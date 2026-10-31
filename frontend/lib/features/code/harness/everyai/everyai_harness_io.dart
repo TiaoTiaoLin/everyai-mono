@@ -885,35 +885,16 @@ final class EveryAISession
   Bound _bound({List<Map<String, Object?>> extra = const []}) =>
       bindReasoning([..._outgoing(), ...extra], bindingSeed(_spec.model, _toolSpecs));
 
-  /// The messages as the model gets them. Only the newest [keptImages]
-  /// tool pictures go out whole; older ones become a note, so a long visual
-  /// check doesn't fill the context with screenshots.
-  List<Map<String, Object?>> _outgoing() {
-    var images = 0;
-    final out = <Map<String, Object?>>[];
-    for (final m in _messages.reversed) {
-      var msg = m.containsKey('_eid') ? (Map.of(m)..remove('_eid')) : m;
-      if (msg['content'] case final List<Object?> parts when parts.any(_isImage)) {
-        final kept = <Object?>[];
-        for (final p in parts) {
-          if (!_isImage(p)) {
-            kept.add(p);
-          } else if (++images <= keptImages) {
-            kept.add(p);
-          } else {
-            kept.add({'type': 'text', 'text': '(an older picture, no longer attached)'});
-          }
-        }
-        msg = {...msg, 'content': kept};
-      }
-      out.add(msg);
-    }
-    return out.reversed.toList();
-  }
+  /// The messages as the model gets them. Old tool pictures become a note,
+  /// in batches: up to 2 × [keptImages] − 1 go out whole, then the oldest
+  /// batch of [keptImages] is dropped at once. Dropping one per new picture
+  /// changed a message deep in the history on every screenshot, and each
+  /// change made the provider re-read the whole conversation uncached (a
+  /// felice-website run paid that 15 times, $13.81 on Opus).
+  List<Map<String, Object?>> _outgoing() => withOlderImagesNoted(_messages, keptImages);
 
+  /// Tool pictures sent whole at least (see [_outgoing]).
   static const keptImages = 8;
-
-  static bool _isImage(Object? part) => part is Map && part['type'] == 'image_url';
 
   Future<void> _run() async {
     if (_looping) return;
@@ -1514,4 +1495,38 @@ Future<void> excludeScratch(String dir) async {
   } on Object {
     // Not git, or git missing: the files just show up as untracked.
   }
+}
+
+/// [messages] without `_eid`, the oldest pictures as a note: none while at
+/// most [kept] × 2 − 1 are there, then whole batches of [kept] (the oldest
+/// first), so the history before the newest pictures changes rarely and the
+/// prompt cache holds.
+@visibleForTesting
+List<Map<String, Object?>> withOlderImagesNoted(List<Map<String, Object?>> messages, int kept) {
+  bool isImage(Object? part) => part is Map && part['type'] == 'image_url';
+  final total = messages.fold<int>(
+    0,
+    (n, m) => n + (m['content'] is List<Object?> ? (m['content']! as List<Object?>).where(isImage).length : 0),
+  );
+  final drop = total < kept * 2 ? 0 : ((total - kept) ~/ kept) * kept;
+  var seen = 0;
+  return [
+    for (final m in messages)
+      () {
+        var msg = m.containsKey('_eid') ? (Map.of(m)..remove('_eid')) : m;
+        if (msg['content'] case final List<Object?> parts when seen < drop && parts.any(isImage)) {
+          msg = {
+            ...msg,
+            'content': [
+              for (final p in parts)
+                if (isImage(p) && seen++ < drop)
+                  {'type': 'text', 'text': '(an older picture, no longer attached)'}
+                else
+                  p,
+            ],
+          };
+        }
+        return msg;
+      }(),
+  ];
 }

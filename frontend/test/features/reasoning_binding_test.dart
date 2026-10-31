@@ -1,3 +1,4 @@
+import 'package:every_ai/features/code/harness/everyai/everyai_harness_io.dart' show withOlderImagesNoted;
 import 'package:every_ai/features/code/harness/everyai/reasoning_binding.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -10,6 +11,18 @@ Map<String, Object?> claude(String sig) => {
 const gemini = {'type': 'reasoning.encrypted', 'data': 'g', 'format': 'google-gemini-v1'};
 
 void main() {
+  test('old pictures are dropped in batches, so the history changes once per 8 screenshots', () {
+    expect(_whole(15).where((w) => w), hasLength(15));
+    final at16 = _whole(16);
+    expect(at16.where((w) => w), hasLength(8));
+    expect(at16.take(8), everyElement(isFalse));
+    // The next seven screenshots leave the older history exactly as it was.
+    for (var n = 17; n <= 23; n++) {
+      expect(_whole(n).take(16).toList(), at16);
+    }
+    expect(_whole(24).where((w) => w), hasLength(8));
+  });
+
   final seed = bindingSeed('anthropic/claude-opus-5.5', const [
     {'type': 'function', 'name': 'read'},
   ]);
@@ -69,4 +82,23 @@ void main() {
     expect(sent[2].containsKey('reasoning_details'), isFalse);
     expect(sent[3]['reasoning_details'], [claude('S2')]);
   });
+}
+
+/// What [withOlderImagesNoted] sends for [n] pictures, oldest first: true = whole.
+List<bool> _whole(int n) {
+  final msgs = [
+    for (var i = 0; i < n; i++)
+      {
+        'role': 'user',
+        '_eid': 'e$i',
+        'content': [
+          {'type': 'text', 'text': 'shot $i'},
+          {
+            'type': 'image_url',
+            'image_url': {'url': 'data:image/png;base64,$i'},
+          },
+        ],
+      },
+  ];
+  return [for (final m in withOlderImagesNoted(msgs, 8)) ((m['content']! as List).last as Map)['type'] == 'image_url'];
 }

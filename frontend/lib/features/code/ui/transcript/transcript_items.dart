@@ -18,6 +18,8 @@ import '../../domain/agent_mode.dart';
 import '../../domain/line_diff.dart';
 import '../../domain/permissions.dart' show denialSummary;
 import '../../domain/transcript.dart';
+import '../../../settings/settings_registry.dart' show SettingsSection;
+import '../../../settings/ui/settings_modal.dart' show showSettings;
 import '../../harness/events.dart';
 import '../../settings/context_files_stub.dart' if (dart.library.io) '../../settings/context_files_io.dart' as impl;
 import '../../uploads/uploads.dart';
@@ -636,6 +638,21 @@ class NoticeView extends StatelessWidget {
         children: [
           if (!item.error) ...[const BrandAvatar(size: 18), const SizedBox(width: 8)],
           Expanded(child: Text(item.message, style: theme.type.callout.tint(color))),
+          // Out of credits: the two ways on, then Retry (or a new message) resumes.
+          if (item.error && isOutOfCredits(item.message)) ...[
+            const SizedBox(width: 8),
+            AdaptiveButton(
+              label: 'Top up',
+              emphasis: ButtonEmphasis.secondary,
+              onPressed: () => showSettings(context, section: SettingsSection.billing),
+            ),
+            const SizedBox(width: 6),
+            AdaptiveButton(
+              label: 'Use my own key',
+              emphasis: ButtonEmphasis.secondary,
+              onPressed: () => showSettings(context, section: SettingsSection.apiKeys),
+            ),
+          ],
           if (onRetry != null) ...[
             const SizedBox(width: 8),
             AdaptiveButton(label: 'Retry', emphasis: ButtonEmphasis.secondary, onPressed: onRetry),

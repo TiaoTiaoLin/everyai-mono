@@ -195,6 +195,11 @@ final class NoticeItem extends TranscriptItem {
   final String detail;
 }
 
+/// Whether an error is the account running out of EveryAI credits (the
+/// gateway's 402), not something about the model or the work.
+bool isOutOfCredits(String text) =>
+    RegExp(r'out of everyai credits|out_of_credits', caseSensitive: false).hasMatch(text);
+
 /// The notice a compacted session opens with.
 const contextCompactedNotice = 'Context compacted';
 

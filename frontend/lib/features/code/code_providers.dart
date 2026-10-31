@@ -2066,9 +2066,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final call = _calls[callId];
     if (parent == null || child == null || call == null || child.model == parent.model) return false;
     if (_fellBack.containsKey(callId)) return false;
+    // Out of credits is the account, not the model: another model on credits
+    // fails the same way. Only one billed to the user's own key can help.
+    if (isOutOfCredits(failed.text) && !ModelBilling.current.ownKey(ModelId(parent.model))) return false;
     final name = ref.read(modelCatalogProvider)[ModelId(child.model)]?.name ?? child.model;
     final reason = failed.text.length > 200 ? '${failed.text.substring(0, 200)}…' : failed.text;
-    _fellBack[callId] = '[$name failed ($reason), so it ran on this session\'s model instead.]';
+    _fellBack[callId] = '[$name failed ($reason), so it was started again on this session\'s model.]';
     _childSubs.remove(callId)?.close();
     _childOf.remove(callId);
     unawaited(_spawn(callId, call, parent, onParentModel: true));
