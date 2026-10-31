@@ -55,8 +55,25 @@ void main() {
         readFiles: () async => ['/tmp/a.pdf', 'content://x/1'],
         readImage: () async => Uint8List.fromList([0x89, 0x50, 1, 2, 3, 4]),
         readText: () async => 'a.pdf',
+        isFile: (p) => p == '/tmp/a.pdf',
       );
       expect(files.map((f) => f.path), ['/tmp/a.pdf']);
+    });
+
+    test('a "/" or folder path next to copied text is not a file: the text pastes', () async {
+      final files = await clipboardFiles(
+        readFiles: () async => ['/', '/Users'],
+        readImage: () async => null,
+        readText: () async => 'const x = 1;',
+      );
+      expect(files, isEmpty);
+    });
+
+    test('an unreadable path is reported, not thrown', () async {
+      final errors = <String>[];
+      final out = await readAttachments([XFile('/')], onError: errors.add);
+      expect(out, isEmpty);
+      expect(errors.single, contains("Couldn't read"));
     });
 
     test('an image becomes a named png or jpg file', () async {

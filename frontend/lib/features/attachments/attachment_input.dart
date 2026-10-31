@@ -8,6 +8,7 @@ import 'package:uuid/uuid.dart';
 
 import 'attachment.dart';
 import 'image_normalize.dart';
+import 'local_file.dart';
 
 /// Opens the system file picker. With [allowed], only those kinds can be
 /// picked (the rest are greyed out in the native dialog); text and code are
@@ -42,7 +43,14 @@ Future<List<Attachment>> readAttachments(
   final out = <Attachment>[];
   var total = alreadyBytes;
   for (final f in files) {
-    var bytes = await f.readAsBytes();
+    Uint8List bytes;
+    try {
+      bytes = await f.readAsBytes();
+    } on Object {
+      // A folder, a vanished file or one we may not read.
+      onError("Couldn't read ${f.name.isEmpty ? f.path : f.name}.");
+      continue;
+    }
     var name = f.name;
     var mime = f.mimeType;
     if (shrinkImages && imageExtensions.contains(_extOf(name))) {
@@ -76,13 +84,15 @@ Future<List<XFile>> clipboardFiles({
   Future<List<String>> Function()? readFiles,
   Future<Uint8List?> Function()? readImage,
   Future<String?> Function()? readText,
+  bool Function(String path)? isFile,
 }) async {
   try {
     final paths = await (readFiles ?? (kIsWeb ? () async => <String>[] : Pasteboard.files))();
-    // Android hands out content URIs, which dart:io can't open.
+    // Android hands out content URIs, which dart:io can't open; some Mac apps put `/` or a folder there along
+    // with copied text. Only real files count, or the text would never paste.
     final real = [
       for (final p in paths)
-        if (!p.contains('://')) p,
+        if (!p.contains('://') && (isFile ?? isRegularFile)(p)) p,
     ];
     if (real.isNotEmpty) return [for (final p in real) XFile(p)];
     final text = await (readText ?? _clipboardText)();
