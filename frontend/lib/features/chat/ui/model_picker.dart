@@ -15,11 +15,14 @@ import '../../models/ui/model_avatar.dart';
 /// (name + one-line description), a search over the whole shop, and a link to
 /// the shop window.
 class ModelChip extends ConsumerWidget {
-  const ModelChip({super.key, required this.selected, required this.onSelected, this.enabled = true});
+  const ModelChip({super.key, required this.selected, required this.onSelected, this.enabled = true, this.pickerKey});
 
   final ModelSpec selected;
   final ValueChanged<ModelSpec> onSelected;
   final bool enabled;
+
+  /// Lets the composer open the picker without a tap.
+  final GlobalKey<AnchoredPopoverState>? pickerKey;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -49,6 +52,7 @@ class ModelChip extends ConsumerWidget {
     );
     if (!enabled) return Opacity(opacity: 0.5, child: chip);
     return AnchoredPopover(
+      key: pickerKey,
       width: 320,
       builder: (context, close) => _ModelPickerPanel(
         selected: selected,

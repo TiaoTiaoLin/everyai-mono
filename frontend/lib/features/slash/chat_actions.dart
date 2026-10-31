@@ -32,7 +32,12 @@ ModelSpec? modelForQuery(ModelCatalog catalog, String query) {
 
 /// Wires the chat commands to one conversation. Callbacks that need a screen
 /// ([context]) check it is still mounted after each await.
-ChatSlashHost chatSlashHost(BuildContext context, WidgetRef ref, String conversationId) {
+ChatSlashHost chatSlashHost(
+  BuildContext context,
+  WidgetRef ref,
+  String conversationId, {
+  VoidCallback? openModelPicker,
+}) {
   final provider = chatSessionProvider(conversationId);
   ChatController controller() => ref.read(provider.notifier);
   void toast(String message) {
@@ -48,6 +53,7 @@ ChatSlashHost chatSlashHost(BuildContext context, WidgetRef ref, String conversa
       controller().selectModel(spec);
       return 'Using ${spec.name}.';
     },
+    openModelPicker: openModelPicker,
     setEffort: (name) {
       final effort = parseEffortArg(name);
       if (effort == null) return 'Pick one: auto, low, medium, high or max.';

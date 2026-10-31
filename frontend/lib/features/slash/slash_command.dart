@@ -59,6 +59,7 @@ class ChatSlashHost {
   const ChatSlashHost({
     required this.setMode,
     this.setModel,
+    this.openModelPicker,
     this.setEffort,
     this.sendWith,
     this.stage,
@@ -74,6 +75,9 @@ class ChatSlashHost {
 
   /// Picks the model best matching a name; returns a message to show, or null.
   final String? Function(String query)? setModel;
+
+  /// Opens the composer's model picker (`/model` with no name).
+  final VoidCallback? openModelPicker;
 
   /// Sets the thinking effort by name (auto, low, medium, high, max); returns a message.
   final String? Function(String name)? setEffort;

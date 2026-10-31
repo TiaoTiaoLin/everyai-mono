@@ -111,10 +111,13 @@ final chatBuiltIns = <SlashCommand>[
   SlashCommand(
     name: 'model',
     description: 'Switch the model',
-    argsHint: '<name>',
+    argsHint: '[name]',
     scope: SlashScope.chat,
     run: (ctx, args) {
-      if (args.isEmpty) return showAdaptiveToast(ctx.context, 'Name a model: /model sonnet');
+      if (args.isEmpty) {
+        final open = ctx.chat?.openModelPicker;
+        return open != null ? open() : showAdaptiveToast(ctx.context, 'Name a model: /model sonnet');
+      }
       _tell(ctx, ctx.chat?.setModel?.call(args));
     },
   ),

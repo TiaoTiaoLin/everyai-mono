@@ -22,14 +22,19 @@ class AnchoredPopover extends StatefulWidget {
   final double maxHeight;
 
   @override
-  State<AnchoredPopover> createState() => _AnchoredPopoverState();
+  State<AnchoredPopover> createState() => AnchoredPopoverState();
 }
 
-class _AnchoredPopoverState extends State<AnchoredPopover> {
+class AnchoredPopoverState extends State<AnchoredPopover> {
   /// Popovers follow the brand's control radius, but stay native-tight on Fluent.
   static double _radius(EveryTheme theme) => theme.design == DesignLanguage.fluent ? 8 : 14;
 
   final _portal = OverlayPortalController();
+
+  /// Opens the panel as if the trigger were tapped (`/model` opens the picker).
+  void open() {
+    if (mounted) _portal.show();
+  }
 
   @override
   Widget build(BuildContext context) {

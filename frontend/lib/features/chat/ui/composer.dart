@@ -129,6 +129,14 @@ class ComposerState extends ConsumerState<Composer> {
   }
 
   /// Puts text in the box (starter prompts) and focuses it.
+  final _modelPicker = GlobalKey<AnchoredPopoverState>();
+
+  /// Opens the model picker (`/model` with no name). Not while a turn runs.
+  void openModelPicker() {
+    // After the frame: the slash menu that ran the command closes first.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _modelPicker.currentState?.open());
+  }
+
   void prefill(String text) {
     _controller.value = TextEditingValue(
       text: text,
@@ -329,6 +337,7 @@ class ComposerState extends ConsumerState<Composer> {
                             selected: widget.model,
                             enabled: !widget.busy,
                             onSelected: widget.onModelChanged,
+                            pickerKey: _modelPicker,
                           ),
                         ),
                       ),

@@ -201,6 +201,7 @@ void main() {
               log.add('model:$q');
               return null;
             },
+            openModelPicker: () => log.add('picker'),
             setEffort: (e) {
               log.add('effort:$e');
               return null;
@@ -243,8 +244,18 @@ void main() {
       await find('export').run(ctx, 'pdf');
       await find('learn').run(ctx, 'weekly reports');
       await find('model').run(ctx, 'sonnet');
+      await find('model').run(ctx, '');
       await find('effort').run(ctx, 'high');
-      expect(log, ['new', 'retry', 'memory', 'export:pdf', 'learn:weekly reports', 'model:sonnet', 'effort:high']);
+      expect(log, [
+        'new',
+        'retry',
+        'memory',
+        'export:pdf',
+        'learn:weekly reports',
+        'model:sonnet',
+        'picker',
+        'effort:high',
+      ]);
     });
 
     testWidgets('a skill command sends with the skill, or holds it for the next message', (tester) async {
