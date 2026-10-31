@@ -17,6 +17,7 @@ import '../../attachments/ui/attachment_tray.dart';
 import '../../attachments/ui/image_viewer.dart';
 import '../../memory/memory_providers.dart';
 import '../../memory/ui/local_tool_chip.dart';
+import '../../models/domain/model_catalog.dart';
 import '../../models/models_providers.dart';
 import '../../models/ui/model_avatar.dart';
 import '../chat_providers.dart';
@@ -235,6 +236,9 @@ class _AssistantMessage extends ConsumerWidget {
     final theme = EveryTheme.of(context);
     final spec = message.model == null ? null : ref.watch(modelCatalogProvider)[message.model!];
     final inFlight = message.status == MessageStatus.streaming;
+    final route = inFlight
+        ? ref.watch(chatSessionProvider(conversationId).select((s) => s.liveParts.whereType<RoutePart>().firstOrNull))
+        : message.route;
 
     final body = <Widget>[
       if (inFlight)
@@ -264,10 +268,18 @@ class _AssistantMessage extends ConsumerWidget {
             children: [
               if (spec != null) ModelAvatar(spec.provider, size: 22),
               const SizedBox(width: 8),
-              Text(
-                spec?.name ?? message.model?.value ?? 'Assistant',
-                style: theme.type.callout.semibold.tint(theme.textMuted),
+              Flexible(
+                child: Text(
+                  spec?.name ?? message.model?.value ?? 'Assistant',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.type.callout.semibold.tint(theme.textMuted),
+                ),
               ),
+              if (route != null) ...[
+                const SizedBox(width: 8),
+                _RouteChip(route: route, conversationId: conversationId, offerRerun: isLatest && !inFlight),
+              ],
             ],
           ),
           const SizedBox(height: 8),
@@ -610,6 +622,83 @@ class _SuggestedMode extends ConsumerWidget {
   }
 }
 
+/// What Auto picked: "Auto · Search · Sonnet 5.5". On the latest answer a
+/// tap offers asking again in another mode, on the model Auto picked.
+class _RouteChip extends ConsumerWidget {
+  const _RouteChip({required this.route, required this.conversationId, required this.offerRerun});
+
+  final RoutePart route;
+  final String conversationId;
+  final bool offerRerun;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = EveryTheme.of(context);
+    final model = ref.watch(modelCatalogProvider).resolve(route.model);
+    final busy = ref.watch(chatSessionProvider(conversationId).select((s) => s.phase.busy));
+    final label = routeLabel(route, model);
+    final interactive = offerRerun && !busy;
+    final chip = Semantics(
+      label: 'Auto picked ${route.mode.label} with ${model.name}',
+      button: interactive,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: theme.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.type.caption.tint(theme.textMuted),
+              ),
+            ),
+            if (interactive) ...[
+              const SizedBox(width: 3),
+              AdaptiveIcon(EveryIcon.chevronDown, size: 10, color: theme.textMuted),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (!interactive) return Flexible(child: chip);
+    return Flexible(
+      child: AnchoredPopover(
+        width: 260,
+        builder: (context, close) => SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              PopoverHeader('Ask again with ${model.shortName} as'),
+              for (final mode in ChatMode.values)
+                if (mode != route.mode)
+                  PopoverRow(
+                    title: mode.label,
+                    subtitle: mode.description,
+                    onTap: () {
+                      close();
+                      ref.read(chatSessionProvider(conversationId).notifier).rerunIn(mode, model: model);
+                    },
+                  ),
+            ],
+          ),
+        ),
+        child: MouseRegion(cursor: SystemMouseCursors.click, child: chip),
+      ),
+    );
+  }
+}
+
+/// "Auto · Search · Sonnet 5.5" for [route], answered by [model].
+String routeLabel(RoutePart route, ModelSpec model) => 'Auto · ${route.mode.label} · ${model.shortName}';
+
 /// Waiting for the first token: the mark's arms fade in turn.
 class _TypingIndicator extends StatelessWidget {
   const _TypingIndicator();
@@ -652,7 +741,8 @@ class _PartView extends StatelessWidget {
       final ToolCallPart call when allLocalChatTools.contains(call.toolName) => LocalToolChip(part: call),
       final ToolCallPart call => InlineVisual(part: call, conversationId: conversationId),
       ArtifactPart(:final title) => Text(title, style: TextStyle(color: theme.accent)),
-      UsagePart() || AttachmentPart() => const SizedBox.shrink(),
+      // The route shows as a chip in the header.
+      UsagePart() || AttachmentPart() || RoutePart() => const SizedBox.shrink(),
     };
   }
 }

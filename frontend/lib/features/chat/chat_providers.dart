@@ -155,15 +155,18 @@ final class ChatController extends Notifier<ChatSessionState> {
 
   /// Asks the last question again in [mode] (the button the model offers
   /// with `suggest_mode`). The earlier answer stays above the new one.
-  Future<void> rerunIn(ChatMode mode) async {
+  ///
+  /// [model] answers this one turn instead of the chat's model: re-running
+  /// an Auto answer uses the model Auto picked, so the server keeps the mode.
+  Future<void> rerunIn(ChatMode mode, {ModelSpec? model}) async {
     if (state.phase.busy || state.phase is Loading) return;
     final last = state.messages.lastWhere((m) => m.isUser, orElse: () => state.messages.first);
     if (!last.isUser) return;
     setMode(mode);
-    final (:model, :prompt) = parseMention(last.plainText, _catalog);
+    final (model: mentioned, :prompt) = parseMention(last.plainText, _catalog);
     await _startTurn(
       prompt: prompt,
-      model: model ?? state.model,
+      model: model ?? mentioned ?? state.model,
       userText: last.plainText.trim(),
       attachments: last.attachments,
     );
@@ -518,6 +521,11 @@ final class ChatController extends Notifier<ChatSessionState> {
               context: !r.followUps,
             );
             state = state.copyWith(liveUsage: usage);
+          // Auto's pick: kept on the answer for its chip (the header finds it among the parts).
+          case RouteChosen(model: final routed, :final mode, :final toolsEnabled):
+            parts.removeWhere((p) => p is RoutePart);
+            parts.insert(0, RoutePart(model: routed, mode: mode, toolsEnabled: toolsEnabled));
+            state = state.copyWith(liveParts: List.unmodifiable(parts));
           case FollowUpsSuggested(:final questions):
             followUps = questions;
           case TurnDone():

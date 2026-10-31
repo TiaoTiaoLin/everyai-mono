@@ -247,6 +247,13 @@ final class ChatRepository {
           kind: 'usage',
           body: Value(jsonEncode(totals.toJson())),
         );
+      case final RoutePart route:
+        return MessagePartsCompanion.insert(
+          messageId: messageId,
+          idx: idx,
+          kind: 'route',
+          body: Value(jsonEncode(route.toJson())),
+        );
       case ArtifactPart(:final artifactId, :final title, :final kind):
         return MessagePartsCompanion.insert(
           messageId: messageId,
@@ -263,6 +270,7 @@ final class ChatRepository {
     'attachment' => _attachment(p, blobs[p.blobId]),
     'tool_call' => _toolCall(p.body ?? '{}'),
     'reasoning' => ReasoningPart(p.body ?? ''),
+    'route' => RoutePart.fromJson(jsonDecode(p.body ?? '{}')) ?? const TextPart(''),
     'usage' => UsagePart(UsageTotals.fromJson(jsonDecode(p.body ?? '{}') as Map<String, Object?>)),
     'sources' => SourcesPart(
       (jsonDecode(p.body ?? '[]') as List<Object?>).map(Source.fromJson).nonNulls.toList(growable: false),

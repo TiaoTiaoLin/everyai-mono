@@ -392,6 +392,39 @@ void main() {
     expect(state().mode, ChatMode.learn);
   });
 
+  test('Auto: the route is kept on the answer, survives a reopen, and a re-run uses the picked model', () async {
+    await settle();
+    ctl().selectModel(builtInCatalog.resolve(autoModelId));
+    await ctl().send('what happened in Lyon today?');
+    expect(transport.requests.last.model.id, autoModelId);
+    expect(transport.requests.last.effort, isNull);
+    transport.turns.last.add(
+      const RouteChosen(model: ModelId('anthropic/claude-sonnet-5.5'), mode: ChatMode.search, toolsEnabled: true),
+    );
+    await settle();
+    expect(state().liveParts.whereType<RoutePart>().single.mode, ChatMode.search);
+    await answer('news');
+    final reply = state().messages.last;
+    expect(reply.model, autoModelId);
+    expect(reply.route?.model, const ModelId('anthropic/claude-sonnet-5.5'));
+
+    container.invalidate(chatSessionProvider(id));
+    container.read(chatSessionProvider(id));
+    await settle();
+    final reopened = state().messages.last.route!;
+    expect(
+      (reopened.model.value, reopened.mode, reopened.toolsEnabled),
+      ('anthropic/claude-sonnet-5.5', ChatMode.search, true),
+    );
+    expect(state().model.id, autoModelId);
+
+    await ctl().rerunIn(ChatMode.research, model: builtInCatalog.resolve(reopened.model));
+    expect(transport.requests.last.mode, ChatMode.research);
+    expect(transport.requests.last.model.id, const ModelId('anthropic/claude-sonnet-5.5'));
+    // The chat stays on Auto.
+    expect(state().model.id, autoModelId);
+  });
+
   test('Research sends the chosen depth', () async {
     await settle();
     ctl()

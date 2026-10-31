@@ -65,7 +65,13 @@ CodeSlashHost codeSlashHost(BuildContext context, WidgetRef ref, String sessionI
     },
     setModel: (query) {
       final choice = agentChoiceFor(query, ref.read(agentCatalogProvider).models);
-      final spec = choice == null ? modelForQuery(ref.read(modelCatalogProvider), query) : null;
+      // Auto is a chat router; a Code session needs a concrete model.
+      final spec = choice == null
+          ? switch (modelForQuery(ref.read(modelCatalogProvider), query)) {
+              final s? when !s.isAuto => s,
+              _ => null,
+            }
+          : null;
       if (choice == null && spec == null) return toast('No model matches "$query".');
       switchTo(model: choice?.model ?? spec!.id.value, effort: choice?.effort);
     },

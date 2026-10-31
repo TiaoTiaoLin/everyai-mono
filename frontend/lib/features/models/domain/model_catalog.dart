@@ -36,8 +36,11 @@ final class ModelProvider {
   static const xai = ModelProvider._('x-ai', 'Grok', 'xAI', 'assets/models/xai.webp');
   static const meta = ModelProvider._('meta-llama', 'Llama', 'Meta', 'assets/models/Llama.jpeg');
 
+  /// The router (`everyai/auto`); drawn with the round EveryAI avatar.
+  static const everyai = ModelProvider._('everyai', 'EveryAI', 'EveryAI');
+
   static final _known = <String, ModelProvider>{
-    for (final p in const [openai, anthropic, google, xai, meta]) p.slug: p,
+    for (final p in const [openai, anthropic, google, xai, meta, everyai]) p.slug: p,
     'meta': meta,
     'deepseek': const ModelProvider._('deepseek', 'DeepSeek', 'DeepSeek'),
     'qwen': const ModelProvider._('qwen', 'Qwen', 'Alibaba'),
@@ -164,6 +167,16 @@ final class ModelSpec {
 
   bool get supportsStreaming => output == Modality.text;
 
+  /// EveryAI · Auto: the server picks the model, mode and rich answers per turn.
+  bool get isAuto => id == autoModelId;
+
+  /// The name without its vendor's product name, for tight places:
+  /// "Claude Sonnet 5.5" → "Sonnet 5.5"; "GPT-6.1 Sol" stays.
+  String get shortName {
+    final prefix = '${provider.label} ';
+    return name.startsWith(prefix) && name.length > prefix.length ? name.substring(prefix.length) : name;
+  }
+
   /// "$2.30 / $11.50" per million input / output tokens, or "Free".
   String? get priceLabel {
     if (free) return 'Free';
@@ -194,7 +207,8 @@ final class ModelSpec {
 /// alias. Featured models come first, then newest first.
 final class ModelCatalog {
   ModelCatalog(Iterable<ModelSpec> specs, {required ModelId defaultModel}) : _default = defaultModel {
-    final sorted = specs.toList()
+    // Auto is always there, as the app describes it (whatever `/v1/models` says of it).
+    final sorted = [autoModel, ...specs.where((s) => s.id != autoModelId)]
       ..sort((a, b) {
         if (a.featured != b.featured) return a.featured ? -1 : 1;
         if (a.featured) return _featuredRank(a.id).compareTo(_featuredRank(b.id));
@@ -245,6 +259,7 @@ final class ModelCatalog {
   }
 
   static const _featuredOrder = [
+    autoModelId,
     ModelId('anthropic/claude-haiku-5.5'),
     ModelId('anthropic/claude-sonnet-5.5'),
     ModelId('anthropic/claude-opus-5.5'),
@@ -289,6 +304,25 @@ final class ModelCatalog {
 }
 
 const defaultModelId = ModelId('anthropic/claude-haiku-5.5');
+
+const autoModelId = ModelId('everyai/auto');
+
+/// EveryAI · Auto, the router: the backend picks the model, the mode and
+/// rich answers for each turn and says which in a `route` event. It takes
+/// what the Claude models take. No effort menu ([reasoning] off: the routed
+/// model thinks as its route says), and [tools] off so Code's model lists,
+/// which want a concrete model, leave it out.
+const autoModel = ModelSpec(
+  id: autoModelId,
+  provider: ModelProvider.everyai,
+  name: 'EveryAI · Auto',
+  blurb: 'Picks the model and mode for each message',
+  imageInput: true,
+  inputs: {'text', 'image', 'file'},
+  contextLength: 1000000,
+  tools: false,
+  featured: true,
+);
 
 /// What the app knows before the backend's catalog arrives: the featured models.
 final builtInCatalog = ModelCatalog(const [

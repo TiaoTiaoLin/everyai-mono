@@ -438,7 +438,8 @@ class _CodeSettingsSectionState extends ConsumerState<CodeSettingsSection> {
         final library = ref.watch(libraryProvider).value ?? const [];
         final current = catalog.resolve(ModelId(session.model));
         return settingsPicker<String>(current.name, [
-          for (final m in {current, ...library}) (m.name, m.id.value),
+          for (final m in {current, ...library})
+            if (!m.isAuto) (m.name, m.id.value),
         ], (id) => switchCodeAgent(context, ref, session.id, model: id));
     }
   }

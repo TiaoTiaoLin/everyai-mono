@@ -155,6 +155,27 @@ final class UsagePart extends MessagePart {
   final UsageTotals totals;
 }
 
+/// What EveryAI · Auto picked for this answer (the `route` event): the
+/// model that wrote it, the mode and whether rich answers were on. Shown as
+/// a chip on the reply.
+final class RoutePart extends MessagePart {
+  const RoutePart({required this.model, required this.mode, this.toolsEnabled = true});
+  final ModelId model;
+  final ChatMode mode;
+  final bool toolsEnabled;
+
+  Map<String, Object?> toJson() => {'model': model.value, 'mode': mode.name, 'tools_enabled': toolsEnabled};
+
+  static RoutePart? fromJson(Object? json) => switch (json) {
+    {'model': final String model} => RoutePart(
+      model: ModelId(model),
+      mode: ChatMode.values.asNameMap()[json['mode']] ?? ChatMode.chat,
+      toolsEnabled: json['tools_enabled'] != false,
+    ),
+    _ => null,
+  };
+}
+
 @immutable
 final class Message {
   const Message({
@@ -182,6 +203,9 @@ final class Message {
   bool get isUser => role == Role.user;
 
   UsageTotals get usage => parts.whereType<UsagePart>().fold(UsageTotals.zero, (sum, p) => sum + p.totals);
+
+  /// What Auto picked for this answer, or null (another model answered).
+  RoutePart? get route => parts.whereType<RoutePart>().firstOrNull;
 
   List<AttachmentPart> get attachments => parts.whereType<AttachmentPart>().toList(growable: false);
 

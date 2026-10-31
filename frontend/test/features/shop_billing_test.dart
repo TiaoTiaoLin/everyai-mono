@@ -26,7 +26,7 @@ final class _Store implements SecretStore {
   Future<void> delete(String key) async => values.remove(key);
 }
 
-/// Nothing featured, so My models starts empty.
+/// Nothing featured but Auto, so My models starts with Auto alone.
 class _Catalog extends CatalogController {
   @override
   ModelCatalog build() => ModelCatalog(const [
@@ -89,9 +89,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(c.read(modelBillersProvider), {haiku: 'openrouter'});
-    expect(c.read(libraryProvider).value!.map((s) => s.id.value), [haiku]);
+    expect(c.read(libraryProvider).value!.map((s) => s.id.value), [autoModelId.value, haiku]);
     expect(c.read(modelBillingProvider).headersFor(const ModelId(haiku)), {'X-Provider-Key-OpenRouter': 'sk-or-v1-k'});
-    // Haiku by the pick; GPT because, unpicked, a key that covers a model pays for it.
-    expect(find.textContaining('Bills to your OpenRouter key'), findsNWidgets(2));
+    // Haiku by the pick; GPT and Auto because, unpicked, a key that covers a model pays for it.
+    expect(find.textContaining('Bills to your OpenRouter key'), findsNWidgets(3));
   });
 }

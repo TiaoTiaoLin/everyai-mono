@@ -169,6 +169,14 @@ final class UsageReport extends ChatEvent {
   final int ownKeyMicros;
 }
 
+/// What EveryAI · Auto picked for this turn; comes before anything else.
+final class RouteChosen extends ChatEvent {
+  const RouteChosen({required this.model, required this.mode, required this.toolsEnabled});
+  final ModelId model;
+  final ChatMode mode;
+  final bool toolsEnabled;
+}
+
 final class FollowUpsSuggested extends ChatEvent {
   const FollowUpsSuggested(this.questions);
   final List<String> questions;
@@ -281,6 +289,13 @@ final class SseTransport implements ChatTransport {
         throw ProtocolError('Malformed ${event.event} event.');
       }
       switch ((event.event, data)) {
+        case ('route', {'model': final String model}):
+          final route = data as Map;
+          yield RouteChosen(
+            model: ModelId(model),
+            mode: ChatMode.values.asNameMap()[route['mode']] ?? request.mode,
+            toolsEnabled: route['tools_enabled'] as bool? ?? request.toolsEnabled,
+          );
         case ('delta' || 'message', {'text': final String text}):
           yield TextDelta(text);
         case ('reasoning', {'text': final String text}):

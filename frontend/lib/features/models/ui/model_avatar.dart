@@ -3,11 +3,12 @@ import 'package:material_new_shapes/material_new_shapes.dart';
 
 import '../../../core/platform/platform_kind.dart';
 import '../../../core/theme/every_theme.dart';
+import '../../../core/ui/brand.dart';
 import '../domain/model_catalog.dart';
 
 /// Provider logo (or a monogram for vendors without one), clipped to the
 /// design language's avatar shape: the Expressive cookie on Material, a
-/// squircle on Apple, a circle elsewhere.
+/// squircle on Apple, a circle elsewhere. EveryAI · Auto keeps its round avatar.
 class ModelAvatar extends StatelessWidget {
   const ModelAvatar(this.provider, {super.key, this.size = 28});
 
@@ -16,6 +17,7 @@ class ModelAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (provider == ModelProvider.everyai) return BrandAvatar(size: size);
     final theme = EveryTheme.of(context);
     final asset = provider.asset;
     final image = asset != null

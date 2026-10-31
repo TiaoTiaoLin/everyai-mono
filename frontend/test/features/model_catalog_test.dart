@@ -73,6 +73,7 @@ void main() {
 
   test('featured first, then newest first', () {
     expect(remote.all.map((s) => s.id.value), [
+      'everyai/auto',
       'anthropic/claude-haiku-5.5',
       '~openai/gpt-latest',
       'qwen/qwen4-32b:free',
@@ -120,5 +121,28 @@ void main() {
     final long = titleFromPrompt('x' * 100);
     expect(long.length, lessThanOrEqualTo(60));
     expect(long.endsWith('…'), isTrue);
+  });
+
+  test('every catalog has EveryAI · Auto first, as the app describes it', () {
+    final served = ModelCatalog([
+      ModelSpec.fromJson({'id': 'everyai/auto', 'name': 'Server Auto', 'tools': true})!,
+      ...remote.all.where((s) => !s.isAuto),
+    ], defaultModel: defaultModelId);
+    for (final c in [remote, served, builtInCatalog]) {
+      final auto = c.all.first;
+      expect(auto.id, autoModelId);
+      expect(auto.name, 'EveryAI · Auto');
+      expect(auto.provider, ModelProvider.everyai);
+      // Code's model lists skip it; no effort menu; takes what Claude takes.
+      expect(auto.tools, isFalse);
+      expect(auto.reasoning, isFalse);
+      expect(auto.inputs, containsAll(['image', 'file']));
+    }
+    expect(remote.defaultModel.id, defaultModelId);
+  });
+
+  test('shortName drops the vendor product name', () {
+    expect(remote.resolve(const ModelId('anthropic/claude-haiku-5.5')).shortName, 'Haiku 5.5');
+    expect(builtInCatalog.resolve(const ModelId('openai/gpt-6.1-sol')).shortName, 'GPT-6.1 Sol');
   });
 }

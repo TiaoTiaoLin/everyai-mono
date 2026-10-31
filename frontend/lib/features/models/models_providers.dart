@@ -99,13 +99,25 @@ final class Library extends AsyncNotifier<List<ModelSpec>> {
   Future<List<ModelSpec>> build() async {
     final catalog = ref.watch(modelCatalogProvider);
     final rows = await (_db.select(_db.libraryModels)..orderBy([(r) => OrderingTerm.asc(r.position)])).get();
+    final prefs = ref.read(preferencesProvider);
+    final addAuto = prefs[_autoAddedKey] == null;
+    prefs[_autoAddedKey] = '1';
     if (rows.isEmpty) return catalog.all.where((s) => s.featured).toList(growable: false);
     final seen = <ModelId>{};
-    return [
+    final models = [
       for (final r in rows)
         if (catalog.resolve(ModelId(r.modelId)) case final s when seen.add(s.id)) s,
     ];
+    // Libraries from before Auto get it once, at the top; removing it later sticks.
+    if (addAuto && !seen.contains(autoModelId)) {
+      final withAuto = [catalog.resolve(autoModelId), ...models];
+      await _write(withAuto);
+      return withAuto;
+    }
+    return models;
   }
+
+  static const _autoAddedKey = 'models.auto_added';
 
   bool contains(ModelId id) => state.value?.any((s) => s.id == id) ?? false;
 
@@ -130,6 +142,10 @@ final class Library extends AsyncNotifier<List<ModelSpec>> {
 
   Future<void> _save(List<ModelSpec> models) async {
     state = AsyncData(List.unmodifiable(models));
+    await _write(models);
+  }
+
+  Future<void> _write(List<ModelSpec> models) async {
     await _db.transaction(() async {
       await _db.delete(_db.libraryModels).go();
       for (final (i, s) in models.indexed) {
