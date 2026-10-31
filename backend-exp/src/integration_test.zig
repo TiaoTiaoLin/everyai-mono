@@ -1814,3 +1814,163 @@ test "decide: typed answers through a strict schema; a bad reply is unsure; gate
     defer down.deinit();
     try down.expectStatus(.bad_gateway);
 }
+
+// ------------------------------------------------------------------ summarise_parts
+
+/// A loopback site for the chat's fetch tools (the fetcher lets loopback
+/// through for tests only).
+const LongSite = struct {
+    var html: []const u8 = "";
+    fn page(_: *anole.http.Request, res: *anole.http.Response) !void {
+        try res.print(.html, "{s}", .{html});
+    }
+};
+
+/// Serves `LongSite` and points the app's fetcher at it; returns the page URL.
+const Site = struct {
+    server: anole.http.Server(void),
+    serving: std.Io.Future(anyerror!void) = undefined,
+    client: anole.http.Client,
+    fetcher: app_main.safe_fetch.Fetcher,
+
+    fn start(self: *Site, env: *Env, a: std.mem.Allocator) ![]const u8 {
+        const io = env.server.io();
+        self.server = anole.http.Server(void).init(alloc, io, .{ .listeners = &.{.{ .address = .{ .ip = .{ .ip4 = .loopback(0) } } }} }, {});
+        self.server.router.get("/doc", LongSite.page);
+        self.serving = try io.concurrent(struct {
+            fn run(s: *anole.http.Server(void)) anyerror!void {
+                try s.run();
+            }
+        }.run, .{&self.server});
+        try self.server.waitReady(io);
+        const o: app_main.safe_fetch.Options = .{ .testing_allow_loopback = true };
+        self.client = anole.http.Client.init(alloc, io, app_main.safe_fetch.clientOptions(o));
+        self.fetcher = .{ .http = &self.client, .options = o };
+        env.state.web = &self.fetcher;
+        return std.fmt.allocPrint(a, "http://127.0.0.1:{d}/doc", .{self.server.address.ip.getPort()});
+    }
+
+    fn stop(self: *Site, env: *Env) void {
+        self.client.deinit();
+        self.serving.cancel(env.server.io()) catch {};
+        self.server.deinit();
+    }
+};
+
+fn summariseCall(a: std.mem.Allocator, url: []const u8) ![]const u8 {
+    const args = try std.json.Stringify.valueAlloc(a, .{ .url = url, .question = "What does it say about PARA1?" }, .{});
+    const call = try std.json.Stringify.valueAlloc(a, .{ .choices = .{.{ .index = 0, .delta = .{ .tool_calls = .{.{ .index = 0, .id = "call_sp", .type = "function", .function = .{ .name = "summarise_parts", .arguments = args } }} } }} }, .{});
+    return std.fmt.allocPrint(a, "data: {s}\n\ndata: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"tool_calls\"}}],\"usage\":{{\"prompt_tokens\":900,\"completion_tokens\":20,\"cost\":0.0001}}}}\n\ndata: [DONE]\n\n", .{call});
+}
+
+const note_reply =
+    \\{"choices":[{"message":{"role":"assistant","content":"- A fact from this part."}}],"usage":{"prompt_tokens":3000,"completion_tokens":20,"cost":0.0001}}
+;
+const merge_reply =
+    \\{"choices":[{"message":{"role":"assistant","content":"PARA1 is the opening [part 1]."}}],"usage":{"prompt_tokens":2000,"completion_tokens":30,"cost":0.0001}}
+;
+
+test "chat: summarise_parts scores the parts, reads the best and the unsure in parallel, and merges with part refs" {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // 14 paragraphs of ~7000 characters: one part each.
+    var html: std.Io.Writer.Allocating = .init(a);
+    try html.writer.writeAll("<html><head><title>Long report</title></head><body>");
+    for (1..15) |i| {
+        try html.writer.print("<p>PARA{d} ", .{i});
+        for (0..700) |_| try html.writer.writeAll("word word ");
+        try html.writer.writeAll("</p>\n");
+    }
+    try html.writer.writeAll("</body></html>");
+    LongSite.html = html.written();
+
+    // Part 3 unsure, part 14 the least relevant: 13 parts are read.
+    var scores: std.Io.Writer.Allocating = .init(a);
+    try scores.writer.writeAll("{");
+    for (1..15) |i| {
+        if (i > 1) try scores.writer.writeAll(",");
+        if (i == 3) try scores.writer.print("\"part_{d}\":\"unsure\"", .{i}) else try scores.writer.print("\"part_{d}\":{d}", .{ i, if (i == 14) @as(f64, 0) else 0.5 });
+    }
+    try scores.writer.writeAll("}");
+    const decide_reply = try std.json.Stringify.valueAlloc(a, .{ .choices = .{.{ .message = .{ .role = "assistant", .content = scores.written() } }}, .usage = .{ .prompt_tokens = 30000, .completion_tokens = 100, .cost = 0.001 } }, .{});
+
+    var env: Env = undefined;
+    var responses: [19][]const u8 = undefined;
+    try start(&env, &.{""}, true);
+    defer env.deinit();
+    var site: Site = undefined;
+    const url = try site.start(&env, a);
+    defer site.stop(&env);
+    responses[0] = try summariseCall(a, url);
+    responses[1] = decide_reply;
+    for (2..15) |i| responses[i] = note_reply;
+    responses[15] = merge_reply;
+    responses[16] = final_turn;
+    responses[17] = followups_reply;
+    responses[18] = followups_reply;
+    env.fake.responses = &responses;
+
+    var res = try env.t.post("/v1/chat/stream", .{ .json = .{
+        .model = "anthropic/claude-haiku-5.5",
+        .mode = "summarise",
+        .messages = .{.{ .role = "user", .content = "Summarise this report" }},
+        .session = "conv-sp",
+    } });
+    defer res.deinit();
+    try res.expectStatus(.ok);
+    const b = env.fake.bodies.items;
+    try std.testing.expectEqual(@as(usize, 18), b.len);
+    // The decider scored all 14 parts in one call.
+    try std.testing.expect(std.mem.indexOf(u8, b[1], "\"name\":\"answers\",\"strict\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[1], "part_14") != null);
+    // 13 parts read: the unsure one among them, the least relevant not.
+    var reads: usize = 0;
+    var saw3 = false;
+    for (b[2..15]) |body| {
+        if (std.mem.indexOf(u8, body, "Part ") != null) reads += 1;
+        if (std.mem.indexOf(u8, body, "Part 3 of 14") != null) saw3 = true;
+        try std.testing.expect(std.mem.indexOf(u8, body, "Part 14 of 14") == null);
+    }
+    try std.testing.expectEqual(@as(usize, 13), reads);
+    try std.testing.expect(saw3);
+    // The merge saw the notes by part; the lead got the answer, cited.
+    try std.testing.expect(std.mem.indexOf(u8, b[15], "<part n=\\\"3\\\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[16], "PARA1 is the opening [part 1].") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[16], "14 parts of about 12000 characters") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[16], "Cite this source as [1]") != null);
+    // The app saw progress, the source and the side calls' usage.
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"name\":\"summarise_parts\",\"status\":\"running\",\"detail\":\"scoring 14 parts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"detail\":\"part 3 of 14\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"name\":\"summarise_parts\",\"status\":\"done\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"title\":\"Long report\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"kind\":\"decide\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"kind\":\"summarise\"") != null);
+    var c: anole.db.Ctx = .{ .io = env.server.io(), .arena = a };
+    try std.testing.expectEqual(@as(i64, 14), try env.state.db.one(i64, &c, "SELECT COUNT(*) FROM usage_events WHERE kind = 'summarise' AND session = 'conv-sp'", .{}));
+    try std.testing.expectEqual(@as(i64, 1), try env.state.db.one(i64, &c, "SELECT COUNT(*) FROM usage_events WHERE kind = 'decide'", .{}));
+}
+
+test "chat: summarise_parts returns a short source whole, without side calls" {
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    LongSite.html = "<html><body><p>PARA1 is short.</p></body></html>";
+    var env: Env = undefined;
+    try start(&env, &.{""}, true);
+    defer env.deinit();
+    var site: Site = undefined;
+    const url = try site.start(&env, a);
+    defer site.stop(&env);
+    const responses = [_][]const u8{ try summariseCall(a, url), final_turn, followups_reply };
+    env.fake.responses = &responses;
+    var res = try env.t.post("/v1/chat/stream", .{ .json = .{
+        .model = "anthropic/claude-haiku-5.5",
+        .messages = .{.{ .role = "user", .content = "What does this say?" }},
+    } });
+    defer res.deinit();
+    try res.expectStatus(.ok);
+    try std.testing.expectEqual(@as(usize, 3), env.fake.bodies.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[1], "PARA1 is short.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[1], "short enough to read directly") != null);
+}

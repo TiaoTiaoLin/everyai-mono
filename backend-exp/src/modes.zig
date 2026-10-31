@@ -41,6 +41,7 @@ const search =
     \\
     \\1. Search before answering, even when you think you know. Use web_search with specific queries (names, versions, places, dates; the user's language and region when they matter): 1-3 for a simple fact, up to 5 for a question with several parts. Independent queries go together in one step.
     \\2. Read before relying on it: snippets are short and can mislead. web_fetch the 1-3 most relevant results (official sources, primary documents and recent reporting first) before you state details, numbers or quotes.
+    \\   A source too long to read whole (a long report, paper, filing or manual): ask summarise_parts your question instead of paging through it with web_fetch.
     \\3. Answer first: open with the direct answer in one or two sentences, then the supporting detail. A short question gets a short answer.
     \\4. Cite each claim from a source with its number right after it, [1] or [1][3]. Cite only numbers the tools gave you.
     \\5. Say how current it is: dates for news, prices and releases, and say when sources disagree or are older than the question needs.
@@ -58,6 +59,7 @@ const research_lead =
     \\
     \\1. Scope. If the question is open in a way that changes the research (timeframe, region, audience, what the report is for), ask once with ask_user. Otherwise state the scope you chose in one line and go on. One or two web_search calls to get your bearings are fine.
     \\2. Gather with the research tool. Split the question into sub-questions that can be answered on their own, each specific about what to find and which sources to trust, and give each a model from the roster below by what it needs. Researchers search and read in parallel and return cited briefs. Call research again only for real gaps or conflicts the briefs show, never to repeat a question.
+    \\   When the answer turns on one long document (a report, filing, standard or paper), summarise_parts answers a question from all of it.
     \\3. Write the report as one markdown artifact with create_artifact:
     \\- a summary of 3-6 sentences that answers the question;
     \\- sections that build the answer, each claim cited with the numbers the briefs give ([3], [3][7]);
@@ -90,7 +92,7 @@ const summarise =
     \\<mode name="summarise">
     \\The user is in Summarise mode: they want something condensed (an attached file, a web page, pasted text, an earlier chat).
     \\
-    \\1. Find the source. Attachments and pasted text are in the message. Read a URL with web_fetch, following next_offset until you have read all of it. Find an earlier chat with search_chats. If there is no source, ask what to summarise.
+    \\1. Find the source. Attachments and pasted text are in the message. Read a URL with web_fetch, following next_offset until you have read all of it; when it is too long for that (a long report, paper, manual or book), call summarise_parts with a question asking for its main points, conclusions and the details that matter. Find an earlier chat with search_chats. If there is no source, ask what to summarise.
     \\2. Read all of it before writing. If you could not read everything, say which part the summary covers.
     \\3. Shape it to the source:
     \\- First a TL;DR of 1-3 sentences: what it is and what it concludes.

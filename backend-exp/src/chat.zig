@@ -2,8 +2,9 @@
 //!
 //! The server runs the tool loop. UI tools (artifacts, SVG, diagrams, charts,
 //! quizzes, flashcards, slides) are streamed to the app as `tool` events and
-//! acknowledged to the model; server tools (web_fetch, web_search, generate_image) run
-//! here. Every upstream call is metered (billing.charge).
+//! acknowledged to the model; server tools (web_fetch, web_search,
+//! summarise_parts, generate_image, research) run here. Every upstream call
+//! is metered (billing.charge).
 //!
 //! Client-executed tools: a UI tool the app names in `client_tools` is sent as
 //! `tool_wait` instead of `tool`, and the loop waits until the app POSTs
@@ -35,6 +36,7 @@ const web = @import("web.zig");
 const routing = @import("routing.zig");
 const modes = @import("modes.zig");
 const research = @import("research.zig");
+const summarise = @import("summarise.zig");
 
 const Events = @typeInfo(@typeInfo(@TypeOf(anole.Response.startEventStream)).@"fn".return_type.?).error_union.payload;
 
@@ -836,6 +838,8 @@ fn runTool(app: *App, req: *anole.Request, who: auth.Identity, body: ChatRequest
                 webFetch(app, req, args, sink)
             else if (std.mem.eql(u8, call.name, "web_search"))
                 webSearch(app, req, who, session, args, sink, try app.aux(req))
+            else if (std.mem.eql(u8, call.name, "summarise_parts"))
+                summarise.run(app, req, who, session, call.id, args, sink, try app.aux(req))
             else
                 generateImage(app, req, who, session, call.id, args, sink, pictures)) catch |err| blk: {
                 break :blk try std.fmt.allocPrint(req.arena, "Error: {t}", .{err});
@@ -1236,6 +1240,7 @@ test {
     _ = tool_check;
     _ = truncation;
     _ = web;
+    _ = summarise;
 }
 
 test buildBody {

@@ -197,6 +197,8 @@ fn semantic(issues: *Issues, name: []const u8, args: Value) !void {
         &.{"mermaid"}
     else if (eql(name, "web_fetch"))
         &.{"url"}
+    else if (eql(name, "summarise_parts"))
+        &.{ "url", "question" }
     else if (eql(name, "generate_image"))
         &.{"prompt"}
     else if (eql(name, "load_skill"))
@@ -225,7 +227,7 @@ fn semantic(issues: *Issues, name: []const u8, args: Value) !void {
         try checkSvg(issues, "content", str(args, "content") orelse "");
     if (eql(name, "create_artifact") and eql(str(args, "kind") orelse "", "drawing"))
         try checkDrawing(issues, str(args, "content") orelse "");
-    if (eql(name, "web_fetch")) if (str(args, "url")) |u| if (!blank(u) and !std.mem.startsWith(u8, u, "https://") and !std.mem.startsWith(u8, u, "http://"))
+    if (eql(name, "web_fetch") or eql(name, "summarise_parts")) if (str(args, "url")) |u| if (!blank(u) and !std.mem.startsWith(u8, u, "https://") and !std.mem.startsWith(u8, u, "http://"))
         try issues.add("url must start with https:// or http://", .{});
 
     if (eql(name, "memory")) {

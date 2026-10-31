@@ -47,8 +47,17 @@ cached_tokens, cache_write_tokens, charged_micros}` (one per upstream call),
 - Search mode adds OpenRouter's web plugin (`SEARCH_ENGINE`, default `exa`,
   which always returns citations). Research mode switches to `RESEARCH_MODEL`.
 - UI tools (artifacts, SVG, Mermaid, charts, quizzes, flashcards, slides) are
-  sent to the app and acknowledged to the model; `web_fetch` and
-  `generate_image` run on the server. At most `MAX_TOOL_STEPS` model calls a turn.
+  sent to the app and acknowledged to the model; `web_fetch`, `web_search`,
+  `summarise_parts` and `generate_image` run on the server. At most `MAX_TOOL_STEPS` model calls a turn.
+- `summarise_parts {url, question}` answers a question from a source too long to
+  read whole (`summarise.zig`): the text is cut into ~12K-character parts on
+  paragraph boundaries, the decider scores each part (one `decide` call per 32),
+  the 12 best plus the unsure ones are summarised in parallel on
+  `AUX_SUMMARISE_MODEL` (else the utility model; 6 at a time), and one merge
+  call answers with `[part N]` references. One or two parts come back whole.
+  Progress is `tool_status {id, name: "summarise_parts", status: "running",
+  detail: "part 14 of 40"}`; usage kinds `decide` and `summarise`; the source
+  joins the turn's citation numbers.
 - Client-executed tools: UI tools named in `client_tools` come as `tool_wait`,
   and the turn waits for `POST /v1/chat/tool_result {call_id, result, is_error?}`
   (404 when nothing waits for that call). The model gets the app's result, or
