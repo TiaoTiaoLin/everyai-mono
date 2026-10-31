@@ -592,5 +592,6 @@ final class ChatController extends Notifier<ChatSessionState> {
 String toolStatusLabel(String tool, String? detail) => switch (tool) {
   'web_fetch' => 'Reading ${Uri.tryParse(detail ?? '')?.host ?? 'the page'}…',
   'generate_image' => 'Creating an image…',
+  'summarise_parts' => 'Reading a long source${detail == null || detail.isEmpty ? '' : ' · $detail'}…',
   _ => 'Working…',
 };

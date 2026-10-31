@@ -332,7 +332,7 @@ final class SseTransport implements ChatTransport {
             ownKeyMicros: (u['byok_cost_micros'] as num?)?.toInt() ?? 0,
             model: u['model'] as String?,
             // Side calls cost money but don't fill the chat's context.
-            followUps: const {'followups', 'search', 'research'}.contains(u['kind']),
+            followUps: const {'followups', 'search', 'research', 'decide', 'summarise'}.contains(u['kind']),
           );
         case ('followups', {'questions': final List<Object?> list}):
           yield FollowUpsSuggested(list.whereType<String>().toList(growable: false));

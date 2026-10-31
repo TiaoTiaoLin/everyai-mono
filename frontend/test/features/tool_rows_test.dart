@@ -4,6 +4,7 @@ import 'package:every_ai/core/ui/syntax_spans.dart';
 import 'package:every_ai/features/chat/data/chat_transport.dart' show ToolRunStatus;
 import 'package:every_ai/features/chat/domain/chat_session.dart';
 import 'package:every_ai/features/chat/ui/tool_steps.dart';
+import 'package:every_ai/features/chat/chat_providers.dart' show toolStatusLabel;
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/ui/transcript/transcript_items.dart';
@@ -163,6 +164,19 @@ void main() {
       expect(toolStepLabel('web_fetch', ToolRunStatus.done), 'Read');
       expect(toolStepLabel('generate_image', ToolRunStatus.failed), 'Couldn\'t create the image');
       expect(toolStepLabel('code_run', ToolRunStatus.done), 'Used code run');
+      LiveToolStep long(ToolRunStatus status, [String? detail]) =>
+          LiveToolStep(id: 's', name: 'summarise_parts', status: status, detail: detail);
+      expect(toolStepLine(long(ToolRunStatus.running, 'part 14 of 40')), (
+        label: 'Reading a long source · part 14 of 40…',
+        detail: '',
+      ));
+      expect(toolStepLine(long(ToolRunStatus.running)).label, 'Reading a long source…');
+      expect(toolStepLine(long(ToolRunStatus.done, 'part 40 of 40')).label, 'Read a long source');
+      expect(toolStatusLabel('summarise_parts', 'part 2 of 9'), 'Reading a long source · part 2 of 9…');
+      expect(
+        toolStepLine(const LiveToolStep(id: 'f', name: 'web_fetch', status: ToolRunStatus.done, detail: 'https://a.b')),
+        (label: 'Read', detail: 'https://a.b'),
+      );
     });
 
     test('finished steps summarize', () {

@@ -96,6 +96,8 @@ void main() {
   test('labels', () {
     expect(usageKindLabel('gateway'), 'Code');
     expect(usageKindLabel('polish'), 'Polish');
+    expect(usageKindLabel('decide'), 'Decisions');
+    expect(usageKindLabel('summarise'), 'Long reads');
     expect(usageProviderLabel('anthropic'), 'Anthropic');
   });
 

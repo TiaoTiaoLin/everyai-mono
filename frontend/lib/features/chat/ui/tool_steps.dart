@@ -24,6 +24,9 @@ String toolStepLabel(String name, ToolRunStatus status) => switch ((name, status
   ('researcher', ToolRunStatus.running) => 'Researching',
   ('researcher', ToolRunStatus.done) => 'Researched',
   ('researcher', ToolRunStatus.failed) => 'Couldn\'t research',
+  ('summarise_parts', ToolRunStatus.running) => 'Reading a long source',
+  ('summarise_parts', ToolRunStatus.done) => 'Read a long source',
+  ('summarise_parts', ToolRunStatus.failed) => 'Couldn\'t read the long source',
   (_, ToolRunStatus.running) => 'Using ${_readable(name)}',
   (_, ToolRunStatus.done) => 'Used ${_readable(name)}',
   (_, ToolRunStatus.failed) => '${_readable(name)} failed',
@@ -31,23 +34,40 @@ String toolStepLabel(String name, ToolRunStatus status) => switch ((name, status
 
 String _readable(String name) => name.replaceAll('_', ' ');
 
+/// Tools whose detail is progress ("part 14 of 40"), shown as part of the
+/// label ("Reading a long source · part 14 of 40") rather than as a preview.
+const _progressTools = {'summarise_parts'};
+
 /// "Read 3 pages, created 1 image" for finished steps.
 String toolRunSummary(List<LiveToolStep> steps) {
   final pages = steps.where((s) => s.name == 'web_fetch').length;
   final images = steps.where((s) => s.name == 'generate_image').length;
   final researchers = steps.where((s) => s.name == 'researcher').length;
   final searches = steps.where((s) => s.name == 'web_search').length;
-  final other = steps.length - pages - images - researchers - searches;
+  final long = steps.where((s) => s.name == 'summarise_parts').length;
+  final other = steps.length - pages - images - researchers - searches - long;
   String n(int count, String one, String many) => '$count ${count == 1 ? one : many}';
   final parts = [
     if (researchers > 0) 'ran ${n(researchers, 'researcher', 'researchers')}',
     if (searches > 0) 'searched ${n(searches, 'time', 'times')}',
     if (pages > 0) 'read ${n(pages, 'page', 'pages')}',
+    if (long > 0) 'read ${n(long, 'long source', 'long sources')}',
     if (images > 0) 'created ${n(images, 'image', 'images')}',
     if (other > 0) 'used ${n(other, 'tool', 'tools')}',
   ];
   final text = parts.join(', ');
   return text.isEmpty ? text : text[0].toUpperCase() + text.substring(1);
+}
+
+/// A step row's label and the detail previewed beside it: "Reading…",
+/// "Read" + the URL, "Reading a long source · part 14 of 40…".
+({String label, String detail}) toolStepLine(LiveToolStep step) {
+  final raw = step.detail?.trim() ?? '';
+  final base = toolStepLabel(step.name, step.status);
+  if (_progressTools.contains(step.name)) {
+    return (label: step.running ? '$base${raw.isEmpty ? '' : ' · $raw'}…' : base, detail: '');
+  }
+  return (label: '$base${step.running && raw.isEmpty ? '…' : ''}', detail: raw);
 }
 
 /// The preview for a step's detail: a URL as host plus a dimmed path, or the
@@ -155,7 +175,7 @@ class ToolStepRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
-    final detail = step.detail?.trim() ?? '';
+    final (:label, :detail) = toolStepLine(step);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
@@ -166,10 +186,7 @@ class ToolStepRow extends StatelessWidget {
             ToolRunStatus.failed => AdaptiveIcon(EveryIcon.close, size: 13, color: theme.danger),
           },
           const SizedBox(width: 8),
-          Text(
-            '${toolStepLabel(step.name, step.status)}${step.running && detail.isEmpty ? '…' : ''}',
-            style: theme.type.callout.tint(theme.textMuted),
-          ),
+          Text(label, style: theme.type.callout.tint(theme.textMuted)),
           if (detail.isNotEmpty) ...[
             const SizedBox(width: 6),
             Flexible(

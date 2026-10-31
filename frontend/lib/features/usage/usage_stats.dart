@@ -202,6 +202,8 @@ String usageKindLabel(String kind) => switch (kind) {
   'gateway' => 'Code',
   'image' || 'images' => 'Images',
   'followups' => 'Suggestions',
+  'decide' => 'Decisions',
+  'summarise' => 'Long reads',
   final k when k.isEmpty => 'Other',
   final k => '${k[0].toUpperCase()}${k.substring(1)}',
 };
