@@ -54,6 +54,7 @@ import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPromp
 import 'mcp_providers.dart';
 import 'permissions_providers.dart';
 import 'settings/context_files.dart';
+import 'settings/script_caps.dart';
 import 'settings/settings.dart';
 import 'session_notifications.dart';
 import 'sidecar/sidecar.dart';
@@ -148,6 +149,7 @@ final everyaiAgentServerProvider = FutureProvider<({Uri baseUrl, String key})>((
         skills: full.skills,
         clientTools: device.clientTools,
         autoCompactAt: full.autoCompactAt,
+        script: full.script,
       );
     },
   );
@@ -447,6 +449,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           : null,
       clientTools: clientTools,
       autoCompactAt: ref.read(codeSettingsProvider).autoCompactPercent / 100,
+      // run_script and the decider: the tier's limits, or the user's level (EveryAI harness only).
+      script: everyai && !demo ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
       pathMap: pathMap,
     );
   }

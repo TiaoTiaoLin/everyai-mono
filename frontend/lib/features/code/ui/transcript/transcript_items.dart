@@ -176,8 +176,77 @@ class StepView extends StatelessWidget {
   Widget build(BuildContext context) => switch (step.call.actionKind) {
     'TerminalAction' => _CommandView(step: step),
     'FileEditorAction' || 'EditAction' || 'WriteFileAction' => _EditView(step: step),
+    'ScriptAction' => _ScriptView(step: step),
     _ => _ToolView(step: step),
   };
+}
+
+/// "12 calls · 38 decides · 4 queries": what a run_script spent, or empty.
+String scriptSummary(Map<String, Object?> observation) {
+  int n(String key) => (observation[key] as num?)?.toInt() ?? 0;
+  String count(int v, String one, String many) => '$v ${v == 1 ? one : many}';
+  return [
+    if (n('call_count') > 0) count(n('call_count'), 'call', 'calls'),
+    if (n('decides') > 0) count(n('decides'), 'decide', 'decides'),
+    if (n('queries') > 0) count(n('queries'), 'query', 'queries'),
+  ].join(' · ');
+}
+
+/// A run_script step: its description, what it spent, and opened, the
+/// program, the calls it made and what it printed.
+class _ScriptView extends StatelessWidget {
+  const _ScriptView({required this.step});
+  final ToolStep step;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    final obs = step.result?.observation ?? const {};
+    final output = step.result?.text ?? '';
+    final calls = [...(obs['calls'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>()];
+    final summary = scriptSummary(obs);
+    final base = _mono.copyWith(color: theme.text);
+    return _Disclosure(
+      icon: EveryIcon.code,
+      title: stepTitle(step.call),
+      busy: !step.done,
+      preview: step.done && output.trim().isNotEmpty ? TextSpan(text: lastLine(output)) : null,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (obs['timed_out'] == true)
+            Text('timed out', style: theme.type.caption.tint(theme.danger))
+          else if (summary.isNotEmpty)
+            Text(summary, style: theme.type.caption.tint(theme.textMuted)),
+          if (!step.done) const RunningTime(),
+          const SizedBox(width: 6),
+          _StatusDot(step: step),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _CodeBox(codeSpan(step.call.str('code'), 'typescript', base: base, brightness: theme.brightness)),
+          if (calls.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            for (final c in calls.take(40))
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 1),
+                child: Text(
+                  '${c['failed'] == true ? '✕' : '·'} ${c['detail'] ?? c['fn']}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.type.caption.mono.tint(c['failed'] == true ? theme.danger : theme.textMuted),
+                ),
+              ),
+            if (calls.length > 40)
+              Text('… ${calls.length - 40} more calls', style: theme.type.caption.tint(theme.textMuted)),
+          ],
+          if (step.done) ...[const SizedBox(height: 6), _Output(output)],
+        ],
+      ),
+    );
+  }
 }
 
 /// Any other tool: its name, a preview of the result, and the arguments

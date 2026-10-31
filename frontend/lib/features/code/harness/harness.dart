@@ -33,6 +33,7 @@ final class SessionSpec {
     this.pathMap = const {},
     this.researchSites,
     this.phaseFlow,
+    this.script,
   });
 
   /// 'max' or 'ultra': the session runs the phase flow (research → questions
@@ -125,6 +126,67 @@ final class SessionSpec {
   /// The share of [maxInputTokens] at which the EveryAI harness compacts the
   /// history in place (0 turns it off).
   final double autoCompactAt;
+
+  /// What `run_script` programs may spend (the tier's defaults, see
+  /// `scriptCapsFor`); null: the EveryAI harness offers no run_script.
+  final ScriptCaps? script;
+}
+
+/// The session's model helpers: whether it offers `run_script` at all
+/// ([enabled]), per-script limits on [decides] fast typed decisions and
+/// [queries] cheap-model reads (0: llmQuery is off), [depth] 2 letting an
+/// llmQuery write scripts of its own, and [smartCompaction] having old tool
+/// output scored before it is cleared.
+@immutable
+final class ScriptCaps {
+  const ScriptCaps({
+    this.enabled = true,
+    this.decides = 20,
+    this.queries = 0,
+    this.depth = 1,
+    this.timeoutSeconds = 120,
+    this.smartCompaction = false,
+  });
+
+  final bool enabled;
+  final int decides;
+  final int queries;
+  final int depth;
+  final int timeoutSeconds;
+  final bool smartCompaction;
+
+  Map<String, Object?> toJson() => {
+    'enabled': enabled,
+    'decides': decides,
+    'queries': queries,
+    'depth': depth,
+    'timeout_seconds': timeoutSeconds,
+    'smart_compaction': smartCompaction,
+  };
+
+  static ScriptCaps? fromJson(Object? j) => j is Map<String, Object?>
+      ? ScriptCaps(
+          enabled: j['enabled'] != false,
+          decides: (j['decides'] as num?)?.toInt() ?? 20,
+          queries: (j['queries'] as num?)?.toInt() ?? 0,
+          depth: (j['depth'] as num?)?.toInt() ?? 1,
+          timeoutSeconds: (j['timeout_seconds'] as num?)?.toInt() ?? 120,
+          smartCompaction: j['smart_compaction'] == true,
+        )
+      : null;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ScriptCaps &&
+      other.enabled == enabled &&
+      other.decides == decides &&
+      other.queries == queries &&
+      other.depth == depth &&
+      other.timeoutSeconds == timeoutSeconds &&
+      other.smartCompaction == smartCompaction;
+
+  @override
+  int get hashCode => Object.hash(enabled, decides, queries, depth, timeoutSeconds, smartCompaction);
 }
 
 /// A running agent conversation. Events arrive on [events] (history first,

@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../harness/everyai/research_sites.dart' show defaultResearchSites;
 import 'code_settings.dart';
+import 'script_caps.dart';
 
 /// How a setting is edited.
 enum SettingKind {
@@ -165,6 +166,25 @@ const settingDefs = <SettingDef>[
     store: SettingStore.prefs,
     choices: [('Build', HarnessMode.build), ('Bug fix', HarnessMode.bugFix)],
     fallback: HarnessMode.build,
+  ),
+  SettingDef(
+    key: 'scripts',
+    title: 'Scripts (run_script)',
+    help:
+        'Programs the agent runs in a sandbox to read and filter in bulk, with a fast decider and a cheap model '
+        'for sub-questions. By tier: Efficient gets scripts and decide, Thorough and Max add llmQuery, Ultra lets '
+        'it recurse. Claude, GPT and Gemini only unless set here.',
+    scopes: _g,
+    kind: SettingKind.choice,
+    store: SettingStore.prefs,
+    choices: [
+      ('By tier', ScriptLevel.byTier),
+      ('Off', ScriptLevel.off),
+      ('Scripts + decide', ScriptLevel.decide),
+      ('Scripts + llmQuery', ScriptLevel.query),
+      ('Deep', ScriptLevel.deep),
+    ],
+    fallback: ScriptLevel.byTier,
   ),
   SettingDef(
     key: 'autoCompact',
@@ -382,6 +402,7 @@ Object? readPrefsValue(SettingDef d, StoredCodeSettings s, String? projectId) =>
   'harnessMode' => s.harnessMode,
   'autoCompact' => s.autoCompactPercent,
   'forks' => s.forksIsolated,
+  'scripts' => s.scripts,
   'researchSites' => s.researchSites,
   _ => throw ArgumentError('${d.key} is not kept in Preferences'),
 };
@@ -394,6 +415,7 @@ StoredCodeSettings writePrefsValue(SettingDef d, StoredCodeSettings s, String? p
       'harnessMode' => s.withHarnessMode(value! as HarnessMode),
       'autoCompact' => s.withAutoCompact(value! as int),
       'forks' => s.withForksIsolated(value! as bool),
+      'scripts' => s.withScripts(value! as ScriptLevel),
       'researchSites' => s.withResearchSites([...value! as List<String>]),
       _ => throw ArgumentError('${d.key} is not kept in Preferences'),
     };

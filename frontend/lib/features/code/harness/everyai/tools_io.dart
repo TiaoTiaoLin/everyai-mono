@@ -36,6 +36,7 @@ abstract final class ToolNames {
   static const applyPatch = 'apply_patch';
   static const browser = 'browser';
   static const screenshot = 'screenshot';
+  static const runScript = 'run_script';
 }
 
 /// The action `kind` each tool shows as in the transcript and is judged as by
@@ -56,6 +57,7 @@ const actionKinds = {
   ToolNames.applyPatch: 'ApplyPatchAction',
   ToolNames.browser: 'BrowserAction',
   ToolNames.screenshot: 'ScreenshotAction',
+  ToolNames.runScript: 'ScriptAction',
 };
 
 Map<String, Object?> _fn(String name, String description, Map<String, Object?> properties, List<String> required) => {
@@ -738,6 +740,10 @@ final class ToolRunner {
   }
 
   /// [text] cut to [maxToolText], the whole of it saved under `.everyai/spill/`.
+  /// [text] as a tool result: longer than [maxToolText], its middle goes to
+  /// a spill file the model can read in parts.
+  String fit(String text, String name) => _fit(text, name);
+
   String _fit(String text, String name) {
     if (text.length <= maxToolText) return text;
     final dir = Directory(spillDir)..createSync(recursive: true);

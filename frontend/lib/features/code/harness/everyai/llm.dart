@@ -546,6 +546,45 @@ final class GatewayClient {
     throw LlmError('The fetch failed (${res.statusCode}).', status: res.statusCode);
   }
 
+  /// Typed answers from the backend's fast decider (`/v1/aux/decide`):
+  /// [questions] are `{id, kind: bool|choice|score, prompt, choices?}`; the
+  /// result maps each id to true/false, a choice, 0–1, or "unsure". Throws
+  /// [LlmError] when the call fails (callers treat that as unsure).
+  Future<Map<String, Object?>> decide(
+    String text,
+    List<Map<String, Object?>> questions, {
+    required String sessionTag,
+    String job = 'script',
+    String? instructions,
+    Future<void>? cancel,
+  }) async {
+    final call = _http
+        .post(
+          Uri.parse('${baseUrl.replaceAll(RegExp(r'/$'), '')}/aux/decide'),
+          headers: _headers(sessionTag, null),
+          body: jsonEncode({'job': job, 'text': text, 'instructions': ?instructions, 'questions': questions}),
+        )
+        .timeout(const Duration(seconds: 60));
+    final http.Response res;
+    try {
+      res = cancel == null
+          ? await call
+          : await Future.any([call, cancel.then<http.Response>((_) => throw const LlmCancelled())]);
+    } on http.ClientException catch (e) {
+      throw LlmError('Could not reach the decider: ${e.message}', retryable: true);
+    } on TimeoutException {
+      throw const LlmError('The decider timed out.', retryable: true);
+    }
+    if (res.statusCode >= 300) throw _statusError(res.body, res.statusCode, res.headers);
+    final v = jsonDecode(res.body);
+    final answers = v is Map<String, Object?> ? v['answers'] : null;
+    if (answers is! List<Object?>) throw const LlmError('The decider sent an unreadable reply.');
+    return {
+      for (final a in answers.whereType<Map<String, Object?>>())
+        if (a['id'] case final String id) id: a['value'] ?? 'unsure',
+    };
+  }
+
   /// A plain (not streamed) call, for search, the goal judge and
   /// compaction; with [retry], transient failures are tried again as in
   /// [completeWithRetry].

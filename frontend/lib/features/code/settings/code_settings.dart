@@ -8,6 +8,7 @@ import '../domain/mcp_servers.dart';
 import '../domain/permissions.dart';
 import '../harness/everyai/research_sites.dart' show defaultResearchSites;
 import 'agent_prompt.dart' show HarnessMode, HarnessTier;
+import 'script_caps.dart' show ScriptLevel;
 
 export 'agent_prompt.dart' show HarnessMode, HarnessTier;
 import '../permissions_providers.dart' show StoredPermissions;
@@ -46,7 +47,11 @@ final class StoredCodeSettings {
     this.forksIsolated = true,
     this.researchSites = defaultResearchSites,
     this.harnessMode = HarnessMode.build,
+    this.scripts = ScriptLevel.byTier,
   });
+
+  /// run_script for sessions started from now on: by tier, or one level.
+  final ScriptLevel scripts;
 
   /// Build or Bug fix, for sessions started from now on.
   final HarnessMode harnessMode;
@@ -93,6 +98,8 @@ final class StoredCodeSettings {
 
   StoredCodeSettings withForksIsolated(bool on) => _copy(forksIsolated: on);
 
+  StoredCodeSettings withScripts(ScriptLevel level) => _copy(scripts: level);
+
   /// [sites] cleaned up (no schemes or paths, lower case); empty restores the defaults.
   StoredCodeSettings withResearchSites(List<String> sites) {
     final clean = [
@@ -113,8 +120,10 @@ final class StoredCodeSettings {
     bool? forksIsolated,
     List<String>? researchSites,
     HarnessMode? harnessMode,
+    ScriptLevel? scripts,
   }) => StoredCodeSettings(
     harnessMode: harnessMode ?? this.harnessMode,
+    scripts: scripts ?? this.scripts,
     researchSites: researchSites ?? this.researchSites,
     tier: tier ?? this.tier,
     forksIsolated: forksIsolated ?? this.forksIsolated,
@@ -145,6 +154,7 @@ final class StoredCodeSettings {
       },
       forksIsolated: !(global is Map<String, Object?> && global['forksIsolated'] == false),
       harnessMode: HarnessMode.parse(global is Map<String, Object?> ? global['harnessMode'] : null),
+      scripts: ScriptLevel.parse(global is Map<String, Object?> ? global['scripts'] : null),
       researchSites: switch (global) {
         {'researchSites': final List<Object?> sites} when sites.isNotEmpty => [...sites.whereType<String>()],
         _ => defaultResearchSites,
@@ -173,6 +183,7 @@ final class StoredCodeSettings {
       if (tier != HarnessTier.efficient) 'harnessTier': tier.name,
       if (!forksIsolated) 'forksIsolated': false,
       if (harnessMode != HarnessMode.build) 'harnessMode': harnessMode.name,
+      if (scripts != ScriptLevel.byTier) 'scripts': scripts.name,
       if (!listEquals(researchSites, defaultResearchSites)) 'researchSites': researchSites,
     },
     'projects': {

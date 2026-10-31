@@ -24,6 +24,7 @@ import 'mcp_io.dart';
 import 'model_family.dart';
 import 'prompt_io.dart';
 import 'reasoning_binding.dart';
+import 'script_io.dart';
 import 'shell_io.dart';
 import 'tools_io.dart';
 
@@ -503,6 +504,7 @@ final class EveryAISession
     'path_map': s.pathMap,
     'research_sites': ?s.researchSites,
     'phase_flow': ?s.phaseFlow,
+    'script': ?s.script?.toJson(),
   };
 
   void _writeForkTools() {
@@ -528,6 +530,7 @@ final class EveryAISession
     pathMap: {for (final e in (j['path_map'] as Map<String, Object?>? ?? const {}).entries) e.key: '${e.value}'},
     researchSites: (j['research_sites'] as List<Object?>?)?.cast<String>(),
     phaseFlow: j['phase_flow'] as String?,
+    script: ScriptCaps.fromJson(j['script']),
   );
 
   Future<String> _systemPrompt() async {
@@ -565,6 +568,7 @@ final class EveryAISession
       _forkTools ??
       [
         ...builtInToolSpecs(only: _spec.tools, applyPatch: family == ModelFamily.gpt),
+        if (_scripting) runScriptSpec,
         ..._mcp.specs,
         if (!_spec.subagent && (_spec.phaseFlow?.startsWith('bugfix') ?? false))
           {
@@ -790,6 +794,7 @@ final class EveryAISession
     int? maxInputTokens,
     bool? vision,
     String? phaseFlow,
+    ScriptCaps? script,
   }) {
     final s = _spec;
     return SessionSpec(
@@ -812,6 +817,7 @@ final class EveryAISession
       pathMap: s.pathMap,
       researchSites: s.researchSites,
       phaseFlow: phaseFlow == null ? s.phaseFlow : (phaseFlow.isEmpty ? null : phaseFlow),
+      script: script ?? s.script,
     );
   }
 
@@ -1306,6 +1312,7 @@ final class EveryAISession
       );
     }
     if (call.name == bugCheckTool) return _bugCheck(call.args!, cancel);
+    if (call.name == ToolNames.runScript) return _runScript(call.args!, cancel);
     if (actionKinds.containsKey(call.name)) return _tools.run(call.name, call.args!, cancel: cancel);
     if (_spec.researchSites != null && (_mcp.has(call.name) || call.name.startsWith('mcp'))) {
       return const ToolOutput('Error: research jobs have no MCP tools. Use web_fetch and web_search.', isError: true);
@@ -1319,6 +1326,56 @@ final class EveryAISession
     }
     // A client tool the app approved without answering it (present_files).
     return const ToolOutput('Shown to the user.');
+  }
+
+  /// Whether the session offers run_script: its tier allows it and Deno is
+  /// here (decided once, so the tool list stays as it was).
+  late final bool _scripting = (_spec.script?.enabled ?? false) && findDeno() != null;
+
+  ScriptRunner _scriptRunner() => ScriptRunner(
+    deno: findDeno()!,
+    dir: '${_dir.path}/scripts',
+    root: _spec.workingDir,
+    pathMap: _spec.pathMap,
+    tools: _tools,
+    gateway: _gateway,
+    sessionTag: _spec.sessionTag,
+  );
+
+  /// Runs a run_script program; the transcript row gets its calls and counts.
+  Future<ToolOutput> _runScript(Map<String, Object?> args, Future<void> cancel) async {
+    final caps = _spec.script;
+    if (caps == null || !_scripting) {
+      return const ToolOutput(
+        'Error: run_script is not available in this session. Use your other tools.',
+        isError: true,
+      );
+    }
+    final code = args['code'] as String? ?? '';
+    if (code.trim().isEmpty) return const ToolOutput('Error: give the program as code.', isError: true);
+    final seconds = ((args['timeout_seconds'] as num?)?.toInt() ?? caps.timeoutSeconds).clamp(5, 600);
+    final runner = _scriptRunner();
+    final budget = ScriptBudget(caps);
+    final r = await runner.run(
+      code,
+      budget: budget,
+      timeout: Duration(seconds: seconds),
+      cancel: cancel,
+    );
+    return ToolOutput(
+      runner.describe(r),
+      isError: r.exitCode != 0 || r.timedOut,
+      observation: {
+        'exit_code': r.exitCode,
+        'timed_out': r.timedOut,
+        'decides': budget.decides,
+        'queries': budget.queries,
+        'call_count': r.calls.length,
+        'calls': [
+          for (final c in r.calls.take(200)) {'fn': c.fn, 'detail': c.detail, 'failed': c.failed},
+        ],
+      },
+    );
   }
 
   /// Bug fix mode's proofs: the harness runs the repro itself, so a fix the

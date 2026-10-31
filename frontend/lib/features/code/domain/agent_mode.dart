@@ -61,6 +61,8 @@ enum AgentMode {
     'BrowserAction' || 'ScreenshotAction' => true,
     // Returns a skill's instructions; the app escapes the inline commands it would run.
     'InvokeSkillAction' => true,
+    // run_script: a Deno program with no permissions; its bridge reads project files and the web only.
+    'ScriptAction' => true,
     // is_input sends keys to a running process.
     'TerminalAction' => call.action['is_input'] != true && isReadOnlyShell(call.str('command')),
     _ => false,

@@ -166,6 +166,8 @@ if [[ "$DEVICE" == macos ]]; then
   say "Checking the OpenHands agent-server"
   BIN="$("$FRONTEND/tool/fetch_agent_server.sh" | tail -1)"
   ARGS+=(--dart-define=AGENT_SERVER_BIN="$BIN")
+  say "Checking Deno (run_script)"
+  DENO="$("$FRONTEND/tool/fetch_deno.sh" | tail -1)" && ARGS+=(--dart-define=DENO_BIN="$DENO") || say "No Deno: run_script is off"
 fi
 [[ "$DEVICE" == chrome ]] && ARGS+=(--web-port=5173)
 
