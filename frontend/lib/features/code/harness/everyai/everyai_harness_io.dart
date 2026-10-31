@@ -1029,10 +1029,49 @@ final class EveryAISession
   /// stay word for word. The transcript shows it as "Context compacted".
   Future<void> _maybeCompact() async {
     // First the cheap step: old tool output goes (rarely, so the cached prefix holds).
-    if (clearOldToolOutput(_messages) > 0) _rewriteMessages();
+    if (clearOldToolOutput(_messages, needed: await _stillNeeded()) > 0) _rewriteMessages();
     final window = _spec.maxInputTokens ?? 0;
     if (window <= 0 || _spec.autoCompactAt <= 0 || lastPromptTokens < window * _spec.autoCompactAt) return;
     await compact();
+  }
+
+  /// On Thorough and up, when old tool output is about to be cleared: the
+  /// call ids of the outputs the decider says the work still needs, cleared
+  /// last. Empty (plain oldest-first) when it can't tell.
+  Future<Set<String>> _stillNeeded() async {
+    if (!(_spec.script?.smartCompaction ?? false)) return const {};
+    final all = oldToolOutputs(_messages);
+    if (all.isEmpty) return const {};
+    // The newest 64 are scored; anything older goes first anyway.
+    final old = all.length > 64 ? all.sublist(all.length - 64) : all;
+    String text(Map<String, Object?> m) => switch (m['content']) {
+      final String s => s,
+      final List<Object?> parts => [
+        for (final p in parts)
+          if (p case {'type': 'text', 'text': final String t}) t,
+      ].join('\n'),
+      _ => '',
+    };
+    String cut(String s, int n) => s.length > n ? '${s.substring(0, n)}…' : s;
+    // The work in progress: the latest user message and what the agent last said.
+    final user = _messages.lastWhere((m) => m['role'] == 'user', orElse: () => const {});
+    final said = _messages.lastWhere((m) => m['role'] == 'assistant' && text(m).isNotEmpty, orElse: () => const {});
+    final focus = 'Task: ${cut(text(user), 2000)}\nAgent, latest: ${cut(text(said), 1000)}';
+    final needed = <String>{};
+    for (var start = 0; start < old.length; start += 32) {
+      final batch = old.sublist(start, (start + 32).clamp(0, old.length));
+      final q = neededQuestions(batch, focus);
+      try {
+        final answers = await _gateway.decide(q.text, q.questions, sessionTag: _spec.sessionTag, job: 'compaction');
+        for (final (n, o) in batch.indexed) {
+          // Unsure counts as needed: clearing it can wait.
+          if (answers['o$n'] != false) needed.add(o.callId);
+        }
+      } on LlmError {
+        return const {};
+      }
+    }
+    return needed;
   }
 
   /// Compacts now (auto-compact, or `/compact` with [focus]). False when

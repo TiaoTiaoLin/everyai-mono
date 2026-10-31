@@ -328,17 +328,16 @@ List<Map<String, Object?>> summaryRequest(
 String clearedToolNote(String tool) =>
     '[output cleared to save context — re-run ${tool.isEmpty ? 'the tool' : tool} if you need it]';
 
-/// Clears old tool output in [messages] (OpenAI chat format, changed in
-/// place) once the output older than the newest [keepTurns] model steps is
-/// over [triggerTokens]: the oldest results are replaced by a short note
-/// until what is left is under [targetTokens]. Tokens are estimated as
-/// characters / 4. Returns how many results were cleared (0: nothing
-/// changed, so the cached prefix is left alone). The gap between trigger and
-/// target means it changes the history rarely.
-int clearOldToolOutput(
+/// A tool result old enough to be cleared: its index in the messages, its
+/// call id and tool, and its text.
+typedef OldToolOutput = ({int index, String callId, String tool, String content});
+
+/// The tool results in [messages] older than the newest [keepTurns] model
+/// steps, oldest first, when together they are over [triggerTokens]
+/// (characters / 4); otherwise none, so nothing needs clearing yet.
+List<OldToolOutput> oldToolOutputs(
   List<Map<String, Object?>> messages, {
   int triggerTokens = 40000,
-  int targetTokens = 20000,
   int keepTurns = 3,
 }) {
   // Where the newest [keepTurns] model steps start: nothing from there on is touched.
@@ -350,9 +349,9 @@ int clearOldToolOutput(
       if (++steps == keepTurns) break;
     }
   }
-  if (steps < keepTurns) return 0;
+  if (steps < keepTurns) return const [];
   final names = <String, String>{};
-  final old = <int>[];
+  final old = <OldToolOutput>[];
   var chars = 0;
   for (var i = 0; i < boundary; i++) {
     final m = messages[i];
@@ -364,22 +363,76 @@ int clearOldToolOutput(
     if (m['role'] != 'tool') continue;
     final content = m['content'];
     if (content is! String || content.startsWith('[output cleared to save context')) continue;
-    old.add(i);
+    final id = m['tool_call_id'] as String? ?? '';
+    old.add((index: i, callId: id, tool: names[id] ?? '', content: content));
     chars += content.length;
   }
-  if (chars / 4 <= triggerTokens) return 0;
+  return chars / 4 <= triggerTokens ? const [] : old;
+}
+
+/// Clears old tool output in [messages] (OpenAI chat format, changed in
+/// place) once the output older than the newest [keepTurns] model steps is
+/// over [triggerTokens]: results are replaced by a short note until what is
+/// left is under [targetTokens], the oldest first, but those whose call ids
+/// are in [needed] (the work still uses them) only after all the others.
+/// Tokens are estimated as characters / 4. Returns how many results were
+/// cleared (0: nothing changed, so the cached prefix is left alone). The gap
+/// between trigger and target means it changes the history rarely.
+int clearOldToolOutput(
+  List<Map<String, Object?>> messages, {
+  int triggerTokens = 40000,
+  int targetTokens = 20000,
+  int keepTurns = 3,
+  Set<String> needed = const {},
+}) {
+  final old = oldToolOutputs(messages, triggerTokens: triggerTokens, keepTurns: keepTurns);
+  if (old.isEmpty) return 0;
+  var chars = old.fold<int>(0, (n, o) => n + o.content.length);
+  final order = [...old.where((o) => !needed.contains(o.callId)), ...old.where((o) => needed.contains(o.callId))];
   var cleared = 0;
-  for (final i in old) {
+  for (final o in order) {
     if (chars / 4 <= targetTokens) break;
-    final m = messages[i];
-    final content = m['content']! as String;
-    final note = clearedToolNote(names[m['tool_call_id']] ?? '');
-    if (note.length >= content.length) continue;
-    messages[i] = {...m, 'content': note};
-    chars -= content.length;
+    final note = clearedToolNote(o.tool);
+    if (note.length >= o.content.length) continue;
+    messages[o.index] = {...messages[o.index], 'content': note};
+    chars -= o.content.length;
     cleared++;
   }
   return cleared;
+}
+
+/// The decider's questions for [old]: whether each output is still needed
+/// for the work in [focus]. Its text puts the work first, then each output
+/// (cut to [each] characters) under its number.
+({String text, List<Map<String, Object?>> questions}) neededQuestions(
+  List<OldToolOutput> old,
+  String focus, {
+  int each = 1500,
+}) {
+  final text = StringBuffer()
+    ..writeln('<work-in-progress>')
+    ..writeln(focus.trim())
+    ..writeln('</work-in-progress>');
+  for (final (n, o) in old.indexed) {
+    final body = o.content.length > each ? '${o.content.substring(0, each)}…' : o.content;
+    text
+      ..writeln('<output n="$n" tool="${o.tool}">')
+      ..writeln(body)
+      ..writeln('</output>');
+  }
+  return (
+    text: text.toString(),
+    questions: [
+      for (final (n, _) in old.indexed)
+        {
+          'id': 'o$n',
+          'kind': 'bool',
+          'prompt':
+              'Does the work in progress still need output $n (a file, error or result it will look at again), '
+              'rather than having moved past it?',
+        },
+    ],
+  );
 }
 
 /// The summarizer's reply, tidied: code fences around it removed. Null when

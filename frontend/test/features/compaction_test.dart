@@ -298,6 +298,22 @@ void main() {
       expect(clearOldToolOutput(messages), 0);
     });
 
+    test('outputs the work still needs are cleared last', () {
+      final messages = history(10);
+      expect(oldToolOutputs(messages).map((o) => o.callId), ['c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6']);
+      expect(clearOldToolOutput(messages, needed: {'c0', 'c2'}), 5);
+      final tools = messages.where((m) => m['role'] == 'tool').map((m) => m['content']! as String).toList();
+      expect(tools[0], hasLength(30000));
+      expect(tools[2], hasLength(30000));
+      for (final i in [1, 3, 4, 5, 6]) {
+        expect(tools[i], startsWith('[output cleared'));
+      }
+      final q = neededQuestions(oldToolOutputs(history(10)).take(2).toList(), 'Fix the login bug');
+      expect(q.questions.map((x) => x['id']), ['o0', 'o1']);
+      expect(q.text, startsWith('<work-in-progress>\nFix the login bug'));
+      expect(q.text, contains('<output n="1" tool="bash">'));
+    });
+
     test('leaves the history alone under the trigger', () {
       final messages = history(8);
       final before = jsonEncode(messages);
