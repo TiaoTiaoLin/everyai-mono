@@ -56,6 +56,10 @@ fn completions(app: *App, req: *anole.Request, res: *anole.Response) !void {
     };
     // The user's own key (byok.zig) pays for the call instead.
     const route = try app.routeFor(req, model, true);
+    if (app.keyless(route.byok, model, true)) {
+        res.status = .unauthorized;
+        return res.json(.{ .@"error" = .{ .message = openrouter.no_key_message, .type = "authentication_error", .code = "no_api_key" } });
+    }
     billing.preflight(app, req, who.user_id, facts.free or route.byok) catch {
         res.status = .payment_required;
         return res.json(.{ .@"error" = .{ .message = "Out of EveryAI credits", .type = "insufficient_quota", .code = "out_of_credits" } });

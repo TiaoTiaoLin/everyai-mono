@@ -219,11 +219,15 @@ flowchart LR
 > You need **Flutter 3.47** and **Zig 0.17**. [Anole](https://github.com/xuckless/anole) 0.4.1 is fetched by `zig build` from its release tag. Code needs Google Chrome (or Chromium/Edge/Brave) for the agent's browser tool.
 
 ```sh
-cp .env.example .env            # add OPENROUTER_API_KEY (and ANTHROPIC_API_KEY if you have one)
-cp frontend/config/example.json frontend/config/dev.json
-
 scripts/dev.sh macos            # or: web · ios-sim · ios · <device id>
 ```
+
+Then open **Settings → API keys** in the app and paste an [OpenRouter](https://openrouter.ai/keys) key (every model)
+or an Anthropic key (Claude models). That's all: no `.env` is needed. Keys stay in your keychain and go with each
+request; the local backend never stores them. Without a key, a message shows an **Add API key** button.
+
+Running a server for others instead? Put `OPENROUTER_API_KEY` (and `JWT_SECRET`, required in production) in a root
+`.env` (template `.env.example`); then everyone's calls can run on the server's key and credits.
 
 `dev.sh` starts `backend-exp` on `:8080` (or reuses a running one), fetches Deno for Code's `run_script` (the macOS build bundles it too), writes the right `API_BASE_URL` for the target, and runs the app.
 
@@ -237,7 +241,7 @@ zig build test
 
 # App
 cd frontend && flutter pub get
-flutter run -d macos --dart-define-from-file=config/dev.json
+flutter run -d macos --dart-define-from-file=config/example.json
 flutter test
 ```
 
@@ -246,8 +250,11 @@ flutter test
 <details>
 <summary><b>Configuration</b></summary>
 
-- **Secrets:** one `.env` at the repo root (template `.env.example`). Never commit it.
-- **`DEV_AUTH=true`:** anonymous requests act as a dev user on the Pro plan with $20 of credit.
+- **Secrets (optional):** one `.env` at the repo root (template `.env.example`). Never commit it. Without
+  `OPENROUTER_API_KEY` the server runs on the keys users add in the app; without `JWT_SECRET` (development only) it
+  makes a random one per run.
+- **`DEV_AUTH=true`:** anonymous requests act as a dev user on the Pro plan, with $20 of credit when the server has
+  its own key.
 - **Claude routing:** Settings → Developer chooses whether `anthropic/*` models go through OpenRouter or the native Anthropic API.
 - **Your own keys:** Settings → API keys takes an OpenRouter or Anthropic key (stored in the keychain, sent per request, never billed). Ultra on your own key has a spend cap you set.
 - **Firebase / Google Sign-In files** (`GoogleService-Info.plist`, `google-services.json`) are gitignored. Put them in the platform folders locally.

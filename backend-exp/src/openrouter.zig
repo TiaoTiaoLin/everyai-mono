@@ -96,6 +96,13 @@ pub const Client = struct {
 
     fn post(ptr: *anyopaque, cx: Ctx, path: []const u8, body: []const u8, extra: []const [2][]const u8) anyerror!Stream {
         const self: *Client = @ptrCast(@alignCast(ptr));
+        // No key here (and none from the user): answered at once, the way
+        // OpenRouter answers a call without credentials, with what to do.
+        if (self.api_key.len == 0) {
+            const reader = try cx.arena.create(std.Io.Reader);
+            reader.* = .fixed(no_key_body);
+            return .{ .status = 401, .reader = reader, .ctx = reader, .closeFn = noClose };
+        }
         const url = try std.fmt.allocPrint(cx.arena, "{s}{s}", .{ self.base_url, path });
         const h = try self.headers(cx.arena, extra);
         const live = try cx.arena.create(Live);
@@ -119,6 +126,8 @@ pub const Client = struct {
         };
     }
 
+    fn noClose(_: *anyopaque) void {}
+
     fn closeLive(ctx: *anyopaque) void {
         const live: *Live = @ptrCast(@alignCast(ctx));
         live.response.deinit();
@@ -128,7 +137,11 @@ pub const Client = struct {
         const self: *Client = @ptrCast(@alignCast(ptr));
         const url = try std.fmt.allocPrint(arena, "{s}{s}", .{ self.base_url, path });
         var r = switch (self.auth) {
-            .bearer => try anole.client(io).fetch(url, .{ .headers = &.{.{ "Authorization", try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key}) }} }),
+            // The model list is public: no key, no header.
+            .bearer => if (self.api_key.len == 0)
+                try anole.client(io).fetch(url, .{})
+            else
+                try anole.client(io).fetch(url, .{ .headers = &.{.{ "Authorization", try std.fmt.allocPrint(arena, "Bearer {s}", .{self.api_key}) }} }),
             .anthropic => try anole.client(io).fetch(url, .{ .headers = &.{ .{ "x-api-key", self.api_key }, .{ "anthropic-version", "2026-10-21" } } }),
         };
         defer r.deinit();
@@ -200,6 +213,10 @@ pub const Delta = union(enum) {
     /// Sources new since the last event, in citation order; the client appends.
     sources: []const Source,
 };
+
+/// What the user is told when a call has no key to run on.
+pub const no_key_message = "No API key for this model. Add your OpenRouter or Anthropic key in Settings → API keys.";
+const no_key_body = "{\"error\":{\"message\":\"" ++ no_key_message ++ "\",\"code\":\"no_api_key\"}}";
 
 pub const UpstreamError = struct {
     status: u16,

@@ -36,7 +36,7 @@ fn start(env: *Env, dev_auth: bool) !void {
         .gpa = alloc,
         .cfg = cfg,
         .db = undefined,
-        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.expose() } }},
+        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.?.expose() } }},
         .upstream = env.fake.upstream(),
         .catalog = .init(alloc),
     };
@@ -239,7 +239,7 @@ test "remote: the relay carries opaque frames between host and client, and unpai
             try std.testing.expectError(error.WebSocketUpgradeFailed, client.connectWebSocket(try std.fmt.allocPrint(ar, "ws://127.0.0.1:{d}/v1/remote/client/{s}?token=rd_nope", .{ port, host_id }), .{}));
 
             // The device token alone is not enough: the caller's account JWT has to match too.
-            const secret = st.cfg.jwt_secret.expose();
+            const secret = st.cfg.jwt_secret.?.expose();
             const other = try app_main.auth.accessToken(ar, io, secret, "someone-else");
             const mine = try app_main.auth.accessToken(ar, io, secret, "dev-user");
             const base = try std.fmt.allocPrint(ar, "ws://127.0.0.1:{d}/v1/remote/client/{s}?token={s}", .{ port, host_id, dev.device_token });

@@ -34,7 +34,7 @@ fn start(env: *Env, responses: []const []const u8, dev_auth: bool) !void {
 }
 
 /// Settings beyond the defaults a test needs.
-const Extra = struct { stripe_webhook_secret: ?[]const u8 = null };
+const Extra = struct { stripe_webhook_secret: ?[]const u8 = null, no_server_key: bool = false };
 
 fn startWith(env: *Env, responses: []const []const u8, dev_auth: bool, extra: Extra) !void {
     env.fake = .{ .responses = responses, .gpa = alloc, .models_json = models_json };
@@ -46,11 +46,12 @@ fn startWith(env: *Env, responses: []const []const u8, dev_auth: bool, extra: Ex
     };
     cfg.max_tool_steps = 4;
     if (extra.stripe_webhook_secret) |secret| cfg.stripe_webhook_secret = .init(secret);
+    if (extra.no_server_key) cfg.openrouter_api_key = null;
     env.state = .{
         .gpa = alloc,
         .cfg = cfg,
         .db = undefined,
-        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.expose() } }},
+        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.?.expose() } }},
         .upstream = env.fake.upstream(),
         .catalog = .init(alloc),
     };
@@ -278,6 +279,35 @@ test "billing: paid models answer 402 when quota and wallet are spent; free mode
     var free = try env.t.post("/v1/chat/stream", .{ .json = .{ .model = "dots-studio/dots-3-note-preview:free", .messages = .{.{ .role = "user", .content = "hi" }}, .tools_enabled = false } });
     defer free.deinit();
     try free.expectStatus(.ok);
+}
+
+test "no server key: a call without the user's key says to add one; with it, it runs" {
+    var env: Env = undefined;
+    try startWith(&env, &.{}, true, .{ .no_server_key = true });
+    defer env.deinit();
+    var keyed: openrouter.Fake = .{ .responses = &.{ final_turn, followups_reply }, .gpa = alloc, .models_json = models_json };
+    defer keyed.deinit();
+    env.state.keyed_transport = keyed.upstream();
+    var models = try env.t.get("/v1/models", .{});
+    models.deinit();
+
+    var none = try env.t.post("/v1/chat/stream", .{ .json = .{ .model = "anthropic/claude-haiku-5.5", .messages = .{.{ .role = "user", .content = "hi" }}, .tools_enabled = false } });
+    defer none.deinit();
+    try none.expectStatus(.bad_request);
+    try std.testing.expectEqualStrings("no_api_key", (try none.json(struct { code: []const u8 })).code);
+
+    var gw = try env.t.post("/v1/chat/completions", .{ .json = .{ .model = "anthropic/claude-haiku-5.5", .messages = .{.{ .role = "user", .content = "hi" }} } });
+    defer gw.deinit();
+    try gw.expectStatus(.unauthorized);
+
+    var res = try env.t.post("/v1/chat/stream", .{
+        .headers = &.{.{ "X-Provider-Key-OpenRouter", "sk-or-v1-user-key" }},
+        .json = .{ .model = "anthropic/claude-haiku-5.5", .messages = .{.{ .role = "user", .content = "hi" }}, .tools_enabled = false },
+    });
+    defer res.deinit();
+    try res.expectStatus(.ok);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "event: delta") != null);
+    try std.testing.expectEqual(@as(usize, 0), env.fake.bodies.items.len);
 }
 
 test "byok: a user's own key runs paid models with no credit left and is never charged" {

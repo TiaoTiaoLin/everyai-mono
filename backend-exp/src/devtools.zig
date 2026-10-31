@@ -19,7 +19,7 @@ const Upstreams = struct {
 fn current(app: *App) Upstreams {
     return .{
         .anthropic = if (app.native_anthropic.load(.monotonic)) "anthropic" else "openrouter",
-        .keys = .{ .openrouter = app.cfg.openrouter_api_key.expose().len > 0, .anthropic = app.anthropic != null },
+        .keys = .{ .openrouter = app.cfg.openrouter_api_key != null, .anthropic = app.anthropic != null },
     };
 }
 

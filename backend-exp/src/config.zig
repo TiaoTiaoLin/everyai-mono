@@ -9,13 +9,16 @@ pub const Config = struct {
     /// Interface to bind. "0.0.0.0" lets phones on the LAN reach a dev server;
     /// with DEV_AUTH on, anyone there can use the dev account.
     host: []const u8 = "127.0.0.1",
-    /// Signs access tokens (HS256), 32+ characters.
-    jwt_secret: anole.Secret,
+    /// Signs access tokens (HS256), 32+ characters. Required in production;
+    /// in development a random one is made per run when unset.
+    jwt_secret: ?anole.Secret = null,
     /// Where the SQLite file lives (relative to the working directory).
     database_path: []const u8 = "data/everyai.db",
 
-    /// Upstream model provider (OpenAI-compatible API).
-    openrouter_api_key: anole.Secret,
+    /// Upstream model provider (OpenAI-compatible API). Optional: without it
+    /// the server runs on the keys users add in the app (byok.zig), and a call
+    /// with none gets a clear "add your key" error.
+    openrouter_api_key: ?anole.Secret = null,
     openrouter_base_url: []const u8 = "https://openrouter.ai/api/v1",
     /// Shown to OpenRouter for attribution (HTTP-Referer / X-Title).
     public_url: []const u8 = "http://localhost:8080",

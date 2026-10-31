@@ -410,7 +410,13 @@ fn stream(app: *App, req: *anole.Request, res: *anole.Response) !void {
         } else m.content = try models.dropUnsupported(req.arena, facts.inputs, m.content);
     }
     body.messages = msgs;
-    const on_key = byok.Keys.of(req).covers(model, modes.nativeOk(body.mode, body.tools_enabled and facts.tools));
+    const native_ok = modes.nativeOk(body.mode, body.tools_enabled and facts.tools);
+    const on_key = byok.Keys.of(req).covers(model, native_ok);
+    // A self-run server without its own key: the user's key or nothing.
+    if (app.keyless(on_key, model, native_ok)) {
+        res.status = .bad_request;
+        return res.json(.{ .message = openrouter.no_key_message, .code = "no_api_key" });
+    }
     billing.preflight(app, req, who.user_id, facts.free or on_key) catch {
         res.status = .payment_required;
         return res.json(.{ .message = "You're out of credits. Top up or upgrade your plan to keep using paid models.", .code = "out_of_credits" });

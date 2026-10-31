@@ -131,9 +131,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   message: error.message,
                   retryable: error.retryable,
                   onRetry: controller.retry,
-                  onTopUp: error is HttpStatusError && error.outOfCredits
-                      ? () => showSettings(context, section: SettingsSection.billing, anchor: 'wallet')
-                      : null,
+                  action: switch (error) {
+                    HttpStatusError(outOfCredits: true) => (
+                      label: 'Top up',
+                      onPressed: () => showSettings(context, section: SettingsSection.billing, anchor: 'wallet'),
+                    ),
+                    // A self-run server without its own key: the user's key is what runs the model.
+                    HttpStatusError(code: 'no_api_key') => (
+                      label: 'Add API key',
+                      onPressed: () => showSettings(context, section: SettingsSection.apiKeys),
+                    ),
+                    _ => null,
+                  },
                 ),
               SafeArea(
                 top: false,
@@ -290,14 +299,14 @@ class _Transcript extends ConsumerWidget {
 }
 
 class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message, required this.retryable, required this.onRetry, this.onTopUp});
+  const _ErrorBanner({required this.message, required this.retryable, required this.onRetry, this.action});
 
   final String message;
   final bool retryable;
   final VoidCallback onRetry;
 
-  /// Out of credits: opens Plan & usage.
-  final VoidCallback? onTopUp;
+  /// What fixes it: Top up (out of credits), Add API key (no key to run on).
+  final ({String label, VoidCallback onPressed})? action;
 
   @override
   Widget build(BuildContext context) {
@@ -319,8 +328,8 @@ class _ErrorBanner extends StatelessWidget {
               child: Row(
                 children: [
                   Expanded(child: Text(message, style: theme.type.callout.tint(theme.text))),
-                  if (onTopUp != null)
-                    AdaptiveButton(label: 'Top up', emphasis: ButtonEmphasis.primary, onPressed: onTopUp),
+                  if (action case final a?)
+                    AdaptiveButton(label: a.label, emphasis: ButtonEmphasis.primary, onPressed: a.onPressed),
                   if (retryable)
                     AdaptiveButton(
                       label: 'Retry',

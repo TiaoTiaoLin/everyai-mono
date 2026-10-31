@@ -103,6 +103,13 @@ pub const App = struct {
         return self.route(model, native_ok);
     }
 
+    /// Whether a call nobody's key covers has nowhere to go: no server
+    /// OpenRouter key, and not an `anthropic/*` model on a server Anthropic key.
+    pub fn keyless(self: *App, covered: bool, model: []const u8, native_ok: bool) bool {
+        if (covered or self.cfg.openrouter_api_key != null) return false;
+        return !std.mem.eql(u8, self.route(model, native_ok).provider, "anthropic");
+    }
+
     /// Side calls (follow-ups, titles, researchers, search, images) use
     /// OpenRouter models: on the user's OpenRouter key when there is one.
     pub fn aux(self: *App, req: *anole.Request) !Route {
@@ -180,11 +187,27 @@ pub fn main(init: std.process.Init) !void {
         return error.DevAuthOnLan;
     }
 
+    // Without JWT_SECRET (development only) a random one serves this run:
+    // access tokens die at a restart, refresh tokens (rows) don't.
+    var jwt_random: [32]u8 = undefined;
+    var jwt_hex: [64]u8 = undefined;
+    const jwt_secret: []const u8 = if (cfg.jwt_secret) |s| s.expose() else blk: {
+        if (anole.env.environment() != .development) {
+            std.log.err("refusing to start: JWT_SECRET is required in production", .{});
+            return error.MissingJwtSecret;
+        }
+        try init.io.randomSecure(&jwt_random);
+        jwt_hex = std.fmt.bytesToHex(jwt_random, .lower);
+        std.log.info("JWT_SECRET not set: using a random one for this run", .{});
+        break :blk &jwt_hex;
+    };
+    if (cfg.openrouter_api_key == null) std.log.info("OPENROUTER_API_KEY not set: model calls run on the keys users add in the app", .{});
+
     var state: App = .{
         .gpa = init.gpa,
         .cfg = cfg,
         .db = undefined,
-        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.expose() } }},
+        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = jwt_secret } }},
         .upstream = undefined,
         .catalog = .init(init.gpa),
     };
@@ -214,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
     defer app.deinit();
     const io = app.io();
 
-    var or_client: openrouter.Client = .{ .base_url = cfg.openrouter_base_url, .api_key = cfg.openrouter_api_key.expose(), .referer = cfg.public_url };
+    var or_client: openrouter.Client = .{ .base_url = cfg.openrouter_base_url, .api_key = if (cfg.openrouter_api_key) |k| k.expose() else "", .referer = cfg.public_url };
     state.upstream = or_client.upstream();
     var an_client: openrouter.Client = .{ .base_url = cfg.anthropic_base_url, .api_key = if (cfg.anthropic_api_key) |k| k.expose() else "", .auth = .anthropic };
     var an_adapter: anthropic.Adapter = .{ .inner = an_client.upstream(), .catalog = &state.catalog };

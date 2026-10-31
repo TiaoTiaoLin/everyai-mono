@@ -138,7 +138,7 @@ fn issue(app: *App, req: *anole.Request, user: User) !Tokens {
         try util.sha256Hex(req.arena, refresh_token), user.id, util.now(req.io) + refresh_ttl_seconds,
     });
     return .{
-        .access_token = try accessToken(req.arena, req.io, app.cfg.jwt_secret.expose(), user.id),
+        .access_token = try accessToken(req.arena, req.io, app.jwt_keys[0].material.hmac, user.id),
         .refresh_token = refresh_token,
         .user = user,
     };
@@ -333,5 +333,6 @@ pub fn seedDevUser(app: *App, ctx: anytype) !void {
     if (exists != null) return;
     _ = try app.db.exec(ctx, "INSERT INTO users (id, name, email, plan, created_at) VALUES (?, 'Developer', 'dev@everyai.local', 'pro', ?)", .{ dev_user_id, util.now(ctx.io) });
     try billing.startPeriod(app, ctx, dev_user_id, "pro");
-    try billing.credit(app, ctx, dev_user_id, 20_000_000, .grant, "dev seed");
+    // Credits only spend on the server's own key; without one, users run on theirs.
+    if (app.cfg.openrouter_api_key != null) try billing.credit(app, ctx, dev_user_id, 20_000_000, .grant, "dev seed");
 }

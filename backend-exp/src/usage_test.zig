@@ -42,7 +42,7 @@ fn start(env: *Env) !void {
         .gpa = alloc,
         .cfg = cfg,
         .db = undefined,
-        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.expose() } }},
+        .jwt_keys = .{.{ .kid = "k1", .alg = .HS256, .material = .{ .hmac = cfg.jwt_secret.?.expose() } }},
         .upstream = env.fake.upstream(),
         .catalog = .init(alloc),
     };

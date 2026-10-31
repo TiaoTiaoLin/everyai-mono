@@ -342,7 +342,11 @@ final class SseTransport implements ChatTransport {
         case ('error', {'message': final String message}):
           final status = ((data as Map)['status'] as num?)?.toInt();
           final retryable = data['retryable'] == true;
-          throw HttpStatusError(status != null && status >= 400 ? status : (retryable ? 503 : 502), message);
+          throw HttpStatusError(
+            status != null && status >= 400 ? status : (retryable ? 503 : 502),
+            message,
+            code: data['code'] as String?,
+          );
         default:
           break; // Unknown events are ignored for forward compatibility.
       }
