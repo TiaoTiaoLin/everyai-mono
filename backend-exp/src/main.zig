@@ -28,6 +28,7 @@ pub const safe_fetch = @import("net/safe_fetch.zig");
 pub const tool_wait = @import("tool_wait.zig");
 pub const remote = @import("remote.zig");
 pub const byok = @import("byok.zig");
+pub const decide = @import("decide.zig");
 
 pub const std_options = anole.std_options;
 
@@ -141,6 +142,7 @@ pub fn routes(app: *anole.Server(App), state: *App) !void {
     gateway.routes(app, state);
     images.routes(app, state);
     routing.routes(app, state);
+    decide.routes(app, state);
     polish.routes(app, state);
     devtools.routes(app, state);
     agents.routes(app, state);
@@ -267,6 +269,7 @@ test {
     _ = polish;
     _ = remote;
     _ = byok;
+    _ = decide;
     // Modules the app reaches only through others: listed so their tests run too.
     _ = @import("auth.zig");
     _ = @import("config.zig");

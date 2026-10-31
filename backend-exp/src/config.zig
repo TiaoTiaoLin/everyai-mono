@@ -41,6 +41,15 @@ pub const Config = struct {
     aux_compaction_model: []const u8 = "",
     aux_critique_model: []const u8 = "",
     aux_judge_model: []const u8 = "",
+    /// The typed decider (decide.zig): routing, ranking and judging calls.
+    aux_decide_model: []const u8 = "",
+    /// Part summaries and their merge in `summarise_parts` (summarise.zig).
+    aux_summarise_model: []const u8 = "",
+    /// What the Auto model (`everyai/auto`) runs a message on, by the tier
+    /// the decider picks.
+    auto_fast_model: []const u8 = "anthropic/claude-haiku-5.5",
+    auto_balanced_model: []const u8 = "anthropic/claude-sonnet-5.5",
+    auto_best_model: []const u8 = "anthropic/claude-opus-5.5",
     /// The vision model behind the figure Polish button (`POST /v1/figures/polish`).
     aux_polish_model: []const u8 = "anthropic/claude-haiku-5.5",
     /// The most one Polish round may charge, in micro-USD after markup.

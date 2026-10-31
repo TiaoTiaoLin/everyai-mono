@@ -1,6 +1,7 @@
 //! Which model runs each side job (titles, follow-ups, compaction, critique,
-//! the goal judge). Every job defaults to `UTILITY_MODEL` and can be pointed
-//! elsewhere with its own env var (AUX_FOLLOWUPS_MODEL, AUX_TITLE_MODEL, ...).
+//! the goal judge, the decider, part summaries). Every job defaults to
+//! `UTILITY_MODEL` and can be pointed elsewhere with its own env var
+//! (AUX_FOLLOWUPS_MODEL, AUX_TITLE_MODEL, AUX_DECIDE_MODEL, ...).
 //! Also serves `POST /v1/aux/title` and the language pin used by follow-ups.
 const std = @import("std");
 const anole = @import("anole");
@@ -12,7 +13,7 @@ const openrouter = @import("openrouter.zig");
 const chat = @import("chat.zig");
 const safe_fetch = @import("net/safe_fetch.zig");
 
-pub const Job = enum { title, followups, compaction, critique, judge, polish };
+pub const Job = enum { title, followups, compaction, critique, judge, polish, decide, summarise };
 
 /// The model for a side job: its override, else the utility model.
 pub fn modelFor(cfg: config.Config, job: Job) []const u8 {
@@ -23,6 +24,8 @@ pub fn modelFor(cfg: config.Config, job: Job) []const u8 {
         .critique => cfg.aux_critique_model,
         .judge => cfg.aux_judge_model,
         .polish => cfg.aux_polish_model,
+        .decide => cfg.aux_decide_model,
+        .summarise => cfg.aux_summarise_model,
     };
     return if (override.len > 0) override else cfg.utility_model;
 }

@@ -1751,3 +1751,66 @@ test "auth: unknown addresses fail like wrong passwords, a burst is limited, 401
     try me.expectStatus(.unauthorized);
     try std.testing.expect(me.header("WWW-Authenticate") != null);
 }
+
+// ------------------------------------------------------------------ decide
+
+test "decide: typed answers through a strict schema; a bad reply is unsure; gateway key and session attribute the spend" {
+    var env: Env = undefined;
+    try start(&env, &.{
+        \\{"choices":[{"message":{"role":"assistant","content":"{\"safe\":true,\"lang\":\"bash\",\"risk\":0.25}"}}],"usage":{"prompt_tokens":200,"completion_tokens":12,"cost":0.0001}}
+        ,
+        \\{"choices":[{"message":{"role":"assistant","content":"{\"safe\":\"perhaps\",\"lang\":\"ruby\"}"}}],"usage":{"prompt_tokens":200,"completion_tokens":12,"cost":0.0001}}
+    }, true);
+    defer env.deinit();
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const questions = .{
+        .{ .id = "safe", .kind = "bool", .prompt = "Is it safe to run?" },
+        .{ .id = "lang", .kind = "choice", .prompt = "Which language?", .choices = .{ "bash", "python" } },
+        .{ .id = "risk", .kind = "score", .prompt = "How risky?" },
+    };
+
+    var res = try env.t.post("/v1/aux/decide", .{ .json = .{ .job = "script", .text = "ls -la", .questions = questions } });
+    defer res.deinit();
+    try res.expectStatus(.ok);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"answers\":[{\"id\":\"safe\",\"value\":true},{\"id\":\"lang\",\"value\":\"bash\"},{\"id\":\"risk\",\"value\":0.25}]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"model\":\"google/gemini-3.5-flash-lite\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"charged_micros\":115") != null);
+    const sent = env.fake.bodies.items[0];
+    try std.testing.expect(std.mem.indexOf(u8, sent, "\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answers\",\"strict\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, sent, "<text>\\nls -la\\n</text>") != null);
+
+    // A gateway key and a session header, as the Code harness calls it.
+    var made = try env.t.post("/v1/keys", .{ .json = .{ .name = "code" } });
+    defer made.deinit();
+    const key = (try made.json(struct { key: []const u8 })).key;
+    var keyed = try env.t.post("/v1/aux/decide", .{
+        .headers = &.{ .{ "Authorization", try bearer(a, key) }, .{ "X-EveryAI-Session", "code-d" } },
+        .json = .{ .text = "rm -rf build", .questions = questions },
+    });
+    defer keyed.deinit();
+    try keyed.expectStatus(.ok);
+    // Nothing usable came back: every answer is unsure, still a 200.
+    try std.testing.expect(std.mem.indexOf(u8, keyed.body, "{\"id\":\"safe\",\"value\":\"unsure\"},{\"id\":\"lang\",\"value\":\"unsure\"},{\"id\":\"risk\",\"value\":\"unsure\"}") != null);
+    var c: anole.db.Ctx = .{ .io = env.server.io(), .arena = a };
+    const row = try env.state.db.one(struct { kind: []const u8, session: []const u8, api_key_id: []const u8 }, &c, "SELECT kind, session, api_key_id FROM usage_events WHERE session = 'code-d'", .{});
+    try std.testing.expectEqualStrings("decide", row.kind);
+    var totals = try env.t.get("/v1/usage/session/code-d", .{});
+    defer totals.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, totals.body, "\"calls\":1") != null);
+
+    // Bad questions are a 422, an oversized text a 413, an upstream failure a 502.
+    var bad = try env.t.post("/v1/aux/decide", .{ .json = .{ .text = "x", .questions = .{.{ .id = "a", .kind = "choice", .prompt = "p", .choices = .{"only"} }} } });
+    defer bad.deinit();
+    try bad.expectStatus(.unprocessable_entity);
+    const long = try a.alloc(u8, 200_001);
+    @memset(long, 'a');
+    var huge = try env.t.post("/v1/aux/decide", .{ .json = .{ .text = long, .questions = questions } });
+    defer huge.deinit();
+    try huge.expectStatus(.payload_too_large);
+    env.fake.status = 500;
+    var down = try env.t.post("/v1/aux/decide", .{ .json = .{ .text = "x", .questions = questions } });
+    defer down.deinit();
+    try down.expectStatus(.bad_gateway);
+}
