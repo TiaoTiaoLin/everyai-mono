@@ -661,6 +661,7 @@ String stepTitle(ActionCall call) {
     'TerminalAction' => call.str('command'),
     'MCPToolAction' => 'Used ${call.toolName}',
     'InvokeSkillAction' => 'Loaded the ${call.str('name')} skill',
+    'MemoryAction' => call.str('reason').isEmpty ? 'Updated the project memory' : 'Remembered: ${call.str('reason')}',
     'ScriptAction' => call.str('description').isEmpty ? 'Ran a script' : call.str('description'),
     _ => call.summary.isNotEmpty ? call.summary : call.toolName,
   };

@@ -976,6 +976,36 @@ for line in sys.stdin:
     expect(results.last, startsWith('Verified'));
   });
 
+  test('the third identical call in a row is not run; the memory tool is offered', () async {
+    File('$work/a.txt').writeAsStringSync('a');
+    for (var i = 0; i < 3; i++) {
+      gateway.reply(
+        calls: [
+          ('read', {'file_path': 'a.txt'}),
+        ],
+      );
+    }
+    gateway.reply(text: 'Done.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-loop',
+        initialMessage: 'read it',
+        holdClientTools: true,
+      ),
+    );
+    final events = await drive(session);
+    final results = events.whereType<ToolResult>().map((r) => r.text).toList();
+    expect(results, hasLength(3));
+    expect(results.last, startsWith('Not run: this is the 3rd identical read call'));
+    final tools = (gateway.requests.first['tools']! as List).map((t) => ((t as Map)['function'] as Map)['name']);
+    expect(tools, contains('memory'));
+  });
+
   test('repro paths and additive test edits', () {
     expect(PhaseFlow.isReproPath('test/calc_test.dart'), isTrue);
     expect(PhaseFlow.isReproPath('src/app.spec.ts'), isTrue);

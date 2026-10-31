@@ -37,6 +37,7 @@ abstract final class ToolNames {
   static const browser = 'browser';
   static const screenshot = 'screenshot';
   static const runScript = 'run_script';
+  static const memory = 'memory';
 }
 
 /// The action `kind` each tool shows as in the transcript and is judged as by
@@ -58,6 +59,7 @@ const actionKinds = {
   ToolNames.browser: 'BrowserAction',
   ToolNames.screenshot: 'ScreenshotAction',
   ToolNames.runScript: 'ScriptAction',
+  ToolNames.memory: 'MemoryAction',
 };
 
 Map<String, Object?> _fn(String name, String description, Map<String, Object?> properties, List<String> required) => {

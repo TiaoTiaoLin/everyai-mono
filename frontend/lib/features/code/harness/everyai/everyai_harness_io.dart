@@ -24,6 +24,7 @@ import 'mcp_io.dart';
 import 'model_family.dart';
 import 'prompt_io.dart';
 import 'reasoning_binding.dart';
+import 'project_notes_io.dart';
 import 'script_io.dart';
 import 'shell_io.dart';
 import 'tools_io.dart';
@@ -322,6 +323,12 @@ final class EveryAISession
       ActionCall(id: '', raw: const {}, toolName: presentPlanTool, toolCallId: call.id, action: args),
     ).markdown;
     _saveState();
+    // Kept with the project (git-excluded), so later sessions can pick the work up.
+    try {
+      savePlan(_spec.workingDir, _approvedPlan);
+    } on FileSystemException {
+      // The plan still lives in the session's state.
+    }
   }
 
   /// The re-injected parts of a continuation message.
@@ -547,6 +554,7 @@ final class EveryAISession
       if (_mcp.failures.isNotEmpty)
         '<MCP>\nThese MCP servers could not start, so their tools are missing: '
             '${_mcp.failures.entries.map((e) => '${e.key} (${e.value})').join('; ')}. Tell the user if the task needs them.\n</MCP>',
+      if (await projectNotesBlock(spec.workingDir) case final notes when notes.isNotEmpty) notes,
       await environmentBlock(spec.workingDir),
     ];
     return parts.join('\n\n');
@@ -569,6 +577,7 @@ final class EveryAISession
       [
         ...builtInToolSpecs(only: _spec.tools, applyPatch: family == ModelFamily.gpt),
         if (_scripting) runScriptSpec,
+        memoryToolSpec,
         ..._mcp.specs,
         if (!_spec.subagent && (_spec.phaseFlow?.startsWith('bugfix') ?? false))
           {
@@ -690,6 +699,8 @@ final class EveryAISession
 
   @override
   Future<void> send(String text, {bool run = true, List<String> images = const []}) async {
+    // The user spoke: a repeated call may be what they asked for.
+    _lastCall = null;
     final eid = _newId();
     final content = <Map<String, Object?>>[
       {'type': 'text', 'text': text},
@@ -947,7 +958,7 @@ final class EveryAISession
             toolChoice: wrapUp ? 'none' : null,
             sessionTag: _spec.sessionTag,
             effort: _spec.effort,
-            maxTokens: _spec.maxOutputTokens,
+            maxTokens: _outputRoom(),
             onText: (d) => _delta(content: d),
             onReasoning: (d) => _delta(reasoning: d),
             onToolProgress: (p) => _delta(
@@ -1021,6 +1032,16 @@ final class EveryAISession
         unawaited(_browser.close());
       }
     }
+  }
+
+  /// The reply's token limit: the session's, or what the window has left
+  /// after the last call's input (less a margin), but never under 8K.
+  int _outputRoom() {
+    final window = _spec.maxInputTokens ?? 0;
+    if (window <= 0 || lastPromptTokens <= 0) return _spec.maxOutputTokens;
+    final room = window - lastPromptTokens - 4000;
+    final floor = _spec.maxOutputTokens < 8192 ? _spec.maxOutputTokens : 8192;
+    return room.clamp(floor, _spec.maxOutputTokens);
   }
 
   /// Compacts the history in place once the last call's input passed
@@ -1147,6 +1168,23 @@ final class EveryAISession
     return (lead, between, pending.toString());
   }
 
+  /// Identical tool calls in a row that make a loop: the last one isn't run.
+  static const doomRepeats = 3;
+
+  String? _lastCall;
+  var _callRun = 0;
+
+  /// How many times in a row [call] (same tool, same arguments) was made,
+  /// itself included. Talking to the user and the todo list don't count;
+  /// a user message starts the count over.
+  int _repeats(LlmToolCall call) {
+    if (clientTools.contains(call.name) || call.name == ToolNames.todo || call.name == bugCheckTool) return 0;
+    final sig = '${call.name}\u0000${call.arguments}';
+    _callRun = sig == _lastCall ? _callRun + 1 : 1;
+    _lastCall = sig;
+    return _callRun;
+  }
+
   /// Shows [calls], waits for approval, runs them, and records the results.
   /// Calls whose arguments arrived cut off, this session: the advice grows
   /// firmer each time (one more whole-file attempt is what fails).
@@ -1237,6 +1275,19 @@ final class EveryAISession
           _result(call, actionId, ToolOutput(refusal, isError: true));
           continue;
         }
+      }
+      if (args != null && _repeats(call) >= doomRepeats) {
+        _result(
+          call,
+          actionId,
+          ToolOutput(
+            'Not run: this is the $doomRepeats${doomRepeats == 3 ? 'rd' : 'th'} identical ${call.name} call in a row, '
+            'and it will give the same result. Change your approach: read the error closely, try something '
+            'different, or ask the user with ask_user_question if you are stuck.',
+            isError: true,
+          ),
+        );
+        continue;
       }
       if (args == null) {
         // A call cut off or garbled: never run, the model is told why.
@@ -1352,6 +1403,15 @@ final class EveryAISession
     }
     if (call.name == bugCheckTool) return _bugCheck(call.args!, cancel);
     if (call.name == ToolNames.runScript) return _runScript(call.args!, cancel);
+    if (call.name == ToolNames.memory) {
+      if (_spec.researchSites != null) {
+        return const ToolOutput(
+          'Error: research jobs keep notes under their scratch folder, not in the project memory.',
+          isError: true,
+        );
+      }
+      return runMemory(_spec.workingDir, call.args!);
+    }
     if (actionKinds.containsKey(call.name)) return _tools.run(call.name, call.args!, cancel: cancel);
     if (_spec.researchSites != null && (_mcp.has(call.name) || call.name.startsWith('mcp'))) {
       return const ToolOutput('Error: research jobs have no MCP tools. Use web_fetch and web_search.', isError: true);
@@ -1714,7 +1774,7 @@ Future<void> excludeScratch(String dir) async {
     if (!path.startsWith('/')) path = '$dir/$path';
     final file = File(path);
     final current = file.existsSync() ? file.readAsStringSync() : '';
-    const lines = ['.everyai/scratch/', '.everyai/spill/'];
+    const lines = ['.everyai/scratch/', '.everyai/spill/', '.everyai/plans/', '.everyai/memory.md'];
     final missing = lines.where((l) => !current.split('\n').contains(l)).toList();
     if (missing.isEmpty) return;
     file.parent.createSync(recursive: true);

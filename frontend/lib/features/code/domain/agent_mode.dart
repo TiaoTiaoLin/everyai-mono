@@ -63,6 +63,8 @@ enum AgentMode {
     'InvokeSkillAction' => true,
     // run_script: a Deno program with no permissions; its bridge reads project files and the web only.
     'ScriptAction' => true,
+    // The project memory: a harness-owned notes file under .everyai/.
+    'MemoryAction' => true,
     // is_input sends keys to a running process.
     'TerminalAction' => call.action['is_input'] != true && isReadOnlyShell(call.str('command')),
     _ => false,
