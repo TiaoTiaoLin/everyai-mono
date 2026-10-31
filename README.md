@@ -175,7 +175,6 @@ flowchart LR
     subgraph Code["Code · desktop"]
         EH["EveryAI harness<br/>tiers · forks · tools"]
         WT[("worktrees<br/>per fork")]
-        OH["OpenHands agent-server<br/>(older sessions only)"]
     end
     Dev["Phone · tablet · web<br/>remote control"]
     subgraph Backend["backend-exp · Zig on Anole"]
@@ -192,7 +191,6 @@ flowchart LR
     UI --> EH
     EH --> WT
     EH -- "sk-eai- key" --> GW
-    OH -.-> GW
     Dev <-- "E2E relay" --> API
     API <-- "E2E relay" --> EH
     Loop --> OR
@@ -227,7 +225,7 @@ cp frontend/config/example.json frontend/config/dev.json
 scripts/dev.sh macos            # or: web · ios-sim · ios · <device id>
 ```
 
-`dev.sh` starts `backend-exp` on `:8080` (or reuses a running one), fetches the OpenHands agent-server (only older Code sessions use it; new ones run on the EveryAI harness), writes the right `API_BASE_URL` for the target, and runs the app.
+`dev.sh` starts `backend-exp` on `:8080` (or reuses a running one), fetches Deno for Code's `run_script` (the macOS build bundles it too), writes the right `API_BASE_URL` for the target, and runs the app.
 
 <details>
 <summary><b>Run the pieces by hand</b></summary>
@@ -554,6 +552,6 @@ One prompt (a browser OS in a single file: 5+ apps, two working 3D games, proced
 
 <img src="frontend/assets/brand/logo/mark-primary-on-dark.svg" width="44" alt="EveryAI mark"/>
 
-<sub>Copyright 2026 xuckless and Syed Ali. Source-available under the <a href="LICENCE.md">Functional Source License 1.1 (FSL-1.1-ALv2)</a>: use, modify and self-host it for any purpose except a competing product; each release becomes Apache-2.0 two years after it ships. See <a href="NOTICE">NOTICE</a>.<br/>"EveryAI" and its logo are trademarks of xuckless and Syed Ali and are not licensed.<br/>The bundled OpenHands agent-server is MIT-licensed; third-party notices ship with the app.</sub>
+<sub>Copyright 2026 xuckless and Syed Ali. Source-available under the <a href="LICENCE.md">Functional Source License 1.1 (FSL-1.1-ALv2)</a>: use, modify and self-host it for any purpose except a competing product; each release becomes Apache-2.0 two years after it ships. See <a href="NOTICE">NOTICE</a>.<br/>"EveryAI" and its logo are trademarks of xuckless and Syed Ali and are not licensed.<br/>Third-party notices, including the bundled Deno (MIT), ship with the app.</sub>
 
 </div>

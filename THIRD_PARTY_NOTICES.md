@@ -199,42 +199,6 @@ SOFTWARE.
 - **License:** Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0),
   from https://github.com/agentskills/agentskills.
 
-## OpenHands agent-server 1.59.0 (OpenHands/software-agent-sdk @ v1.59.0)
-
-- **What:** the `agent-server` release binary, unmodified, from
-  https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.59.0
-  (checked against the release's `SHA256SUMS`). The Code workspace runs it as
-  a local process. The binary is a PyInstaller build and carries the Python
-  runtime and packages it depends on, each under its own license.
-- **Where:** downloaded by `frontend/tool/fetch_agent_server.sh` into
-  `frontend/.agent-server/`; the macOS build copies it into
-  `EveryAI.app/Contents/Resources/` (`frontend/macos/scripts/bundle_agent_server.sh`).
-- **License:** MIT
-
-```
-MIT License
-
-Copyright (c) 2026 OpenHands contributors
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ## Deno 2.9.8 (denoland/deno @ v2.9.8)
 
 - **What:** the `deno` release binary, unmodified, from
@@ -243,7 +207,8 @@ SOFTWARE.
   with no permissions. The binary carries V8 and other components under their
   own licenses.
 - **Where:** downloaded by `frontend/tool/fetch_deno.sh` into `frontend/.deno/`
-  (`scripts/dev.sh` passes it as `DENO_BIN`); not bundled into the app yet.
+  (`scripts/dev.sh` passes it as `DENO_BIN`); the macOS build copies it into
+  `EveryAI.app/Contents/Resources/deno` (`frontend/macos/scripts/bundle_deno.sh`).
 - **License:** MIT
 
 ```

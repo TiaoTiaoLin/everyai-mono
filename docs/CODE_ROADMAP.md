@@ -14,36 +14,28 @@ works, and what comes next. For the product as a whole, see [ROADMAP.md](ROADMAP
  │                   │                          │          │  cache breakpoints,     │
  │ CodeSessionController ── permission policy   │          │  billing per session)   │
  │                   │                          │          └───────────▲─────────────┘
- │ Harness interface ── OpenHandsHarness ───────┼─ REST+WS ─┐         │ LLM calls
- │                    ├ FakeHarness (demo)      │           ▼         │
- │                    └ RelayHarness (remote)   │   agent-server 1.59.0 (sidecar)
- │ Git service: worktree per session, checkpoints│   LocalWorkspace = session worktree
+ │ Harness interface ── EveryAI harness ────────┼──────────────────────┘ LLM calls
+ │                    └ FakeHarness (demo)      │
+ │ Git service: worktree per session, checkpoints│
  └──────────────────────────────────────────────┘
 ```
 
-### Sidecar
-- The OpenHands agent-server v1.59.0 (MIT) runs as a local process that the app owns
-  (`features/code/sidecar/`). It is bundled in the macOS app (`tool/fetch_agent_server.sh` checks SHA256SUMS).
-  In development it can be pointed at a running server with `AGENT_SERVER_URL`/`AGENT_SERVER_KEY`.
-- It listens on a free loopback port with a random session key and a stable secret key. Conversations persist
-  under app support (`agent-server/workspace/conversations`). A pid file lets the next launch kill an orphan.
-  The app stops it on quit.
-- If it crashes, the app restarts it and reattaches open sessions (20efb88). The harness looks the sidecar up
-  again before each request and reconnect, so a new port or key is picked up.
-- Its LLM provider is our gateway. The model is `openai/<id>`, the base URL is `API_BASE_URL/v1`, and the key is
+### Sidecar (removed)
+- The bundled OpenHands agent-server was removed on 2026-10-31: the EveryAI harness (`harness/everyai/`, the agent
+  loop in the app) is the only Code harness. Sessions stored with `harness: openHands` show a notice instead of
+  reopening. The macOS app bundles Deno instead (`Contents/Resources/deno`, `macos/scripts/bundle_deno.sh`) for
+  `run_script`.
+- The harness's LLM provider is our gateway. The base URL is `API_BASE_URL/v1`, and the key is
   a per-user `sk-eai-` key kept in secure storage and re-minted on a 401. Usage is attributed through
   `X-EveryAI-Session` and read back from `/v1/usage/session/:id` for the composer meter.
 
 ### Harness
 - `harness/harness.dart` defines `Harness` (start, attach, statuses) and `HarnessSession` (send, interrupt, pause,
   resume, respond, setMode, switchLlm, rewindTo, close), plus `SessionSpec`.
-- `OpenHandsHarness` speaks the agent-server's REST and WebSocket protocol. It buffers history and replays it to
-  every listener, and it removes events that are sent again after a reconnect.
+- The EveryAI harness runs the loop, tools and permissions in the app and keeps sessions under app support.
 - `FakeHarness` plays a scripted demo session (`demo://counter-app`) for UI work without a model.
-- `RelayHarness` is the same client running through the encrypted remote tunnel.
-- `harness/events.dart` turns OpenHands `kind`s into a sealed `HarnessEvent` type. The model and harness are
-  separate choices in the agent menu: Harness, then Model (grouped by vendor and tier), then Effort. Only
-  OpenHands is enabled today.
+- `harness/events.dart` turns OpenHands-shaped `kind`s (which the EveryAI harness emits) into a sealed
+  `HarnessEvent` type.
 
 ### Transcript
 - `domain/transcript.dart` folds events into items:

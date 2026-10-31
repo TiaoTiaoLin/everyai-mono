@@ -244,7 +244,7 @@
 				33CC10EB2044A3C60003C045 /* Resources */,
 				33CC110E2044A8840003C045 /* Bundle Framework */,
 				3399D490228B24CF009A79C7 /* ShellScript */,
-				E7A1B2C3D4E5F60718293A4B /* Bundle agent-server */,
+				E7A1B2C3D4E5F60718293A4B /* Bundle Deno */,
 				861464FC8A17E339E7796776 /* [CP] Embed Pods Frameworks */,
 			);
 			buildRules = (
@@ -334,7 +334,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		E7A1B2C3D4E5F60718293A4B /* Bundle agent-server */ = {
+		E7A1B2C3D4E5F60718293A4B /* Bundle Deno */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -344,14 +344,14 @@
 			);
 			inputPaths = (
 			);
-			name = "Bundle agent-server";
+			name = "Bundle Deno";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "\"$PROJECT_DIR/scripts/bundle_agent_server.sh\"\n";
+			shellScript = "\"$PROJECT_DIR/scripts/bundle_deno.sh\"\n";
 		};
 		3399D490228B24CF009A79C7 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
