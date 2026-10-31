@@ -8,14 +8,17 @@ import '../../../core/ui/anchored_popover.dart';
 import '../../../core/ui/every_icons.dart';
 import '../../auth/auth_providers.dart';
 import '../../auth/domain/auth_state.dart';
+import '../../auth/profile.dart';
 import '../settings_registry.dart';
 import 'settings_modal.dart';
 
-/// The name and plan the account row shows. There is no profile data yet, so
-/// these are placeholders by sign-in state.
-(String name, String plan) accountSummary(AuthState auth) => switch (auth) {
+/// The name and plan the account row shows: from [profile] (`/v1/me`) when
+/// it has loaded, else placeholders by sign-in state.
+(String name, String plan) accountSummary(AuthState auth, [Profile? profile]) => switch (auth) {
+  Bypassed() when profile != null => (profile.displayName, '${profile.planLabel} · Developer mode'),
   Bypassed() => ('Guest', 'Developer mode'),
-  SignedIn() => ('Account', 'Free plan'),
+  SignedIn() when profile != null => (profile.displayName, profile.planLabel),
+  SignedIn() => ('Account', 'Signed in'),
   _ => ('Signed out', ''),
 };
 
@@ -63,7 +66,7 @@ class AccountRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = EveryTheme.of(context);
-    final (name, plan) = accountSummary(ref.watch(authProvider));
+    final (name, plan) = accountSummary(ref.watch(authProvider), ref.watch(profileProvider).value);
     final avatar = AccountAvatar(name: name);
     final trigger = Container(
       padding: const EdgeInsets.all(6),

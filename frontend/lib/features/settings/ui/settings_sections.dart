@@ -12,6 +12,7 @@ import '../../../core/ui/segmented.dart';
 import '../../agents/ui/agents_settings_screen.dart';
 import '../../auth/auth_providers.dart';
 import '../../auth/domain/auth_state.dart';
+import '../../auth/profile.dart';
 import '../../billing/ui/billing_screen.dart';
 import '../../code/code_settings_providers.dart' show SettingsScope;
 import '../../code/ui/code_settings_section.dart';
@@ -155,7 +156,8 @@ class AccountSection extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = EveryTheme.of(context);
     final auth = ref.watch(authProvider);
-    final (name, plan) = accountSummary(auth);
+    final profile = ref.watch(profileProvider).value;
+    final (name, plan) = accountSummary(auth, profile);
     return ListView(
       padding: _listPadding,
       children: [
@@ -164,13 +166,11 @@ class AccountSection extends ConsumerWidget {
           title: Text(name),
           subtitle: Text(plan.isEmpty ? 'Not signed in' : plan),
         ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-          child: Text(
-            'Your name, email and plan will show here once profiles arrive.',
-            style: theme.type.caption.tint(theme.textMuted),
+        if (profile != null && profile.email.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: Text(profile.email, style: theme.type.caption.tint(theme.textMuted)),
           ),
-        ),
         SettingsAnchor(
           section: SettingsSection.account,
           id: 'sign-out',
