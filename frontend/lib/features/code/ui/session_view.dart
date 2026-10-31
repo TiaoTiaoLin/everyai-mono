@@ -182,6 +182,7 @@ class CodeSessionScreen extends ConsumerWidget {
                                   remember: controller.rememberable(),
                                   // The demo's commands never run; no need to ask about them.
                                   workingDir: isDemoPath(info.workingDir) ? null : info.workingDir,
+                                  session: info.billingTag,
                                   decided: state.decided,
                                   rememberBy: controller.rememberBy(),
                                   onAllowCall: controller.perCall

@@ -3,8 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/api/decide_client.dart';
 import 'gateway_key.dart';
 
-/// Which command the approval card asks about, and where it runs.
-typedef RiskKey = ({String command, String workingDir});
+/// Which command the approval card asks about, where it runs, and the
+/// session its spend is attributed to (`X-EveryAI-Session`; null: none).
+typedef RiskKey = ({String command, String workingDir, String? session});
 
 /// The decide questions asked about a command the user must approve.
 const riskQuestions = [
@@ -64,6 +65,7 @@ final approvalRiskProvider = FutureProvider.autoDispose.family<String?, RiskKey>
         instructions: _instructions,
         questions: riskQuestions,
         apiKey: apiKey,
+        session: key.session,
       );
   final label = riskLabel(result);
   if (label == null) keep.close();

@@ -82,7 +82,7 @@ void main() {
       return c;
     }
 
-    const key = (command: 'rm -rf build', workingDir: '/work/app');
+    const key = (command: 'rm -rf build', workingDir: '/work/app', session: 's1');
 
     test('asks once on the gateway key, with job risk, and keeps the label', () async {
       reply = () => http.Response(
@@ -101,6 +101,7 @@ void main() {
       expect(body['text'], contains('rm -rf build'));
       expect(body['text'], contains('/work/app'));
       expect(sent.single.headers['Authorization'], 'Bearer sk-eai-test');
+      expect(sent.single.headers['X-EveryAI-Session'], 's1');
       expect(await c.read(approvalRiskProvider(key).future), 'May delete files');
       expect(sent, hasLength(1));
     });
@@ -139,6 +140,7 @@ void main() {
                 onDeny: (_) {},
                 onMode: (_) {},
                 workingDir: dir,
+                session: 's1',
               ),
             ),
           ),
@@ -150,7 +152,9 @@ void main() {
       expect(sent, isEmpty);
 
       await tester.pumpWidget(card('/work/app'));
-      await tester.runAsync(() => c.read(approvalRiskProvider((command: 'ls -la', workingDir: '/work/app')).future));
+      await tester.runAsync(
+        () => c.read(approvalRiskProvider((command: 'ls -la', workingDir: '/work/app', session: 's1')).future),
+      );
       await tester.pumpAndSettle();
       expect(find.text('Looks read-only'), findsOneWidget);
     });

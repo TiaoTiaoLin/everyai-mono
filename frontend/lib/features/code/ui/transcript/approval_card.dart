@@ -35,11 +35,15 @@ class ApprovalCard extends StatefulWidget {
     this.decided = const {},
     this.rememberBy = const {},
     this.workingDir,
+    this.session,
   });
 
   /// Where commands run; with it, each command gets an informational risk
   /// label ([approvalRiskProvider]) once one arrives. Null shows none.
   final String? workingDir;
+
+  /// The session the risk calls are billed to (`X-EveryAI-Session`).
+  final String? session;
 
   /// One call's answer, for sessions that take one per call (null: the
   /// batch is answered as one, as the agent-server does).
@@ -115,7 +119,13 @@ class _ApprovalCardState extends State<ApprovalCard> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      for (final c in calls) _Preview(call: c, flag: widget.flags[c.id], workingDir: widget.workingDir),
+                      for (final c in calls)
+                        _Preview(
+                          call: c,
+                          flag: widget.flags[c.id],
+                          workingDir: widget.workingDir,
+                          session: widget.session,
+                        ),
                     ],
                   ),
                 ),
@@ -231,6 +241,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                           decided: widget.decided[c.id],
                           rule: widget.rememberBy[c.id],
                           workingDir: widget.workingDir,
+                          session: widget.session,
                           onAllow: (scope) => widget.onAllowCall!(c.id, scope),
                           onDeny: () => widget.onDenyCall!(c.id),
                         ),
@@ -296,11 +307,13 @@ class _CallRow extends StatelessWidget {
     this.decided,
     this.rule,
     this.workingDir,
+    this.session,
   });
 
   final ActionCall call;
   final String? flag;
   final String? workingDir;
+  final String? session;
 
   /// Null while it waits; true allowed, false denied.
   final bool? decided;
@@ -319,7 +332,7 @@ class _CallRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Preview(call: call, flag: flag, workingDir: workingDir),
+          _Preview(call: call, flag: flag, workingDir: workingDir, session: session),
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Row(
@@ -363,10 +376,11 @@ class _CallRow extends StatelessWidget {
 }
 
 class _Preview extends StatelessWidget {
-  const _Preview({required this.call, this.flag, this.workingDir});
+  const _Preview({required this.call, this.flag, this.workingDir, this.session});
   final ActionCall call;
   final String? flag;
   final String? workingDir;
+  final String? session;
 
   @override
   Widget build(BuildContext context) {
@@ -439,7 +453,7 @@ class _Preview extends StatelessWidget {
           body,
           if ((call.actionKind, workingDir) case ('TerminalAction', final dir?)
               when dir.isNotEmpty && call.str('command').trim().isNotEmpty)
-            _RiskLine((command: call.str('command'), workingDir: dir)),
+            _RiskLine((command: call.str('command'), workingDir: dir, session: session)),
           if (flag case final why?)
             Padding(
               padding: const EdgeInsets.only(top: 4),
