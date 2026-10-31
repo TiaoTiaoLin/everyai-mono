@@ -930,6 +930,95 @@ for line in sys.stdin:
     expect((state as Map)['approved_plan'], startsWith('# '));
   });
 
+  test('Bug fix: a fix that edits the repro test is refused; adding a test beside it is fine', () async {
+    File('$work/calc.sh').writeAsStringSync('echo \$((2 + 2 + 1))\n');
+    File('$work/calc_test.sh').writeAsStringSync('test "\$(sh calc.sh)" = 4\n');
+    gateway
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'reproduced', 'command': 'sh calc_test.sh'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'triage', 'kind': 'simple', 'why': 'Off by one.'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('present_plan', {'plan': '# Remove the + 1'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('read', {'file_path': 'calc_test.sh'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('write', {'file_path': 'calc_test.sh', 'content': 'exit 0\n'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'verify'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('write', {'file_path': 'calc_test.sh', 'content': 'test "\$(sh calc.sh)" = 4\ntest 1 = 1\n'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('read', {'file_path': 'calc.sh'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('write', {'file_path': 'calc.sh', 'content': 'echo \$((2 + 2))\n'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'verify'}),
+        ],
+      )
+      ..reply(text: 'Fixed.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-bug2',
+        initialMessage: 'calc.sh prints 5 for 2 + 2',
+        holdClientTools: true,
+        phaseFlow: 'bugfix',
+      ),
+    );
+    final events = await drive(session, answer: (c) => c.toolName == 'present_plan' ? planApprovedReason : null);
+    final results = events.whereType<ToolResult>().map((r) => r.text).toList();
+    expect(results.first, startsWith('Reproduced'));
+    expect(
+      results.where((r) => r.startsWith('Not verified: the fix changed what reproduces the bug (calc_test.sh)')),
+      hasLength(1),
+    );
+    expect(results.last, startsWith('Verified'));
+  });
+
+  test('repro paths and additive test edits', () {
+    expect(PhaseFlow.isReproPath('test/calc_test.dart'), isTrue);
+    expect(PhaseFlow.isReproPath('src/app.spec.ts'), isTrue);
+    expect(PhaseFlow.isReproPath('tests/test_calc.py'), isTrue);
+    expect(PhaseFlow.isReproPath('.everyai/scratch/repro.sh'), isTrue);
+    expect(PhaseFlow.isReproPath('.everyai/scratch/research/notes.md'), isFalse);
+    expect(PhaseFlow.isReproPath('lib/contest.dart'), isFalse);
+    expect(PhaseFlow.onlyAdded('a\nb\n', 'a\nx\nb\ny\n'), isTrue);
+    expect(PhaseFlow.onlyAdded('a\nb\n', 'a\nc\n'), isFalse);
+  });
+
   group('per-call approvals', () {
     /// Runs [session] until it settles; at the first approval [decide] answers
     /// the waiting calls (action ids, in order).

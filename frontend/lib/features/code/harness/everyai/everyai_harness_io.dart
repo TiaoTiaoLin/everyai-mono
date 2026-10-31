@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
@@ -1437,8 +1438,25 @@ final class EveryAISession
         if (command.isEmpty) return const ToolOutput('Error: give the command that shows the bug.', isError: true);
         final r = await run(command);
         final shown = expect.isNotEmpty ? r.out.contains(expect) : r.exit != 0;
+        // Any failure counts without `expect`: the decider checks it is this bug, not another one.
+        final match = shown && expect.isEmpty ? await _reproMatch(command, r.out) : 'bug';
+        if (match == 'other') {
+          return ToolOutput(
+            'Not reproduced: the command fails, but its output reads as a different failure than the bug described '
+            '(a build or setup error, say). Make the repro fail on exactly this bug, or pass `expect` with the text '
+            'in the output that shows it.\n${tail(r.out)}',
+            isError: true,
+            observation: const {'repro_match': 'other'},
+          );
+        }
         if (f.reproduced(command, expect, shown: shown)) {
-          result = ToolOutput('Reproduced: the harness ran it and saw the bug.\n${tail(r.out)}');
+          f.reproFiles
+            ..clear()
+            ..addAll(await _reproSnapshot(command));
+          result = ToolOutput(
+            'Reproduced: the harness ran it and saw the bug.\n${tail(r.out)}',
+            observation: {'repro_match': match},
+          );
           _notePhaseAfter = true;
         } else {
           result = ToolOutput(
@@ -1477,6 +1495,26 @@ final class EveryAISession
           _notePhaseAfter = true;
           break;
         }
+        // The repro has to pass as it was: a test edited into passing proves nothing.
+        final changed = f.changedReproFiles(
+          _digests(f.reproFiles.keys),
+          before: (p) => _readOr('${_dir.path}/repro-files/$p'),
+          after: (p) => _readOr('${_spec.workingDir}/$p'),
+        );
+        if (changed.isNotEmpty) {
+          if (!f.askedUser) {
+            return ToolOutput(
+              'Not verified: the fix changed what reproduces the bug (${changed.take(8).join(', ')}). The original '
+              'repro has to pass unchanged. Restore those files; if a test itself was wrong, ask the user '
+              '(ask_user_question) whether to change it, then call verify again.',
+              isError: true,
+            );
+          }
+          f.askedUser = false;
+          f.reproFiles
+            ..clear()
+            ..addAll(await _reproSnapshot(f.reproCommand));
+        }
         final r = await run(f.reproCommand);
         final gone = r.exit == 0 && (f.reproExpect.isEmpty || !r.out.contains(f.reproExpect));
         final moved = f.verified(gone: gone);
@@ -1500,6 +1538,103 @@ final class EveryAISession
     _saveFlow();
     return result;
   }
+
+  /// Whether a failing repro's output shows the bug the user described
+  /// ('bug'), another failure ('other'), or the decider can't tell
+  /// ('unsure', which counts as shown).
+  Future<String> _reproMatch(String command, String output) async {
+    final task = _messages.firstWhere((m) => m['role'] == 'user', orElse: () => const {})['content'];
+    final report = switch (task) {
+      final String t => t,
+      final List<Object?> parts => [
+        for (final p in parts)
+          if (p case {'type': 'text', 'text': final String t}) t,
+      ].join('\n'),
+      _ => '',
+    };
+    String cut(String s, int n) => s.length > n ? s.substring(s.length - n) : s;
+    try {
+      final a = await _gateway.decide(
+        '<bug-report>\n${report.length > 4000 ? report.substring(0, 4000) : report}\n</bug-report>\n'
+        '<command>$command</command>\n<output>\n${cut(output, 6000)}\n</output>',
+        const [
+          {
+            'id': 'shows',
+            'kind': 'choice',
+            'prompt':
+                'Does this failing output show the bug in the report ("bug"), or a different failure such as a '
+                'build, setup or unrelated error ("other")?',
+            'choices': ['bug', 'other'],
+          },
+        ],
+        sessionTag: _spec.sessionTag,
+        job: 'repro',
+      );
+      return switch (a['shows']) {
+        'bug' => 'bug',
+        'other' => 'other',
+        _ => 'unsure',
+      };
+    } on LlmError {
+      return 'unsure';
+    }
+  }
+
+  /// The tests and repro scripts the bug was reproduced with (path →
+  /// digest): tracked or new test files, `.everyai/scratch/` scripts, and
+  /// files the command names.
+  Future<Map<String, String>> _reproSnapshot(String command) async {
+    final root = _spec.workingDir;
+    final paths = <String>{};
+    try {
+      final r = await Process.run('git', ['ls-files', '-co', '--exclude-standard'], workingDirectory: root);
+      if (r.exitCode == 0) {
+        paths.addAll(const LineSplitter().convert('${r.stdout}').where(PhaseFlow.isReproPath).take(3000));
+      }
+    } on Object {
+      // Not git: the scratch scripts and named files still count.
+    }
+    final scratch = Directory('$root/.everyai/scratch');
+    if (scratch.existsSync()) {
+      for (final e in scratch.listSync(recursive: true).whereType<File>().take(500)) {
+        final rel = e.path.substring(root.length + 1);
+        if (PhaseFlow.isReproPath(rel)) paths.add(rel);
+      }
+    }
+    for (final word in command.split(RegExp(r'\s+'))) {
+      final w = word.replaceAll(RegExp('^[\'"]+|[\'"]+\$'), '');
+      if (w.isEmpty || w.startsWith('-')) continue;
+      final full = resolvePath(root, w);
+      if (full.startsWith('$root/') && File(full).existsSync()) paths.add(full.substring(root.length + 1));
+    }
+    // Copies to compare against at verify (a file that only gained lines is fine).
+    final copies = Directory('${_dir.path}/repro-files');
+    if (copies.existsSync()) copies.deleteSync(recursive: true);
+    for (final p in paths) {
+      final f = File('$root/$p');
+      if (!f.existsSync() || f.lengthSync() > 512000) continue;
+      File('${copies.path}/$p')
+        ..createSync(recursive: true)
+        ..writeAsBytesSync(f.readAsBytesSync());
+    }
+    return _digests(paths);
+  }
+
+  static String? _readOr(String path) {
+    try {
+      return File(path).readAsStringSync();
+    } on Object {
+      return null;
+    }
+  }
+
+  /// [paths] (relative to the project) → a digest of each file's bytes;
+  /// a missing file has none.
+  Map<String, String> _digests(Iterable<String> paths) => {
+    for (final p in paths)
+      if (File('${_spec.workingDir}/$p') case final f when f.existsSync())
+        p: sha256.convert(f.readAsBytesSync()).toString().substring(0, 24),
+  };
 
   /// A bug_check moved the flow: its note follows this turn's results.
   bool _notePhaseAfter = false;

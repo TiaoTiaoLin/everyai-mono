@@ -110,7 +110,9 @@ final class PhaseFlow {
     this.reproByUser = false,
     this.failedFixes = 0,
     this.askedUser = false,
-  }) : phase = phase ?? (bugfix ? Phase.reproduce : Phase.research),
+    Map<String, String>? reproFiles,
+  }) : reproFiles = reproFiles ?? {},
+       phase = phase ?? (bugfix ? Phase.reproduce : Phase.research),
        researchers = researchers ?? {};
 
   /// From a flow name: max, ultra, bugfix, bugfix-ultra; null for another.
@@ -152,10 +154,55 @@ final class PhaseFlow {
   /// The user answered a question since the last bug_check (for confirmed_by_user).
   bool askedUser;
 
+  /// The tests and repro scripts as they were when the bug was reproduced
+  /// (path → digest): verify refuses a fix that changed them, since a repro
+  /// made to pass by editing it proves nothing.
+  final Map<String, String> reproFiles;
+
   static const maxNudges = 2;
 
   /// Failed fixes before the flow goes back to research.
   static const missesBeforeResearch = 2;
+
+  /// Whether [path] looks like a test or spec file (or a repro script under
+  /// `.everyai/scratch/`), which verify keeps as reproduced.
+  static bool isReproPath(String path) {
+    final p = path.replaceAll('\\', '/');
+    if (p.contains('.everyai/scratch/') && !p.contains('.everyai/scratch/research/')) return true;
+    final name = p.split('/').last;
+    final dirs = p.split('/')..removeLast();
+    return dirs.any((d) => const {'test', 'tests', '__tests__', 'spec', 'specs', 'integration_test'}.contains(d)) ||
+        RegExp(r'([._-](test|spec)s?\.[a-z]+$)|(^test_.*\.py$)|((Test|Tests|Spec)\.[a-z]+$)').hasMatch(name);
+  }
+
+  /// The repro files [now] (path → digest) that differ from [reproFiles]:
+  /// changed or gone. New files (a regression test) are fine, and so is a
+  /// file [before] says only gained lines (a test added beside the repro).
+  List<String> changedReproFiles(
+    Map<String, String> now, {
+    String? Function(String path)? before,
+    String? Function(String path)? after,
+  }) => [
+    for (final e in reproFiles.entries)
+      if (now[e.key] != e.value && !_onlyGrew(before?.call(e.key), after?.call(e.key))) e.key,
+  ];
+
+  static bool _onlyGrew(String? before, String? after) => before != null && after != null && onlyAdded(before, after);
+
+  /// Whether [after] keeps every line of [before], in order (lines were only
+  /// added).
+  static bool onlyAdded(String before, String after) {
+    final a = after.split('\n');
+    var i = 0;
+    for (final line in before.split('\n')) {
+      while (i < a.length && a[i] != line) {
+        i++;
+      }
+      if (i == a.length) return false;
+      i++;
+    }
+    return true;
+  }
 
   /// Where the plan is written before it is presented.
   static const planFile = '.everyai/scratch/plan.md';
@@ -184,6 +231,9 @@ final class PhaseFlow {
       reproByUser: j['repro_by_user'] == true,
       failedFixes: (j['failed_fixes'] as num?)?.toInt() ?? 0,
       askedUser: j['asked_user'] == true,
+      reproFiles: {
+        for (final e in (j['repro_files'] as Map<String, Object?>? ?? const {}).entries) e.key: '${e.value}',
+      },
     );
   }
 
@@ -200,6 +250,7 @@ final class PhaseFlow {
     if (reproByUser) 'repro_by_user': true,
     if (failedFixes > 0) 'failed_fixes': failedFixes,
     if (askedUser) 'asked_user': true,
+    if (reproFiles.isNotEmpty) 'repro_files': reproFiles,
   };
 
   /// Why [tool] with [args] may not run now, or null. [inScratch] says
@@ -260,7 +311,8 @@ final class PhaseFlow {
       'reproduce the bug before anything else. Find or write the smallest command that shows it (a failing test, '
           'a script under .everyai/scratch/) and call bug_check reproduced with it. If the description is not '
           'enough to reproduce it, ask the user how with ask_user_question (multiple choice: the likely steps, '
-          'environments, inputs). Do not guess at a fix.',
+          'environments, inputs). Long logs or build output: filter them with run_script rather than reading them '
+          'whole. Do not guess at a fix.',
     Phase.triage =>
       'call bug_check triage: "simple" when the cause is clear and local, "hard" when it is low level, rare or not '
           'yet understood (it then gets researched first), with why.',
@@ -272,8 +324,11 @@ final class PhaseFlow {
                 'arrive together in one message.'
           : bugfix
           ? 'start one or more forks with role "researcher" (run_subagent, run_in_background true) to find this exact '
-                'bug in established projects: their issues, commits and fixes, and the root cause they found. Then '
-                'end your turn until they report.'
+                'bug in established projects: their issues, commits and fixes, and the root cause they found. '
+                'Meanwhile locate it here: run_script can rank the files in the stack trace and their callers '
+                '(rank, or llmQuery per file) and return the few suspects with reasons; if it worked before, `git '
+                'bisect run <repro command>` from a clean worktree finds the commit. Then end your turn until they '
+                'report.'
           : 'start one or more forks with role "researcher" (run_subagent, run_in_background true), one per question '
                 'worth answering: how this is best built, which libraries or reference code to borrow from, what '
                 'goes wrong. Then end your turn until they report.',

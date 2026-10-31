@@ -266,7 +266,20 @@ class _ToolView extends StatelessWidget {
       titleSpan: stepTitleSpan(context, step.call, theme.type.callout.tint(theme.textMuted)),
       busy: !step.done,
       preview: step.done && output.trim().isNotEmpty ? TextSpan(text: lastLine(output)) : null,
-      trailing: _StatusDot(step: step),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Bug fix: whether the decider read the failing repro as this bug.
+          if (step.result?.observation['repro_match'] case final String m when m != 'other') ...[
+            Text(
+              m == 'bug' ? 'matches the bug ✓' : 'match unsure ?',
+              style: theme.type.caption.tint(m == 'bug' ? theme.success : theme.textMuted),
+            ),
+            const SizedBox(width: 6),
+          ],
+          _StatusDot(step: step),
+        ],
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
