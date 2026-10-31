@@ -169,6 +169,8 @@ class _UsageTile extends ConsumerWidget {
     'followups': 'Suggestions',
     'search': 'Search',
     'research': 'Researchers',
+    'decide': 'Decisions',
+    'summarise': 'Long reads',
   };
 
   @override
