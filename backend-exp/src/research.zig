@@ -362,7 +362,7 @@ const Job = struct {
             self.out.cost_usd += usage.cost_usd;
             const c = try billing.charge(self.app, cx, self.who.user_id, .{ .kind = "research", .model = self.task.model, .prompt_tokens = usage.prompt_tokens, .completion_tokens = usage.completion_tokens, .cached_tokens = usage.cached_tokens, .cost_usd = usage.cost_usd, .session = self.session, .byok = self.aux.byok });
             const sink: LockedSink = .{ .shared = self.shared };
-            try sink.send("usage", .{ .kind = "research", .model = self.task.model, .prompt_tokens = usage.prompt_tokens, .completion_tokens = usage.completion_tokens, .cached_tokens = usage.cached_tokens, .cache_write_tokens = usage.cache_write_tokens, .charged_micros = c.charged_micros });
+            try sink.send("usage", .{ .kind = "research", .model = self.task.model, .prompt_tokens = usage.prompt_tokens, .completion_tokens = usage.completion_tokens, .cached_tokens = usage.cached_tokens, .cache_write_tokens = usage.cache_write_tokens, .charged_micros = c.charged_micros, .byok_cost_micros = billing.ownKeyCost(c, self.aux.byok) });
         };
         const choices = v.object.get("choices") orelse return error.BadReply;
         if (choices != .array or choices.array.items.len == 0) return error.BadReply;

@@ -25,11 +25,13 @@ class UsageMeter extends StatelessWidget {
   Widget build(BuildContext context) {
     if (totals.isEmpty) return const SizedBox.shrink();
     final theme = EveryTheme.of(context);
-    final label = '${formatTokens(totals.totalTokens)} · ${formatMicros(totals.chargedMicros)}';
+    // Credits and own-key spend together: switching to a key mid-session
+    // must not freeze the figure.
+    final label = '${formatTokens(totals.totalTokens)} · ${formatMicros(totals.spentMicros)}';
     return Semantics(
       button: true,
       label:
-          'Usage: ${totals.totalTokens} tokens, ${formatMicros(totals.chargedMicros)}'
+          'Usage: ${totals.totalTokens} tokens, ${formatMicros(totals.spentMicros)}'
           '${contextWindow > 0 ? ', context ${(_fill * 100).round()}% full' : ''}',
       child: AnchoredPopover(
         width: 260,
@@ -182,7 +184,11 @@ class UsageBreakdown extends StatelessWidget {
           if (totals.cacheWriteTokens > 0) row('  written to cache', formatTokens(totals.cacheWriteTokens)),
           row('Output', formatTokens(totals.completionTokens)),
           row('Model calls', '${totals.calls}'),
-          row('Cost', formatMicros(totals.chargedMicros), strong: true),
+          if (totals.ownKeyMicros > 0) ...[
+            row('EveryAI credits', formatMicros(totals.chargedMicros)),
+            row('On your own key', formatMicros(totals.ownKeyMicros)),
+          ],
+          row('Cost', formatMicros(totals.spentMicros), strong: true),
         ],
       ),
     );

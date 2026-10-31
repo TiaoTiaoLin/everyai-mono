@@ -127,6 +127,12 @@ pub const Usage = struct {
 
 pub const Charge = struct { cost_micros: i64, charged_micros: i64, from_quota: i64, from_wallet: i64 };
 
+/// What a call on the user's own key cost them upstream (0 on credits), for
+/// usage events: the app's meter shows it next to what EveryAI charged.
+pub fn ownKeyCost(c: Charge, byok: bool) i64 {
+    return if (byok) c.cost_micros else 0;
+}
+
 /// Records one upstream call and takes its price from quota, then wallet.
 /// The wallet may go slightly negative on the call that crosses zero; the
 /// next preflight stops further paid calls. One transaction (it holds the

@@ -13,7 +13,7 @@
 //!
 //! Events: delta {text}, reasoning {text}, sources {sources} (new ones, appended), tool {id, name,
 //! arguments}, tool_wait {id, name, arguments}, tool_status {id, name, status, detail?}, image {id, image_id, mime, data, prompt, revises?},
-//! usage {kind: chat|followups, model, tokens..., charged_micros}, followups {questions}, done {},
+//! usage {kind: chat|followups, model, tokens..., charged_micros, byok_cost_micros}, followups {questions}, done {},
 //! error {message, retryable}.
 const std = @import("std");
 const byok = @import("byok.zig");
@@ -617,10 +617,11 @@ const Turn = struct {
             .cached_tokens = result.usage.cached_tokens,
             .cache_write_tokens = result.usage.cache_write_tokens,
             .charged_micros = c.charged_micros,
+            .byok_cost_micros = billing.ownKeyCost(c, self.route.byok),
         });
         if (result.usage.search_cost_usd > 0) {
             const sc = try billing.charge(app, self.req, self.who.user_id, .{ .kind = "search", .model = billed, .cost_usd = result.usage.search_cost_usd, .session = self.body.session, .provider = self.route.provider, .byok = self.route.byok });
-            try sink.send("usage", .{ .kind = "search", .model = billed, .prompt_tokens = 0, .completion_tokens = 0, .cached_tokens = 0, .cache_write_tokens = 0, .charged_micros = sc.charged_micros });
+            try sink.send("usage", .{ .kind = "search", .model = billed, .prompt_tokens = 0, .completion_tokens = 0, .cached_tokens = 0, .cache_write_tokens = 0, .charged_micros = sc.charged_micros, .byok_cost_micros = billing.ownKeyCost(sc, self.route.byok) });
         }
         return result;
     }
@@ -978,7 +979,7 @@ pub fn webSearch(app: *App, req: anytype, who: auth.Identity, session: ?[]const 
         if (reply.usage) |u| {
             const c = try billing.charge(app, req, who.user_id, .{ .kind = "search", .model = app.cfg.utility_model, .prompt_tokens = u.prompt_tokens, .completion_tokens = u.completion_tokens, .cost_usd = u.cost_usd, .session = session, .byok = aux.byok });
             // Costs money; does not fill the conversation's context.
-            try sink.send("usage", .{ .kind = "search", .model = app.cfg.utility_model, .prompt_tokens = u.prompt_tokens, .completion_tokens = u.completion_tokens, .cached_tokens = 0, .cache_write_tokens = 0, .charged_micros = c.charged_micros });
+            try sink.send("usage", .{ .kind = "search", .model = app.cfg.utility_model, .prompt_tokens = u.prompt_tokens, .completion_tokens = u.completion_tokens, .cached_tokens = 0, .cache_write_tokens = 0, .charged_micros = c.charged_micros, .byok_cost_micros = billing.ownKeyCost(c, aux.byok) });
         }
         if (key) |k| if (reply.sources.len > 0) try app.searches.put(req.io, app.gpa, k, reply.sources, now);
         break :blk reply.sources;
@@ -1215,7 +1216,7 @@ fn followUps(app: *App, req: *anole.Request, who: auth.Identity, body: ChatReque
         const usage = openrouter.parseUsage(u.object);
         const c = try billing.charge(app, req, who.user_id, .{ .kind = "followups", .model = model, .prompt_tokens = usage.prompt_tokens, .completion_tokens = usage.completion_tokens, .cost_usd = usage.cost_usd, .session = body.session, .byok = aux.byok });
         // Counted in the conversation's cost, not its context window.
-        try sink.send("usage", .{ .kind = "followups", .model = model, .prompt_tokens = usage.prompt_tokens, .completion_tokens = usage.completion_tokens, .cached_tokens = 0, .cache_write_tokens = 0, .charged_micros = c.charged_micros });
+        try sink.send("usage", .{ .kind = "followups", .model = model, .prompt_tokens = usage.prompt_tokens, .completion_tokens = usage.completion_tokens, .cached_tokens = 0, .cache_write_tokens = 0, .charged_micros = c.charged_micros, .byok_cost_micros = billing.ownKeyCost(c, aux.byok) });
     };
     const content = v.object.get("choices").?.array.items[0].object.get("message").?.object.get("content").?.string;
     const start = std.mem.indexOfScalar(u8, content, '[') orelse return;

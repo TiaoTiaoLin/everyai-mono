@@ -514,6 +514,7 @@ final class ChatController extends Notifier<ChatSessionState> {
               cached: r.cachedTokens,
               cacheWrite: r.cacheWriteTokens,
               charged: r.chargedMicros,
+              ownKey: r.ownKeyMicros,
               context: !r.followUps,
             );
             state = state.copyWith(liveUsage: usage);

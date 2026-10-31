@@ -82,6 +82,7 @@ final class UsageTotals {
     int cached = 0,
     int cacheWrite = 0,
     int charged = 0,
+    int ownKey = 0,
     bool context = true,
   }) => UsageTotals(
     calls: calls + 1,
@@ -90,7 +91,7 @@ final class UsageTotals {
     cachedTokens: cachedTokens + cached,
     cacheWriteTokens: cacheWriteTokens + cacheWrite,
     chargedMicros: chargedMicros + charged,
-    ownKeyMicros: ownKeyMicros,
+    ownKeyMicros: ownKeyMicros + ownKey,
     lastPromptTokens: context ? prompt : lastPromptTokens,
     lastCompletionTokens: context ? completion : lastCompletionTokens,
   );

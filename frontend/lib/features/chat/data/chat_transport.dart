@@ -148,6 +148,7 @@ final class UsageReport extends ChatEvent {
     required this.completionTokens,
     required this.cachedTokens,
     required this.chargedMicros,
+    this.ownKeyMicros = 0,
     this.cacheWriteTokens = 0,
     this.model,
     this.followUps = false,
@@ -163,6 +164,9 @@ final class UsageReport extends ChatEvent {
 
   /// What the user was charged, in millionths of a dollar.
   final int chargedMicros;
+
+  /// What the call cost upstream on the user's own key (they pay it there).
+  final int ownKeyMicros;
 }
 
 final class FollowUpsSuggested extends ChatEvent {
@@ -310,6 +314,7 @@ final class SseTransport implements ChatTransport {
             cachedTokens: (u['cached_tokens'] as num?)?.toInt() ?? 0,
             cacheWriteTokens: (u['cache_write_tokens'] as num?)?.toInt() ?? 0,
             chargedMicros: (u['charged_micros'] as num?)?.toInt() ?? 0,
+            ownKeyMicros: (u['byok_cost_micros'] as num?)?.toInt() ?? 0,
             model: u['model'] as String?,
             // Side calls cost money but don't fill the chat's context.
             followUps: const {'followups', 'search', 'research'}.contains(u['kind']),
