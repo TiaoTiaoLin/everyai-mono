@@ -23,6 +23,7 @@ import 'llm.dart';
 import 'mcp_io.dart';
 import 'model_family.dart';
 import 'prompt_io.dart';
+import 'reasoning_binding.dart';
 import 'shell_io.dart';
 import 'tools_io.dart';
 
@@ -845,7 +846,7 @@ final class EveryAISession
     final reply = await _gateway.complete(
       model: _spec.model,
       messages: [
-        ..._outgoing(),
+        ..._bound().messages,
         {'role': 'user', 'content': question},
       ],
       // The same tools as the conversation keep the cached prefix; none may run.
@@ -878,6 +879,11 @@ final class EveryAISession
   Future<void> killProcesses() => _shell.killAll();
 
   // ------------------------------------------------------------------ loop
+
+  /// [_outgoing] (plus [extra]) with Claude thinking whose earlier
+  /// conversation changed taken out; see [bindReasoning].
+  Bound _bound({List<Map<String, Object?>> extra = const []}) =>
+      bindReasoning([..._outgoing(), ...extra], bindingSeed(_spec.model, _toolSpecs));
 
   /// The messages as the model gets them. Only the newest [keptImages]
   /// tool pictures go out whole; older ones become a note, so a long visual
@@ -931,6 +937,17 @@ final class EveryAISession
         steps++;
         final wrapUp = steps > maxStepsPerRun;
         final cancel = _cancel = Completer<void>();
+        final sent = _bound(
+          extra: [
+            if (wrapUp)
+              {
+                'role': 'user',
+                'content':
+                    'You have used this run\'s step budget. Stop calling tools and write your final message: '
+                    'what you did, what is verified, and what is left.',
+              },
+          ],
+        );
         final LlmReply reply;
         try {
           reply = await _gateway.completeWithRetry(
@@ -938,16 +955,7 @@ final class EveryAISession
             onRetry: _retrying,
             wait: _retryWait,
             model: _spec.model,
-            messages: [
-              ..._outgoing(),
-              if (wrapUp)
-                {
-                  'role': 'user',
-                  'content':
-                      'You have used this run\'s step budget. Stop calling tools and write your final message: '
-                      'what you did, what is verified, and what is left.',
-                },
-            ],
+            messages: sent.messages,
             tools: _toolSpecs,
             toolChoice: wrapUp ? 'none' : null,
             sessionTag: _spec.sessionTag,
@@ -967,7 +975,10 @@ final class EveryAISession
         lastPromptTokens = reply.promptTokens;
         lastCachedTokens = reply.cachedTokens;
         final textId = _newId();
-        _append({...reply.toMessage(), '_eid': textId});
+        final kept = reply.toMessage();
+        // Claude's thinking is replayed only while what it saw stays the same.
+        if (hasClaudeThinking(kept)) kept[boundKey] = sent.prefix;
+        _append({...kept, '_eid': textId});
         // The text before the first call opens the turn; text the model wrote
         // between calls is shown between them, as it wrote it.
         final (lead, between, trailing) = _split(reply);

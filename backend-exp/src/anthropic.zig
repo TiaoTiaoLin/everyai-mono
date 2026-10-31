@@ -34,6 +34,11 @@ const jsonInt = openrouter.jsonInt;
 /// The `format` of reasoning details this adapter makes and takes back.
 const details_format = "anthropic-claude-v1";
 
+/// Lets a request say what to do with a replayed thinking block whose
+/// earlier conversation changed (see `translateRequest`).
+const thinking_binding_beta = "thinking-binding-controls-2026-08-01";
+const fallback_beta = "server-side-fallback-2026-07-01";
+
 pub const Adapter = struct {
     /// Posts raw Messages API requests (`openrouter.Client` with `.auth = .anthropic`).
     inner: openrouter.Upstream,
@@ -58,7 +63,7 @@ pub const Adapter = struct {
 
         var headers: std.ArrayList([2][]const u8) = .empty;
         try headers.appendSlice(arena, extra);
-        if (t.fallbacks) try headers.append(arena, .{ "anthropic-beta", "server-side-fallback-2026-07-01" });
+        try headers.append(arena, .{ "anthropic-beta", if (t.fallbacks) thinking_binding_beta ++ "," ++ fallback_beta else thinking_binding_beta });
         const up = try self.inner.post(cx, "/messages", t.body, headers.items);
 
         const prices = self.catalog.pricesOf(cx.io, t.model);
@@ -242,8 +247,16 @@ pub fn translateRequest(arena: std.mem.Allocator, in: ObjectMap) !Translated {
     const stream = if (in.get("stream")) |s| s == .bool and s.bool else false;
     if (stream) try out.put(arena, "stream", .{ .bool = true });
 
-    // Summarized thinking streams as `reasoning`.
-    try out.put(arena, "thinking", try obj(arena, &.{ .{ "type", str("adaptive") }, .{ "display", str("summarized") } }));
+    // Summarized thinking streams as `reasoning`. A signed thinking block is
+    // bound to the exact conversation before it; callers edit history (the
+    // Code harness clears old tool output, compacts, prunes images, seeds
+    // forks), which used to fail the whole call with "Invalid signature in
+    // thinking block". drop_block makes Anthropic drop such a block instead.
+    try out.put(arena, "thinking", try obj(arena, &.{
+        .{ "type", str("adaptive") },
+        .{ "display", str("summarized") },
+        .{ "block_binding", try obj(arena, &.{.{ "prefix_mismatch_behavior", str("drop_block") }}) },
+    }));
     const effort = jsonStr(in.get("reasoning_effort")) orelse
         (if (in.get("reasoning")) |r| (if (r == .object) jsonStr(r.object.get("effort")) else null) else null);
     if (effort) |e| for ([_][]const u8{ "low", "medium", "high", "xhigh", "max" }) |ok| {
@@ -1099,6 +1112,9 @@ test translateRequest {
     try testing.expectEqualStrings("claude-sonnet-5-5", out.get("model").?.string);
     for ([_][]const u8{ "temperature", "top_p", "usage", "plugins" }) |k| try testing.expect(out.get(k) == null);
     try testing.expectEqualStrings("auto", out.get("tool_choice").?.object.get("type").?.string);
+    // A replayed thinking block whose earlier history changed is dropped, not a 400.
+    const binding = out.get("thinking").?.object.get("block_binding").?.object;
+    try testing.expectEqualStrings("drop_block", binding.get("prefix_mismatch_behavior").?.string);
     try testing.expectEqualStrings("sys", out.get("system").?.array.items[0].object.get("text").?.string);
     const msgs = out.get("messages").?.array.items;
     // user, assistant(tool_use), user(tool_result + thanks), assistant, user
