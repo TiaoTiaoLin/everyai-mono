@@ -163,10 +163,13 @@ String forHeldClientTools(String suffix) => suffix.replaceFirst(_askRuleEndsTurn
 /// research → questions → plan → build flow the harness enforces.
 enum HarnessTier {
   ultraEfficient('Ultra efficient', 'Smallest sound change, essentials checked once'),
-  efficient('Efficient', 'Plan, build in parts, check like a user, one polish pass'),
-  thorough('Thorough', 'Showcase quality: verify every part, polish until nothing is left'),
-  max('Max', 'Research with forks first, ask you, plan, then build with forks'),
-  ultra('Ultra', 'A research workflow sized to the task, then questions, a plan and a parallel build');
+  efficient('Efficient', 'Plan, build in parts, check like a user, one polish pass; scripts filter bulk reads'),
+  thorough('Thorough', 'Showcase quality: verify every part, polish until nothing is left; scripts ask a cheap model'),
+  max('Max', 'Research with forks first, ask you, plan, then build with forks; sub-queries over big codebases'),
+  ultra(
+    'Ultra',
+    'A research workflow sized to the task, then questions, a plan and a parallel build; recursive sub-queries',
+  );
 
   const HarnessTier(this.label, this.description);
   final String label;
