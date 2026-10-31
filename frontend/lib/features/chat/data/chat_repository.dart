@@ -129,6 +129,14 @@ final class ChatRepository {
     _db.conversations,
   )..where((c) => c.id.equals(conversationId))).write(ConversationsCompanion(title: Value(title)));
 
+  /// Renames the chat only while its title is still [from], so a name the
+  /// user gave it meanwhile stays. Whether it changed.
+  Future<bool> renameIf(String conversationId, {required String from, required String to}) async {
+    final n = await (_db.update(_db.conversations)..where((c) => c.id.equals(conversationId) & c.title.equals(from)))
+        .write(ConversationsCompanion(title: Value(to)));
+    return n > 0;
+  }
+
   Future<void> setPinned(String conversationId, {required bool pinned}) => (_db.update(
     _db.conversations,
   )..where((c) => c.id.equals(conversationId))).write(ConversationsCompanion(pinned: Value(pinned)));

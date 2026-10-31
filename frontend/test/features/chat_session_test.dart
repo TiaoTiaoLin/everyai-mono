@@ -7,6 +7,7 @@ import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/artifacts/checks/tool_checks.dart';
 import 'package:every_ai/features/chat/chat_providers.dart';
+import 'package:every_ai/features/chat/data/chat_titles.dart';
 import 'package:every_ai/features/chat/data/chat_transport.dart';
 import 'package:every_ai/features/chat/domain/chat_session.dart';
 import 'package:every_ai/features/chat/domain/message.dart';
@@ -49,6 +50,25 @@ class FakeToolResults implements ToolResults {
   }
 }
 
+/// Answers title requests with [reply] (null: the call failed).
+class FakeTitler implements ChatTitler {
+  final calls = <(String, String, String)>[];
+  String? reply;
+  Completer<void>? gate;
+
+  @override
+  Future<String?> title({
+    required String user,
+    required String assistant,
+    required String session,
+    Map<String, String> headers = const {},
+  }) async {
+    calls.add((user, assistant, session));
+    await gate?.future;
+    return reply;
+  }
+}
+
 /// The built-in catalog, without the network refresh.
 class FixedCatalog extends CatalogController {
   @override
@@ -59,6 +79,7 @@ void main() {
   late AppDatabase db;
   late FakeTransport transport;
   late FakeToolResults results;
+  late FakeTitler titler;
   late ProviderContainer container;
   const id = 'conv-1';
 
@@ -66,6 +87,7 @@ void main() {
     db = AppDatabase(NativeDatabase.memory());
     transport = FakeTransport();
     results = FakeToolResults();
+    titler = FakeTitler();
     final prefs = await Preferences.load(db);
     container = ProviderContainer(
       overrides: [
@@ -74,6 +96,7 @@ void main() {
         installedSkillsProvider.overrideWith(NoInstalledSkills.new),
         chatTransportProvider.overrideWithValue(transport),
         toolResultsProvider.overrideWithValue(results),
+        chatTitlerProvider.overrideWithValue(titler),
         chatClientToolsProvider.overrideWithValue(const {'render_diagram'}),
         // Checks math only: no webview draws Mermaid in tests.
         appToolCheckerProvider.overrideWithValue(const AppToolChecker()),
@@ -135,6 +158,65 @@ void main() {
       (Role.user, 'Hello there', MessageStatus.complete),
       (Role.assistant, 'Hi, friend', MessageStatus.complete),
     ]);
+  });
+
+  group('backend titles', () {
+    Future<void> firstTurn(String prompt, String reply) async {
+      await settle();
+      await ctl().send(prompt);
+      transport.turns.single
+        ..add(TextDelta(reply))
+        ..add(const TurnDone());
+      unawaited(transport.turns.single.close());
+      await settle();
+    }
+
+    Future<String?> stored() async => (await container.read(chatRepositoryProvider).conversation(id))?.title;
+
+    test('the first reply renames the chat with the backend title', () async {
+      titler.reply = 'Greeting a friend';
+      await firstTurn('Hello there', 'Hi, friend');
+      expect(titler.calls, [('Hello there', 'Hi, friend', id)]);
+      expect(state().title, 'Greeting a friend');
+      expect(await stored(), 'Greeting a friend');
+
+      // Only the first reply asks.
+      await ctl().send('again');
+      transport.turns.last
+        ..add(const TextDelta('ok'))
+        ..add(const TurnDone());
+      unawaited(transport.turns.last.close());
+      await settle();
+      expect(titler.calls, hasLength(1));
+    });
+
+    test('a failed title call keeps the local title', () async {
+      await firstTurn('Hello there', 'Hi');
+      expect(titler.calls, hasLength(1));
+      expect(state().title, 'Hello there');
+      expect(await stored(), 'Hello there');
+    });
+
+    test('a name the user gave meanwhile stays', () async {
+      titler
+        ..reply = 'Greeting a friend'
+        ..gate = Completer<void>();
+      await firstTurn('Hello there', 'Hi');
+      await container.read(chatRepositoryProvider).rename(id, 'My chat');
+      titler.gate!.complete();
+      await settle();
+      expect(await stored(), 'My chat');
+    });
+
+    test('a failed or cancelled turn asks nothing', () async {
+      titler.reply = 'Nope';
+      await settle();
+      await ctl().send('flaky');
+      transport.turns.single.addError(const TimeoutError());
+      await settle();
+      expect(titler.calls, isEmpty);
+      expect(await stored(), 'flaky');
+    });
   });
 
   test('a second send while busy is ignored', () async {

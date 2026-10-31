@@ -15,6 +15,7 @@ import '../skills/skills_providers.dart';
 import '../usage/usage_totals.dart';
 import 'data/chat_cleanup.dart';
 import 'data/chat_repository.dart';
+import 'data/chat_titles.dart';
 import 'data/chat_transport.dart';
 import 'domain/ask_user.dart';
 import 'domain/chat_session.dart';
@@ -36,6 +37,13 @@ final chatTransportProvider = Provider<ChatTransport>((ref) {
     stream: SseTransport(api, authenticated: authenticated),
     image: ImageTransport(api, authenticated: authenticated),
   );
+});
+
+/// Names new chats after their first reply. Null when chat turns don't go to
+/// the backend (a fake transport in tests), so no title call goes out either.
+final chatTitlerProvider = Provider<ChatTitler?>((ref) {
+  if (ref.watch(chatTransportProvider) is! TransportRouter) return null;
+  return HttpChatTitler(ref.watch(apiClientProvider), authenticated: !ref.watch(appConfigProvider).devSkipAuth);
 });
 
 /// Answers client-executed tool calls (`POST /v1/chat/tool_result`).
@@ -75,6 +83,10 @@ final class ChatController extends Notifier<ChatSessionState> {
   StreamSubscription<ChatEvent>? _turn;
   final _buffer = StringBuffer();
   final _reasoning = StringBuffer();
+
+  /// The chat's local title and opening prompt, until its first reply asks
+  /// the backend for a better title.
+  ({String placeholder, String prompt, ModelSpec model})? _untitled;
 
   /// Stores a tool result on the turn in flight's call part (set per turn).
   void Function(String callId, String resultJson)? _recordResult;
@@ -337,6 +349,7 @@ final class ChatController extends Notifier<ChatSessionState> {
       );
       if (!ref.mounted) return;
       state = state.copyWith(title: c.title);
+      _untitled = (placeholder: c.title, prompt: prompt, model: model);
     }
 
     // The user's skills: a catalog after the memory block, loaded on demand.
@@ -585,6 +598,27 @@ final class ChatController extends Notifier<ChatSessionState> {
     if (status != MessageStatus.failed || finished.parts.isNotEmpty) {
       unawaited(_repo.saveMessage(finished));
     }
+    if (status == MessageStatus.complete && _untitled != null) {
+      unawaited(_retitle(_untitled!, finished.plainText));
+      _untitled = null;
+    }
+  }
+
+  /// Swaps the local title for the backend's once the first reply is in.
+  /// Keeps the local one on any failure, and a title the user changed meanwhile.
+  Future<void> _retitle(({String placeholder, String prompt, ModelSpec model}) untitled, String reply) async {
+    final titler = ref.read(chatTitlerProvider);
+    if (titler == null || untitled.prompt.trim().isEmpty) return;
+    final repo = _repo;
+    final title = await titler.title(
+      user: untitled.prompt,
+      assistant: reply,
+      session: conversationId,
+      headers: ref.read(modelBillingProvider).headersFor(untitled.model.id),
+    );
+    if (title == null || title == untitled.placeholder) return;
+    final renamed = await repo.renameIf(conversationId, from: untitled.placeholder, to: title);
+    if (renamed && ref.mounted) state = state.copyWith(title: title);
   }
 }
 
