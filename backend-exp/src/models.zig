@@ -19,6 +19,27 @@ pub const defaults = [_][]const u8{
     "dots-studio/dots-3-note-preview:free",
 };
 
+/// The Auto model's shop entry (`everyai/auto`, auto.zig). Its prices are
+/// 0 but it is not free: each message is billed as the model it ran on.
+pub const auto_model: Model = .{
+    .id = "everyai/auto",
+    .owned_by = "everyai",
+    .name = "EveryAI · Auto",
+    .provider = "EveryAI",
+    .blurb = "Picks the mode and the model for each message: fast, balanced or best, with web search, research or rich answers when they help.",
+    .context_length = 1_000_000,
+    .input_modalities = &.{ "text", "image", "file" },
+    .output_modalities = &.{"text"},
+    .prompt_per_mtok = 0,
+    .completion_per_mtok = 0,
+    .free = false,
+    .tools = true,
+    .reasoning = true,
+    .web_search = true,
+    .default = false,
+    .created = 0,
+};
+
 pub const Model = struct {
     id: []const u8,
     object: []const u8 = "model",
@@ -272,6 +293,10 @@ fn parse(a: std.mem.Allocator, raw: []const u8, markup: f64) !Parsed {
     const data = (root.object.get("data") orelse return error.BadCatalog).array.items;
     var out: std.ArrayList(Model) = .empty;
     var prices: std.ArrayList(Prices) = .empty;
+    // Ours, first: it runs each message on one of the models below (auto.zig),
+    // priced as that model.
+    try out.append(a, auto_model);
+    try prices.append(a, .{ .base = .{} });
     for (data) |item| {
         const o = item.object;
         const id = openrouter.jsonStr(o.get("id")) orelse continue;

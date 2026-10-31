@@ -32,10 +32,17 @@ Anole is a path dependency (`../../../PersonalProjects/anole` in
 ## Chat stream
 
 Request: `{model?, mode: chat|search|research, messages: [{role, content}], tools_enabled?, session?, client_tools?, images?: [{id, url?}], memory?}`.
+`model: "everyai/auto"` (listed first in `/v1/models` as "EveryAI · Auto") lets the decider
+(`auto.zig`) read the newest message and up to two earlier turns and pick the mode (only when
+`mode` is `chat`), rich answers (`tools_enabled`; never turned on when the request turned it off)
+and a tier: `AUTO_FAST_MODEL` / `AUTO_BALANCED_MODEL` / `AUTO_BEST_MODEL` (Claude Haiku / Sonnet /
+Opus 5.5). "Unsure" keeps the request's values on the balanced tier. The stream then starts with
+`route {model, mode, tools_enabled}` (what the turn runs on) and the decider's `usage {kind:
+"decide"}`; Research picked by Auto runs at Quick depth unless `research_depth` was sent.
 `images` lists the conversation's images (`img_<n>` generated, `upload_<n>` attached) so
 `generate_image` can edit them (`edit_of`) or follow them (`references`); new ids continue from the highest `img_<n>`.
 
-Events: `delta {text}`, `reasoning {text}`, `sources {sources}` (new sources,
+Events: `route {model, mode, tools_enabled}` (Auto only, first), `delta {text}`, `reasoning {text}`, `sources {sources}` (new sources,
 appended in citation order), `tool {id, name, arguments}` (a UI tool for the
 app to render), `tool_wait {id, name, arguments}` (a client-executed tool the
 turn waits on), `tool_status {id, name, status, detail?}` (a server tool),

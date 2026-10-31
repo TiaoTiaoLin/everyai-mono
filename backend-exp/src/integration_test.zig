@@ -142,11 +142,15 @@ test "models: shop excludes batch variants, marks free and default, applies mark
     defer res.deinit();
     try res.expectStatus(.ok);
     const list = try res.json(struct { object: []const u8, data: []const struct { id: []const u8, free: bool, default: bool, prompt_per_mtok: f64, name: []const u8 } });
-    try std.testing.expectEqual(@as(usize, 2), list.data.len);
-    try std.testing.expectEqualStrings("Claude Haiku 5.5", list.data[0].name);
-    try std.testing.expect(list.data[0].default and !list.data[0].free);
-    try std.testing.expectApproxEqAbs(@as(f64, 0.115), list.data[0].prompt_per_mtok, 1e-9);
-    try std.testing.expect(list.data[1].free);
+    try std.testing.expectEqual(@as(usize, 3), list.data.len);
+    // The Auto model leads: ours, not a default, priced as what it picks.
+    try std.testing.expectEqualStrings("everyai/auto", list.data[0].id);
+    try std.testing.expectEqualStrings("EveryAI · Auto", list.data[0].name);
+    try std.testing.expect(!list.data[0].default and !list.data[0].free);
+    try std.testing.expectEqualStrings("Claude Haiku 5.5", list.data[1].name);
+    try std.testing.expect(list.data[1].default and !list.data[1].free);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.115), list.data[1].prompt_per_mtok, 1e-9);
+    try std.testing.expect(list.data[2].free);
 }
 
 const quiz_turn =
@@ -1973,4 +1977,84 @@ test "chat: summarise_parts returns a short source whole, without side calls" {
     try std.testing.expectEqual(@as(usize, 3), env.fake.bodies.items.len);
     try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[1], "PARA1 is short.") != null);
     try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[1], "short enough to read directly") != null);
+}
+
+// ------------------------------------------------------------------ auto
+
+fn decideReply(comptime content: []const u8) []const u8 {
+    return "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":" ++ content ++ "}}],\"usage\":{\"prompt_tokens\":400,\"completion_tokens\":10,\"cost\":0.0001}}";
+}
+
+test "auto: the decider picks mode, rich answers and tier; the route event comes first and the turn runs on it" {
+    var env: Env = undefined;
+    try start(&env, &.{ decideReply(
+        \\"{\"mode\":\"search\",\"rich\":false,\"tier\":\"fast\"}"
+    ), final_turn, followups_reply }, true);
+    defer env.deinit();
+    var res = try env.t.post("/v1/chat/stream", .{ .json = .{
+        .model = "everyai/auto",
+        .messages = .{ .{ .role = "user", .content = "hi" }, .{ .role = "assistant", .content = "Hello!" }, .{ .role = "user", .content = "Who won the match last night?" } },
+        .session = "conv-auto",
+    } });
+    defer res.deinit();
+    try res.expectStatus(.ok);
+    try std.testing.expect(std.mem.startsWith(u8, res.body, "event: route\ndata: {\"model\":\"anthropic/claude-haiku-5.5\",\"mode\":\"search\",\"tools_enabled\":false}"));
+    try std.testing.expect(std.mem.indexOf(u8, res.body, "\"kind\":\"decide\"") != null);
+    const b = env.fake.bodies.items;
+    // The decider saw the questions and the conversation, newest last.
+    try std.testing.expect(std.mem.indexOf(u8, b[0], "- mode (choice)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[0], "Assistant: Hello!") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[0], "The message to route:\\nWho won the match last night?") != null);
+    // Search without rich answers: the fast model with the web plugin.
+    try std.testing.expect(std.mem.indexOf(u8, b[1], "\"model\":\"anthropic/claude-haiku-5.5\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b[1], "\"plugins\":[{\"id\":\"web\"") != null);
+    var arena: std.heap.ArenaAllocator = .init(alloc);
+    defer arena.deinit();
+    var c: anole.db.Ctx = .{ .io = env.server.io(), .arena = arena.allocator() };
+    try std.testing.expectEqual(@as(i64, 1), try env.state.db.one(i64, &c, "SELECT COUNT(*) FROM usage_events WHERE kind = 'decide' AND session = 'conv-auto'", .{}));
+}
+
+test "auto: unsure falls back to the request on the balanced tier; an explicit mode and rich-off are kept, not asked" {
+    var env: Env = undefined;
+    try start(&env, &.{
+        decideReply(
+            \\"{\"mode\":\"unsure\",\"rich\":\"unsure\",\"tier\":\"genius\"}"
+        ),
+        final_turn,
+        followups_reply,
+        decideReply(
+            \\"{\"tier\":\"best\"}"
+        ),
+        final_turn,
+        followups_reply,
+    }, true);
+    defer env.deinit();
+    var unsure = try env.t.post("/v1/chat/stream", .{ .json = .{ .model = "everyai/auto", .messages = .{.{ .role = "user", .content = "hmm" }} } });
+    defer unsure.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, unsure.body, "event: route\ndata: {\"model\":\"anthropic/claude-sonnet-5.5\",\"mode\":\"chat\",\"tools_enabled\":true}"));
+    try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[1], "\"model\":\"anthropic/claude-sonnet-5.5\"") != null);
+
+    var kept = try env.t.post("/v1/chat/stream", .{ .json = .{ .model = "everyai/auto", .mode = "learn", .tools_enabled = false, .messages = .{.{ .role = "user", .content = "Teach me Zig" }} } });
+    defer kept.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, kept.body, "event: route\ndata: {\"model\":\"anthropic/claude-opus-5.5\",\"mode\":\"learn\",\"tools_enabled\":false}"));
+    const asked = env.fake.bodies.items[3];
+    try std.testing.expect(std.mem.indexOf(u8, asked, "- tier (choice)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asked, "- mode (choice)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, asked, "- rich (bool)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[4], "is in Learn mode") != null);
+}
+
+test "auto: Research chosen by Auto runs at Quick depth" {
+    var env: Env = undefined;
+    const three = leadCall("research",
+        \\"{\"questions\":[{\"question\":\"a\",\"model\":\"google/gemini-3.5-flash-lite\"},{\"question\":\"b\",\"model\":\"google/gemini-3.5-flash-lite\"},{\"question\":\"c\",\"model\":\"google/gemini-3.5-flash-lite\"}]}"
+    );
+    try start(&env, &.{ decideReply(
+        \\"{\"mode\":\"research\",\"rich\":true,\"tier\":\"balanced\"}"
+    ), three, final_turn, followups_reply }, true);
+    defer env.deinit();
+    var res = try env.t.post("/v1/chat/stream", .{ .json = .{ .model = "everyai/auto", .messages = .{.{ .role = "user", .content = "Compare the EV markets in Europe and China" }} } });
+    defer res.deinit();
+    try std.testing.expect(std.mem.startsWith(u8, res.body, "event: route\ndata: {\"model\":\"anthropic/claude-sonnet-5.5\",\"mode\":\"research\",\"tools_enabled\":true}"));
+    try std.testing.expect(std.mem.indexOf(u8, env.fake.bodies.items[2], "quick research sends at most 2 researchers") != null);
 }

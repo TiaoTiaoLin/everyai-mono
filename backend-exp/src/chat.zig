@@ -12,7 +12,8 @@
 //! the result, not an acknowledgement, goes back to the model. A `tool_status`
 //! (done, or failed with detail "timed out") then closes the wait.
 //!
-//! Events: delta {text}, reasoning {text}, sources {sources} (new ones, appended), tool {id, name,
+//! Events: route {model, mode, tools_enabled} (first, for `everyai/auto`; auto.zig),
+//! delta {text}, reasoning {text}, sources {sources} (new ones, appended), tool {id, name,
 //! arguments}, tool_wait {id, name, arguments}, tool_status {id, name, status, detail?}, image {id, image_id, mime, data, prompt, revises?},
 //! usage {kind: chat|followups, model, tokens..., charged_micros, byok_cost_micros}, followups {questions}, done {},
 //! error {message, retryable}.
@@ -37,6 +38,7 @@ const routing = @import("routing.zig");
 const modes = @import("modes.zig");
 const research = @import("research.zig");
 const summarise = @import("summarise.zig");
+const auto = @import("auto.zig");
 
 const Events = @typeInfo(@typeInfo(@TypeOf(anole.Response.startEventStream)).@"fn".return_type.?).error_union.payload;
 
@@ -94,8 +96,9 @@ pub const ChatRequest = struct {
     /// Only the first upstream call of the turn is forced, so the loop goes
     /// on normally after the tool ran. Must name a tool in `tools.definitions`.
     force_tool: ?[]const u8 = null,
-    /// Research mode: how far the researchers go (caps in research.zig).
-    research_depth: research.Depth = .standard,
+    /// Research mode: how far the researchers go (caps in research.zig);
+    /// null is Standard, or Quick when the Auto model chose Research.
+    research_depth: ?research.Depth = null,
 };
 
 pub const Effort = enum {
@@ -377,6 +380,17 @@ fn stream(app: *App, req: *anole.Request, res: *anole.Response) !void {
         return req.invalid("messages", "chat.content_shape", "content must be a string or an array of parts");
 
     app.catalog.ensureFresh(app.upstream, req.io, app.cfg.markup);
+    // The Auto model: the decider picks the mode, rich answers and the
+    // model, and the turn runs as if the app had sent them.
+    var picked: ?auto.Pick = null;
+    if (body.model) |m| if (std.mem.eql(u8, m, auto.model_id)) {
+        const p = try auto.choose(app, req, who, body);
+        body.model = p.model;
+        if (p.mode == .research and body.mode != .research and body.research_depth == null) body.research_depth = .quick;
+        body.mode = p.mode;
+        body.tools_enabled = p.tools_enabled;
+        picked = p;
+    };
     var model = body.model orelse app.cfg.default_model;
     var facts = app.catalog.facts(req.io, model);
     // Research is led by the user's model with tools; one without them hands
@@ -407,6 +421,11 @@ fn stream(app: *App, req: *anole.Request, res: *anole.Response) !void {
     var scratch: std.Io.Writer.Allocating = .init(req.arena);
     var ledger: web.Ledger = .{};
     const sink: Sink = .{ .ev = &ev, .scratch = &scratch, .ledger = &ledger, .arena = req.arena };
+    if (picked) |p| {
+        // What runs: Research without tools hands over to the research model.
+        try sink.send("route", .{ .model = model, .mode = body.mode, .tools_enabled = body.tools_enabled });
+        if (p.outcome) |o| try sink.send("usage", .{ .kind = "decide", .model = o.model, .prompt_tokens = o.prompt_tokens, .completion_tokens = o.completion_tokens, .cached_tokens = o.cached_tokens, .cache_write_tokens = 0, .charged_micros = o.charged_micros, .byok_cost_micros = o.byok_cost_micros });
+    }
 
     run(app, req, who, model, body, facts, sink) catch |err| switch (err) {
         error.Upstream, error.OutOfCredits => {}, // already reported
@@ -439,7 +458,7 @@ fn run(app: *App, req: *anole.Request, who: auth.Identity, model: []const u8, bo
         }
     }
     const with_tools = body.tools_enabled and facts.tools;
-    var inquiry: research.State = .{ .depth = body.research_depth };
+    var inquiry: research.State = .{ .depth = body.research_depth orelse .standard };
     var docs: Artifacts = .{};
     for (messages.items) |m| if (std.mem.eql(u8, m.role, "assistant")) try docs.seed(arena, m.content);
     var pictures: ImageBook = .{};
@@ -1241,6 +1260,7 @@ test {
     _ = truncation;
     _ = web;
     _ = summarise;
+    _ = auto;
 }
 
 test buildBody {
