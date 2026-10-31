@@ -4,9 +4,9 @@ import 'package:flutter/foundation.dart';
 
 import 'permissions.dart' show dangerReason, floorReason;
 
-/// How the agent-server reaches an MCP server.
+/// How the harness reaches an MCP server.
 enum McpTransport {
-  /// A local program the agent-server starts and talks to over stdin/stdout.
+  /// A local program the harness starts and talks to over stdin/stdout.
   stdio('Local command'),
 
   /// Streamable HTTP.
@@ -24,9 +24,9 @@ enum McpTransport {
 }
 
 /// One MCP server the user configured for Code sessions. Sessions get it
-/// through the agent-server's `mcp_config` (OpenHands 1.59 `MCPServer`:
-/// `{command, args, env}` or `{url, transport, headers}`), so the sidecar
-/// owns the protocol.
+/// through `SessionSpec.mcpConfig` (`{command, args, env}` or `{url,
+/// transport, headers}`, the shape OpenHands' agent-server used), and the
+/// harness's MCP client owns the protocol.
 ///
 /// A local command runs on this machine as the user (the app is not
 /// sandboxed), so it is only passed on after the user approved exactly
@@ -103,7 +103,7 @@ final class McpServer {
   /// for the dangerous-pattern checks; the server is started without a shell).
   String get commandLine => shellJoin([command, ...args]);
 
-  /// This server's entry in the agent-server's `mcp_config`.
+  /// This server's entry in the session's `mcp_config`.
   Map<String, Object?> toAgentConfig() => transport == McpTransport.stdio
       ? {
           'command': command,
@@ -216,11 +216,9 @@ final class StoredMcpServers {
     return byName.values.toList();
   }
 
-  /// The agent-server's `mcp_config` for a session in [projectId]: active
-  /// servers only, sorted by name so the agent's tool list stays the same
-  /// between sessions (and the model's prompt cache holds). The map is flat,
-  /// `{name: server}`: OpenHands 1.59 types `Agent.mcp_config` as
-  /// `dict[str, MCPServer]` (it also unwraps a fastmcp `{"mcpServers": …}`).
+  /// The `mcp_config` for a session in [projectId]: active servers only,
+  /// sorted by name so the agent's tool list stays the same between sessions
+  /// (and the model's prompt cache holds). The map is flat, `{name: server}`.
   Map<String, Object?> mcpConfigFor(String? projectId) {
     final active = serversFor(projectId).where((s) => s.active).toList()..sort((a, b) => a.name.compareTo(b.name));
     return {for (final s in active) s.name: s.toAgentConfig()};

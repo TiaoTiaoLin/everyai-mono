@@ -2,12 +2,8 @@ import 'package:flutter/foundation.dart';
 
 import 'session_processes_stub.dart' if (dart.library.io) 'session_processes_io.dart' as impl;
 
-/// In the agent-server's environment (see the sidecar), so its tmux server,
-/// which detaches from it, can still be told from the user's own.
-const serverEnvVar = 'OH_SESSION_API_KEYS_0';
-
-/// Set in each session's agent terminal (OpenHands `terminal` tool `env`), so
-/// the processes it starts can be told apart from other sessions'.
+/// Set in the environment of each session's shell commands, so the processes
+/// they start can be told apart from other sessions'.
 const sessionEnvVar = 'EVERYAI_SESSION';
 
 /// Ends every process a Code session's terminal left running: background
@@ -16,10 +12,9 @@ const sessionEnvVar = 'EVERYAI_SESSION';
 ///
 /// A process belongs to the session when its environment shows
 /// [sessionEnvVar] = [tag]. macOS hides the environment of system binaries
-/// (`/bin/sleep`, `/bin/bash`); those count when their working directory is
-/// inside [workingDir], [ownsDir] says no other session works there (a
-/// per-session worktree), and their shell is the agent-server's own (not a
-/// tmux server the user started). Returns the pids signalled.
+/// (`/bin/sleep`, `/bin/bash`); an orphaned one counts when its working
+/// directory is inside [workingDir] and [ownsDir] says no other session
+/// works there (a per-session worktree). Returns the pids signalled.
 Future<List<int>> killSessionProcesses({required String tag, required String workingDir, required bool ownsDir}) =>
     impl.killSessionProcesses(tag: tag, workingDir: workingDir, ownsDir: ownsDir);
 
@@ -34,14 +29,7 @@ Future<(ProcessTable, List<int>)?> findSessionProcesses({
 /// One row of the process table.
 @immutable
 final class ProcessRow {
-  const ProcessRow({
-    required this.pid,
-    required this.ppid,
-    required this.command,
-    this.envVisible = true,
-    this.tag,
-    this.serverEnv = false,
-  });
+  const ProcessRow({required this.pid, required this.ppid, required this.command, this.envVisible = true, this.tag});
 
   final int pid;
   final int ppid;
@@ -55,19 +43,14 @@ final class ProcessRow {
   /// The value of [sessionEnvVar], when set and visible.
   final String? tag;
 
-  /// Whether the environment visibly carries [serverEnvVar].
-  final bool serverEnv;
-
   String get _exe {
     final first = command.trimLeft().split(RegExp(r'\s')).first;
     return first.substring(first.lastIndexOf('/') + 1);
   }
 
-  bool get isAgentServer => _exe.startsWith('agent-server');
-
-  /// An agent-server (the binary and its unpacked child) or a tmux server:
-  /// their children may be the agent's terminal shells. Never signalled.
-  bool get isTerminalHost => isAgentServer || _exe == 'tmux';
+  /// A tmux server: its children may be shells running the agent's
+  /// commands. Never signalled.
+  bool get isTerminalHost => _exe == 'tmux';
 }
 
 /// The process table, and which processes belong to a session.
@@ -82,7 +65,6 @@ final class ProcessTable {
   final _children = <int, List<int>>{};
 
   static final _envTag = RegExp('(?:^|\\s)$sessionEnvVar=(\\S*)');
-  static final _envServer = RegExp('(?:^|\\s)$serverEnvVar=');
 
   /// Parses `ps -E -ww -x -o pid=,ppid=,command=` (macOS): the environment
   /// follows the arguments when it is readable. [plain] is the same listing
@@ -101,7 +83,6 @@ final class ProcessTable {
             command: cmd,
             envVisible: rest.length > cmd.length,
             tag: rest.length > cmd.length ? _envTag.firstMatch(rest.substring(cmd.length))?.group(1) : null,
-            serverEnv: rest.length > cmd.length && _envServer.hasMatch(rest.substring(cmd.length)),
           ),
     ]);
   }
@@ -123,23 +104,7 @@ final class ProcessTable {
     return null;
   }
 
-  /// Whether environment block [environ] carries [serverEnvVar].
-  static bool serverInEnviron(String environ) => environ.split('\x00').any((e) => e.startsWith('$serverEnvVar='));
-
-  /// A terminal host known to be the agent-server's: the server itself, or
-  /// a tmux server below it or carrying its environment.
-  bool _agentHost(int pid) {
-    final r = rows[pid];
-    if (r == null || !r.isTerminalHost) return false;
-    if (r.isAgentServer || r.serverEnv) return true;
-    final seen = <int>{};
-    for (var p = r.ppid; p > 1 && seen.add(p); p = rows[p]?.ppid ?? 0) {
-      if (rows[p]?.isAgentServer ?? false) return true;
-    }
-    return false;
-  }
-
-  /// The agent terminals' shells: children of an agent-server or tmux.
+  /// Shells under a tmux server.
   List<int> get shells => [
     for (final r in rows.values)
       if (!r.isTerminalHost && (rows[r.ppid]?.isTerminalHost ?? false)) r.pid,
@@ -163,16 +128,17 @@ final class ProcessTable {
     return out;
   }
 
-  /// The processes whose working directory decides ownership: shells and
-  /// orphans without a visible tag.
+  /// The processes whose working directory decides ownership: orphans
+  /// without a visible tag.
   List<int> needsCwd() => [
-    for (final p in [...shells, ...orphans])
+    for (final p in orphans)
       if (rows[p]!.tag == null) p,
   ];
 
-  /// What to signal for session [tag]: everything under its terminal shells
-  /// (not the shells), and orphaned processes it started (with their
-  /// children). [cwds] maps pids from [needsCwd] to working directories.
+  /// What to signal for session [tag]: everything under shells whose tree
+  /// carries its tag (not the shells), and orphaned processes it started
+  /// (with their children). [cwds] maps pids from [needsCwd] to working
+  /// directories.
   List<int> sessionProcesses({
     required String tag,
     required String workingDir,
@@ -193,10 +159,7 @@ final class ProcessTable {
 
     final out = <int>{};
     for (final shell in shells) {
-      final t = treeTag(shell);
-      // Without a tag, only a shell of the agent-server's in a folder this session has to itself.
-      final ours = t == tag || (t == null && ownsDir && _agentHost(rows[shell]!.ppid) && inDir(shell));
-      if (ours) out.addAll(descendants(shell));
+      if (treeTag(shell) == tag) out.addAll(descendants(shell));
     }
     for (final o in orphans) {
       final r = rows[o]!;

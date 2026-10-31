@@ -6,7 +6,6 @@ import 'package:every_ai/core/db/app_database.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
-import 'package:every_ai/features/code/domain/agent_menu.dart' show CodeHarnessKind;
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/questions.dart';
@@ -14,15 +13,11 @@ import 'package:every_ai/features/code/domain/subagents.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/fake_harness.dart';
-import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/code/settings/agent_settings.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 
 class _FixedCatalog extends CatalogController {
   @override
@@ -220,36 +215,6 @@ void main() {
       expect(brief, startsWith('Task: Review diff\nRole: reviewer. Reviews diffs\nLook for bugs only.'));
       expect(brief, endsWith('Review the staged diff.'));
     });
-
-    test('a subagent conversation gets no client tools and the subagent rules', () async {
-      Map<String, Object?>? created;
-      final client = MockClient((req) async {
-        if (req.method == 'POST' && req.url.path == '/api/conversations') {
-          created = jsonDecode(req.body) as Map<String, Object?>;
-          return http.Response(jsonEncode({'id': 'c9'}), 200);
-        }
-        return http.Response(jsonEncode({'id': 'c9', 'execution_status': 'idle'}), 200);
-      });
-      final harness = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:9/'), sessionApiKey: 'k', client: client);
-      final s = await harness.start(
-        const SessionSpec(
-          workingDir: '/tmp/x',
-          model: 'anthropic/claude-haiku-5.5',
-          mode: AgentMode.ask,
-          llmBaseUrl: 'http://localhost/v1',
-          llmApiKey: 'sk',
-          sessionTag: 'parent',
-          initialMessage: 'Task: x',
-          subagent: true,
-        ),
-      );
-      // No socket server here; closing can wait on the pending connect.
-      unawaited(s.close());
-      expect(created!['client_tools'], isEmpty);
-      final agent = created!['agent']! as Map<String, Object?>;
-      expect((agent['agent_context']! as Map)['system_message_suffix'], contains('<SUBAGENT>'));
-      expect(((agent['llm']! as Map)['extra_headers']! as Map)['X-EveryAI-Session'], 'parent');
-    });
   });
 
   group('controller', () {
@@ -267,8 +232,6 @@ void main() {
           databaseProvider.overrideWithValue(db),
           preferencesProvider.overrideWithValue(prefs),
           harnessProvider.overrideWithValue(FakeHarness(step: Duration.zero)),
-          // These cover fresh child conversations (OpenHands); EveryAI forks are tested elsewhere.
-          codeHarnessProvider.overrideWith(_OpenHandsChoice.new),
           modelCatalogProvider.overrideWith(_FixedCatalog.new),
         ],
       );
@@ -392,9 +355,4 @@ void main() {
     expect(notice.detail, contains('lib/a.dart:4'));
     expect(forkingTaskSpec().toString(), contains('run_in_background'));
   });
-}
-
-final class _OpenHandsChoice extends CodeHarnessChoice {
-  @override
-  CodeHarnessKind build() => CodeHarnessKind.openHands;
 }

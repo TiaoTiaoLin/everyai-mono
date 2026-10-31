@@ -19,8 +19,7 @@ import '../../attachments/attachment.dart';
 import '../../../core/platform/platform_kind.dart';
 import '../agent_models.dart';
 import '../code_providers.dart';
-import '../sidecar/sidecar.dart';
-import '../domain/agent_menu.dart' show CodeHarnessKind;
+import '../sample/sample_project.dart';
 import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
 import '../../slash/slash_command.dart' show CodeSlashHost;
@@ -89,18 +88,15 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
   }
 
   /// The tier the new session runs on: the bar's pick, capped at Thorough
-  /// where the phased tiers can't run (another harness).
+  /// for the scripted demo (it has no phase flow).
   HarnessTier _tierFor(CodeProject project) {
     final tier = ref.read(codeSettingsProvider).tier;
-    final everyai = !isDemoPath(project.path) && ref.read(codeHarnessProvider) == CodeHarnessKind.everyai;
-    return tier.everyaiOnly && !everyai ? HarnessTier.thorough : tier;
+    return tier.phased && isDemoPath(project.path) ? HarnessTier.thorough : tier;
   }
 
-  /// Bug fix needs the EveryAI harness on this computer.
-  HarnessMode _harnessModeFor(CodeProject project) {
-    final everyai = !isDemoPath(project.path) && ref.read(codeHarnessProvider) == CodeHarnessKind.everyai;
-    return everyai ? ref.read(codeSettingsProvider).harnessMode : HarnessMode.build;
-  }
+  /// Bug fix isn't in the scripted demo.
+  HarnessMode _harnessModeFor(CodeProject project) =>
+      isDemoPath(project.path) ? HarnessMode.build : ref.read(codeSettingsProvider).harnessMode;
 
   Future<void> _start(CodeProject project, String prompt, List<Attachment> files) async {
     final mode = _modeFor(project.id);
@@ -195,7 +191,7 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
                     trailing: AgentMenu(
                       model: ref.watch(codeAgentProvider).model,
                       effort: ref.watch(codeAgentProvider).effort,
-                      harness: isDemoPath(project.path) ? CodeHarnessKind.demo : ref.watch(codeHarnessProvider),
+                      demo: isDemoPath(project.path),
                       onChanged: ref.read(codeAgentProvider.notifier).chooseModel,
                       tier: ref.watch(codeSettingsProvider.select((s) => s.tier)),
                       onTier: ref.read(codeSettingsProvider.notifier).setTier,
@@ -458,7 +454,7 @@ class _SessionTileState extends ConsumerState<SessionTile> {
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
-    // Open sessions have a live status; the rest come from the agent server.
+    // Open sessions have a live status; the rest come from the harness.
     final status = ref.exists(codeSessionProvider(widget.info.id))
         ? ref.watch(codeSessionProvider(widget.info.id).select((s) => s.status))
         : ref.watch(codeStatusesProvider.select((all) => all[widget.info.id])) ?? SessionStatus.idle;

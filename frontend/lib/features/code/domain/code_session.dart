@@ -32,6 +32,9 @@ enum SessionStatus {
   final String label;
 }
 
+/// The stored harness name of sessions on the EveryAI harness (the only one).
+const everyaiHarnessName = 'everyai';
+
 @immutable
 final class CodeSessionInfo {
   const CodeSessionInfo({
@@ -46,7 +49,7 @@ final class CodeSessionInfo {
     this.branch = '',
     this.worktree,
     this.baseline,
-    this.harness = 'openHands',
+    this.harness = everyaiHarnessName,
     this.mainAgent = '',
     this.effort = '',
     this.holdClientTools = false,
@@ -63,7 +66,7 @@ final class CodeSessionInfo {
   final String projectId;
   final String title;
 
-  /// The agent server's conversation id.
+  /// The harness's conversation id.
   final String conversationId;
   final String model;
   final AgentMode mode;
@@ -81,9 +84,12 @@ final class CodeSessionInfo {
   /// so Changes can show what it did.
   final GitBaseline? baseline;
 
-  /// The harness it runs on (`CodeHarnessKind` name); sessions from before
-  /// there was a choice ran on OpenHands.
+  /// The harness it ran on: [everyaiHarnessName], or `openHands` for
+  /// sessions from before that harness was removed (they can't reopen).
   final String harness;
+
+  /// Started on a harness the app no longer has.
+  bool get removedHarness => harness != everyaiHarnessName;
 
   /// The library agent running the session ('' for the EveryAI agent).
   final String mainAgent;

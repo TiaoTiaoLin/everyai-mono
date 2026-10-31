@@ -32,7 +32,7 @@ final class KeychainSecretStore implements SecretStore {
 }
 
 /// The user's `sk-eai-` key for the backend's OpenAI-compatible gateway; the
-/// agent-server and the side jobs send their model calls there.
+/// harness and the side jobs send their model calls there.
 ///
 /// Kept in the keychain. Older builds kept it in Preferences
 /// (`code.gateway_key`); the first read moves it. A key the gateway refuses
@@ -66,7 +66,7 @@ final class GatewayKeys {
     return _loading ??= _fresh().whenComplete(() => _loading = null);
   }
 
-  /// A new key after the agent-server reported a refusal, which doesn't say
+  /// A new key after the harness reported a refusal, which doesn't say
   /// which key it sent. A key minted within [recent] is taken as the fix
   /// another session already made.
   Future<String> renewAfterRefusal({Duration recent = const Duration(minutes: 1)}) async {
@@ -137,9 +137,8 @@ final gatewayKeysProvider = Provider<GatewayKeys>((ref) {
   );
 });
 
-/// Whether an agent-server error means the gateway refused the key: LiteLLM
-/// reports it as an `AuthenticationError`, the gateway's own text is
-/// "invalid API key".
+/// Whether a harness error means the gateway refused the key: the gateway's
+/// own text is "invalid API key" (LiteLLM clients say `AuthenticationError`).
 bool isGatewayAuthFailure(String message) =>
     RegExp(r'AuthenticationError|invalid API key|\b401\b', caseSensitive: false).hasMatch(message);
 

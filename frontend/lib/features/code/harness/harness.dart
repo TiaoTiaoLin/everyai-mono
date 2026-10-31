@@ -74,14 +74,14 @@ final class SessionSpec {
   /// Room for thinking plus a whole-file edit in one reply.
   final int maxOutputTokens;
 
-  /// The model reads images: OpenHands passes them on instead of dropping them.
+  /// The model reads images: the harness passes them on instead of dropping them.
   final bool vision;
 
   /// `data:` URLs sent with [initialMessage].
   final List<String> initialImages;
 
-  /// Replaces the agent-server's persona and workflow sections (see
-  /// `agentPersona`); null keeps its defaults.
+  /// The persona at the start of the system prompt (see `agentPersona`);
+  /// null keeps the harness's default.
   final String? persona;
 
   /// Appended to the system prompt; defaults to `workingRules`.
@@ -101,14 +101,13 @@ final class SessionSpec {
   /// and `subagentRules` after the prompt suffix.
   final bool subagent;
 
-  /// The agent-server's `mcp_config`: user-configured MCP servers by name
+  /// The session's `mcp_config`: user-configured MCP servers by name
   /// (see `StoredMcpServers.mcpConfigFor`). Empty: no MCP tools.
   final Map<String, Object?> mcpConfig;
 
-  /// Agent Skills as OpenHands `Skill`s (see `openHandsSkill`): listed in the
-  /// prompt and loaded with the server's `invoke_skill` tool. The app picks
-  /// them (enabled, and trusted for project skills); the server's own
-  /// `load_*_skills` scans stay off.
+  /// Agent Skills in OpenHands' `Skill` shape (see `openHandsSkill`), listed
+  /// in the prompt. The app picks them (enabled, and trusted for project
+  /// skills).
   final List<Map<String, Object?>> skills;
 
   /// The tools the agent keeps (`terminal`, `file_editor`, `task_tracker`,
@@ -275,7 +274,7 @@ abstract interface class HasBackgroundShells {
   Future<void> stopBackground(String id);
 }
 
-/// Starts and reopens sessions on some agent server.
+/// Starts and reopens agent sessions.
 abstract interface class Harness {
   Future<HarnessSession> start(SessionSpec spec);
   Future<HarnessSession> attach(String conversationId);
@@ -283,4 +282,16 @@ abstract interface class Harness {
   /// The execution status of each of [conversationIds] the server knows,
   /// without opening their event streams (for session lists).
   Future<Map<String, ExecutionStatus>> statuses(List<String> conversationIds);
+}
+
+/// A harness call that failed: the message is shown as is.
+final class HarnessError implements Exception {
+  const HarnessError(this.message, {this.status});
+  final String message;
+
+  /// The HTTP status, for server errors.
+  final int? status;
+
+  @override
+  String toString() => message;
 }

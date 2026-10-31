@@ -92,7 +92,6 @@ ProcessTable _procTable() {
           command: cmd.isEmpty ? field('Name') : cmd,
           envVisible: environ != null,
           tag: environ == null ? null : ProcessTable.tagInEnviron(environ),
-          serverEnv: environ != null && ProcessTable.serverInEnviron(environ),
         ),
       );
     } on Object {

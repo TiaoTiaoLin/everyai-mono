@@ -17,7 +17,6 @@ import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/fake_harness.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/code/ui/code_composer.dart';
 import 'package:every_ai/features/code/ui/transcript/aside_card.dart';
 import 'package:every_ai/features/models/domain/model_catalog.dart';
@@ -29,8 +28,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
 class _FixedCatalog extends CatalogController {
@@ -149,39 +146,6 @@ void main() {
       expect(record, contains('step 49'));
       expect(record, isNot(contains('step 0 ')));
     });
-  });
-
-  test('switch_llm posts the new llm to the conversation', () async {
-    Map<String, Object?>? switched;
-    String? path;
-    final client = MockClient((req) async {
-      if (req.method == 'POST' && req.url.path.endsWith('/switch_llm')) {
-        path = req.url.path;
-        switched = jsonDecode(req.body) as Map<String, Object?>;
-        return http.Response('{"success":true}', 200);
-      }
-      return http.Response(jsonEncode({'id': 'c1', 'execution_status': 'idle'}), 200);
-    });
-    final harness = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:9/'), sessionApiKey: 'k', client: client);
-    final s = await harness.attach('c1');
-    await s.switchLlm(
-      const SessionSpec(
-        workingDir: '/tmp/x',
-        model: 'anthropic/claude-opus-5.5',
-        mode: AgentMode.ask,
-        llmBaseUrl: 'http://localhost/v1',
-        llmApiKey: 'sk',
-        sessionTag: 's1',
-        effort: 'high',
-      ),
-    );
-    unawaited(s.close());
-    expect(path, '/api/conversations/c1/switch_llm');
-    final llm = switched!['llm']! as Map<String, Object?>;
-    expect(llm['model'], 'openai/anthropic/claude-opus-5.5');
-    expect(llm['reasoning_effort'], 'high');
-    expect(llm['usage_id'], 's1');
-    expect((llm['extra_headers']! as Map)['X-EveryAI-Effort'], 'high');
   });
 
   group('controller', () {

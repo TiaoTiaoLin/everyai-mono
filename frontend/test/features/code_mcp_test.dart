@@ -7,8 +7,6 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/mcp_servers.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/harness/events.dart';
-import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/code/mcp_providers.dart' show CodeMcpServers, codeMcpServersProvider;
 import 'package:every_ai/features/code/ui/mcp_settings_screen.dart';
 import 'package:every_ai/features/code/ui/transcript/approval_card.dart' show mcpArgumentsPreview;
@@ -16,8 +14,6 @@ import 'package:material_ui/material_ui.dart' as m;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 
 ActionCall _call(Map<String, Object?> action, {String tool = 'terminal'}) =>
     HarnessEvent.decode({'kind': 'ActionEvent', 'id': 'a', 'tool_name': tool, 'action': action}) as ActionCall;
@@ -248,35 +244,6 @@ void main() {
       expect(mcpArgumentsPreview(_mcp('t', {'url': 'x'})), '{\n  "url": "x"\n}');
       expect(mcpArgumentsPreview(_mcp('t')), '{}');
     });
-  });
-
-  test('the harness sends mcp_config on conversation create, and only when set', () async {
-    final bodies = <Map<String, Object?>>[];
-    final client = MockClient((req) async {
-      bodies.add(jsonDecode(req.body) as Map<String, Object?>);
-      return http.Response('nope', 500);
-    });
-    final harness = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:1/'), sessionApiKey: 'k', client: client);
-    SessionSpec spec(Map<String, Object?> mcp) => SessionSpec(
-      workingDir: '/w',
-      model: 'm',
-      mode: AgentMode.ask,
-      llmBaseUrl: 'http://x/v1',
-      llmApiKey: 'sk',
-      sessionTag: 's',
-      mcpConfig: mcp,
-    );
-    final config = StoredMcpServers(global: [_npx.approve()]).mcpConfigFor(null);
-    await expectLater(harness.start(spec(config)), throwsA(isA<HarnessError>()));
-    await expectLater(harness.start(spec(const {})), throwsA(isA<HarnessError>()));
-    final agent = bodies[0]['agent']! as Map<String, Object?>;
-    expect(agent['mcp_config'], {
-      'charts': {
-        'command': 'npx',
-        'args': ['-y', '@antv/mcp-server-chart'],
-      },
-    });
-    expect((bodies[1]['agent']! as Map<String, Object?>).containsKey('mcp_config'), isFalse);
   });
 
   group('stored list', () {

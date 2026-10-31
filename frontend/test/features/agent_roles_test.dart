@@ -65,9 +65,9 @@ void main() {
 
   test('a forking session is offered other models for its children; others are not', () {
     final models = {'google/gemini-argon': 'Gemini Argon'};
-    final suffix = agentPromptSuffix(AgentSettings.defaults, everyai: true, forks: true, models: models);
+    final suffix = agentPromptSuffix(AgentSettings.defaults, forks: true, models: models);
     expect(suffix, allOf(contains('<MODELS>'), contains('google/gemini-argon: Gemini Argon')));
-    expect(agentPromptSuffix(AgentSettings.defaults, everyai: true, models: models), isNot(contains('<MODELS>')));
+    expect(agentPromptSuffix(AgentSettings.defaults, models: models), isNot(contains('<MODELS>')));
     final props = (forkingTaskSpec()['parameters']! as Map)['properties']! as Map;
     expect(props.containsKey('model'), isTrue);
   });

@@ -6,12 +6,8 @@ import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/compaction.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
-import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/code/harness/summarizer.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 
 var _ids = 0;
 
@@ -217,34 +213,6 @@ void main() {
       expect(seen['session'], 'session-1');
       expect((seen['body']! as Map)['model'], compactionModel);
     });
-  });
-
-  test('a continuation conversation starts without running the agent', () async {
-    Map<String, Object?>? created;
-    final client = MockClient((req) async {
-      if (req.method == 'POST' && req.url.path == '/api/conversations') {
-        created = jsonDecode(req.body) as Map<String, Object?>;
-        return http.Response(jsonEncode({'id': 'conv-2'}), 200);
-      }
-      return http.Response('{"detail":"Not Found"}', 404);
-    });
-    final h = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:1/'), sessionApiKey: 'k', client: client);
-    await expectLater(
-      h.start(
-        const SessionSpec(
-          workingDir: '/w',
-          model: 'm',
-          mode: AgentMode.ask,
-          llmBaseUrl: 'http://x/v1',
-          llmApiKey: 'k',
-          sessionTag: 's',
-          initialMessage: 'summary',
-          runInitial: false,
-        ),
-      ),
-      throwsA(isA<HarnessError>()),
-    );
-    expect((created!['initial_message']! as Map)['run'], false);
   });
 
   test('session info keeps the conversations it was compacted from', () {

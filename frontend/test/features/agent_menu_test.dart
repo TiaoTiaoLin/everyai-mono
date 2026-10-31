@@ -105,7 +105,6 @@ void main() {
             groups: agentMenuGroups(_catalog),
             model: 'anthropic/claude-opus-5.5',
             effort: 'medium',
-            harness: CodeHarnessKind.openHands,
             onChanged: (model, effort) => picks.add('$model@$effort'),
             close: () {},
           ),
@@ -150,7 +149,6 @@ void main() {
             groups: agentMenuGroups(_catalog),
             model: 'anthropic/claude-haiku-5.5',
             effort: '',
-            harness: CodeHarnessKind.openHands,
             reasons: false,
             onChanged: (model, effort) => picks.add('$model@$effort'),
             close: () {},
@@ -192,19 +190,19 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('the tier bar picks a tier; Max and Ultra need EveryAI, Ultra the Max plan', (tester) async {
+  testWidgets('the tier bar picks a tier; Max and Ultra aren\'t in the demo, Ultra needs the Max plan', (tester) async {
     final picks = <HarnessTier>[];
-    Future<void> show(CodeHarnessKind harness, {bool ultraAllowed = false}) => tester.pumpWidget(
+    Future<void> show({bool demo = false, bool ultraAllowed = false}) => tester.pumpWidget(
       _host(
         SizedBox(
           width: 320,
           height: 700,
           child: AgentMenuPanel(
-            key: ValueKey('$harness$ultraAllowed'),
+            key: ValueKey('$demo$ultraAllowed'),
             groups: agentMenuGroups(_catalog),
             model: 'anthropic/claude-opus-5.5',
             effort: 'medium',
-            harness: harness,
+            demo: demo,
             onChanged: (_, _) {},
             close: () {},
             onTier: picks.add,
@@ -213,37 +211,37 @@ void main() {
         ),
       ),
     );
-    await show(CodeHarnessKind.openHands);
+    await show(demo: true);
     expect(find.text('Harness mode'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('agent-menu.tier.max')));
     await tester.tap(find.byKey(const ValueKey('agent-menu.tier.thorough')));
     await tester.pump();
     expect(picks, [HarnessTier.thorough]);
 
-    await show(CodeHarnessKind.everyai);
+    await show();
     await tester.tap(find.byKey(const ValueKey('agent-menu.tier.ultra')));
     await tester.tap(find.byKey(const ValueKey('agent-menu.tier.max')));
     await tester.pump();
     expect(picks, [HarnessTier.thorough, HarnessTier.max]);
 
-    await show(CodeHarnessKind.everyai, ultraAllowed: true);
+    await show(ultraAllowed: true);
     await tester.tap(find.byKey(const ValueKey('agent-menu.tier.ultra')));
     expect(picks.last, HarnessTier.ultra);
   });
 
-  testWidgets('the harness mode switch picks Bug fix only on the EveryAI harness', (tester) async {
+  testWidgets('the harness mode switch picks Bug fix, except in the demo', (tester) async {
     final picks = <HarnessMode>[];
-    Future<void> show(CodeHarnessKind harness) => tester.pumpWidget(
+    Future<void> show({bool demo = false}) => tester.pumpWidget(
       _host(
         SizedBox(
           width: 320,
           height: 700,
           child: AgentMenuPanel(
-            key: ValueKey(harness),
+            key: ValueKey(demo),
             groups: agentMenuGroups(_catalog),
             model: 'anthropic/claude-opus-5.5',
             effort: 'medium',
-            harness: harness,
+            demo: demo,
             onChanged: (_, _) {},
             close: () {},
             onHarnessMode: picks.add,
@@ -251,11 +249,11 @@ void main() {
         ),
       ),
     );
-    await show(CodeHarnessKind.openHands);
+    await show(demo: true);
     await tester.tap(find.byKey(const ValueKey('agent-menu.harness-mode.bugFix')));
     await tester.pump();
     expect(picks, isEmpty);
-    await show(CodeHarnessKind.everyai);
+    await show();
     await tester.tap(find.byKey(const ValueKey('agent-menu.harness-mode.bugFix')));
     await tester.pump();
     expect(picks, [HarnessMode.bugFix]);

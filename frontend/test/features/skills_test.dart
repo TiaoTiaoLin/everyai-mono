@@ -6,8 +6,6 @@ import 'package:archive/archive.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/transcript.dart' show stepTitle;
 import 'package:every_ai/features/code/harness/events.dart';
-import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/skills/data/skill_import.dart';
 import 'package:every_ai/features/skills/data/skill_store_io.dart' as store;
 import 'package:every_ai/features/skills/domain/skill_format.dart';
@@ -16,8 +14,6 @@ import 'package:every_ai/features/slash/skills/skill_draft.dart';
 import 'package:every_ai/features/slash/skills/skill_md.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 
 const _valid = '''---
 name: make-deck
@@ -275,39 +271,6 @@ void main() {
     expect(AgentMode.isReadOnly(call), isTrue);
     expect(AgentMode.plan.autoApproves(call), isTrue);
     expect(stepTitle(call), 'Loaded the make-deck skill');
-  });
-
-  test('the harness sends skills in agent_context only when there are some', () async {
-    final bodies = <Map<String, Object?>>[];
-    final client = MockClient((req) async {
-      bodies.add(jsonDecode(req.body) as Map<String, Object?>);
-      return http.Response('nope', 500);
-    });
-    final harness = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:1/'), sessionApiKey: 'k', client: client);
-    SessionSpec spec(List<Map<String, Object?>> skills) => SessionSpec(
-      workingDir: '/w',
-      model: 'm',
-      mode: AgentMode.ask,
-      llmBaseUrl: 'http://x/v1',
-      llmApiKey: 'sk',
-      sessionTag: 's',
-      skills: skills,
-    );
-    await expectLater(
-      harness.start(
-        spec([
-          {'name': 'a', 'content': 'c'},
-        ]),
-      ),
-      throwsA(isA<HarnessError>()),
-    );
-    await expectLater(harness.start(spec(const [])), throwsA(isA<HarnessError>()));
-    Map<String, Object?> ctx(int i) => (bodies[i]['agent']! as Map)['agent_context']! as Map<String, Object?>;
-    expect(ctx(0)['skills'], [
-      {'name': 'a', 'content': 'c'},
-    ]);
-    expect(ctx(1).containsKey('skills'), isFalse);
-    expect(ctx(1)['system_message_suffix'], isNotNull);
   });
 
   group('import', () {

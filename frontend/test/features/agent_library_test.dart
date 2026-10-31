@@ -10,15 +10,11 @@ import 'package:every_ai/features/agents/data/agent_store_io.dart' as io;
 import 'package:every_ai/features/agents/ui/agents_settings_screen.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/subagents.dart';
-import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/code/settings/agent_prompt.dart';
 import 'package:every_ai/features/code/settings/agent_settings.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/testing.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
 final class _FixedLibrary extends AgentLibrary {
@@ -211,46 +207,15 @@ void main() {
       },
     );
     final suffix = agentPromptSuffix(settings, agents: [(name: 'reviewer', description: 'Reviews diffs')]);
-    expect(suffix, contains('<AGENT_TYPES>'));
+    expect(suffix, contains('<ROLES>'));
     expect(suffix, contains('- reviewer: Reviews diffs\n- linter: lints\n'));
     expect(suffix, isNot(contains('- reviewer: old')));
-    expect(agentPromptSuffix(AgentSettings.defaults), isNot(contains('AGENT_TYPES')));
+    expect(agentPromptSuffix(AgentSettings.defaults), isNot(contains('ROLES')));
   });
 
   test('run_subagent names the agent parameter', () {
     final params = (taskSpec['parameters']! as Map)['properties'] as Map;
     expect((params['agent'] as Map)['description'], contains('AGENT_TYPES'));
-  });
-
-  test('the harness drops tools the agent leaves out and adds its instructions', () async {
-    final bodies = <Map<String, Object?>>[];
-    final client = MockClient((req) async {
-      bodies.add(jsonDecode(req.body) as Map<String, Object?>);
-      return http.Response('nope', 500);
-    });
-    final harness = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:1/'), sessionApiKey: 'k', client: client);
-    SessionSpec spec({List<String>? tools, String? role}) => SessionSpec(
-      workingDir: '/w',
-      model: 'm',
-      mode: AgentMode.ask,
-      llmBaseUrl: 'http://x/v1',
-      llmApiKey: 'sk',
-      sessionTag: 's',
-      subagent: true,
-      mcpConfig: const {'srv': <String, Object?>{}},
-      tools: tools,
-      rolePrompt: role,
-    );
-    await expectLater(harness.start(spec(tools: ['terminal'], role: '<AGENT name="x">hi</AGENT>')), throwsA(anything));
-    await expectLater(harness.start(spec()), throwsA(anything));
-    Map<String, Object?> agent(int i) => bodies[i]['agent']! as Map<String, Object?>;
-    List<Object?> names(int i) => [for (final t in agent(i)['tools']! as List) (t as Map)['name']];
-    expect(names(0), ['terminal']);
-    expect(agent(0).containsKey('mcp_config'), isFalse);
-    final suffix = (agent(0)['agent_context']! as Map)['system_message_suffix'] as String;
-    expect(suffix, endsWith('$subagentRules\n\n<AGENT name="x">hi</AGENT>'));
-    expect(names(1), ['terminal', 'file_editor', 'task_tracker']);
-    expect(agent(1).containsKey('mcp_config'), isTrue);
   });
 
   group('files', () {

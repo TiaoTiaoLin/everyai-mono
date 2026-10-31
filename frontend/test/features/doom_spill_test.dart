@@ -112,8 +112,8 @@ void main() {
       expect(Spill.fileName('a/b:c'), 'a_b_c.txt');
     });
 
-    test('the agent is told about the spill directory', () {
-      expect(workingRules, contains('.everyai/spill/'));
+    test('the agent is told long output is saved to a file', () {
+      expect(workingRules, contains('saved to a file automatically'));
     });
   });
 }

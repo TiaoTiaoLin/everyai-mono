@@ -16,7 +16,6 @@ import '../../questions/ui/question_card.dart';
 import '../../usage/usage_totals.dart';
 import '../code_providers.dart';
 import '../morning_providers.dart';
-import '../domain/agent_menu.dart' show CodeHarnessKind;
 import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
 import '../domain/permissions.dart';
@@ -76,7 +75,7 @@ class CodeSessionScreen extends ConsumerWidget {
         t.items.lastOrNull is AgentText &&
         t.items.whereType<UserTurn>().isNotEmpty;
 
-    // The live Harness → mode → tier → Model → Effort menu, in the composer.
+    // The live mode → tier → Model → Effort menu, in the composer.
     Widget agentMenu() => AgentMenu(
       model: info.model,
       effort: info.effort,
@@ -84,7 +83,7 @@ class CodeSessionScreen extends ConsumerWidget {
       harnessMode: info.harnessMode,
       onHarnessMode: controller.setHarnessMode,
       onTier: controller.setTier,
-      harness: isDemoPath(info.workingDir) ? CodeHarnessKind.demo : CodeHarnessKind.parse(info.harness),
+      demo: isDemoPath(info.workingDir),
       onChanged: (model, effort) => switchCodeAgent(
         context,
         ref,

@@ -19,7 +19,7 @@ void main() {
 
   test('the bar offers four tiers; ultra efficient stays hidden', () {
     expect(HarnessTier.offered, [HarnessTier.efficient, HarnessTier.thorough, HarnessTier.max, HarnessTier.ultra]);
-    expect(HarnessTier.max.phased && HarnessTier.ultra.everyaiOnly, isTrue);
+    expect(HarnessTier.max.phased && HarnessTier.ultra.phased, isTrue);
     expect(HarnessTier.thorough.phased, isFalse);
   });
 
@@ -66,12 +66,12 @@ void main() {
   });
 
   test('Bug fix mode adds its rules, and the mode is stored as the default for new sessions', () {
-    final suffix = agentPromptSuffix(AgentSettings.defaults, everyai: true, harnessMode: HarnessMode.bugFix);
+    final suffix = agentPromptSuffix(AgentSettings.defaults, harnessMode: HarnessMode.bugFix);
     expect(
       suffix,
       allOf(contains('<HARNESS_MODE name="bugFix">'), contains("don't guess"), contains('ask_user_question')),
     );
-    expect(agentPromptSuffix(AgentSettings.defaults, everyai: true), isNot(contains('HARNESS_MODE')));
+    expect(agentPromptSuffix(AgentSettings.defaults), isNot(contains('HARNESS_MODE')));
     final back = StoredCodeSettings.fromJson(const StoredCodeSettings().withHarnessMode(HarnessMode.bugFix).toJson());
     expect(back.harnessMode, HarnessMode.bugFix);
   });

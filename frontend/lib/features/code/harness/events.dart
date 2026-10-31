@@ -2,9 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-/// Agent-server events (OpenHands v1.59 `kind`s), decoded tolerantly: fields
-/// the app doesn't use are kept in [HarnessEvent.raw], unknown kinds become
-/// [UnknownEvent]. The protocol reference is in AGENTS.md.
+/// Harness events, decoded tolerantly: fields the app doesn't use are kept in
+/// [HarnessEvent.raw], unknown kinds become [UnknownEvent]. The EveryAI
+/// harness emits the `kind`s of OpenHands' agent-server (v1.59, see
+/// AGENTS.md), which the app first ran on.
 @immutable
 sealed class HarnessEvent {
   const HarnessEvent({required this.id, required this.raw});
@@ -302,8 +303,8 @@ final class ConnectionChange extends HarnessEvent {
   const ConnectionChange({required this.connected, this.restarted = false}) : super(id: '', raw: const {});
   final bool connected;
 
-  /// Connected to a different server than before (the sidecar restarted
-  /// after a crash): a run that was going on was cut off.
+  /// Connected to a different server than before: a run that was going on
+  /// was cut off. The EveryAI harness never sets it.
   final bool restarted;
 }
 

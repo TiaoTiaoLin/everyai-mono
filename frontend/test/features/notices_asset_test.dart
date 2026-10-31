@@ -7,6 +7,6 @@ void main() {
     final root = File('../THIRD_PARTY_NOTICES.md').readAsStringSync();
     final bundled = File('assets/legal/THIRD_PARTY_NOTICES.md').readAsStringSync();
     expect(bundled, root, reason: 'Copy THIRD_PARTY_NOTICES.md to frontend/assets/legal/ after editing it.');
-    expect(bundled, contains('OpenHands agent-server'));
+    expect(bundled, contains('Deno'));
   });
 }

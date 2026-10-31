@@ -4,34 +4,6 @@ import '../../models/domain/model_catalog.dart';
 import '../agent_models.dart';
 import 'session_commands.dart';
 
-/// What runs the agent loop, apart from the model it talks to. Only the
-/// bundled OpenHands agent-server works today; the rest show as "later".
-enum CodeHarnessKind {
-  everyai('EveryAI', 'Our own agent loop, in the app', available: true),
-  openHands('OpenHands', 'The bundled agent server', available: true),
-  demo('Scripted demo', 'A canned session; it ignores the model', available: true, listed: false),
-  claudeCode('Claude Code', 'Coming later'),
-  codex('Codex CLI', 'Coming later'),
-  opencode('opencode', 'Coming later');
-
-  const CodeHarnessKind(this.label, this.blurb, {this.available = false, this.listed = true});
-
-  final String label;
-  final String blurb;
-  final bool available;
-
-  /// Shown in the menu even when not current.
-  final bool listed;
-
-  /// The harnesses the menu lists: every listed one, plus [current].
-  static CodeHarnessKind parse(String? name) => values.asNameMap()[name] ?? CodeHarnessKind.openHands;
-
-  static List<CodeHarnessKind> menuFor(CodeHarnessKind current) => [
-    for (final h in values)
-      if (h.listed || h == current) h,
-  ];
-}
-
 /// One model in the agent menu: its curated tiers are hints, not the list.
 @immutable
 final class AgentMenuModel {

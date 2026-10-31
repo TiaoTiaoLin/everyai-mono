@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:every_ai/core/db/app_database.dart';
@@ -13,7 +12,6 @@ import 'package:every_ai/features/code/domain/rewind.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/fake_harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -116,80 +114,6 @@ void main() {
       );
       expect(const RewindOutcome.busy().label, contains('stop it'));
       expect(rewindPrompt('this message', files: false), contains('The files stay as they are.'));
-    });
-  });
-
-  group('OpenHands session', () {
-    late HttpServer server;
-    final posts = <String, Object?>{};
-    final sockets = <WebSocket>[];
-    var leaf = 'm4';
-
-    setUp(() async {
-      posts.clear();
-      leaf = 'm4';
-      server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((req) async {
-        final path = req.uri.path;
-        if (path == '/sockets/events/c1' && WebSocketTransformer.isUpgradeRequest(req)) {
-          final ws = await WebSocketTransformer.upgrade(req);
-          sockets.add(ws);
-          ws.listen((_) {});
-          // resend_mode=all: every branch, oldest first.
-          for (final e in _branched) {
-            ws.add(jsonEncode(e));
-          }
-          return;
-        }
-        if (req.method == 'POST') posts[path] = jsonDecode(await utf8.decodeStream(req));
-        req.response.headers.contentType = ContentType.json;
-        if (path == '/api/conversations/c1') {
-          req.response.write(jsonEncode({'id': 'c1', 'execution_status': 'idle', 'leaf_event_id': leaf}));
-        } else if (path == '/api/conversations/c1/events/search') {
-          final second = req.uri.queryParameters['page_id'] == 'p2';
-          req.response.write(
-            jsonEncode({
-              'items': second ? _branched.sublist(5) : _branched.sublist(0, 5),
-              'next_page_id': second ? null : 'p2',
-            }),
-          );
-        } else {
-          req.response.write(jsonEncode({'id': 'c1', 'leaf_event_id': 'm1'}));
-        }
-        await req.response.close();
-      });
-    });
-
-    tearDown(() async {
-      for (final ws in sockets) {
-        await ws.close();
-      }
-      await server.close(force: true);
-    });
-
-    test('replays only the active branch, and rewindTo navigates and trims it', () async {
-      final harness = OpenHandsHarness(baseUrl: Uri.parse('http://127.0.0.1:${server.port}/'), sessionApiKey: 'k');
-      final session = await harness.attach('c1');
-      final seen = <String>[];
-      final sub = session.events.listen((e) {
-        if (e.id.isNotEmpty) seen.add(e.id);
-      });
-      await _until(() => seen.length, (n) => n >= 5);
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      expect(seen, ['sys', 'm1', 's1', 'm4', 's4']);
-
-      await session.rewindTo('m1');
-      expect(posts['/api/conversations/c1/navigate'], {'event_id': 'm1'});
-      // A new listener gets the trimmed history.
-      final replay = <String>[];
-      final sub2 = session.events.listen((e) {
-        if (e.id.isNotEmpty) replay.add(e.id);
-      });
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      expect(replay, ['sys', 'm1', 's1']);
-      await sub.cancel();
-      await sub2.cancel();
-      await session.close();
     });
   });
 

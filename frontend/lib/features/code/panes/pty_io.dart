@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_pty/flutter_pty.dart';
 
-import '../harness/session_processes.dart' show serverEnvVar, sessionEnvVar;
+import '../harness/session_processes.dart' show sessionEnvVar;
 import 'pty.dart';
 
 bool get shellSupported => Platform.isMacOS || Platform.isLinux || Platform.isWindows;
@@ -18,8 +18,7 @@ ShellPty? startShell({
   final (exe, args) = _shell();
   final environment = {...Platform.environment, ...env}
     // Not one of the agent's terminals: Stop must leave these processes alone.
-    ..remove(sessionEnvVar)
-    ..remove(serverEnvVar);
+    ..remove(sessionEnvVar);
   if (!Platform.isWindows) environment['TERM'] = 'xterm-256color';
   return _Pty(
     Pty.start(

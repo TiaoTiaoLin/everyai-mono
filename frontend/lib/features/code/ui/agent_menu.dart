@@ -26,7 +26,7 @@ class AgentMenu extends ConsumerWidget {
     required this.model,
     required this.effort,
     required this.onChanged,
-    this.harness = CodeHarnessKind.openHands,
+    this.demo = false,
     this.bordered = false,
     this.tier = HarnessTier.efficient,
     this.onTier,
@@ -42,7 +42,9 @@ class AgentMenu extends ConsumerWidget {
   final String model;
   final String effort;
   final void Function(String model, String effort) onChanged;
-  final CodeHarnessKind harness;
+
+  /// The scripted demo: no effort, Bug fix or phased tiers.
+  final bool demo;
   final HarnessTier tier;
 
   /// Picks the tier; null hides the bar.
@@ -79,7 +81,7 @@ class AgentMenu extends ConsumerWidget {
         groups: groups,
         model: model,
         effort: effort,
-        harness: harness,
+        demo: demo,
         reasons: specs[ModelId(model)]?.reasoning ?? true,
         onChanged: onChanged,
         close: close,
@@ -134,7 +136,7 @@ class AgentMenuPanel extends StatefulWidget {
     required this.groups,
     required this.model,
     required this.effort,
-    required this.harness,
+    this.demo = false,
     required this.onChanged,
     required this.close,
     this.reasons = true,
@@ -164,7 +166,7 @@ class AgentMenuPanel extends StatefulWidget {
   final List<(ModelProvider, List<AgentMenuModel>)> groups;
   final String model;
   final String effort;
-  final CodeHarnessKind harness;
+  final bool demo;
 
   /// Whether the current model takes an effort at all.
   final bool reasons;
@@ -196,8 +198,8 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
   }
 
   /// Why [t] can't be picked, or null.
-  String? _blocked(HarnessTier t) => t.everyaiOnly && widget.harness != CodeHarnessKind.everyai
-      ? 'EveryAI harness only'
+  String? _blocked(HarnessTier t) => t.phased && widget.demo
+      ? 'Not in the demo'
       : t == HarnessTier.ultra && !widget.ultraAllowed
       ? 'Max plan or your own key'
       : null;
@@ -229,15 +231,15 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
           title: 'Harness mode',
           subtitle: _mode == HarnessMode.bugFix
               ? 'Reproduce, triage, research, plan, fix, verify'
-              : widget.harness == CodeHarnessKind.everyai
-              ? 'Build things, or switch to fix a bug, issue or PR'
-              : 'Bug fix needs the EveryAI harness',
+              : widget.demo
+              ? 'Bug fix isn\'t in the demo'
+              : 'Build things, or switch to fix a bug, issue or PR',
           trailing: _ModeSwitch(
             mode: _mode,
             onPick: widget.onHarnessMode == null
                 ? null
                 : (m) {
-                    if (m == HarnessMode.bugFix && widget.harness != CodeHarnessKind.everyai) return;
+                    if (m == HarnessMode.bugFix && widget.demo) return;
                     setState(() => _mode = m);
                     widget.onHarnessMode!(m);
                   },
@@ -267,7 +269,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
           title: 'Effort',
           subtitle: widget.reasons ? effortLabel(_effort) : 'Not used by this model',
           trailing: more,
-          onTap: widget.harness == CodeHarnessKind.demo ? null : () => setState(() => _page = _Page.effort),
+          onTap: widget.demo ? null : () => setState(() => _page = _Page.effort),
         ),
         if (widget.onBudget != null)
           PopoverRow(

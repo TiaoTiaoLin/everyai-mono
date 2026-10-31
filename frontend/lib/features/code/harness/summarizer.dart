@@ -6,7 +6,7 @@ import '../../models/domain/model_catalog.dart' show ModelId;
 import '../../settings/domain/byok_providers.dart' show ModelBilling;
 
 import '../domain/compaction.dart';
-import 'openhands_harness.dart' show HarnessError;
+import 'harness.dart' show HarnessError;
 
 /// Writes a summary from chat messages (OpenAI format); returns the reply text.
 typedef Summarizer = Future<String> Function(List<Map<String, Object?>> messages);

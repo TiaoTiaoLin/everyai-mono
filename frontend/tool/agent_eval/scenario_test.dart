@@ -1,16 +1,16 @@
-// Runs one live scenario against a real agent-server and the backend gateway.
+// Runs one live scenario on the EveryAI harness through the backend gateway.
 // Not part of `flutter test`: run it explicitly with the environment set.
 //
-//   AGENT_SERVER_URL=http://127.0.0.1:18731 AGENT_SERVER_KEY=… GATEWAY_KEY=sk-eai-… \
+//   GATEWAY_KEY=sk-eai-… \
 //   EVAL_DIR=/path/to/repo EVAL_MODE=plan EVAL_MODEL=anthropic/claude-haiku-5.5 \
-//   EVAL_PROMPT='…' [EVAL_EFFORT=medium EVAL_MAX_USD=5 EVAL_TAG=… EVAL_MINUTES=10 EVAL_HELD=false] \
+//   EVAL_PROMPT='…' [EVAL_EFFORT=medium EVAL_MAX_USD=5 EVAL_TAG=… EVAL_MINUTES=10] \
 //   flutter test tool/agent_eval/scenario_test.dart
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/harness/everyai/everyai_harness_io.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
 import 'package:every_ai/features/code/settings/settings.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -36,8 +36,9 @@ void main() {
       }
     }
 
+    final data = await Directory.systemTemp.createTemp('everyai-scenario');
     final run = EvalRun(
-      OpenHandsHarness(baseUrl: Uri.parse('${env['AGENT_SERVER_URL']}/'), sessionApiKey: env['AGENT_SERVER_KEY']!),
+      EveryAIHarness(dataDir: () async => data.path, gatewayKey: () async => env['GATEWAY_KEY']!),
       SessionSpec(
         workingDir: env['EVAL_DIR']!,
         model: env['EVAL_MODEL'] ?? 'anthropic/claude-haiku-5.5',
@@ -50,7 +51,7 @@ void main() {
         persona: prompt.persona,
         promptSuffix: prompt.suffix,
         effort: env['EVAL_EFFORT'],
-        holdClientTools: env['EVAL_HELD'] != 'false',
+        holdClientTools: true,
       ),
       spent: spent,
       maxUsd: double.tryParse(env['EVAL_MAX_USD'] ?? ''),

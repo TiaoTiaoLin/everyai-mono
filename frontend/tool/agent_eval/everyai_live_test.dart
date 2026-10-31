@@ -26,7 +26,7 @@ void main() {
       final api = _env['API_BASE_URL'] ?? 'http://localhost:8080';
       final data = await Directory.systemTemp.createTemp('everyai-live');
       final harness = EveryAIHarness(dataDir: () async => data.path, gatewayKey: () async => _env['GATEWAY_KEY']!);
-      final prompt = await agentPromptFor(dir, everyai: true);
+      final prompt = await agentPromptFor(dir);
       final session = await harness.start(
         SessionSpec(
           workingDir: dir,

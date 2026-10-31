@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs backend-exp and the Flutter app together.
 #
-#   scripts/dev.sh                 macOS app (+ the OpenHands agent-server for Code)
+#   scripts/dev.sh                 macOS app (+ Deno for Code's run_script)
 #   scripts/dev.sh web             Chrome on http://localhost:5173
 #   scripts/dev.sh ios-sim         iOS Simulator (boots one if none is running)
 #   scripts/dev.sh ios             the first connected iPhone (backend on the LAN)
@@ -148,8 +148,8 @@ base["API_BASE_URL"] = api
 json.dump(base, open(dst, "w"), indent=2)
 PY
 
-# An earlier run on this device left suspended (Ctrl-Z) keeps its build lock and
-# agent-server; resume-and-kill it. A live run in another terminal is left alone.
+# An earlier run on this device left suspended (Ctrl-Z) keeps its build lock;
+# resume-and-kill it. A live run in another terminal is left alone.
 for pid in $(pgrep -f "flutter_tools.snapshot run -d $DEVICE " 2>/dev/null || true); do
   if [[ "$(ps -o stat= -p "$pid" 2>/dev/null)" == T* ]]; then
     say "Stopping a suspended flutter run on $DEVICE (pid $pid)"
@@ -163,9 +163,6 @@ done
 
 ARGS=(-d "$DEVICE" --dart-define-from-file="$DEFINES")
 if [[ "$DEVICE" == macos ]]; then
-  say "Checking the OpenHands agent-server"
-  BIN="$("$FRONTEND/tool/fetch_agent_server.sh" | tail -1)"
-  ARGS+=(--dart-define=AGENT_SERVER_BIN="$BIN")
   say "Checking Deno (run_script)"
   DENO="$("$FRONTEND/tool/fetch_deno.sh" | tail -1)" && ARGS+=(--dart-define=DENO_BIN="$DENO") || say "No Deno: run_script is off"
 fi

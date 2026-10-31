@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'dart:ui' show AppExitResponse;
-
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
@@ -41,13 +39,11 @@ import 'domain/session_commands.dart';
 import 'domain/transcript.dart';
 import 'gateway_key.dart';
 import 'git/git_service.dart';
-import 'domain/agent_menu.dart' show CodeHarnessKind;
 import 'domain/transcript_export.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
 import 'harness/fake_harness.dart';
 import 'harness/harness.dart';
-import 'harness/openhands_harness.dart';
 import 'harness/session_processes.dart';
 import 'harness/summarizer.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
@@ -57,7 +53,6 @@ import 'settings/context_files.dart';
 import 'settings/script_caps.dart';
 import 'settings/settings.dart';
 import 'session_notifications.dart';
-import 'sidecar/sidecar.dart';
 import 'spill/spill.dart';
 import 'uploads/uploads.dart';
 
@@ -75,32 +70,18 @@ bool noLocalFolder(String path) => isDemoPath(path);
 /// The scripted harness for demo projects.
 final harnessProvider = Provider<Harness>((ref) => FakeHarness());
 
-/// The local OpenHands agent-server, started on first use and stopped with
-/// the app.
-final sidecarProvider = Provider<Sidecar>((ref) {
-  final sidecar = createSidecar();
-  // Provider disposal doesn't run on quit; stop the server when the app exits.
-  final lifecycle = AppLifecycleListener(
-    onExitRequested: () async {
-      await sidecar.stop();
-      return AppExitResponse.exit;
-    },
-    onDetach: sidecar.stop,
-  );
-  ref.onDispose(() {
-    lifecycle.dispose();
-    unawaited(sidecar.stop());
-  });
-  return sidecar;
-});
-
 /// The harness a session in [workingDir] runs on: the scripted one for demo
-/// projects, else the sidecar (started, or restarted after a crash, on demand).
-Future<Harness> harnessFor(Ref ref, String workingDir, {String harness = 'openHands'}) async {
+/// projects, else the EveryAI harness. [harness] is the session's stored
+/// harness name; sessions from the removed OpenHands harness can't reopen.
+Future<Harness> harnessFor(Ref ref, String workingDir, {String harness = everyaiHarnessName}) async {
   if (isDemoPath(workingDir)) return ref.read(harnessProvider);
-  if (harness == CodeHarnessKind.everyai.name) return ref.read(everyaiHarnessProvider);
-  return ref.read(_sidecarHarnessProvider);
+  if (harness != everyaiHarnessName) throw const HarnessError(removedHarnessNotice);
+  return ref.read(everyaiHarnessProvider);
 }
+
+/// What a session from the removed OpenHands harness shows instead of its history.
+const removedHarnessNotice =
+    'This session ran on the OpenHands harness, which was removed, so it can\'t be reopened. Start a new session.';
 
 /// The EveryAI harness: the agent loop in the app, sessions kept under App
 /// Support.
@@ -108,79 +89,8 @@ final everyaiHarnessProvider = Provider<Harness>(
   (ref) => everyAIHarness(dataDir: GitService.dataDir, gatewayKey: () => gatewayKey(ref)),
 );
 
-/// The EveryAI harness served to paired devices (see `serveAsAgentServer`):
-/// a session a device starts gets this host's full setup for the project
-/// (persona, rules, context files, skills), which the device can't know.
-final everyaiAgentServerProvider = FutureProvider<({Uri baseUrl, String key})>((ref) {
-  return serveAsAgentServer(
-    ref.read(everyaiHarnessProvider),
-    enrich: (device) async {
-      final full = await ref
-          .read(codeSessionsProvider.notifier)
-          .specFor(
-            sessionId: device.sessionTag,
-            sessionTag: device.sessionTag,
-            projectDir: device.workingDir,
-            workingDir: device.workingDir,
-            model: device.model,
-            mode: device.mode,
-            effort: device.effort,
-            holdClientTools: true,
-            everyai: true,
-            clientTools: device.clientTools,
-          );
-      return SessionSpec(
-        workingDir: device.workingDir,
-        model: device.model,
-        mode: device.mode,
-        llmBaseUrl: device.llmBaseUrl,
-        llmApiKey: device.llmApiKey,
-        sessionTag: device.sessionTag,
-        initialMessage: device.initialMessage,
-        initialImages: device.initialImages,
-        runInitial: device.runInitial,
-        maxInputTokens: device.maxInputTokens ?? full.maxInputTokens,
-        maxOutputTokens: device.maxOutputTokens,
-        vision: device.vision,
-        persona: full.persona,
-        promptSuffix: full.promptSuffix,
-        effort: device.effort,
-        holdClientTools: true,
-        skills: full.skills,
-        clientTools: device.clientTools,
-        autoCompactAt: full.autoCompactAt,
-        script: full.script,
-      );
-    },
-  );
-});
-
-/// The harness new Code sessions start on: EveryAI. Switching harnesses
-/// (OpenHands, and later Claude Code, Codex, opencode) is stubbed out of
-/// the menu; `--dart-define=CODE_HARNESS=openHands` still picks one for
-/// development. Sessions keep the harness they started on.
-final codeHarnessProvider = NotifierProvider<CodeHarnessChoice, CodeHarnessKind>(CodeHarnessChoice.new);
-
-class CodeHarnessChoice extends Notifier<CodeHarnessKind> {
-  @override
-  CodeHarnessKind build() {
-    const forced = String.fromEnvironment('CODE_HARNESS');
-    return forced.isNotEmpty ? CodeHarnessKind.parse(forced) : CodeHarnessKind.everyai;
-  }
-}
-
-/// One harness for the sidecar; it asks the sidecar where it is on every
-/// call, which also restarts a server that died.
-final _sidecarHarnessProvider = Provider<Harness>((ref) {
-  final sidecar = ref.read(sidecarProvider);
-  return OpenHandsHarness.located(() async {
-    final e = await sidecar.endpoint();
-    return (e.baseUrl, e.sessionApiKey);
-  }, restarts: sidecar.restarts);
-});
-
 /// The user's `sk-eai-` key for the backend's OpenAI-compatible gateway; the
-/// agent-server sends its LLM calls there. Kept in the keychain (see [GatewayKeys]).
+/// harness sends its LLM calls there. Kept in the keychain (see [GatewayKeys]).
 Future<String> gatewayKey(Ref ref) => ref.read(gatewayKeysProvider).key();
 
 /// The backend's OpenAI-compatible gateway (`…/v1`), the agent's LLM provider.
@@ -261,14 +171,8 @@ final class CodeProjects extends Notifier<List<CodeProject>> {
   }
 }
 
-/// New sessions answer question cards and plans inside the held tool call,
-/// so the agent keeps its turn (verified live: `tool/agent_eval/held_answers_test.dart`).
-/// Build with `--dart-define=CODE_HELD_ANSWERS=false` to send replies as new
-/// user messages instead.
-const heldAnswers = bool.fromEnvironment('CODE_HELD_ANSWERS', defaultValue: true);
-
 /// Every coding session, newest first (stored in preferences; transcripts
-/// live in the agent server).
+/// live with the harness, under App Support).
 final codeSessionsProvider = NotifierProvider<CodeSessions, List<CodeSessionInfo>>(CodeSessions.new);
 
 final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
@@ -294,13 +198,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     String? effort,
     List<Attachment> files = const [],
     bool isolated = false,
-    CodeHarnessKind? harnessKind,
     HarnessTier? tier,
     HarnessMode? harnessMode,
   }) async {
     final id = const Uuid().v7();
     harnessMode ??= ref.read(codeSettingsProvider).harnessMode;
-    final demo = isDemoPath(project.path);
     final title = titleFor(prompt.isEmpty ? files.first.name : prompt);
     // Sessions work in the project folder itself, in a real shell, unless asked
     // to be isolated (then a worktree on its own branch). A remote host's
@@ -310,10 +212,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     final baseline = local && worktree == null ? await _baselineFor(project.path) : null;
     final workingDir = worktree?.path ?? project.path;
     final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
-    final CodeHarnessKind kind = harnessKind ?? ref.read(codeHarnessProvider);
-    final harness = await harnessFor(ref, project.path, harness: kind.name);
-    // The scripted demo approves client tools like the old path does.
-    final hold = heldAnswers && !demo;
+    final harness = await harnessFor(ref, project.path);
+    // The scripted demo answers client tools with new messages, not inside the call.
+    final hold = !isDemoPath(project.path);
     final live = await harness.start(
       await specFor(
         sessionId: id,
@@ -322,11 +223,10 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         model: model,
         mode: mode,
         effort: effort,
-        holdClientTools: hold || kind == CodeHarnessKind.everyai,
+        holdClientTools: hold,
         initialMessage: modeNote(mode, first.text),
         initialImages: first.images,
         isolated: worktree != null,
-        everyai: kind == CodeHarnessKind.everyai,
         tier: tier ?? ref.read(codeSettingsProvider).tier,
         harnessMode: harnessMode,
       ),
@@ -344,9 +244,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       branch: worktree?.branch ?? baseline?.branch ?? '',
       worktree: worktree,
       baseline: baseline,
-      harness: kind.name,
       effort: effort ?? '',
-      holdClientTools: hold || kind == CodeHarnessKind.everyai,
+      holdClientTools: hold,
       tier: tier ?? ref.read(codeSettingsProvider).tier,
       harnessMode: harnessMode,
     );
@@ -375,7 +274,6 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     String? rolePrompt,
     List<Map<String, Object?>>? clientTools,
     bool isolated = false,
-    bool everyai = false,
     Map<String, String> pathMap = const {},
     HarnessTier? tier,
     HarnessMode? harnessMode,
@@ -385,7 +283,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     // A session's own tier and mode; a new one's come from the caller, else the defaults.
     tier ??= byId(sessionId)?.tier ?? ref.read(codeSettingsProvider).tier;
     harnessMode ??= byId(sessionId)?.harnessMode ?? HarnessMode.build;
-    final bugFix = everyai && harnessMode == HarnessMode.bugFix;
+    final bugFix = harnessMode == HarnessMode.bugFix;
     // The demo and remote hosts have no local folder: the server's default prompt, no project files.
     final local = !noLocalFolder(projectDir);
     final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
@@ -398,14 +296,13 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             projectDir,
             agents: [for (final a in agents) (name: a.name, description: a.oneLine)],
             isolated: isolated,
-            everyai: everyai,
             tier: tier,
-            // Only a main EveryAI session forks (forks are one level deep).
-            forks: everyai && !subagent,
-            models: everyai && !subagent ? _childModels(model) : const {},
-            harnessMode: everyai ? harnessMode : HarnessMode.build,
+            // Only a main session forks (forks are one level deep).
+            forks: !subagent,
+            models: !subagent ? _childModels(model) : const {},
+            harnessMode: harnessMode,
           );
-    // AGENTS.md and friends from the project folder up to the repository root (OpenHands doesn't load them).
+    // AGENTS.md and friends from the project folder up to the repository root.
     final context = !local ? const <ContextFile>[] : await _startContext(workingDir, projectDir);
     // MCP servers come from the app's list (global plus this project's), never from repository files.
     final mcpConfig = !local ? const <String, Object?>{} : ref.read(codeMcpServersProvider).mcpConfigFor(projectId);
@@ -439,8 +336,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       tools: tools,
       rolePrompt: rolePrompt,
       researchSites: researchSites,
-      // Only a main EveryAI session runs the Max or Ultra flow.
-      phaseFlow: subagent || !everyai
+      // Only a main session runs the Max or Ultra flow.
+      phaseFlow: subagent
           ? null
           : bugFix
           ? (tier == HarnessTier.ultra ? 'bugfix-ultra' : 'bugfix')
@@ -449,8 +346,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           : null,
       clientTools: clientTools,
       autoCompactAt: ref.read(codeSettingsProvider).autoCompactPercent / 100,
-      // run_script and the decider: the tier's limits, or the user's level (EveryAI harness only).
-      script: everyai && !demo ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
+      // run_script and the decider: the tier's limits, or the user's level.
+      script: !demo ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
       pathMap: pathMap,
     );
   }
@@ -535,7 +432,6 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         return catalog[ModelId(m)]?.tools ?? false;
       },
     );
-    final everyai = parent.harness == CodeHarnessKind.everyai.name;
     // The orchestrator asked for another model without a role: a fresh
     // general child on it, when the model can call tools.
     final known = ref.read(modelCatalogProvider);
@@ -545,10 +441,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (asked != null) {
       setup = (mode: setup.mode, model: asked, effort: null, tools: null, rolePrompt: null);
     }
-    // On the EveryAI harness a subagent is a fork, starting from the parent's
-    // whole conversation (and its cached prefix), unless its role runs on
-    // another model: then it is a fresh child with the role's instructions.
-    final fork = everyai && (agent == null ? role == null && asked == null : setup.model == parent.model);
+    // A subagent is a fork, starting from the parent's whole conversation
+    // (and its cached prefix), unless its role runs on another model: then it
+    // is a fresh child with the role's instructions. The scripted demo can't
+    // fork; its children start fresh.
+    final fork =
+        !isDemoPath(parent.workingDir) && (agent == null ? role == null && asked == null : setup.model == parent.model);
     // A researcher is sandboxed: the research sites only, no shell, no secrets.
     final research = agent?.name == 'researcher' || task.agent == 'researcher';
     final sites = research ? ref.read(codeSettingsProvider).researchSites : null;
@@ -628,14 +526,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     projectDir ??=
         ref.read(codeProjectsProvider).where((p) => p.id == parent.projectId).firstOrNull?.path ?? parent.workingDir;
     workingDir ??= forkCopy?.path ?? parent.workingDir;
-    final everyai = parent.harness == CodeHarnessKind.everyai.name;
     final harness = await harnessFor(ref, parent.workingDir, harness: parent.harness);
     Future<HarnessSession> begin(SessionSpec spec) =>
         (fork ? forkSession(harness, parent.conversationId, spec) : null) ?? harness.start(spec);
     final live = await begin(
       await specFor(
         isolated: workingDir != parent.workingDir || parent.worktree != null,
-        everyai: everyai,
         sessionId: id,
         sessionTag: ownTag ? id : parent.id,
         projectDir: projectDir,
@@ -1115,7 +1011,6 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   void _onEvent(HarnessEvent event) {
     if (event is ConnectionChange) {
       state = state.copyWith(connected: event.connected);
-      if (event.restarted) _resumeAfterRestart();
       return;
     }
     if (_live && event is ConversationFailure && isGatewayAuthFailure(event.message)) {
@@ -1129,7 +1024,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     event = _spilled(event);
     // Live only, like deltas: a retry note is not part of what the session replays.
     if (event is! StreamDelta && event is! RetryState) _events.add(event);
-    // OpenHands reports `stats` after every model call; the cost lives in our ledger.
+    // A state change refreshes the meter; the cost lives in our ledger.
     if (event is StateChange) ref.read(codeUsageProvider(sessionId).notifier).refreshSoon();
     final wasRunning = state.transcript.running;
     _trackContext(event);
@@ -1412,7 +1307,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = sessions.byId(sessionId);
     if (info == null || info.tier == tier) return;
     sessions.update(info.copyWith(tier: tier));
-    _tierNote = tierChangeNote(tier, forks: info.harness == CodeHarnessKind.everyai.name && !info.isSubagent);
+    _tierNote = tierChangeNote(tier, forks: !info.isSubagent);
     _syncFlow();
   }
 
@@ -1575,7 +1470,6 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         initialMessage: modeNote(state.mode, message),
         runInitial: resume,
         isolated: info.worktree != null,
-        everyai: info.harness == CodeHarnessKind.everyai.name,
       );
       final live = await (await harnessFor(ref, info.workingDir, harness: info.harness)).start(spec);
       if (!ref.mounted) {
@@ -1753,7 +1647,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   /// Moves the session to [model] and/or [effort] ('' is the model's default)
-  /// through the agent-server's `switch_llm`; the history stays. Applies
+  /// through the harness's `switchLlm`; the history stays. Applies
   /// from the agent's next model call. Returns a message for the user.
   Future<String> switchModel({String? model, String? effort}) async {
     final sessions = ref.read(codeSessionsProvider.notifier);
@@ -1778,23 +1672,6 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     sessions.update(next);
     final name = ref.read(modelCatalogProvider)[ModelId(next.model)]?.name ?? next.model.split('/').last;
     return next.effort.isEmpty ? 'Now using $name.' : 'Now using $name · ${next.effort}.';
-  }
-
-  /// Runs the agent again after a failed turn (a dropped connection, an
-  /// upstream error); the conversation keeps everything so far. A stuck
-  /// agent needs a new message: the server's stuck check reads the history
-  /// and would stop a plain re-run at once.
-  /// The sidecar crashed and came back: the conversation is reloaded from
-  /// disk, but a run it was in the middle of stopped. Carry it on (waiting
-  /// approvals and questions keep waiting for the user).
-  void _resumeAfterRestart() {
-    final t = state.transcript;
-    if (!t.running || t.pending.isNotEmpty || _doomOpen) return;
-    // Give the replayed state a moment to settle first.
-    Timer(const Duration(milliseconds: 500), () {
-      if (!ref.mounted || !state.transcript.running || !state.connected || !_withinBudget()) return;
-      _session?.resume().ignore();
-    });
   }
 
   DateTime? _keyRenewedAt;
@@ -1832,6 +1709,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
   }
 
+  /// Runs the agent again after a failed turn (a dropped connection, an
+  /// upstream error); the conversation keeps everything so far. A stuck
+  /// agent needs a new message: the server's stuck check reads the history
+  /// and would stop a plain re-run at once.
   Future<void> retry() async {
     if (!_withinBudget()) return;
     if (state.transcript.status == ExecutionStatus.stuck) return send('Carry on from where you stopped.');
@@ -2473,19 +2354,10 @@ final class CodeStatuses extends Notifier<Map<String, SessionStatus>> {
     ];
     if (sessions.isEmpty) return;
     try {
-      final everyai = CodeHarnessKind.everyai.name;
-      final byConversation = {
-        ...await ref.read(everyaiHarnessProvider).statuses([
-          for (final s in sessions)
-            if (s.harness == everyai) s.conversationId,
-        ]),
-        // Older OpenHands sessions only when that server is up already: polling doesn't start it.
-        if (ref.read(sidecarProvider).started)
-          ...await ref.read(_sidecarHarnessProvider).statuses([
-            for (final s in sessions)
-              if (s.harness != everyai) s.conversationId,
-          ]),
-      };
+      final byConversation = await ref.read(everyaiHarnessProvider).statuses([
+        for (final s in sessions)
+          if (!s.removedHarness) s.conversationId,
+      ]);
       if (!ref.mounted) return;
       final before = state;
       state = {
@@ -2525,18 +2397,10 @@ Future<Map<String, SessionStatus>> sessionStatusesNow(Ref ref, List<CodeSessionI
   }
   if (ask.isEmpty) return out;
   try {
-    final everyai = CodeHarnessKind.everyai.name;
-    final byConversation = {
-      ...await ref.read(everyaiHarnessProvider).statuses([
-        for (final s in ask)
-          if (s.harness == everyai) s.conversationId,
-      ]),
-      if (ref.read(sidecarProvider).started)
-        ...await ref.read(_sidecarHarnessProvider).statuses([
-          for (final s in ask)
-            if (s.harness != everyai) s.conversationId,
-        ]),
-    };
+    final byConversation = await ref.read(everyaiHarnessProvider).statuses([
+      for (final s in ask)
+        if (!s.removedHarness) s.conversationId,
+    ]);
     for (final s in ask) {
       if (byConversation[s.conversationId] case final status?) out[s.id] = CodeStatuses._sessionStatus(status);
     }

@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/features/code/gateway_key.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
+import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/harness/summarizer.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;

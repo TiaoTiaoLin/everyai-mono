@@ -43,7 +43,7 @@ void main() {
     final api = _env['API_BASE_URL'] ?? 'http://localhost:8080';
     final data = await Directory.systemTemp.createTemp('everyai-vision');
     final harness = EveryAIHarness(dataDir: () async => data.path, gatewayKey: () async => _env['GATEWAY_KEY']!);
-    final prompt = await agentPromptFor(dir, everyai: true);
+    final prompt = await agentPromptFor(dir);
     // Playwright blocks file: URLs, so the page is served.
     final server = await Process.start('python3', ['-m', 'http.server', '8765', '--bind', '127.0.0.1'], workingDirectory: dir);
     addTearDown(server.kill);

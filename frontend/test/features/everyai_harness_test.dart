@@ -6,9 +6,8 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/subagents.dart' show forkAnswerReason, taskTool;
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
-import 'package:every_ai/features/code/harness/everyai/agent_server_facade_io.dart';
 import 'package:every_ai/features/code/harness/everyai/everyai_harness_io.dart';
-import 'package:every_ai/features/code/harness/openhands_harness.dart';
+import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/harness/everyai/llm.dart';
 import 'package:every_ai/features/code/harness/everyai/prompt_io.dart';
 import 'package:every_ai/features/code/harness/everyai/shell_io.dart';
@@ -16,7 +15,6 @@ import 'package:every_ai/features/code/domain/phases.dart';
 import 'package:every_ai/features/code/domain/transcript.dart' show planApprovedReason;
 import 'package:every_ai/features/code/harness/everyai/scrub.dart';
 import 'package:every_ai/features/code/harness/everyai/tools_io.dart';
-import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -534,36 +532,6 @@ void main() {
     expect(pwd.output.trim(), endsWith('/sub'));
     final slow = await shell.run('sleep 20', timeout: const Duration(seconds: 1));
     expect(slow.timedOut, isTrue);
-  });
-
-  test('the agent-server facade serves the harness to an OpenHands client (the remote path)', () async {
-    gateway
-      ..reply(
-        calls: [
-          ('write', {'file_path': 'remote.txt', 'content': 'from afar\n'}),
-        ],
-      )
-      ..reply(text: 'Written.');
-    var enriched = false;
-    final facade = await AgentServerFacade.start(
-      harness,
-      enrich: (spec) async {
-        enriched = true;
-        return spec;
-      },
-    );
-    addTearDown(facade.close);
-    final client = OpenHandsHarness(baseUrl: facade.baseUrl, sessionApiKey: facade.key);
-    final session = await client.start(spec('write remote.txt'));
-    final events = await drive(session);
-    expect(enriched, isTrue);
-    expect(File('$work/remote.txt').readAsStringSync(), 'from afar\n');
-    expect(events.whereType<ChatMessage>().last.text, 'Written.');
-    // The device's spec arrived: model without the LiteLLM prefix, the session tag.
-    expect(gateway.requests.first['model'], 'anthropic/claude-sonnet-5.5');
-    final statuses = await client.statuses([session.id]);
-    expect(statuses[session.id], ExecutionStatus.finished);
-    await session.close();
   });
 
   test('the scratch folders are kept out of git, once', () async {

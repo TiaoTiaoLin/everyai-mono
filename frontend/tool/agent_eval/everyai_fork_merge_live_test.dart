@@ -44,7 +44,7 @@ void main() {
 
     final api = _env['API_BASE_URL'] ?? 'http://localhost:8080';
     final harness = EveryAIHarness(dataDir: () async => tmp.path, gatewayKey: () async => _env['GATEWAY_KEY']!);
-    final prompt = await agentPromptFor(repo, everyai: true);
+    final prompt = await agentPromptFor(repo);
     SessionSpec spec(String dir, String msg, {Map<String, String> map = const {}}) => SessionSpec(
       workingDir: dir,
       model: _env['EVAL_MODEL'] ?? 'anthropic/claude-haiku-5.5',

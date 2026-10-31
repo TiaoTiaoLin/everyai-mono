@@ -18,7 +18,6 @@ import '../../domain/subagents.dart' show forkingTaskSpec, subagentRules, taskTo
 import '../../settings/agent_prompt.dart' show forHeldClientTools;
 import '../events.dart';
 import '../harness.dart';
-import '../openhands_harness.dart' show HarnessError;
 import 'browser_io.dart';
 import 'llm.dart';
 import 'mcp_io.dart';

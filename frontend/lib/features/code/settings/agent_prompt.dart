@@ -1,20 +1,13 @@
 import 'agent_settings.dart';
 
-/// The agent's persona, sent as OpenHands' `agent.persona`: it replaces the
-/// built-in persona and coding-workflow sections (which sign commits as
-/// OpenHands), while OpenHands keeps its security, risk and process sections.
-/// Built from settings, then constant for the session, so prompt caching works.
-/// [isolated]: the session has a worktree of its own (else it works in the
-/// user's checkout); [everyai]: it runs on the EveryAI harness and its tools.
-String agentPersona({
-  required CommitStyle style,
-  required bool attribution,
-  bool isolated = false,
-  bool everyai = false,
-}) =>
+/// The agent's persona, the start of the system prompt. Built from settings,
+/// then constant for the session, so prompt caching works. [isolated]: the
+/// session has a worktree of its own (else it works in the user's checkout).
+String agentPersona({required CommitStyle style, required bool attribution, bool isolated = false}) =>
     '''
 <SOUL>
-You are the EveryAI coding agent, an autonomous software engineer working in the user's repository through tools: ${everyai ? 'a\nshell, file tools (read, edit, write, grep, glob), a todo list and the web' : 'a\nterminal, a file editor and a task tracker'}. You are running in an agentic environment, not a chat: the user follows your
+You are the EveryAI coding agent, an autonomous software engineer working in the user's repository through tools: a
+shell, file tools (read, edit, write, grep, glob), a todo list and the web. You are running in an agentic environment, not a chat: the user follows your
 tool calls in the EveryAI desktop app, approves some of them, and expects you to do the work yourself.
 </SOUL>
 
@@ -38,7 +31,7 @@ tool calls in the EveryAI desktop app, approves some of them, and expects you to
 </WORKFLOW>
 
 <EFFICIENCY>
-${everyai ? _everyaiEfficiency : _efficiency}
+$_efficiency
 </EFFICIENCY>
 
 <FILE_SYSTEM_GUIDELINES>
@@ -72,10 +65,6 @@ ${attribution ? '' : '* ${noAttribution.replaceAll('\n', ' ')}\n'}* Stage only w
 </PULL_REQUESTS>''';
 
 const _efficiency =
-    '* Each action is expensive. Combine related shell commands into one, and use find, grep, rg and git with filters to\n'
-    '  explore instead of opening files one at a time.';
-
-const _everyaiEfficiency =
     '* Use grep and glob to find code and read to open it; call independent tools together in one turn (several reads,\n'
     '  a grep and a glob) instead of one at a time. Combine related shell commands into one with &&.';
 
@@ -101,33 +90,10 @@ String _commitStyle(CommitStyle style) => switch (style) {
         'characters, no trailing period; then a blank line and a body explaining why when it isn\'t obvious.',
 };
 
-/// How EveryAI wants the agent to work, appended to the system prompt
-/// (`agent_context.system_message_suffix`).
+/// How EveryAI wants the agent to work, at the start of the system-prompt
+/// suffix: its own tools (background shells and monitor, spill files it
+/// writes itself), and question cards answered inside the call.
 const workingRules = '''
-<EVERYAI>
-- Your workspace is the current working directory. Files the user attaches are saved under .everyai/uploads/ there.
-- User messages may start with an <everyai-mode> note. Follow the latest note; it replaces earlier ones.
-- Act with your tools instead of describing what you would do. If a tool call is refused, read the reason and
-  continue within it. Never say a tool or file is unavailable without trying it first.
-- Use ask_user_question only for decisions that are genuinely the user's. After calling it, end your turn; when the
-  answers arrive, carry on with the task.
-- Keep every command bounded. Give slow commands (installs, builds, test suites) the terminal's timeout parameter,
-  and never run something that doesn't end by itself (a server, a watcher, a generator) in the foreground: start it
-  in the background with its output in a log file (`cmd > /tmp/name.log 2>&1 &`), then check on it with short
-  commands such as `tail` of the log or `curl --max-time 5`. Stop the background processes you started once you no
-  longer need them, unless the user wants them left running.
-- Keep output you expect to be long (full test logs, big searches, dumps) out of the conversation: whatever a
-  command prints comes back to you in full. Filter it with `head`, `tail`, `grep` or `wc`, or, outside Plan mode,
-  redirect it to a file under .everyai/spill/ and read that in parts with `sed -n 'A,Bp'` or `grep`.
-- When the work leaves files the user will want (a report, a build, a generated document), name them with
-  present_files just before your final message. It returns at once.
-- Before saying you are done, verify the change: run the tests, the build or the program, and report what you ran.
-</EVERYAI>''';
-
-/// [workingRules] for the EveryAI harness: its own tools (background shells
-/// and monitor, spill files it writes itself), and question cards answered
-/// inside the call.
-const everyaiWorkingRules = '''
 <EVERYAI>
 - Your workspace is the current working directory. Files the user attaches are saved under .everyai/uploads/ there.
   Put scratch work (prototypes, generators, temporary files) under .everyai/scratch/, never in /tmp.
@@ -146,15 +112,15 @@ const everyaiWorkingRules = '''
 - Before saying you are done, verify the change: run the tests, the build or the program, and report what you ran.
 </EVERYAI>''';
 
-/// The ask_user_question rule in [workingRules], and its wording for
-/// sessions whose cards are answered inside the call (see [forHeldClientTools]).
+/// An ask_user_question rule that ends the turn (older suffixes), and its
+/// wording for cards answered inside the call (see [forHeldClientTools]).
 const _askRuleEndsTurn = '''After calling it, end your turn; when the
   answers arrive, carry on with the task.''';
 const _askRuleHeld = '''The call waits for the
   user; their answers come back as its result, so read them and carry on with the task.''';
 
-/// [suffix] (from [agentPromptSuffix] or [workingRules]) worded for a session
-/// that answers question cards and plans inside the call.
+/// [suffix] worded for a session that answers question cards and plans inside
+/// the call ([workingRules] already is).
 String forHeldClientTools(String suffix) => suffix.replaceFirst(_askRuleEndsTurn, _askRuleHeld);
 
 /// How hard a session works, the harness's progressive bar (Efficiency ↔
@@ -180,9 +146,6 @@ enum HarnessTier {
 
   /// Runs the required phase flow.
   bool get phased => this == max || this == ultra;
-
-  /// Needs the EveryAI harness (forks, the phase engine).
-  bool get everyaiOnly => phased;
 
   static HarnessTier parse(Object? s) => values.where((v) => v.name == s).firstOrNull ?? efficient;
 
@@ -314,13 +277,12 @@ const _orchestrating =
 String agentPromptSuffix(
   AgentSettings settings, {
   List<({String name, String description})> agents = const [],
-  bool everyai = false,
   HarnessTier tier = HarnessTier.efficient,
   bool forks = false,
   Map<String, String> models = const {},
   HarnessMode harnessMode = HarnessMode.build,
 }) {
-  final out = StringBuffer(everyai ? everyaiWorkingRules : workingRules)
+  final out = StringBuffer(workingRules)
     ..write('\n\n')
     ..write(tierBlock(tier, forks: forks));
   if (harnessMode == HarnessMode.bugFix) out.write('\n\n$bugFixRules');
@@ -345,18 +307,14 @@ String agentPromptSuffix(
   ];
   if (roles.isNotEmpty) {
     out.write(
-      everyai
-          ? '\n\n<ROLES>\nRoles you can give a fork with run_subagent\'s role. Each brings its own instructions and may '
-                'run on a model the user picked for it, or with stricter permissions. Give the one whose description '
-                'fits; leave role out for a plain fork.\n'
-          : '\n\n<AGENT_TYPES>\nAgents you can hand work to with run_subagent: pass the name as its agent. Each brings '
-                'its own instructions and may run on another model or with stricter permissions. Pick the one whose '
-                'description fits the task; leave agent out for a general-purpose subagent.\n',
+      '\n\n<ROLES>\nRoles you can give a fork with run_subagent\'s role. Each brings its own instructions and may '
+      'run on a model the user picked for it, or with stricter permissions. Give the one whose description '
+      'fits; leave role out for a plain fork.\n',
     );
     for (final a in roles) {
       out.write('- ${a.name}: ${a.description}\n');
     }
-    out.write(everyai ? '</ROLES>' : '</AGENT_TYPES>');
+    out.write('</ROLES>');
   }
   if (forks && models.isNotEmpty) {
     out.write(
