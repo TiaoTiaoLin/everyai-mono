@@ -3,12 +3,14 @@ import 'dart:convert';
 import 'package:everyai_markdown/everyai_markdown.dart' show languageForPath;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/platform/platform_kind.dart';
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../../../core/ui/syntax_spans.dart';
+import '../../approval_risk.dart';
 import '../../domain/agent_mode.dart';
 import '../../domain/line_diff.dart';
 import '../../domain/permissions.dart';
@@ -32,7 +34,12 @@ class ApprovalCard extends StatefulWidget {
     this.onDenyCall,
     this.decided = const {},
     this.rememberBy = const {},
+    this.workingDir,
   });
+
+  /// Where commands run; with it, each command gets an informational risk
+  /// label ([approvalRiskProvider]) once one arrives. Null shows none.
+  final String? workingDir;
 
   /// One call's answer, for sessions that take one per call (null: the
   /// batch is answered as one, as the agent-server does).
@@ -107,7 +114,9 @@ class _ApprovalCardState extends State<ApprovalCard> {
                 child: SingleChildScrollView(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [for (final c in calls) _Preview(call: c, flag: widget.flags[c.id])],
+                    children: [
+                      for (final c in calls) _Preview(call: c, flag: widget.flags[c.id], workingDir: widget.workingDir),
+                    ],
                   ),
                 ),
               ),
@@ -221,6 +230,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                           flag: widget.flags[c.id],
                           decided: widget.decided[c.id],
                           rule: widget.rememberBy[c.id],
+                          workingDir: widget.workingDir,
                           onAllow: (scope) => widget.onAllowCall!(c.id, scope),
                           onDeny: () => widget.onDenyCall!(c.id),
                         ),
@@ -278,10 +288,19 @@ class _ApprovalCardState extends State<ApprovalCard> {
 
 /// One call on the stacked card: what it does, and its own answer.
 class _CallRow extends StatelessWidget {
-  const _CallRow({required this.call, required this.onAllow, required this.onDeny, this.flag, this.decided, this.rule});
+  const _CallRow({
+    required this.call,
+    required this.onAllow,
+    required this.onDeny,
+    this.flag,
+    this.decided,
+    this.rule,
+    this.workingDir,
+  });
 
   final ActionCall call;
   final String? flag;
+  final String? workingDir;
 
   /// Null while it waits; true allowed, false denied.
   final bool? decided;
@@ -300,7 +319,7 @@ class _CallRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Preview(call: call, flag: flag),
+          _Preview(call: call, flag: flag, workingDir: workingDir),
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Row(
@@ -344,9 +363,10 @@ class _CallRow extends StatelessWidget {
 }
 
 class _Preview extends StatelessWidget {
-  const _Preview({required this.call, this.flag});
+  const _Preview({required this.call, this.flag, this.workingDir});
   final ActionCall call;
   final String? flag;
+  final String? workingDir;
 
   @override
   Widget build(BuildContext context) {
@@ -417,6 +437,9 @@ class _Preview extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           body,
+          if ((call.actionKind, workingDir) case ('TerminalAction', final dir?)
+              when dir.isNotEmpty && call.str('command').trim().isNotEmpty)
+            _RiskLine((command: call.str('command'), workingDir: dir)),
           if (flag case final why?)
             Padding(
               padding: const EdgeInsets.only(top: 4),
@@ -451,6 +474,24 @@ class _Preview extends StatelessWidget {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// A muted one-line read of a command ("Looks read-only"), once the decide
+/// call answers; nothing before that or when it fails. Informational only.
+class _RiskLine extends ConsumerWidget {
+  const _RiskLine(this.risk);
+  final RiskKey risk;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final label = ref.watch(approvalRiskProvider(risk)).value;
+    if (label == null) return const SizedBox.shrink();
+    final theme = EveryTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.type.caption.tint(theme.textMuted)),
     );
   }
 }

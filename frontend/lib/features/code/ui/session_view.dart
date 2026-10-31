@@ -180,6 +180,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                   onDeny: controller.deny,
                                   onMode: controller.setMode,
                                   remember: controller.rememberable(),
+                                  // The demo's commands never run; no need to ask about them.
+                                  workingDir: isDemoPath(info.workingDir) ? null : info.workingDir,
                                   decided: state.decided,
                                   rememberBy: controller.rememberBy(),
                                   onAllowCall: controller.perCall
