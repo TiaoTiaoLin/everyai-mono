@@ -21,6 +21,7 @@ import '../chat_providers.dart';
 import '../domain/ask_user.dart';
 import '../domain/message.dart';
 import '../domain/chat_session.dart';
+import '../domain/starters.dart';
 import 'composer.dart';
 import 'message_view.dart';
 import '../../settings/ui/settings_modal.dart';
@@ -94,7 +95,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       onEffortChanged: controller.setEffort,
       researchDepth: ref.watch(provider.select((s) => s.researchDepth)),
       onResearchDepthChanged: controller.setResearchDepth,
-      slash: chatSlashHost(context, ref, widget.conversationId),
+      slash: chatSlashHost(
+        context,
+        ref,
+        widget.conversationId,
+        openModelPicker: () => _composer.currentState?.openModelPicker(),
+      ),
       meter: UsageMeter(totals: usage, contextWindow: model.contextLength, modelName: model.name),
     );
 
@@ -110,7 +116,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         conversationId: widget.conversationId,
         child: switch (phase) {
           Loading() => const Center(child: AdaptiveProgress()),
-          _ when home => _Home(composer: composer, onStarter: (text) => _composer.currentState?.prefill(text)),
+          _ when home => _Home(
+            composer: composer,
+            onStarter: (starter) {
+              controller.setMode(starter.mode);
+              _composer.currentState?.prefill(starter.prompt);
+            },
+          ),
           _ => Column(
             children: [
               Expanded(child: _Transcript(conversationId: widget.conversationId)),
@@ -145,15 +157,7 @@ class _Home extends StatelessWidget {
   const _Home({required this.composer, required this.onStarter});
 
   final Widget composer;
-  final ValueChanged<String> onStarter;
-
-  static const _starters = <(EveryIcon, String, String)>[
-    (EveryIcon.edit, 'Write', 'Help me write '),
-    (EveryIcon.spark, 'Learn', 'Explain like I\'m new to it: '),
-    (EveryIcon.chat, 'Code', 'Write code that '),
-    (EveryIcon.globe, 'Research', 'Find the latest on '),
-    (EveryIcon.copy, 'Summarize', 'Summarize this: '),
-  ];
+  final ValueChanged<Starter> onStarter;
 
   static String _greeting(DateTime now) => switch (now.hour) {
     < 5 => 'Up late?',
@@ -192,8 +196,8 @@ class _Home extends StatelessWidget {
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  for (final (icon, label, prompt) in _starters)
-                    _StarterChip(icon: icon, label: label, onTap: () => onStarter(prompt)),
+                  for (final starter in chatStarters)
+                    _StarterChip(icon: starter.icon, label: starter.label, onTap: () => onStarter(starter)),
                 ],
               ),
             ],
