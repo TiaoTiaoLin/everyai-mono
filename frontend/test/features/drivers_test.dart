@@ -138,7 +138,6 @@ void main() {
       final stubs = <HarnessDriver>[
         ClaudeDriver(which: _nowhere),
         CodexDriver(which: _nowhere),
-        OpenCodeDriver(which: _nowhere),
         AcpDriver(id: 'acp:x', label: 'x', command: 'x', which: _nowhere),
         TerminalDriver(id: 'terminal:x', label: 'x', command: 'x', which: _nowhere),
       ];

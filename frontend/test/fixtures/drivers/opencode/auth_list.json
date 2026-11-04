@@ -1,0 +1,5 @@
+[
+  {"id": "anthropic", "name": "Anthropic", "connections": [{"type": "credential", "id": "cred_1", "label": "Claude Pro/Max", "method": "oauth"}]},
+  {"id": "minimax-coding-plan", "name": "MiniMax Token Plan (minimax.io)", "connections": [{"type": "credential", "id": "cred_2", "label": "API key", "method": "key"}]},
+  {"id": "openrouter", "name": "OpenRouter", "connections": []}
+]
