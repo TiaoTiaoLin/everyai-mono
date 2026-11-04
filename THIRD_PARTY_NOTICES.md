@@ -207,7 +207,7 @@ SOFTWARE.
   with no permissions. The binary carries V8 and other components under their
   own licenses.
 - **Where:** downloaded by `frontend/tool/fetch_deno.sh` into `frontend/.deno/`
-  (`scripts/dev.sh` passes it as `DENO_BIN`); the macOS build copies it into
+  (`scripts/dev.sh` and `scripts/launch.sh` pass it as `DENO_BIN`); the macOS build copies it into
   `EveryAI.app/Contents/Resources/deno` (`frontend/macos/scripts/bundle_deno.sh`).
 - **License:** MIT
 

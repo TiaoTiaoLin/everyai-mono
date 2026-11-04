@@ -1,0 +1,20 @@
+# Runs on the VM next to the ttt stack (its own project, its own network).
+# TLS: Anole serves HTTPS on 8443 itself, with the certificate Caddy (ttt)
+# obtains and renews for HOSTNAME; everyai-cert-reload.timer sends SIGHUP so a
+# renewed certificate is picked up without a restart.
+services:
+  backend:
+    image: everyai-backend:0.1.0-dev-nonsigned
+    container_name: everyai-backend
+    restart: always
+    ports: ["8443:8443"]
+    environment:
+      PUBLIC_URL: https://${HOSTNAME}:8443
+      TLS_CERT_PATH: /certs/${HOSTNAME}.crt
+      TLS_KEY_PATH: /certs/${HOSTNAME}.key
+    volumes:
+      - data:/app/data
+      - /var/lib/docker/volumes/ttt_caddy-data/_data/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${HOSTNAME}:/certs:ro
+    mem_limit: 256m
+volumes:
+  data:

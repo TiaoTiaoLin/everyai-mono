@@ -1,0 +1,6 @@
+[Unit]
+Description=Reload the EveryAI backend's TLS certificate (SIGHUP)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker kill --signal=HUP everyai-backend

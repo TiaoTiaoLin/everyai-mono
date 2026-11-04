@@ -7,6 +7,18 @@ import 'package:http/http.dart' as http;
 import 'api_error.dart';
 import 'sse.dart';
 
+/// Whether the backend answers. A server that scaled to zero or is restarting takes a while to come up.
+enum ServerStatus {
+  /// Answered; requests go straight through.
+  online,
+
+  /// Didn't answer yet; requests wait (the app shows "waking up").
+  waking,
+
+  /// Didn't come up within [ApiClient.wakeTimeout]; the next request tries again.
+  unreachable,
+}
+
 /// Supplies bearer tokens for authenticated requests. Implemented by the auth feature.
 abstract interface class AccessTokenSource {
   /// The current access token, or null when signed out or bypassed.
@@ -19,13 +31,75 @@ abstract interface class AccessTokenSource {
 /// The one HTTP entry point for the backend. Create it once (see `apiClientProvider`)
 /// and reuse it so connections, HTTP/2 sessions and QUIC state are pooled.
 final class ApiClient {
-  ApiClient({required this.baseUrl, required http.Client client, AccessTokenSource? tokens})
-    : _client = client, // ignore: prefer_initializing_formals
-      _tokens = tokens; // ignore: prefer_initializing_formals
+  ApiClient({
+    required this.baseUrl,
+    required http.Client client,
+    AccessTokenSource? tokens,
+    this.waitForServer = false,
+    this.wakeBackoff = const Duration(milliseconds: 500),
+  }) : _client = client, // ignore: prefer_initializing_formals
+       _tokens = tokens; // ignore: prefer_initializing_formals
 
   final Uri baseUrl;
   final http.Client _client;
   final AccessTokenSource? _tokens;
+
+  /// Hold every request until the server answers `GET /v1/ping` (the app's
+  /// client; tests talk to their fakes directly).
+  final bool waitForServer;
+
+  /// The first pause between pings while the server starts; it doubles up to 4 s.
+  final Duration wakeBackoff;
+
+  /// How long requests wait for a server that is starting before they fail.
+  static const wakeTimeout = Duration(seconds: 90);
+
+  bool _online = false;
+  Future<void>? _waking;
+  ServerStatus? _shown;
+  final _status = StreamController<ServerStatus>.broadcast();
+
+  /// Changes of [ServerStatus]; nothing is sent while the server answers at once.
+  Stream<ServerStatus> get status => _status.stream;
+
+  /// Completes when the server answers, polling with backoff while it starts.
+  /// Throws a [NetworkError] after [wakeTimeout].
+  Future<void> awaitOnline() {
+    if (_online) return Future.value();
+    return _waking ??= _wake().whenComplete(() => _waking = null);
+  }
+
+  void _show(ServerStatus status) {
+    if (_shown == status || _status.isClosed) return;
+    _shown = status;
+    _status.add(status);
+  }
+
+  Future<void> _wake() async {
+    final deadline = DateTime.now().add(wakeTimeout);
+    var delay = wakeBackoff;
+    while (true) {
+      try {
+        final res = await _client.send(http.Request('GET', resolve('v1/ping'))).timeout(const Duration(seconds: 10));
+        await res.stream.drain<void>();
+        // A 5xx here is a proxy or a server still starting; anything else is the server itself.
+        if (res.statusCode < 500) {
+          _online = true;
+          if (_shown != null) _show(ServerStatus.online);
+          return;
+        }
+      } on Object {
+        // Not up yet (refused, reset, timed out).
+      }
+      _show(ServerStatus.waking);
+      if (DateTime.now().isAfter(deadline)) {
+        _show(ServerStatus.unreachable);
+        throw const NetworkError("The EveryAI server didn't come online. Check your connection and try again.");
+      }
+      await Future<void>.delayed(delay);
+      if (delay < const Duration(seconds: 4)) delay = delay * 2 + const Duration(milliseconds: 1);
+    }
+  }
 
   static const jsonTimeout = Duration(seconds: 20);
 
@@ -35,7 +109,7 @@ final class ApiClient {
   Uri resolve(String path) => baseUrl.resolve(path.startsWith('/') ? path.substring(1) : path);
 
   Future<void> ping() async {
-    final res = await _send('GET', 'ping', timeout: const Duration(seconds: 5));
+    final res = await _send('GET', 'v1/ping', timeout: const Duration(seconds: 5));
     await _readBody(res);
   }
 
@@ -163,6 +237,7 @@ final class ApiClient {
     Map<String, String> headers = const {},
     bool isRetry = false,
   }) async {
+    if (waitForServer) await awaitOnline();
     final request = http.AbortableRequest(method, resolve(path), abortTrigger: cancel)..headers.addAll(headers);
     if (json != null) {
       request
@@ -183,6 +258,8 @@ final class ApiClient {
     } on http.RequestAbortedException {
       throw const CancelledError();
     } on http.ClientException catch (e) {
+      // The server went away (a restart, a scale-down): the next request waits for it again.
+      _online = false;
       throw NetworkError(e.message);
     }
 
@@ -241,5 +318,8 @@ final class ApiClient {
     return null;
   }
 
-  void close() => _client.close();
+  void close() {
+    _status.close();
+    _client.close();
+  }
 }

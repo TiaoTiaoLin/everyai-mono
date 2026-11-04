@@ -1,0 +1,64 @@
+# Unsigned dev builds of the app for Windows and Linux (Flutter can't build
+# them from a Mac). Runs when a builds/* branch is pushed, or by hand from the
+# Actions tab. The builds point at the dev backend; download them from the
+# run's Artifacts. macOS: scripts/launch.sh build macos on a Mac.
+name: Dev builds (unsigned)
+
+on:
+  push:
+    branches: ["builds/**"]
+  workflow_dispatch:
+    inputs:
+      api:
+        description: Backend the builds talk to
+        default: https://everyai.136-108-68-64.sslip.io:8443
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.9
+  VERSION: 0.1.0-dev-nonsigned
+  API_BASE_URL: ${{ inputs.api || 'https://everyai.136-108-68-64.sslip.io:8443' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            out: build/linux/x64/release/bundle
+          - os: windows-latest
+            platform: windows
+            out: build/windows/x64/runner/Release
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build tools
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libsecret-1-dev libjsoncpp-dev libsqlite3-dev libwebkit2gtk-4.1-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Defines
+        run: |
+          printf '{"API_BASE_URL":"%s","DEV_SKIP_AUTH":true,"SSE_ENABLED":true,"GOOGLE_SERVER_CLIENT_ID":""}\n' \
+            "$API_BASE_URL" > "$RUNNER_TEMP/defines.json"
+      - run: flutter pub get
+      - run: flutter build ${{ matrix.platform }} --release --dart-define-from-file="$RUNNER_TEMP/defines.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: everyai-${{ env.VERSION }}-${{ matrix.platform }}-x64
+          path: frontend/${{ matrix.out }}
+          if-no-files-found: error
