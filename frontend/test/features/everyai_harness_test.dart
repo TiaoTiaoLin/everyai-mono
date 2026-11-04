@@ -771,12 +771,12 @@ for line in sys.stdin:
       )
       ..reply(
         calls: [
-          ('run_subagent', {'description': 'HTTP servers in C', 'prompt': 'Find the best.', 'role': 'researcher'}),
+          ('present_plan', {'plan': 'x'}),
         ],
       )
       ..reply(
         calls: [
-          ('present_plan', {'plan': 'x'}),
+          ('run_subagent', {'description': 'HTTP servers in C', 'prompt': 'Find the best.', 'role': 'researcher'}),
         ],
       )
       ..reply(
@@ -825,7 +825,7 @@ for line in sys.stdin:
     );
     final results = events.whereType<ToolResult>().map((r) => r.text).toList();
     expect(results.first, contains('nothing in the project changes'));
-    expect(results.any((r) => r.contains('Error (Max flow, questions phase): not yet')), isTrue);
+    expect(results.any((r) => r.contains('Error (Max flow, research phase): not yet')), isTrue);
     expect(File('$work/main.c').readAsStringSync(), 'int main(){return 0;}');
     final notes = [
       for (final m in events.whereType<ChatMessage>())
@@ -848,6 +848,32 @@ for line in sys.stdin:
     expect(read('phases.json')['run'], isNot(run));
     expect(read('state.json')['approved_plan'], '');
     expect(gateway.decided.last['text'], allOf(contains('<finished-task>'), contains('Python client')));
+  });
+
+  test('"just build it" while a Max flow prepares goes straight to build', () async {
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-now',
+        initialMessage: 'Make a snake game in one HTML file',
+        runInitial: false,
+        holdClientTools: true,
+        phaseFlow: 'max',
+      ),
+    );
+    final dir = '${tmp.path}/data/everyai-sessions/${session.id}';
+    String phase() => (jsonDecode(File('$dir/phases.json').readAsStringSync()) as Map)['phase'] as String;
+    expect(phase(), 'research');
+    await session.send('What will you research?', run: false);
+    expect(phase(), 'research', reason: 'the decider is unsure, so nothing skips');
+    gateway.decisions['build_now'] = true;
+    await session.send('skip all that, just build it', run: false);
+    expect(phase(), 'build');
+    expect(gateway.decided.last['text'], contains('just build it'));
   });
 
   test('Bug fix: the harness runs the repro itself, refuses a fake fix, and verifies the real one', () async {

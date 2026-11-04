@@ -1954,7 +1954,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         final library = (ref.read(libraryProvider).value ?? const <ModelSpec>[]).where((m) => m.tools).take(8);
         final models = {
           for (final m in library)
-            if (m.id.value != info.model) m.id.value: m.name,
+            if (m.id.value != info.model) m.id.value: researchModelLine(m),
         };
         String reply;
         try {
@@ -2549,6 +2549,18 @@ Future<Map<String, SessionStatus>> sessionStatusesNow(Ref ref, List<CodeSessionI
 /// orchestrator), as far as [usage] has read them.
 /// Whether a session runs under the own-key Ultra cap: the Ultra tier on a
 /// model billed to one of the user's keys.
+/// How the orchestrator sees a model it may give a researcher: its name and
+/// price, so it can weigh cost against depth.
+String researchModelLine(ModelSpec m) {
+  String usd(double v) => v >= 10 ? v.toStringAsFixed(0) : v.toStringAsFixed(2);
+  final price = m.free
+      ? 'free'
+      : (m.promptPrice != null && m.completionPrice != null)
+      ? '\$${usd(m.promptPrice!)} in / \$${usd(m.completionPrice!)} out per million tokens'
+      : 'price unknown';
+  return '${m.name}, $price';
+}
+
 bool byokUltraCapped(HarnessTier tier, ModelId model, ModelBilling billing) =>
     tier == HarnessTier.ultra && billing.ownKey(model);
 

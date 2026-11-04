@@ -116,6 +116,7 @@ final class PhaseFlow {
     Map<String, String>? forks,
     String? run,
     this.researchFailed = false,
+    this.buildingUnplanned = false,
   }) : reproFiles = reproFiles ?? {},
        forks = forks ?? {},
        run = run ?? newRunId(),
@@ -142,6 +143,9 @@ final class PhaseFlow {
   /// The Ultra workflow came back with no finished report: the flow waits
   /// for the user (go on without research, or run it again).
   bool researchFailed;
+
+  /// The user asked to start building before a plan was approved.
+  bool buildingUnplanned;
 
   static String newRunId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 
@@ -248,6 +252,7 @@ final class PhaseFlow {
       // Flows saved before runs had ids: their workers are named research-N.
       run: j['run'] as String? ?? '',
       researchFailed: j['research_failed'] == true,
+      buildingUnplanned: j['building_unplanned'] == true,
       bugfix: bugfix,
       phase: j['phase'] == null ? null : Phase.parse(j['phase']),
       nudges: (j['nudges'] as num?)?.toInt() ?? 0,
@@ -281,6 +286,7 @@ final class PhaseFlow {
     if (reproFiles.isNotEmpty) 'repro_files': reproFiles,
     if (forks.isNotEmpty) 'forks': forks,
     if (researchFailed) 'research_failed': true,
+    if (buildingUnplanned) 'building_unplanned': true,
   };
 
   /// This flow on the other tier (Max ↔ Ultra), where it is: switching tier
@@ -303,7 +309,19 @@ final class PhaseFlow {
     reproFiles.clear();
     forkAsking = false;
     researchFailed = false;
+    buildingUnplanned = false;
     run = newRunId();
+  }
+
+  /// The user told the agent to stop preparing and build now: the flow goes
+  /// straight to build. Bug fix keeps its proofs, so it never skips.
+  bool buildNow() {
+    if (bugfix || !phase.preparing) return false;
+    phase = Phase.build;
+    nudges = 0;
+    researchFailed = false;
+    buildingUnplanned = true;
+    return true;
   }
 
   /// Whether [text] came from the user rather than from the app on the
@@ -350,7 +368,10 @@ final class PhaseFlow {
               'Next: ${next()}';
         }
       case presentPlanTool:
-        if (phase != Phase.plan) return 'Error ($where): not yet. Next: ${next()}';
+        // From questions too: with nothing worth asking, the plan card is the user's checkpoint.
+        if (phase != Phase.plan && !(phase == Phase.questions && !bugfix)) {
+          return 'Error ($where): not yet. Next: ${next()}';
+        }
     }
     return null;
   }
@@ -412,7 +433,8 @@ final class PhaseFlow {
                 'researcher has reported and at least one finished.',
     Phase.questions =>
       'ask the user about the directions research found with ask_user_question: the choices that change what gets '
-          'built, your recommendation first.',
+          'built, your recommendation first. If nothing would change what gets built, skip the questions: write the '
+          'plan to $planFile and present_plan, saying why there was nothing to ask.',
     Phase.plan =>
       bugfix
           ? 'write the fix plan to $planFile: the root cause with evidence, the smallest change that removes it, and '
@@ -420,7 +442,11 @@ final class PhaseFlow {
           : 'write the plan to $planFile (the parts, which research each uses, how each is checked), then '
                 'present_plan.',
     Phase.build =>
-      forks.isNotEmpty
+      buildingUnplanned && forks.isEmpty
+          ? 'the user asked to start building now, without an approved plan. Note the parts briefly in your todo '
+                'list (no plan card), then build them to the Thorough standard; use forks (isolation "worktree") for '
+                'independent parts.'
+          : forks.isNotEmpty
           ? 'forks are still building in the background (${forks.length}): keep to your own part, or end your turn; '
                 'their notifications wake you. Then integrate their work and check the whole.'
           : 'build the plan: give each independent part to a fork (isolation "worktree") and build the rest yourself, '
@@ -476,7 +502,7 @@ final class PhaseFlow {
         askedUser = true;
         return _advanceFrom(Phase.questions);
       case presentPlanTool when reason.startsWith(planApprovedReason.substring(0, 40)):
-        return _advanceFrom(Phase.plan);
+        return _approvePlan();
     }
     return false;
   }
@@ -522,7 +548,12 @@ final class PhaseFlow {
     }
     // "Start building" for a plan that wasn't held (or was closed by a reply)
     // comes as a message; it approves the plan as much as the held answer does.
-    if (phase == Phase.plan && text.contains(planApprovedMessage)) return _advanceFrom(Phase.plan);
+    if (text.contains(planApprovedMessage) && (phase == Phase.plan || phase == Phase.questions)) return _approvePlan();
+    // Questions asked in prose get answered in prose: the user's reply is the answer.
+    if (phase == Phase.questions && fromUser(text) && parsePhaseNote(text) == null) {
+      askedUser = true;
+      return _advanceFrom(Phase.questions);
+    }
     // Also after a switch to Max while the workflow ran: its reports are this round's research.
     if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
       if (phase != Phase.research) return false;
@@ -619,6 +650,13 @@ final class PhaseFlow {
     }
   }
 
+  /// An approved plan: from the plan phase, or straight from questions when
+  /// the agent had nothing worth asking.
+  bool _approvePlan() {
+    if (phase == Phase.questions) phase = Phase.plan;
+    return _advanceFrom(Phase.plan);
+  }
+
   bool _advanceFrom(Phase from) {
     if (phase != from) return false;
     final i = steps.indexOf(from);
@@ -672,7 +710,10 @@ const researchTimeout = Duration(minutes: 45);
 /// research workflow: how many researchers, on what, and on which of
 /// [models] (id → what it is good for; "same" is its own model).
 String researchAnglesQuestion({Map<String, String> models = const {}, bool bug = false}) {
-  final options = StringBuffer('- "same": your own model; the researcher forks you and shares your cache\n');
+  final options = StringBuffer(
+    '- "same": your own model; the researcher forks you and shares your cache (cheapest per token while your '
+    'context is short)\n',
+  );
   for (final MapEntry(:key, :value) in models.entries) {
     options.write('- "$key"${value.isEmpty ? '' : ': $value'}\n');
   }
@@ -683,10 +724,11 @@ String researchAnglesQuestion({Map<String, String> models = const {}, bool bug =
             'subsystem involved really behaves (docs, specs, kernel or library source), and the smallest fixes '
             'that held. '
       : 'Plan the research for the task above as a workflow of researchers working in parallel. You decide how '
-            'many (at most $maxResearchers; fewer for a small task, more for a broad one) and what each finds out: '
-            'one angle each that changes what gets built, such as reference implementations to borrow from, '
-            'libraries and their trade-offs, architecture, pitfalls and security issues, performance, testing, specs '
-            'and APIs, prior art on GitHub and Hugging Face. ';
+            'many (at most $maxResearchers) and what each finds out: one angle each that changes what gets built, '
+            'such as reference implementations to borrow from, libraries and their trade-offs, architecture, '
+            'pitfalls and security issues, performance, testing, specs and APIs, prior art on GitHub and Hugging '
+            'Face. Size it to the task: one or two researchers for a small or playful one (a toy game, a single '
+            'page), more only when the task is broad or risky. ';
   return '$what'
       'Pick each researcher\'s model from these, weighing cost against depth:\n'
       '$options'

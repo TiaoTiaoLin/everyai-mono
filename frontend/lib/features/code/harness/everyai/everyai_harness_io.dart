@@ -13,7 +13,7 @@ import '../../domain/agent_mode.dart';
 import '../../domain/compaction.dart';
 import '../../domain/phases.dart';
 import '../../domain/shell_readonly.dart';
-import '../../domain/transcript.dart' show PlanProposal, planApprovedReason;
+import '../../domain/transcript.dart' show PlanProposal, planApprovedMessage, planApprovedReason;
 import '../../domain/subagents.dart' show forkingTaskSpec, subagentRules, taskTool;
 import '../../settings/agent_prompt.dart' show forHeldClientTools;
 import '../events.dart';
@@ -725,8 +725,8 @@ final class EveryAISession
       'llm_message': {'role': 'user', 'content': content},
     });
     final message = {'role': 'user', 'content': images.isEmpty ? text : content, '_eid': eid};
-    final restarted = await _newTask(text);
-    final moved = (_flow?.onMessage(text) ?? false) || restarted;
+    final routed = await _newTask(text) || await _buildNow(text);
+    final moved = (_flow?.onMessage(text) ?? false) || routed;
     if (_looping) {
       // Steering: read before the next model call. A message right after a
       // stop (Option-Enter) is a new instruction, so the run carries on.
@@ -777,6 +777,40 @@ final class EveryAISession
     _approvedPlan = '';
     _saveState();
     return true;
+  }
+
+  /// A message while the flow still prepares (research, questions, plan):
+  /// when the user tells the agent to stop preparing and build ("just build
+  /// it"), the flow goes straight to build. Bug fix never skips its proofs.
+  /// True when it moved.
+  Future<bool> _buildNow(String text) async {
+    final f = _flow;
+    if (f == null || f.bugfix || !f.phase.preparing || !PhaseFlow.fromUser(text)) return false;
+    // "Start building" on the plan card is an approval, which onMessage handles.
+    if (text.contains(planApprovedMessage)) return false;
+    final said = userTextOf(text).trim();
+    if (said.isEmpty || said.length > 4000) return false;
+    try {
+      final a = await _gateway.decide(
+        '<phase>${f.phase.label}</phase>\n<message>\n$said\n</message>',
+        const [
+          {
+            'id': 'build_now',
+            'kind': 'bool',
+            'prompt':
+                'An agent is preparing a task in steps (research, questions to the user, a plan for approval). Does '
+                'this message from the user tell it to skip the rest of that and start building right away (true)? '
+                'An answer to a question, a new requirement or a question of their own is false.',
+          },
+        ],
+        sessionTag: _spec.sessionTag,
+        job: 'flow',
+      );
+      if (a['build_now'] != true) return false;
+    } on Object {
+      return false;
+    }
+    return f.buildNow();
   }
 
   /// The session's first task, as the user wrote it.

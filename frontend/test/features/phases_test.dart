@@ -165,6 +165,28 @@ void main() {
     expect(q, allOf(contains('"same"'), contains('google/gemini-argon'), contains('You decide how many')));
   });
 
+  test('with nothing to ask the plan comes straight from questions; a prose answer moves questions on', () {
+    final f = PhaseFlow()..phase = Phase.questions;
+    expect(f.gate('present_plan', {}, inScratch: scratch), isNull);
+    expect(f.next(), contains('skip the questions'));
+    expect(f.onAnswer('present_plan', {}, planApprovedReason), isTrue);
+    expect(f.phase, Phase.build);
+    final g = PhaseFlow()..phase = Phase.questions;
+    expect(g.onMessage('Go with SQLite, and keep it single-player.'), isTrue);
+    expect(g.phase, Phase.plan);
+    expect(PhaseFlow(bugfix: true, phase: Phase.plan).gate('present_plan', {}, inScratch: scratch), isNull);
+  });
+
+  test('"just build it" goes straight to build, except in Bug fix', () {
+    final f = PhaseFlow();
+    expect(f.buildNow(), isTrue);
+    expect((f.phase, f.buildingUnplanned), (Phase.build, true));
+    expect(f.next(), contains('without an approved plan'));
+    expect(f.gate('write', {'file_path': 'main.c'}, inScratch: scratch), isNull);
+    expect(PhaseFlow(bugfix: true).buildNow(), isFalse);
+    expect((PhaseFlow()..phase = Phase.verify).buildNow(), isFalse);
+  });
+
   test('a workflow with no finished report waits for the user, whose message runs it again', () {
     final f = PhaseFlow(ultra: true);
     final failed = researchWorkflowMessage([
