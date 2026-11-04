@@ -147,8 +147,8 @@ final class ClaudeDriver implements HarnessDriver {
     );
     await writeTextFile('$dir/$id.json', jsonEncode(meta.toJson()));
     final briefing = await _briefing(spec.briefing);
+    // The CLI starts with the first message that runs, not before.
     final session = _live[id] = ClaudeSession._(this, id, dir, meta, briefing, openEventJournal(dir, id));
-    await session._ensure();
     if (spec.initialMessage case final text?) {
       await session.send(text, run: spec.runInitial, images: spec.initialImages);
     }
@@ -166,8 +166,10 @@ final class ClaudeDriver implements HarnessDriver {
     final json = raw == null ? null : _json(raw);
     if (json == null) throw const HarnessError("This Claude Code session's record is gone.");
     final journal = openEventJournal(dir, conversationId);
-    final session = ClaudeSession._(this, conversationId, dir, _Meta.fromJson(json), null, journal)
-      .._history.addAll(await journal.read());
+    final meta = _Meta.fromJson(json);
+    final session = ClaudeSession._(this, conversationId, dir, meta, null, journal)
+      .._history.addAll(await journal.read())
+      .._carry.addAll(meta.carry);
     _live[conversationId] = session;
     session._emit(stateEvent(const Uuid().v4(), ExecutionStatus.idle), keep: false);
     return session;
@@ -226,7 +228,8 @@ Map<String, Object?>? _json(String line) {
 
 /// What [ClaudeDriver.attach] needs to continue a session: where it runs
 /// (`--resume` looks the conversation up by folder), its model and mode, and
-/// whether the CLI has had a message (before that there is nothing to resume).
+/// whether the CLI has had a message (before that there is nothing to resume),
+/// and messages shown but not sent yet ([ClaudeSession.send] `run: false`).
 final class _Meta {
   const _Meta({
     required this.cwd,
@@ -235,6 +238,7 @@ final class _Meta {
     required this.effort,
     required this.mode,
     required this.sent,
+    this.carry = const [],
   });
 
   final String cwd;
@@ -243,14 +247,20 @@ final class _Meta {
   final String? effort;
   final AgentMode mode;
   final bool sent;
+  final List<String> carry;
 
-  _Meta copyWith({String? model, String? effort, AgentMode? mode, bool? sent}) => _Meta(
+  /// [effort] is taken as given (null is Claude's default), not kept.
+  _Meta withLlm({required String model, required String? effort}) =>
+      _Meta(cwd: cwd, sessionTag: sessionTag, model: model, effort: effort, mode: mode, sent: sent, carry: carry);
+
+  _Meta copyWith({AgentMode? mode, bool? sent, List<String>? carry}) => _Meta(
     cwd: cwd,
     sessionTag: sessionTag,
-    model: model ?? this.model,
-    effort: effort ?? this.effort,
+    model: model,
+    effort: effort,
     mode: mode ?? this.mode,
     sent: sent ?? this.sent,
+    carry: carry ?? this.carry,
   );
 
   Map<String, Object?> toJson() => {
@@ -260,6 +270,7 @@ final class _Meta {
     'effort': ?effort,
     'mode': mode.name,
     'sent': sent,
+    if (carry.isNotEmpty) 'carry': carry,
   };
 
   static _Meta fromJson(Map<String, Object?> j) => _Meta(
@@ -269,6 +280,7 @@ final class _Meta {
     effort: j['effort'] as String?,
     mode: AgentMode.values.where((m) => m.name == j['mode']).firstOrNull ?? AgentMode.ask,
     sent: j['sent'] == true,
+    carry: [for (final t in j['carry'] as List<Object?>? ?? const []) ?t as String?],
   );
 }
 
@@ -277,7 +289,7 @@ final class _Meta {
 typedef _Held = ({String requestId, bool hook, Map<String, Object?> input});
 
 /// One Claude Code conversation. Refusing a call doesn't stop the run (the
-/// model is told and carries on), so [resume] does nothing.
+/// model is told and carries on); [resume] runs a stopped or failed turn on.
 final class ClaudeSession implements HarnessSession, PerCallApprovals {
   ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal);
 
@@ -298,6 +310,13 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
   var _requests = 0;
   var _running = false;
   var _waiting = false;
+
+  /// We asked the running turn to stop; [_continueAfter]: run on once it has.
+  var _interrupting = false;
+  var _continueAfter = false;
+
+  /// The process runs with an old effort: replaced once the turn ends.
+  var _respawn = false;
   var _closed = false;
   var _status = ExecutionStatus.idle;
 
@@ -310,8 +329,12 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
   /// Calls already answered, so a second answer is dropped.
   final _answered = <String>{};
 
-  /// Messages sent with `run: false`, which go along with the next one.
+  /// Messages sent with `run: false`, which go along with the next one
+  /// (also in the record, for [ClaudeDriver.attach]).
   final _carry = <String>[];
+
+  /// Calls already shown as let run ([approvedEvent]).
+  final _let = <String>{};
 
   /// History, then live events. Both are taken at the moment of listening,
   /// so nothing emitted in between is lost.
@@ -334,12 +357,18 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     _emit(userMessage(const Uuid().v4(), text));
     if (!run) {
       _carry.add(text);
+      await _save(_meta.copyWith(carry: List.unmodifiable(_carry)));
       return;
     }
-    final c = await _ensure();
     final body = [..._carry, text].join('\n\n');
     _carry.clear();
-    if (!_meta.sent) await _save(_meta.copyWith(sent: true));
+    await _turn(body, images: images);
+  }
+
+  /// Sends [body] as the next turn, starting the CLI when it isn't running.
+  Future<void> _turn(String body, {List<String> images = const []}) async {
+    final c = await _ensure();
+    if (!_meta.sent || _meta.carry.isNotEmpty) await _save(_meta.copyWith(sent: true, carry: const []));
     c.send(jsonEncode(userLine(body, images: images)));
     _running = true;
     _emit(stateEvent(const Uuid().v4(), ExecutionStatus.running));
@@ -351,14 +380,31 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
       _answer(callId, _held.remove(callId)!, accept: false, reason: 'The user stopped this.');
     }
     _waiting = false;
-    if (_running) _request({'subtype': 'interrupt'});
+    _continueAfter = false;
+    _stopTurn();
+  }
+
+  void _stopTurn() {
+    if (!_running) return;
+    _interrupting = true;
+    _request({'subtype': 'interrupt'});
   }
 
   @override
   Future<void> pause() => interrupt();
 
+  /// Runs on after a turn that stopped (Stop, the repeat guard's pause) or
+  /// failed: the CLI has no "run again", so it gets a short message. Nothing
+  /// while a turn runs, unless it is being stopped (it runs on after that).
   @override
-  Future<void> resume() async {}
+  Future<void> resume() async {
+    if (_closed) return;
+    if (_running) {
+      if (_interrupting) _continueAfter = true;
+      return;
+    }
+    if (_status == ExecutionStatus.paused || _status == ExecutionStatus.error) await _turn(continueMessage);
+  }
 
   @override
   Future<void> respond({required bool accept, String? reason, List<String>? callIds}) async {
@@ -373,7 +419,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     // Refusing everything at once parks the run, as with the EveryAI harness.
     if (callIds == null && !accept) {
       _waiting = false;
-      if (_running) _request({'subtype': 'interrupt'});
+      _stopTurn();
       return;
     }
     if (_waiting && _held.isEmpty) {
@@ -388,11 +434,19 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     _request({'subtype': 'set_permission_mode', 'mode': permissionModeFor(mode)});
   }
 
-  /// The model changes in place; a new effort applies when the CLI next
-  /// starts (it has no live control for it).
+  /// The model changes in place. The CLI has no live control for the
+  /// effort, so a new one restarts it (`--resume`): now when no turn runs,
+  /// else when the turn ends.
   @override
   Future<void> switchLlm(SessionSpec spec) async {
-    await _save(_meta.copyWith(model: spec.model, effort: spec.effort));
+    final effort = spec.effort == null || spec.effort!.isEmpty ? null : spec.effort;
+    final restart = effort != _meta.effort;
+    await _save(_meta.withLlm(model: spec.model, effort: effort));
+    if (restart && _channel != null) {
+      if (!_running) return _drop();
+      _respawn = true;
+      return;
+    }
     _request({'subtype': 'set_model', 'model': claudeModelArg(spec.model) ?? 'default'});
   }
 
@@ -405,12 +459,18 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     if (_closed) return;
     _closed = true;
     _driver._live.remove(id);
-    final c = _channel;
-    _channel = null;
-    await _sub?.cancel();
-    await c?.close();
+    await _drop();
     await _journal.close();
     await _events.close();
+  }
+
+  /// Ends the CLI's process quietly; the next turn starts it again.
+  Future<void> _drop() async {
+    final c = _channel;
+    _channel = null;
+    _respawn = false;
+    await _sub?.cancel();
+    await c?.close();
   }
 
   /// The CLI's process, started when missing: a new conversation under our
@@ -437,6 +497,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
       logPath: '$_dir/$id.log',
     );
     _channel = c;
+    _requests = 0; // Ids count per process.
     _sub = c.lines.listen(_line, onDone: () => _gone(c));
     // Before any message; the CLI reads its stdin in order.
     _request({'subtype': 'initialize', 'hooks': gateHooks});
@@ -460,12 +521,32 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
         }
       default:
         final events = _decoder.decode(line);
-        if (line['type'] == 'result') {
-          _running = false;
-          _waiting = false;
+        for (final e in events) {
+          _emit(e);
+          if (e is ActionCall && _selfAnswered(e.toolName)) _letRun(e.id);
         }
-        events.forEach(_emit);
+        if (line['type'] == 'result') _ended();
     }
+  }
+
+  /// A turn ended: replace a process with an old effort, and run on when
+  /// [resume] asked while it was being stopped.
+  void _ended() {
+    _running = false;
+    _waiting = false;
+    _interrupting = false;
+    if (_respawn) unawaited(_drop());
+    if (_continueAfter) {
+      _continueAfter = false;
+      unawaited(_turn(continueMessage));
+    }
+  }
+
+  bool _selfAnswered(String toolName) => answeredBySession(toolName, briefed: _briefing != null);
+
+  /// Shows [callId] as no longer waiting for the user (its result is still to come).
+  void _letRun(String callId) {
+    if (_let.add(callId)) _emit(approvedEvent('ok:$callId', [callId]));
   }
 
   /// The CLI asks before a tool call: our hook, or its permission prompt.
@@ -485,7 +566,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     final input = body[hook ? 'tool_input' : 'input'] as Map<String, Object?>? ?? const {};
     final held = (requestId: requestId, hook: hook, input: input);
     if (!_decoder.knows(callId)) _emit(_decoder.action(callId, name, input));
-    if (answeredBySession(name)) return _answer(callId, held, accept: true);
+    if (_selfAnswered(name)) return _answer(callId, held, accept: true);
     if (_early.remove(callId) case final a?) return _answer(callId, held, accept: a.accept, reason: a.reason);
     _held[callId] = held;
     _waiting = true;
@@ -494,6 +575,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
 
   void _answer(String callId, _Held h, {required bool accept, String? reason}) {
     _answered.add(callId);
+    if (accept) _letRun(callId);
     if (!accept) _decoder.refused[callId] = reason == null || reason.isEmpty ? refusedByUser : reason;
     final answer = approvalAnswer(hook: h.hook, accept: accept, reason: reason, input: h.input);
     _channel?.send(jsonEncode(controlResponse(h.requestId, answer)));
@@ -507,6 +589,9 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     unawaited(_sub?.cancel());
     _held.clear();
     _waiting = false;
+    _interrupting = false;
+    _continueAfter = false;
+    _respawn = false;
     if (_closed || !_running) return;
     _running = false;
     final why = c.lastError.trim();

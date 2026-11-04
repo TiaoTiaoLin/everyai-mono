@@ -1,5 +1,7 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
+import 'dart:convert';
+
 import '../../domain/agent_mode.dart';
 import '../../harness/events.dart';
 import '../briefing/briefing_types.dart';
@@ -75,6 +77,16 @@ Delivery claudeDelivery(DriverBriefing b, {String sessionText = ''}) {
   );
 }
 
+/// Only the user's own settings (`~/.claude`): a project's
+/// `.claude/settings*.json` would run its hooks, `apiKeyHelper`, env and
+/// `.mcp.json` servers before our hook sees anything (`-p` skips Claude's
+/// trust prompt), so a cloned repo could run code just by being opened.
+const _userSettingsOnly = ['--setting-sources', 'user'];
+
+/// Skill bodies' inline `!` shell lines never run (the briefing's recipe
+/// sets the same; without a briefing the driver does).
+final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
+
 /// How to start one session's process. [resume] continues the conversation
 /// [sessionId] (it has had a message); otherwise it starts under that id.
 /// Never `--dangerously-skip-permissions`: every call comes to our hook.
@@ -101,12 +113,14 @@ Delivery claudeDelivery(DriverBriefing b, {String sessionText = ''}) {
       'stdio',
       '--permission-mode',
       permissionModeFor(mode),
+      ..._userSettingsOnly,
       ...resume ? ['--resume', sessionId] : ['--session-id', sessionId],
       if (m != null) ...['--model', m],
       if (effort != null && effort.isNotEmpty) ...['--effort', effort],
       // Briefed sessions ask the user through our question cards.
       if (briefing != null) ...['--disallowedTools', 'AskUserQuestion'],
       ...?briefing?.args,
+      if (briefing == null) ...['--settings', _noSkillShell],
     ],
     env: {...?briefing?.env, 'MCP_TOOL_TIMEOUT': _mcpTimeoutMs, 'CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT': _mcpTimeoutMs},
   );
@@ -123,6 +137,7 @@ const claudeProbeArgs = [
   '--verbose',
   '--strict-mcp-config',
   '--no-session-persistence',
+  ..._userSettingsOnly,
 ];
 
 Map<String, Object?> controlRequest(String id, Map<String, Object?> request) => {
@@ -187,10 +202,14 @@ Map<String, Object?> approvalAnswer({
 
 const refusedByUser = 'The user refused this.';
 
-/// Tools that only touch Claude's own state (or reach the user through our
-/// MCP server), which the session allows itself: they still show.
-bool answeredBySession(String toolName) =>
-    toolName.startsWith('mcp__${everyaiServerName}__') || _internalTools.contains(toolName);
+/// What [ClaudeSession.resume] sends to run a stopped or failed turn on.
+const continueMessage = 'Carry on from where you stopped.';
+
+/// Tools that only touch Claude's own state (or, in a [briefed] session,
+/// reach the user through our MCP server), which the session allows itself:
+/// they still show. Without a briefing an `everyai` MCP server isn't ours.
+bool answeredBySession(String toolName, {required bool briefed}) =>
+    (briefed && toolName.startsWith('mcp__${everyaiServerName}__')) || _internalTools.contains(toolName);
 
 const _internalTools = {
   'ToolSearch',
@@ -227,8 +246,11 @@ const _internalTools = {
     'Read' => (kind: 'ReadFileAction', args: {'path': s('file_path')}),
     'Grep' => (kind: 'GrepAction', args: {'pattern': s('pattern'), 'path': s('path')}),
     'Glob' => (kind: 'GlobAction', args: {'pattern': s('pattern'), 'path': s('path')}),
-    'WebFetch' => (kind: 'WebFetchAction', args: {'url': s('url')}),
-    'WebSearch' => (kind: 'WebSearchAction', args: {'query': s('query')}),
+    // Not the EveryAI harness's web tools (which go through the backend's
+    // safe fetcher and the secret scrubber): a URL can carry data out, so the
+    // user approves each one.
+    'WebFetch' => (kind: 'ClaudeWebFetchAction', args: {'url': s('url')}),
+    'WebSearch' => (kind: 'ClaudeWebSearchAction', args: {'query': s('query')}),
     'TodoWrite' => (
       kind: 'TaskTrackerAction',
       args: {

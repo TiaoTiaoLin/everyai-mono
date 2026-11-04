@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/claude/claude_driver.dart';
 import 'package:every_ai/features/code/drivers/claude/claude_wire.dart';
@@ -72,6 +73,56 @@ Future<void> _played(ReplayChannel c) async {
   c.expectFinished();
 }
 
+// Short scripts for the CLI's side, built from the wire helpers.
+final _init = [
+  _out(controlRequest('req_1', {'subtype': 'initialize', 'hooks': gateHooks})),
+  _in(controlResponse('req_1', const {})),
+].join('\n');
+String _out(Map<String, Object?> msg) => jsonEncode({'dir': 'out', 'msg': msg});
+String _in(Map<String, Object?> msg) => jsonEncode({'dir': 'in', 'msg': msg});
+String _say(String text) => _out(userLine(text));
+String _done(String uuid, {bool aborted = false}) => _in({
+  'type': 'result',
+  'subtype': aborted ? 'error_during_execution' : 'success',
+  'is_error': aborted,
+  if (aborted) 'terminal_reason': 'aborted_streaming',
+  'usage': {'input_tokens': 0, 'output_tokens': 0},
+  'uuid': uuid,
+});
+String _use(String callId, String name, Map<String, Object?> input, {String? parent}) => _in({
+  'type': 'assistant',
+  'message': {
+    'id': 'm-$callId',
+    'role': 'assistant',
+    'content': [
+      {'type': 'tool_use', 'id': callId, 'name': name, 'input': input},
+    ],
+  },
+  'parent_tool_use_id': parent,
+  'uuid': 'u-$callId',
+});
+String _hook(String requestId, String callId, String name, Map<String, Object?> input) => _in({
+  'type': 'control_request',
+  'request_id': requestId,
+  'request': {
+    'subtype': 'hook_callback',
+    'callback_id': gateCallbackId,
+    'input': {'hook_event_name': 'PreToolUse', 'tool_name': name, 'tool_input': input, 'tool_use_id': callId},
+  },
+});
+String _allow(String requestId) => _out(controlResponse(requestId, approvalAnswer(hook: true, accept: true)));
+String _results(List<String> callIds) => _in({
+  'type': 'user',
+  'message': {
+    'role': 'user',
+    'content': [
+      for (final id in callIds) {'type': 'tool_result', 'tool_use_id': id, 'content': 'ok', 'is_error': false},
+    ],
+  },
+  'uuid': 'res-${callIds.join()}',
+});
+String _script(List<String> lines) => '${lines.join('\n')}\n';
+
 void main() {
   late Directory tmp;
   setUp(() => tmp = Directory.systemTemp.createTempSync('claude_driver'));
@@ -94,15 +145,30 @@ void main() {
         'stdio',
         '--permission-mode',
         'default',
+        '--setting-sources',
+        'user',
         '--session-id',
         'abc',
         '--model',
         'haiku',
         '--effort',
         'high',
+        '--settings',
+        '{"disableSkillShellExecution":true}',
       ]);
       final resumed = claudeLaunch(sessionId: 'abc', resume: true, mode: AgentMode.plan, model: 'default');
-      expect(resumed.args.sublist(9), ['--permission-mode', 'plan', '--resume', 'abc']);
+      expect(resumed.args.sublist(9), [
+        '--permission-mode',
+        'plan',
+        '--setting-sources',
+        'user',
+        '--resume',
+        'abc',
+        '--settings',
+        '{"disableSkillShellExecution":true}',
+      ]);
+      // A project's own .claude settings (hooks, apiKeyHelper, env) never load, nor in the models probe.
+      expect(claudeProbeArgs, containsAllInOrder(['--setting-sources', 'user']));
       for (final a in [fresh.args, resumed.args]) {
         expect(a, isNot(contains('--dangerously-skip-permissions')));
         expect(a, isNot(contains('--max-turns')));
@@ -145,6 +211,9 @@ void main() {
       final at = l.args.indexOf('--disallowedTools');
       expect(l.args.sublist(at, at + 4), ['--disallowedTools', 'AskUserQuestion', '--plugin-dir', '/s/briefing']);
       expect(l.args, containsAll(['--mcp-config', '--append-system-prompt', 'Session rules.', '--add-dir']));
+      // The recipe's own --settings switches skill shell lines off; there is only one.
+      expect(l.args.where((a) => a == '--settings'), hasLength(1));
+      expect(l.args, contains('{"disableSkillShellExecution":true}'));
       expect(l.args.join(' '), isNot(contains('tok-secret')));
       expect(l.env[tokenEnvVar], 'tok-secret');
       expect(l.env['MCP_TOOL_TIMEOUT'], '330000');
@@ -208,10 +277,24 @@ void main() {
         expect(autoDecidable(c), isTrue, reason: c.toolName);
       }
       expect(autoDecidable(other), isFalse);
-      expect(answeredBySession('mcp__everyai__ask_user_question'), isTrue);
-      expect(answeredBySession('Skill'), isTrue);
-      expect(answeredBySession('Bash'), isFalse);
-      expect(answeredBySession('mcp__github__create_issue'), isFalse);
+      expect(answeredBySession('mcp__everyai__ask_user_question', briefed: true), isTrue);
+      // Without a briefing a server named everyai is the user's own, not ours.
+      expect(answeredBySession('mcp__everyai__ask_user_question', briefed: false), isFalse);
+      expect(answeredBySession('Skill', briefed: false), isTrue);
+      expect(answeredBySession('Bash', briefed: true), isFalse);
+      expect(answeredBySession('mcp__github__create_issue', briefed: true), isFalse);
+    });
+
+    test("Claude's web tools always ask: they skip our safe fetcher and secret scrubber", () {
+      final d = ClaudeDecoder();
+      final fetch = d.action('1', 'WebFetch', {'url': 'https://example.com/?d=x', 'prompt': 'p'});
+      final search = d.action('2', 'WebSearch', {'query': 'q'});
+      for (final c in [fetch, search]) {
+        expect(AgentMode.isReadOnly(c), isFalse, reason: c.toolName);
+        expect(autoDecidable(c), isFalse, reason: c.toolName);
+        expect(AgentMode.ask.autoApproves(c), isFalse, reason: c.toolName);
+      }
+      expect(fetch.str('url'), 'https://example.com/?d=x');
     });
   });
 
@@ -221,8 +304,8 @@ void main() {
       final s = _Spawner([channel]);
       final session = await driver(s).start(_spec());
       final events = _record(session);
-      await session.setMode(AgentMode.ask);
-      await session.switchLlm(_spec(model: 'haiku'));
+      // Nothing starts before the first message.
+      expect(s.calls, isEmpty);
       await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
       await _played(channel);
 
@@ -253,8 +336,6 @@ void main() {
       );
       final session = await driver(_Spawner([channel])).start(_spec());
       final events = _record(session);
-      await session.setMode(AgentMode.ask);
-      await session.switchLlm(_spec());
       await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
       await _played(channel);
       expect(events.whereType<UsageReport>().single.onPlan, isFalse);
@@ -279,7 +360,7 @@ void main() {
       );
       final states = [
         for (final e in events)
-          if (e is StateChange) e.executionStatus,
+          if (e is StateChange && e.key != approvedCallsKey) e.executionStatus,
       ];
       expect(states, [
         ExecutionStatus.running,
@@ -327,7 +408,7 @@ void main() {
       );
       final states = [
         for (final e in events)
-          if (e is StateChange) e.executionStatus,
+          if (e is StateChange && e.key != approvedCallsKey) e.executionStatus,
       ];
       expect(states, isNot(contains(ExecutionStatus.paused)));
       expect(states.last, ExecutionStatus.finished);
@@ -419,6 +500,173 @@ void main() {
       expect(after.whereType<ToolResult>().last.text, 'hi');
       expect(_isState(after.last, ExecutionStatus.finished), isTrue);
       await expectLater(two.rewindTo(null), throwsA(isA<HarnessError>()));
+      await two.close();
+    });
+
+    test('Retry after the CLI died mid-turn runs the turn on in a resumed process', () async {
+      final first = ReplayChannel(
+        _script([
+          _init,
+          _say('Go.'),
+          _in({'type': 'system', 'subtype': 'init'}),
+          '{"dir":"eof"}',
+        ]),
+      );
+      final second = ReplayChannel(_script([_init, _say(continueMessage), _done('r2')]));
+      final s = _Spawner([first, second]);
+      final session = await driver(s).start(_spec(message: 'Go.'));
+      final events = _record(session);
+      await _played(first);
+      expect(_isState(events.last, ExecutionStatus.error), isTrue);
+
+      await session.resume();
+      await _played(second);
+      expect(s.calls[1].args, containsAllInOrder(['--resume', session.id]));
+      expect(_isState(events.last, ExecutionStatus.finished), isTrue);
+      // Not something the user typed.
+      expect(events.whereType<ChatMessage>().where((m) => m.text == continueMessage), isEmpty);
+      // After a finished turn there is nothing to run on.
+      await session.resume();
+      expect(second.failures, isEmpty);
+      await session.close();
+    });
+
+    test('pause, then resume before the stopped turn has ended: it runs on once it has', () async {
+      final channel = ReplayChannel(
+        _script([
+          _init,
+          _say('Go.'),
+          _in({'type': 'system', 'subtype': 'init'}),
+          _out(controlRequest('req_2', {'subtype': 'interrupt'})),
+          _in(controlResponse('req_2', const {})),
+          _done('r1', aborted: true),
+          _say(continueMessage),
+          _done('r2'),
+        ]),
+      );
+      final session = await driver(_Spawner([channel])).start(_spec(message: 'Go.'));
+      final events = _record(session);
+      await pumpEventQueue();
+      await session.pause();
+      await session.resume();
+      await _played(channel);
+      final states = [
+        for (final e in events)
+          if (e is StateChange && e.key != approvedCallsKey) e.executionStatus,
+      ];
+      expect(states, containsAllInOrder([ExecutionStatus.paused, ExecutionStatus.running, ExecutionStatus.finished]));
+      await session.close();
+    });
+
+    test('a new effort restarts the CLI with it, a cleared one without; a model change is live', () async {
+      final one = ReplayChannel(_script([_init, _say('Hi.'), _done('r1')]));
+      final two = ReplayChannel(_script([_init, _say('Again.'), _done('r2')]));
+      final three = ReplayChannel(
+        _script([
+          _init,
+          _say('Once more.'),
+          _done('r3'),
+          _out(controlRequest('req_2', {'subtype': 'set_model', 'model': 'sonnet'})),
+          _in(controlResponse('req_2', const {'model': 'claude-sonnet-5-5'})),
+        ]),
+      );
+      final s = _Spawner([one, two, three]);
+      final d = driver(s);
+      final session = await d.start(_spec(message: 'Hi.'));
+      await _played(one);
+      expect(s.calls[0].args, isNot(contains('--effort')));
+
+      await session.switchLlm(_spec(effort: 'high'));
+      await session.send('Again.');
+      await _played(two);
+      expect(s.calls[1].args, containsAllInOrder(['--resume', session.id, '--effort', 'high']));
+
+      await session.switchLlm(_spec(effort: ''));
+      await session.send('Once more.');
+      await pumpEventQueue();
+      expect(s.calls[2].args, isNot(contains('--effort')));
+      await session.switchLlm(_spec(model: 'sonnet'));
+      await _played(three);
+      expect(s.calls, hasLength(3));
+      await session.close();
+      // The record dropped the effort too, so a restart doesn't bring it back.
+      final again = jsonDecode(File('${tmp.path}/driver-sessions/claude-code/${session.id}.json').readAsStringSync());
+      expect((again as Map).containsKey('effort'), isFalse);
+    });
+
+    test('an effort changed during a turn applies once the turn ends', () async {
+      final one = ReplayChannel(
+        _script([
+          _init,
+          _say('Go.'),
+          _use('toolu_a', 'Bash', {'command': 'make'}),
+          _hook('h1', 'toolu_a', 'Bash', {'command': 'make'}),
+          _allow('h1'),
+          _results(['toolu_a']),
+          _done('r1'),
+        ]),
+      );
+      final two = ReplayChannel(_script([_init, _say('Next.'), _done('r2')]));
+      final s = _Spawner([one, two]);
+      final session = await driver(s).start(_spec(message: 'Go.'));
+      _record(session, (e) {
+        if (_isState(e, ExecutionStatus.waitingForConfirmation)) {
+          unawaited(
+            session.switchLlm(_spec(effort: 'low')).then((_) => session.respond(accept: true, callIds: ['toolu_a'])),
+          );
+        }
+      });
+      await _played(one);
+      await session.send('Next.');
+      await _played(two);
+      expect(s.calls[1].args, containsAllInOrder(['--resume', session.id, '--effort', 'low']));
+      await session.close();
+    });
+
+    test("a running subagent isn't asked about again while its own call waits", () async {
+      final channel = ReplayChannel(
+        _script([
+          _init,
+          _say('Use a subagent.'),
+          _use('toolu_t', 'Task', {'description': 'Install', 'prompt': 'npm install'}),
+          _hook('h1', 'toolu_t', 'Task', {'description': 'Install', 'prompt': 'npm install'}),
+          _allow('h1'),
+          _use('toolu_c', 'Bash', {'command': 'npm install'}, parent: 'toolu_t'),
+          _hook('h2', 'toolu_c', 'Bash', {'command': 'npm install'}),
+          _allow('h2'),
+          _results(['toolu_c']),
+          _results(['toolu_t']),
+          _done('r1'),
+        ]),
+      );
+      final session = await driver(_Spawner([channel])).start(_spec(message: 'Use a subagent.'));
+      final t = TranscriptBuilder();
+      final asked = <List<String>>[];
+      _record(session, (e) {
+        t.add(e);
+        if (_isState(e, ExecutionStatus.waitingForConfirmation)) {
+          asked.add([for (final c in t.snapshot.pending) c.id]);
+          unawaited(session.respond(accept: true, callIds: ['toolu_c']));
+        }
+      });
+      await _played(channel);
+      expect(asked, [
+        ['toolu_c'],
+      ]);
+      expect(t.snapshot.pending, isEmpty);
+      await session.close();
+    });
+
+    test('messages held back with run: false survive a restart and go with the next one', () async {
+      final d1 = driver(_Spawner([]));
+      final one = await d1.start(_spec());
+      await one.send('First, quietly.', run: false);
+      await one.close();
+
+      final channel = ReplayChannel(_script([_init, _say('First, quietly.\n\nNow go.'), _done('r1')]));
+      final two = await driver(_Spawner([channel])).attach(one.id);
+      await two.send('Now go.');
+      await _played(channel);
       await two.close();
     });
 
