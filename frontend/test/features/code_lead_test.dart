@@ -118,6 +118,9 @@ final class _Host implements HostServer {
   final revoked = <String>[];
   final revokedSessions = <String>[];
   final tools = <String, HostTools>{};
+
+  /// Live tokens by session; a revoked one leaves.
+  final live = <String, Set<String>>{};
   var touchOk = true;
   var _n = 0;
 
@@ -125,15 +128,27 @@ final class _Host implements HostServer {
   Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
     minted.add(sessionId);
     this.tools[sessionId] = tools;
-    return (url: Uri.parse('http://127.0.0.1:9/mcp'), token: 'tok${++_n}');
+    final token = 'tok${++_n}';
+    (live[sessionId] ??= {}).add(token);
+    return (url: Uri.parse('http://127.0.0.1:9/mcp'), token: token);
   }
 
   @override
   bool touch(String token) => touchOk;
   @override
-  Future<void> revoke(String token) async => revoked.add(token);
+  Future<void> revoke(String token) async {
+    revoked.add(token);
+    for (final t in live.values) {
+      t.remove(token);
+    }
+  }
+
   @override
-  Future<void> revokeSession(String sessionId) async => revokedSessions.add(sessionId);
+  Future<void> revokeSession(String sessionId) async {
+    revokedSessions.add(sessionId);
+    revoked.addAll(live.remove(sessionId) ?? const {});
+  }
+
   @override
   Future<void> stop() async {}
 }
@@ -538,6 +553,11 @@ void main() {
     final again = drivers['test']!.reopened.single;
     expect(again.mcpToken, 'tok2');
     expect(again.sessionSkill, contains('# EveryAI session'));
+    // The token the session started with is gone; only the new one answers.
+    expect(host.revoked, contains('tok1'));
+    expect(host.revoked, isNot(contains('tok2')));
+    expect(host.live[info.id], {'tok2'});
+    expect(drivers['test']!.specs.single.briefing!.mcpToken, 'tok1');
   });
 
   test('an EveryAI session still asks for the gateway key and gets no host token', () async {

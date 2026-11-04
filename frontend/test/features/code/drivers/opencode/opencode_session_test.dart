@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/driver_process.dart';
 import 'package:every_ai/features/code/drivers/opencode/opencode_driver.dart';
 import 'package:every_ai/features/code/drivers/opencode/opencode_server.dart';
@@ -46,7 +47,13 @@ final class _Process implements DriverProcess {
 }
 
 /// A driver whose server is [http] playing a recording, run by [process].
-({OpenCodeDriver driver, Directory data}) _driver(ReplayHttpClient http, {_Process? process, void Function()? found}) {
+/// What each server was started with lands in [envs].
+({OpenCodeDriver driver, Directory data}) _driver(
+  ReplayHttpClient http, {
+  _Process? process,
+  void Function()? found,
+  List<Map<String, String>>? envs,
+}) {
   final data = Directory.systemTemp.createTempSync('opencode_session_test');
   addTearDown(() => data.deleteSync(recursive: true));
   final driver = OpenCodeDriver(
@@ -57,8 +64,10 @@ final class _Process implements DriverProcess {
     run: (exe, args) async => (exitCode: 0, stdout: File('$_dir/auth_list.json').readAsStringSync()),
     dataDir: () async => data.path,
     reconnectDelay: Duration.zero,
-    launch: ({required executable, required cwd, required sessionTag, required logPath, env = const {}}) async =>
-        OpenCodeServer(base: Uri.parse('http://127.0.0.1:4096'), password: 'pw', client: http, process: process),
+    launch: ({required executable, required cwd, required sessionTag, required logPath, env = const {}}) async {
+      envs?.add(env);
+      return OpenCodeServer(base: Uri.parse('http://127.0.0.1:4096'), password: 'pw', client: http, process: process);
+    },
   );
   return (driver: driver, data: data);
 }
@@ -213,6 +222,32 @@ void main() {
     expect(await driver.attach(_ses), same(session));
     _expectAuth(http);
     await session.close();
+  });
+
+  test('attachBriefed: the new server gets the new token and skills in its env; plain attach gets none', () async {
+    for (final briefed in [true, false]) {
+      final envs = <Map<String, String>>[];
+      final (:driver, :data) = _driver(_replay('attach_resync.jsonl'), envs: envs);
+      final record = File('${data.path}/driver-sessions/opencode/$_ses.json')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(jsonEncode({'workingDir': _cwd, 'sessionTag': 'tag-1'}));
+      final session = briefed
+          ? await driver.attachBriefed(
+              _ses,
+              const DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new', skillDir: '/s/skills'),
+            )
+          : await driver.attach(_ses);
+      final env = envs.single;
+      if (briefed) {
+        expect(env[tokenEnvVar], 'tok-new');
+        expect(env['OPENCODE_CONFIG_CONTENT'], contains('127.0.0.1:7001'));
+        expect(env['OPENCODE_CONFIG_CONTENT'], isNot(contains('tok-new')));
+      } else {
+        expect(env, isEmpty);
+      }
+      expect(record.readAsStringSync(), isNot(contains('tok-')));
+      await session.close();
+    }
   });
 
   test("attach without a record says it can't find the session", () async {

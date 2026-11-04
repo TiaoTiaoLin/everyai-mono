@@ -18,7 +18,7 @@ import 'opencode_session.dart';
 /// reopening one reads its message list back. What [attach] needs besides
 /// the id (the folder, the session's tag) is kept in
 /// `<data>/driver-sessions/opencode/<id>.json`.
-final class OpenCodeDriver implements HarnessDriver {
+final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
   OpenCodeDriver({
     this.which,
     OpenCodeLauncher? launch,
@@ -150,9 +150,19 @@ final class OpenCodeDriver implements HarnessDriver {
 
   /// Reopens a session after a restart: a new server in its folder, its
   /// history from OpenCode, then live events. The briefing given at start
-  /// isn't handed to the new server (its MCP token ended with the old one).
+  /// isn't handed to the new server (its MCP token ended with the old one):
+  /// see [attachBriefed].
   @override
-  Future<HarnessSession> attach(String conversationId) async {
+  Future<HarnessSession> attach(String conversationId) => _attach(conversationId, null);
+
+  /// [attach] with a new briefing (the old token was revoked when the session
+  /// closed): the new server gets its MCP entry, token and skills in its
+  /// environment. A session still open here is returned as it is.
+  @override
+  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
+      _attach(conversationId, briefing);
+
+  Future<HarnessSession> _attach(String conversationId, DriverBriefing? briefing) async {
     if (_live[conversationId] case final s?) return s;
     final dir = await _dataDir();
     final record = _decode(await readTextFile(_recordPath(dir, conversationId)) ?? '');
@@ -165,6 +175,7 @@ final class OpenCodeDriver implements HarnessDriver {
       cwd: workingDir,
       sessionTag: tag,
       logPath: '$dir/driver-sessions/opencode/$tag.log',
+      env: openCodeBriefingEnv(briefing),
     );
     OpenCodeSession? session;
     try {

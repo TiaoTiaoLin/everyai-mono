@@ -677,6 +677,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (consentProblem(harness.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
     if (harness is! AttachesBriefed) return harness.attach(info.conversationId);
     final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
+    // Whatever token the session had before (a run that ended without its quit hook) ends now.
+    await ref.read(hostServerProvider).revokeSession(info.id);
     final briefing = await _brief(
       info.id,
       projectDir: project?.path ?? info.workingDir,

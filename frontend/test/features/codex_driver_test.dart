@@ -552,6 +552,56 @@ ${_upTo('resume', '"id":2,"result"')}
     await s.close();
   });
 
+  test('attachBriefed: the reopened process and its respawn carry the new token and skill root', () async {
+    final skills = '${tmp.path}/session/briefing/skills';
+    Directory(skills).createSync(recursive: true);
+    File('${tmp.path}/session/briefing/session.md').writeAsStringSync('You are in an EveryAI session.');
+    final first = _fixture('start');
+    final spawned = <_Spawned>[];
+    final a = await _driver(data, [first], spawned).start(
+      _spec(
+        work,
+        briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:4567/mcp', mcpToken: 'tok-old', skillDir: skills),
+      ),
+    );
+    await a.close();
+    expect(spawned.single.env, {'EVERYAI_MCP_TOKEN': 'tok-old'});
+
+    String reopen({required bool dies}) =>
+        '''
+${_upTo('resume', '"id":2,"result"')}
+{"dir":"out","msg":{"id":3,"method":"skills/extraRoots/set","params":{"extraRoots":["$skills"]}}}
+{"dir":"in","msg":{"id":3,"result":{}}}
+{"dir":"out","msg":{"id":4,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"in","msg":{"id":4,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
+${dies ? '{"dir":"eof"}' : ''}
+''';
+    final channel = ReplayChannel(reopen(dies: true));
+    final again = ReplayChannel(reopen(dies: false));
+    spawned.clear();
+    final s = await _driver(data, [channel, again], spawned).attachBriefed(
+      'thr_1',
+      DriverBriefing(mcpUrl: 'http://127.0.0.1:4568/mcp', mcpToken: 'tok-new', skillDir: skills),
+    );
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    // Gone on its own: Retry starts it again with the same briefing.
+    await s.resume();
+    await again.finished;
+    again.expectFinished();
+    expect(spawned, hasLength(2));
+    for (final launch in spawned) {
+      expect(launch.env, {'EVERYAI_MCP_TOKEN': 'tok-new'});
+      expect(launch.args, contains('mcp_servers.everyai.url="http://127.0.0.1:4568/mcp"'));
+      expect(launch.args.join(' '), isNot(contains('tok-')));
+    }
+    for (final f in Directory(data).listSync(recursive: true).whereType<File>()) {
+      expect(f.readAsStringSync(), isNot(contains('tok-')), reason: f.path);
+    }
+    await s.close();
+  });
+
   test('attach without saved details is refused', () async {
     await expectLater(
       _driver(data, []).attach('nope'),

@@ -38,7 +38,7 @@ typedef ClaudeSpawn = Future<LineChannel> Function(
 /// show it after a restart; the CLI keeps the conversation itself and
 /// continues it with `--resume`. It doesn't print history back, so the
 /// journal is the transcript.
-final class ClaudeDriver implements HarnessDriver {
+final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
   ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run});
 
   /// Replaces the PATH lookup in [detect] (tests).
@@ -157,17 +157,30 @@ final class ClaudeDriver implements HarnessDriver {
 
   /// Shows the session from its journal; the CLI starts with the next
   /// message, not before. A briefing isn't kept across restarts (its MCP
-  /// token was in memory), so a reopened session runs without our tools.
+  /// token was in memory), so a reopened session runs without our tools;
+  /// [attachBriefed] hands it a new one.
   @override
-  Future<HarnessSession> attach(String conversationId) async {
-    if (_live[conversationId] case final s?) return s;
+  Future<HarnessSession> attach(String conversationId) => _attach(conversationId, null);
+
+  /// [attach] with a new briefing (the old token was revoked when the session
+  /// closed): the next process the session starts carries it. A session still
+  /// open here takes it too, from its next process on.
+  @override
+  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
+      _attach(conversationId, briefing);
+
+  Future<HarnessSession> _attach(String conversationId, DriverBriefing? b) async {
+    if (_live[conversationId] case final s?) {
+      if (b != null) await s._rebrief(await _briefing(b));
+      return s;
+    }
     final dir = await _dir();
     final raw = await readTextFile('$dir/$conversationId.json');
     final json = raw == null ? null : _json(raw);
     if (json == null) throw const HarnessError("This Claude Code session's record is gone.");
     final journal = openEventJournal(dir, conversationId);
     final meta = _Meta.fromJson(json);
-    final session = ClaudeSession._(this, conversationId, dir, meta, null, journal)
+    final session = ClaudeSession._(this, conversationId, dir, meta, await _briefing(b), journal)
       .._history.addAll(await journal.read())
       .._carry.addAll(meta.carry);
     _live[conversationId] = session;
@@ -298,7 +311,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
   final String id;
   final String _dir;
   _Meta _meta;
-  final Delivery? _briefing;
+  Delivery? _briefing;
   final EventJournal _journal;
 
   final _history = <HarnessEvent>[];
@@ -315,7 +328,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
   var _interrupting = false;
   var _continueAfter = false;
 
-  /// The process runs with an old effort: replaced once the turn ends.
+  /// The process runs with an old effort or briefing: replaced once the turn ends.
   var _respawn = false;
   var _closed = false;
   var _status = ExecutionStatus.idle;
@@ -502,6 +515,15 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     // Before any message; the CLI reads its stdin in order.
     _request({'subtype': 'initialize', 'hooks': gateHooks});
     return c;
+  }
+
+  /// Uses [briefing] from the next process on: now when no turn runs, else
+  /// once the turn ends (the running one keeps the token it started with).
+  Future<void> _rebrief(Delivery? briefing) async {
+    _briefing = briefing;
+    if (_channel == null) return;
+    if (!_running) return _drop();
+    _respawn = true;
   }
 
   /// Sends a control request to a running CLI (one that isn't running

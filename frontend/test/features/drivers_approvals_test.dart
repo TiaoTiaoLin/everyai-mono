@@ -16,6 +16,8 @@ import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
+import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/code/permissions_providers.dart';
 import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
@@ -108,6 +110,23 @@ final class _PerCallSession extends _Session implements PerCallApprovals {
   }
 }
 
+/// The MCP host for outside sessions reopened here: hands out tokens, serves nothing.
+final class _Host implements HostServer {
+  var _n = 0;
+
+  @override
+  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async =>
+      (url: Uri.parse('http://127.0.0.1:9/mcp'), token: 'tok${++_n}');
+  @override
+  bool touch(String token) => true;
+  @override
+  Future<void> revoke(String token) async {}
+  @override
+  Future<void> revokeSession(String sessionId) async {}
+  @override
+  Future<void> stop() async {}
+}
+
 final class _TestDriver implements HarnessDriver {
   _TestDriver(this.id, this.session, {this.caps = const {DriverCap.approvals}});
   final String id;
@@ -130,6 +149,9 @@ final class _TestDriver implements HarnessDriver {
 }
 
 void main() {
+  // Reopening an outside session briefs it, which sets up the app-quit listener.
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late AppDatabase db;
   late Directory tmp;
   late _Session session;
@@ -169,6 +191,8 @@ void main() {
         preferencesProvider.overrideWithValue(prefs),
         modelCatalogProvider.overrideWith(_FixedCatalog.new),
         codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
+        hostServerProvider.overrideWithValue(_Host()),
+        driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
         driverRegistryProvider.overrideWithValue(
           DriverRegistry({
             everyaiHarnessName: _TestDriver(everyaiHarnessName, session, caps: const {DriverCap.rewind}),
@@ -291,8 +315,13 @@ void main() {
     final channels = <ReplayChannel>[];
     setUp(channels.clear);
 
-    /// The ACP driver on [script], with conversation c1 on disk (agent session [acpSession]).
-    Map<String, HarnessDriver> acp(String command, String script, String acpSession) {
+    /// The ACP driver on [script] (changed by [edit]), with conversation c1 on disk (agent session [acpSession]).
+    Map<String, HarnessDriver> acp(
+      String command,
+      String script,
+      String acpSession, {
+      String Function(String script)? edit,
+    }) {
       final dir = Directory('${tmp.path}/data/acp-sessions/c1')..createSync(recursive: true);
       File(
         '${dir.path}/meta.json',
@@ -313,7 +342,8 @@ void main() {
                 required String logPath,
                 required Map<String, String> env,
               }) async {
-                final c = ReplayChannel.file('test/fixtures/drivers/$script');
+                final text = File('test/fixtures/drivers/$script').readAsStringSync();
+                final c = ReplayChannel(edit?.call(text) ?? text);
                 channels.add(c);
                 return c;
               },
@@ -373,7 +403,17 @@ void main() {
       final controller = await open(
         AgentMode.fullAuto,
         harness: 'acp',
-        extra: acp('gemini', 'gemini/exec_waits.jsonl', 'gemini-session-1'),
+        // Reopened with a fresh briefing: our server and its new token go in session/load.
+        extra: acp(
+          'gemini',
+          'gemini/exec_waits.jsonl',
+          'gemini-session-1',
+          edit: (t) => t.replaceFirst(
+            '"mcpServers":[]',
+            '"mcpServers":[{"type":"http","name":"everyai","url":"http://127.0.0.1:9/mcp",'
+                '"headers":[{"name":"Authorization","value":"Bearer tok1"}]}]',
+          ),
+        ),
       );
       await controller.send('List');
       await _when(

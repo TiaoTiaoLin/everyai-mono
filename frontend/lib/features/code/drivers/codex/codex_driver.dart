@@ -33,7 +33,7 @@ typedef CodexSpawn = Future<LineChannel> Function({
 /// It keeps `<data>/drivers/codex/`: `threads/<id>.json` (what [attach]
 /// needs to start it again), `journal/<id>.jsonl` (the transcript) and
 /// `logs/<session>.log` (stderr).
-final class CodexDriver implements HarnessDriver {
+final class CodexDriver implements HarnessDriver, AttachesBriefed {
   CodexDriver({this.which, this.spawn, this.dataDir});
 
   /// Replaces the PATH lookup in [detect] (tests).
@@ -160,9 +160,20 @@ final class CodexDriver implements HarnessDriver {
 
   /// Starts Codex again on the thread and replays our journal. The EveryAI
   /// MCP server isn't there until a briefing is handed over again (its token
-  /// is never written down).
+  /// is never written down): see [attachBriefed].
   @override
-  Future<HarnessSession> attach(String conversationId) async {
+  Future<HarnessSession> attach(String conversationId) => _attach(conversationId, null);
+
+  /// [attach] with a new briefing (the old token was revoked when the session
+  /// closed): the reopened process, and any it is started again as, get its
+  /// `-c` overrides, token and skill roots. The session text goes only into
+  /// thread/start (`developerInstructions`), so it isn't sent again here. A
+  /// session still open here is returned as it is.
+  @override
+  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
+      _attach(conversationId, briefing);
+
+  Future<HarnessSession> _attach(String conversationId, DriverBriefing? briefing) async {
     if (_live[conversationId] case final s?) return s;
     final data = await _data();
     final saved = await readText(_metaPath(data, conversationId));
@@ -172,7 +183,8 @@ final class CodexDriver implements HarnessDriver {
     if (!found.installed || found.path == null) throw _notInstalled;
     final cwd = meta['cwd'] as String? ?? '';
     final tag = meta['sessionTag'] as String? ?? '';
-    Future<LineChannel> respawn() => _spawn(found.path!, args: const [], cwd: cwd, env: const {}, tag: tag);
+    final launch = await _launch(briefing);
+    Future<LineChannel> respawn() => _spawn(found.path!, args: launch.args, cwd: cwd, env: launch.env, tag: tag);
     final session = CodexSession(
       await respawn(),
       cwd: cwd,
@@ -181,7 +193,7 @@ final class CodexDriver implements HarnessDriver {
       effort: meta['effort'] as String?,
     );
     try {
-      await session.open();
+      await session.open(initRequests: launch.initRequests);
       await session.resumeThread(conversationId);
     } on Object catch (e) {
       await session.close();

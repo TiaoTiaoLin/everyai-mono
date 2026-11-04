@@ -5,6 +5,7 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
+import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
@@ -380,6 +381,34 @@ void main() {
       expect(seen.notices.single, contains('without your MCP servers github'));
       final meta = jsonDecode(File('${r.dataDir}/acp-sessions/o1/meta.json').readAsStringSync()) as Map;
       expect(meta['mcpServers'], ['github']);
+    });
+
+    test('attachBriefed: the reopened agent starts with the new token, not the old one, and none is stored', () async {
+      final r = rig(['opencode/usage_reopen.jsonl']);
+      _stored(r, 'o1', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE', mcp: ['github']);
+      final d = r.driver('acp:opencode', 'opencode');
+      expect(d, isA<AttachesBriefed>());
+      final s = await (d as AttachesBriefed).attachBriefed(
+        'o1',
+        DriverBriefing(
+          mcpUrl: 'http://127.0.0.1:7001/mcp',
+          mcpToken: 'tok-new',
+          skillDir: '${tmp.path}/b/briefing/skills',
+          sessionSkill: 'Session text.',
+        ),
+      );
+      final seen = _Seen(s);
+      await s.send('Hi');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final env = r.spawns.single.env;
+      expect(env[tokenEnvVar], 'tok-new');
+      expect(env['OPENCODE_CONFIG_CONTENT'], contains('127.0.0.1:7001'));
+      expect(r.spawns.single.args.join(' '), isNot(contains('tok-new')));
+      await s.close();
+      for (final f in Directory(r.dataDir).listSync(recursive: true).whereType<File>()) {
+        expect(f.readAsStringSync(), isNot(contains('tok-new')), reason: f.path);
+      }
     });
 
     test('a command that ran without asking is shown with a notice; in Plan it stops the turn', () async {

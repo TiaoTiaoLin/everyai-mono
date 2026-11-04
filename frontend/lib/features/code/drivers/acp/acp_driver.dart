@@ -26,7 +26,7 @@ export 'acp_session.dart' show AcpConnect;
 /// agent's session id, the folder, the session tag; nothing secret), the
 /// event journal and the agent's stderr. Models come from the last session
 /// the agent started (no session is started just to ask).
-final class AcpDriver implements HarnessDriver {
+final class AcpDriver implements HarnessDriver, AttachesBriefed {
   AcpDriver({
     required this.id,
     required this.label,
@@ -181,6 +181,7 @@ final class AcpDriver implements HarnessDriver {
   /// [attach] with a new briefing (the old session's MCP token died with the
   /// app), so the reopened agent reaches EveryAI's tools again, and the
   /// user's approved MCP servers ([mcpConfig]; `meta.json` keeps only names).
+  @override
   Future<HarnessSession> attachBriefed(
     String conversationId,
     DriverBriefing briefing, {

@@ -41,17 +41,23 @@ final class _Spawner {
   }
 }
 
-SessionSpec _spec({String? message, AgentMode mode = AgentMode.ask, String model = 'haiku', String? effort}) =>
-    SessionSpec(
-      workingDir: '/work/repo',
-      model: model,
-      mode: mode,
-      llmBaseUrl: '',
-      llmApiKey: '',
-      sessionTag: 'tag-1',
-      initialMessage: message,
-      effort: effort,
-    );
+SessionSpec _spec({
+  String? message,
+  AgentMode mode = AgentMode.ask,
+  String model = 'haiku',
+  String? effort,
+  DriverBriefing? briefing,
+}) => SessionSpec(
+  workingDir: '/work/repo',
+  model: model,
+  mode: mode,
+  llmBaseUrl: '',
+  llmApiKey: '',
+  sessionTag: 'tag-1',
+  initialMessage: message,
+  effort: effort,
+  briefing: briefing,
+);
 
 const _pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
 
@@ -668,6 +674,60 @@ void main() {
       await two.send('Now go.');
       await _played(channel);
       await two.close();
+    });
+
+    test('attachBriefed: the resumed process carries the new token, not the old one; none is on disk', () async {
+      const old = DriverBriefing(mcpUrl: 'http://127.0.0.1:7000/mcp', mcpToken: 'tok-old');
+      const fresh = DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new');
+      final first = ReplayChannel(_script([_init, _say('Go.'), _done('r1')]));
+      final s1 = _Spawner([first]);
+      final one = await driver(s1).start(_spec(message: 'Go.', briefing: old));
+      await _played(first);
+      expect(s1.calls.single.env[tokenEnvVar], 'tok-old');
+      await one.close();
+
+      final resumed = ReplayChannel(_script([_init, _say('Next.'), _done('r2')]));
+      final s2 = _Spawner([resumed]);
+      final two = await driver(s2).attachBriefed(one.id, fresh);
+      await two.send('Next.');
+      await _played(resumed);
+      final call = s2.calls.single;
+      expect(call.env[tokenEnvVar], 'tok-new');
+      expect(call.args, containsAllInOrder(['--resume', one.id]));
+      expect(call.args.join(' '), contains('127.0.0.1:7001'));
+      expect(call.args.join(' '), isNot(contains('tok-')));
+      for (final f in tmp.listSync(recursive: true).whereType<File>()) {
+        expect(f.readAsStringSync(), isNot(contains('tok-')), reason: f.path);
+      }
+      await two.close();
+
+      // Without a briefing it reopens with no MCP server of ours.
+      final bare = ReplayChannel(_script([_init, _say('Bare.'), _done('r3')]));
+      final s3 = _Spawner([bare]);
+      final three = await driver(s3).attach(one.id);
+      await three.send('Bare.');
+      await _played(bare);
+      expect(s3.calls.single.env.containsKey(tokenEnvVar), isFalse);
+      expect(s3.calls.single.args, isNot(contains('--mcp-config')));
+      await three.close();
+    });
+
+    test('attachBriefed on a session still open restarts its idle CLI with the new token', () async {
+      const fresh = DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new');
+      final first = ReplayChannel(_script([_init, _say('Go.'), _done('r1')]));
+      final second = ReplayChannel(_script([_init, _say('Next.'), _done('r2')]));
+      final s = _Spawner([first, second]);
+      final d = driver(s);
+      final one = await d.start(_spec(message: 'Go.'));
+      await _played(first);
+      expect(await d.attachBriefed(one.id, fresh), same(one));
+      await one.send('Next.');
+      await _played(second);
+      expect(s.calls, hasLength(2));
+      expect(s.calls[0].env.containsKey(tokenEnvVar), isFalse);
+      expect(s.calls[1].env[tokenEnvVar], 'tok-new');
+      expect(s.calls[1].args, containsAllInOrder(['--resume', one.id]));
+      await one.close();
     });
 
     test('a session without a record says so', () async {
