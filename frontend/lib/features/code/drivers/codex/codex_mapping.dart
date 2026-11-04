@@ -8,12 +8,18 @@ import '../driver_events.dart';
 // Codex app-server shapes ↔ the app's events, as pure functions. Field names
 // come from the generated schema in github.com/openai/codex
 // `codex-rs/app-server-protocol/schema/json/` at 3a2788e6 (ThreadItem,
-// ThreadTokenUsage, AskForApproval, SandboxMode, SandboxPolicy).
+// ThreadTokenUsage, AskForApproval, SandboxMode, SandboxPolicy), checked
+// against `codex app-server generate-json-schema` of codex-cli 0.166.0.
 
-/// What Codex is told for a mode: its approval policy, the thread's
-/// `sandbox` (a `SandboxMode` string) and the turn's `sandboxPolicy` (the
-/// same as a tagged object).
-typedef CodexPolicy = ({String approvalPolicy, String sandbox, Map<String, Object?> sandboxPolicy});
+/// What Codex is told for a mode: its approval policy, who answers its
+/// approvals (`approvalsReviewer`), the thread's `sandbox` (a `SandboxMode`
+/// string) and the turn's `sandboxPolicy` (the same as a tagged object).
+typedef CodexPolicy = ({
+  String approvalPolicy,
+  String approvalsReviewer,
+  String sandbox,
+  Map<String, Object?> sandboxPolicy,
+});
 
 /// The policy for [mode]. Codex always asks ("untrusted": every patch and
 /// every command outside its known-safe reads, `core/src/safety.rs`) and
@@ -32,16 +38,52 @@ typedef CodexPolicy = ({String approvalPolicy, String sandbox, Map<String, Objec
 /// just fails). Plan keeps a read-only sandbox with the network on, for the
 /// fetches planning may approve; it isn't a backstop, since an approved
 /// call that the sandbox blocks runs again without it.
+///
+/// The reviewer is always the user (here: the app). A user's
+/// `approvals_reviewer = "auto_review"` in their Codex config would
+/// otherwise let Codex's own reviewer answer calls the app must judge.
 CodexPolicy codexPolicy(AgentMode mode) => mode == AgentMode.plan
     ? (
         approvalPolicy: 'untrusted',
+        approvalsReviewer: 'user',
         sandbox: 'read-only',
         sandboxPolicy: const {'type': 'readOnly', 'networkAccess': true},
       )
-    : (approvalPolicy: 'untrusted', sandbox: 'danger-full-access', sandboxPolicy: const {'type': 'dangerFullAccess'});
+    : (
+        approvalPolicy: 'untrusted',
+        approvalsReviewer: 'user',
+        sandbox: 'danger-full-access',
+        sandboxPolicy: const {'type': 'dangerFullAccess'},
+      );
 
-/// Codex's reasoning effort for ours: it has no `max`, its top is `xhigh`.
-String? codexEffort(String? effort) => effort == 'max' ? 'xhigh' : effort;
+/// Whether a turn's `codexErrorInfo` says the account ran out: Codex folds
+/// its plan's usage limit, an API key's quota or credits, a plan without
+/// Codex and a workspace's credit or spend cap into `usageLimitExceeded`
+/// (`CodexErr::to_codex_protocol_error`, `codex-rs/protocol/src/error.rs`
+/// lines 500-541 @ rust-v0.166.0). `rateLimitExceeded` is a burst Codex
+/// retries itself, and `sessionBudgetExceeded` is Codex's own budget, so
+/// neither counts.
+bool codexUsageLimit(Object? codexErrorInfo) => codexErrorInfo == 'usageLimitExceeded';
+
+/// When the used-up windows of a rate-limit snapshot
+/// (`account/rateLimits/updated`'s `RateLimitSnapshot`) have all reset: the
+/// latest `resetsAt` (epoch seconds) of `primary`, `secondary` and
+/// `individualLimit` among those used up (`usedPercent` 100, or no
+/// `remainingPercent` left). Windows without a time are skipped; null when
+/// none is used up.
+DateTime? codexLimitResetsAt(Map<String, Object?>? snapshot) {
+  bool usedUp(Object? window) => switch (window) {
+    {'usedPercent': final num used} => used >= 100,
+    {'remainingPercent': final num left} => left <= 0,
+    _ => false,
+  };
+  final times = [
+    for (final w in [snapshot?['primary'], snapshot?['secondary'], snapshot?['individualLimit']])
+      if (w case {'resetsAt': final int at} when usedUp(w)) at,
+  ];
+  if (times.isEmpty) return null;
+  return DateTime.fromMillisecondsSinceEpoch(times.reduce((a, b) => a > b ? a : b) * 1000, isUtc: true);
+}
 
 /// The script inside `bash -lc '<script>'` (Codex runs commands through
 /// the user's shell), so the permission rules read the command itself.

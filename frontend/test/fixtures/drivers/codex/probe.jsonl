@@ -1,7 +1,9 @@
-// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
-// detect(): the handshake and account/read (local auth only, no model call). Not signed in.
+// RECORDED from codex-cli 0.166.0 app-server, signed out, 2026-11-04 (CODEX_HOME and repo in a scratch folder).
+// Scrubbed: scratch paths -> /work/... and {{cwd}}, the Codex home -> /home/user/.codex, host name, installation id, cf-ray and request ids; thread/turn/item UUIDs -> thr_1/turn_1/item_u1.
+// detect(): the handshake and account/read (local, no model call). Not signed in.
 {"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
-{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 27.0.0; arm64) (everyai; 0.1.0)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
 {"dir":"out","msg":{"method":"initialized"}}
 {"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
-{"dir":"in","msg":{"id":2,"result":{"account":null,"requiresOpenaiAuth":true}}}
+{"dir":"in","msg":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"host.local","installationId":"00000000-0000-0000-0000-000000000000","environmentId":null},"emittedAtMs":1793780722342}}
+{"dir":"in","msg":{"id":2,"result":{"account":null,"requiresOpenaiAuth":true,"workspaceRouting":null}}}

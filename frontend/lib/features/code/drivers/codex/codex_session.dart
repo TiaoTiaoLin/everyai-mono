@@ -11,12 +11,14 @@ import '../briefing/briefing_types.dart' show RpcCall;
 import '../driver_events.dart';
 import '../event_journal.dart';
 import '../json_rpc.dart';
+import '../usage_limit.dart';
 import 'codex_mapping.dart';
 
 // One Codex thread over `codex app-server` (JSON-RPC on stdio, without the
 // `"jsonrpc"` field: `codex-rs/app-server-protocol/src/rpc.rs`). Message
 // order follows the app-server guide (README at b04ed4c50c5c, removed from
-// main in d3ee328ee6); field names follow the schema at 3a2788e6.
+// main in d3ee328ee6); field names follow the schema at 3a2788e6. Checked
+// against codex-cli 0.166.0 (its generated schema and recorded traffic).
 
 /// Sent as `clientInfo` (it shows in OpenAI's logs, so it stays stable).
 const codexClientInfo = {'name': 'everyai', 'title': 'EveryAI', 'version': '0.1.0'};
@@ -57,7 +59,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   CodexSession(LineChannel channel, {required this.cwd, required AgentMode mode, String? model, String? effort})
     : _currentMode = mode,
       _model = model == null || model.isEmpty ? null : model,
-      _effort = codexEffort(effort) {
+      _effort = effort == null || effort.isEmpty ? null : effort {
     _bind(channel);
   }
 
@@ -86,6 +88,10 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   var _turnsSeen = false;
   var _plans = 0;
   String? _lastError;
+  Object? _lastErrorInfo;
+  String? _startedTurn;
+  String? _interruptOnStart;
+  Map<String, Object?>? _rateLimits;
   CodexTokens? _total;
   var _status = ExecutionStatus.idle;
   var _closing = false;
@@ -136,6 +142,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       'cwd': cwd,
       'model': ?_model,
       'approvalPolicy': p.approvalPolicy,
+      'approvalsReviewer': p.approvalsReviewer,
       'sandbox': p.sandbox,
       if (instructions != null && instructions.isNotEmpty) 'developerInstructions': instructions,
     }, codexSetupTimeout);
@@ -154,6 +161,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       'cwd': cwd,
       'excludeTurns': true,
       'approvalPolicy': p.approvalPolicy,
+      'approvalsReviewer': p.approvalsReviewer,
       'sandbox': p.sandbox,
     }, codexSetupTimeout);
     _threadId = threadId;
@@ -301,6 +309,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
         'model': ?_model,
         'effort': ?_effort,
         'approvalPolicy': p.approvalPolicy,
+        'approvalsReviewer': p.approvalsReviewer,
         'sandboxPolicy': p.sandboxPolicy,
       });
     } on Object {
@@ -327,10 +336,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _turnsSeen = true;
     _plans = 0;
     _lastError = null;
+    _lastErrorInfo = null;
   }
 
   void _end(String turn) {
     _ended.add(turn);
+    if (_interruptOnStart == turn) _interruptOnStart = null;
     if (_turnId != turn) return;
     _turnId = null;
     final done = _turnDone;
@@ -351,6 +362,9 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     }
   }
 
+  /// Codex answers turn/start before the turn has started, and an interrupt
+  /// in between finds no turn ("no active turn to interrupt", seen live
+  /// with 0.166.0): it is sent again once the turn starts.
   @override
   Future<void> interrupt() async {
     final turn = _turnId;
@@ -358,7 +372,20 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     try {
       await _peer.request('turn/interrupt', {'threadId': _threadId, 'turnId': turn});
     } on JsonRpcError {
-      // Already over.
+      if (_turnId != turn || _ended.contains(turn)) return; // Already over.
+      if (_startedTurn == turn) {
+        unawaited(_interruptAgain(turn));
+      } else {
+        _interruptOnStart = turn;
+      }
+    }
+  }
+
+  Future<void> _interruptAgain(String turn) async {
+    try {
+      await _peer.request('turn/interrupt', {'threadId': _threadId, 'turnId': turn});
+    } on JsonRpcError {
+      // Over meanwhile.
     }
   }
 
@@ -386,7 +413,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> switchLlm(SessionSpec spec) async {
     if (spec.model.isNotEmpty) _model = spec.model;
-    _effort = codexEffort(spec.effort);
+    _effort = spec.effort == null || spec.effort!.isEmpty ? null : spec.effort;
     await onChanged?.call();
   }
 
@@ -438,7 +465,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       case 'turn/started':
         if (params['turn'] case {'id': final String turn}) {
           _begin(turn);
+          _startedTurn = turn;
           _state(ExecutionStatus.running);
+          if (_interruptOnStart == turn) {
+            _interruptOnStart = null;
+            unawaited(_interruptAgain(turn));
+          }
         }
       case 'turn/completed':
         _turnCompleted(params['turn'] as Map<String, Object?>? ?? const {});
@@ -461,16 +493,32 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
         );
       case 'thread/tokenUsage/updated':
         _usage(params);
+      case 'account/rateLimits/updated':
+        // Sparse: a field left out keeps what came before. Core sends one
+        // just before a usage-limit error (core/src/session/turn.rs lines
+        // 1846-1851, app-server/src/bespoke_event_handling.rs lines
+        // 1637-1645 @ rust-v0.166.0).
+        if (params['rateLimits'] case final Map<String, Object?> update) {
+          _rateLimits = {
+            ...?_rateLimits,
+            for (final e in update.entries)
+              if (e.value != null) e.key: e.value,
+          };
+        }
       case 'error':
+        // Retries (willRetry: true, "Reconnecting... n/5") aren't shown.
         if (params['willRetry'] == true) return;
-        final message = switch (params['error']) {
+        final error = params['error'];
+        final message = switch (error) {
           {'message': final String m} => m,
           _ => 'Codex failed.',
         };
+        final info = error is Map<String, Object?> ? error['codexErrorInfo'] : null;
         if (_turnId != null) {
           _lastError = message;
+          _lastErrorInfo = info;
         } else {
-          _emit(_failure(message));
+          _emit(_failureOf(message, info));
         }
     }
   }
@@ -501,12 +549,16 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       {'message': final String m} => m,
       _ => _lastError,
     };
+    final info = switch (turn['error']) {
+      {'codexErrorInfo': final Object info} => info,
+      _ => _lastErrorInfo,
+    };
     _end(id);
     switch (status) {
       case 'interrupted':
         _state(ExecutionStatus.paused);
       case 'failed':
-        _emit(_failure(error ?? 'The turn failed.'));
+        _emit(_failureOf(error ?? 'The turn failed.', info));
         _state(ExecutionStatus.error);
       default:
         _state(ExecutionStatus.finished);
@@ -515,6 +567,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
 
   HarnessEvent _failure(String message) =>
       HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': _newId(), 'detail': message});
+
+  /// A usage limit (with when it lifts, from the last rate-limit snapshot)
+  /// or a plain failure, by Codex's `codexErrorInfo`.
+  HarnessEvent _failureOf(String message, Object? info) => codexUsageLimit(info)
+      ? usageLimitEvent(_newId(), message, resetsAt: codexLimitResetsAt(_rateLimits))
+      : _failure(message);
 
   void _usage(Map<String, Object?> params) {
     final usage = params['tokenUsage'] as Map<String, Object?>? ?? const {};
@@ -557,7 +615,13 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       case 'item/permissions/requestApproval':
         return {'permissions': const <String, Object?>{}};
       case 'execCommandApproval' || 'applyPatchApproval':
-        return {'decision': 'denied'};
+        // v1 requests, which a v2 thread shouldn't send. `denied` is a struct
+        // variant of ReviewDecision (protocol/src/protocol.rs @ rust-v0.166.0).
+        return {
+          'decision': {
+            'denied': {'rejection': 'Not supported by this client'},
+          },
+        };
     }
     throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');
   }

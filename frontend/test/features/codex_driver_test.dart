@@ -1,8 +1,10 @@
-// The Codex driver against hand-built `codex app-server` transcripts.
+// The Codex driver against `codex app-server` transcripts.
 //
-// UNVERIFIED: every fixture in test/fixtures/drivers/codex/ is hand-built from the generated schema in
-// github.com/openai/codex codex-rs/app-server-protocol at 3a2788e6 (Codex isn't installed here, by the owner's
-// choice). Replace them with a live recording when one can be made; real traffic may differ in order and nulls.
+// RECORDED from codex-cli 0.166.0, signed out (no model could run): probe, models, start, interrupt_early,
+// turn_failed and the head of resume; only our own out lines were edited to the tests' specs (each file says how).
+// UNVERIFIED, hand-built in the 0.166.0 shapes: approve_command, file_change, interrupt, server_requests, turn,
+// usage_limit, models_paged and the tail of resume (approvals, items, token usage and limits need a signed-in
+// Codex). The recording tool and steps are in docs/research/batches/multi-harness/run3/x2-recordings/.
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
@@ -12,6 +14,7 @@ import 'package:every_ai/features/code/drivers/codex/codex_mapping.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/json_rpc.dart';
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -51,9 +54,14 @@ CodexDriver _driver(String data, List<LineChannel> channels, [List<_Spawned>? sp
   },
 );
 
-SessionSpec _spec(String dir, {AgentMode mode = AgentMode.ask, DriverBriefing? briefing}) => SessionSpec(
+SessionSpec _spec(
+  String dir, {
+  AgentMode mode = AgentMode.ask,
+  String model = 'gpt-5.5-codex',
+  DriverBriefing? briefing,
+}) => SessionSpec(
   workingDir: dir,
-  model: 'gpt-5.5-codex',
+  model: model,
   mode: mode,
   llmBaseUrl: '',
   llmApiKey: '',
@@ -126,10 +134,54 @@ void main() {
       expect((r.input, r.output), (10, 5));
       expect(usageDelta(t2, t2, last2, turnId: 't', onPlan: false), isNull);
     });
+
+    test('usage limits: only usageLimitExceeded; the latest reset of the used-up windows', () {
+      expect(codexUsageLimit('usageLimitExceeded'), isTrue);
+      for (final other in [
+        'rateLimitExceeded',
+        'sessionBudgetExceeded',
+        null,
+        const {'httpConnectionFailed': <String, Object?>{}},
+      ]) {
+        expect(codexUsageLimit(other), isFalse, reason: '$other');
+      }
+      DateTime at(int s) => DateTime.fromMillisecondsSinceEpoch(s * 1000, isUtc: true);
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 100, 'resetsAt': 1000},
+          'secondary': {'usedPercent': 100, 'resetsAt': 3000},
+          'individualLimit': {'remainingPercent': 10, 'resetsAt': 9000},
+        }),
+        at(3000),
+      );
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 100, 'resetsAt': 1000},
+          'secondary': {'usedPercent': 40, 'resetsAt': 9000},
+          'individualLimit': {'remainingPercent': 0, 'resetsAt': 2000},
+        }),
+        at(2000),
+      );
+      // A used-up window without a time is skipped.
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 100, 'resetsAt': null},
+          'secondary': {'usedPercent': 100, 'resetsAt': 1500},
+        }),
+        at(1500),
+      );
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 99, 'resetsAt': 1000},
+        }),
+        isNull,
+      );
+      expect(codexLimitResetsAt(null), isNull);
+    });
   });
 
   group('start', () {
-    test('with a briefing: handshake, skill root, developer instructions; the token only in env', () async {
+    test('with a briefing (recorded): handshake, skill root, developer instructions; the token only in env', () async {
       final skills = '${tmp.path}/session/briefing/skills';
       Directory(skills).createSync(recursive: true);
       File('${tmp.path}/session/briefing/session.md').writeAsStringSync('You are in an EveryAI session.');
@@ -139,15 +191,23 @@ void main() {
       final s = await driver.start(
         _spec(
           work,
+          mode: AgentMode.plan,
+          model: '',
           briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:4567/mcp', mcpToken: 'tok-secret', skillDir: skills),
         ),
       );
+      final events = _listen(s);
+      await pumpEventQueue();
       channel.expectFinished();
       expect(s.id, 'thr_1');
       expect(channel.sent.first.containsKey('jsonrpc'), isFalse);
       expect(channel.sent[3]['params'], {
         'extraRoots': [skills],
       });
+      // Codex's own reviewer never answers for the app.
+      expect((channel.sent[4]['params']! as Map)['approvalsReviewer'], 'user');
+      // thread/started, skills/changed, mcpServer/startupStatus/updated, remoteControl/status/changed.
+      expect(events, isEmpty);
       final launch = spawned.single;
       expect((launch.cwd, launch.sessionTag), (work, 'tag-1'));
       expect(launch.args, [
@@ -345,6 +405,12 @@ void main() {
     await pumpEventQueue();
     channel.expectFinished();
     expect(events.whereType<ToolResult>().single.outcome, ToolOutcome.ok);
+    // ReviewDecision::Denied is a struct variant.
+    expect(channel.sent.lastWhere((m) => m['id'] == 15)['result'], {
+      'decision': {
+        'denied': {'rejection': 'Not supported by this client'},
+      },
+    });
     await s.close();
   });
 
@@ -459,13 +525,13 @@ ${_running()}
   test('two sends close together: the second turn/start waits for the first turn', () async {
     final channel = ReplayChannel('''
 ${_upTo('approve_command', '"id":3,"result"')}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
 {"dir":"out","msg":{"id":5,"method":"turn/interrupt","params":{"threadId":"thr_1","turnId":"turn_1"}}}
 {"dir":"in","msg":{"id":5,"result":{}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"interrupted","items":[]}}}}
-{"dir":"out","msg":{"id":6,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"second"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":6,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"second"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
 {"dir":"in","msg":{"id":6,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
 ''');
@@ -483,7 +549,7 @@ ${_upTo('approve_command', '"id":3,"result"')}
     await s.close();
   });
 
-  test('a mode, model or effort changed after start is what a reopened session runs with', () async {
+  test('a mode, model or effort changed after start is what a reopened session runs with; effort as given', () async {
     final s = await _driver(data, [_fixture('approve_command')]).start(_spec(work));
     await s.switchLlm(
       const SessionSpec(
@@ -501,9 +567,9 @@ ${_upTo('approve_command', '"id":3,"result"')}
 
     final channel = ReplayChannel('''
 ${_upTo('resume', '"id":2,"result"')}
-{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"read-only"}}}
+{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}}
 {"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Carry on"}],"model":"gpt-5.4-mini","effort":"xhigh","approvalPolicy":"untrusted","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Carry on"}],"model":"gpt-5.4-mini","effort":"max","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
 ''');
@@ -521,9 +587,9 @@ ${_upTo('resume', '"id":2,"result"')}
     final dead = ReplayChannel([...lines.take(cut + 1), '{"dir":"eof"}'].join('\n'));
     final channel = ReplayChannel('''
 ${_upTo('resume', '"id":2,"result"')}
-{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"danger-full-access"}}}
 {"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Try again"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Try again"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
@@ -561,6 +627,8 @@ ${_upTo('resume', '"id":2,"result"')}
     final a = await _driver(data, [first], spawned).start(
       _spec(
         work,
+        mode: AgentMode.plan,
+        model: '',
         briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:4567/mcp', mcpToken: 'tok-old', skillDir: skills),
       ),
     );
@@ -572,7 +640,7 @@ ${_upTo('resume', '"id":2,"result"')}
 ${_upTo('resume', '"id":2,"result"')}
 {"dir":"out","msg":{"id":3,"method":"skills/extraRoots/set","params":{"extraRoots":["$skills"]}}}
 {"dir":"in","msg":{"id":3,"result":{}}}
-{"dir":"out","msg":{"id":4,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"out","msg":{"id":4,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}}
 {"dir":"in","msg":{"id":4,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
 ${dies ? '{"dir":"eof"}' : ''}
 ''';
@@ -625,7 +693,7 @@ ${dies ? '{"dir":"eof"}' : ''}
       );
     });
 
-    test('signed in with ChatGPT, not signed in, or the probe failing', () async {
+    test('signed in with ChatGPT, not signed in (recorded), or the probe failing', () async {
       final chatgpt = ReplayChannel(
         File('$_fixtures/probe.jsonl').readAsStringSync().replaceFirst(
           '"account":null',
@@ -647,8 +715,35 @@ ${dies ? '{"dir":"eof"}' : ''}
       expect(failed.problem, contains("Couldn't ask Codex"));
     });
 
-    test('models: two pages, hidden ones dropped, efforts kept', () async {
+    test('models (recorded): the visible ones in order, the default marked, efforts up to max and ultra', () async {
       final channel = _fixture('models');
+      final models = await _driver(data, [channel]).models();
+      channel.expectFinished();
+      expect(models.map((m) => m.id), [
+        'gpt-6.1-sol',
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-6-luna',
+        'gpt-5.6-sol',
+        'gpt-6.1-terra',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+        'gpt-5.5',
+      ]);
+      expect(
+        [
+          for (final m in models)
+            if (m.isDefault) m.id,
+        ],
+        ['gpt-6.1-sol'],
+      );
+      expect(models.first.label, 'GPT-6.1-Sol');
+      expect(models.first.efforts, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+      expect(models.last.efforts, ['low', 'medium', 'high', 'xhigh']);
+    });
+
+    test('models: two pages, hidden ones dropped, efforts kept', () async {
+      final channel = _fixture('models_paged');
       final models = await _driver(data, [channel]).models();
       channel.expectFinished();
       expect(
@@ -670,6 +765,92 @@ ${dies ? '{"dir":"eof"}' : ''}
           ],
         ],
       );
+    });
+  });
+
+  test(
+    'Stop right after Send (recorded): the interrupt Codex refuses before turn/started goes again after it',
+    () async {
+      final channel = _fixture('interrupt_early');
+      final s = await _driver(data, [channel]).start(_spec(work, mode: AgentMode.plan, model: ''));
+      final events = _listen(s);
+      await s.send('reply OK');
+      await s.interrupt();
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      expect(channel.sent.where((m) => m['method'] == 'turn/interrupt'), hasLength(2));
+      expect(_states(events).last, ExecutionStatus.paused);
+      expect(events.whereType<ConversationFailure>(), isEmpty);
+      await s.close();
+    },
+  );
+
+  test('a failed turn (recorded 401): retries add nothing, then one plain failure', () async {
+    final skills = '${tmp.path}/session/briefing/skills';
+    Directory(skills).createSync(recursive: true);
+    File('${tmp.path}/session/briefing/session.md').writeAsStringSync('You are in an EveryAI session.');
+    final channel = _fixture('turn_failed');
+    final s = await _driver(data, [channel]).start(
+      _spec(
+        work,
+        mode: AgentMode.plan,
+        model: '',
+        briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:9/mcp', mcpToken: 'tok', skillDir: skills),
+      ),
+    );
+    final events = _listen(s);
+    await s.send('reply OK');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    final failure = events.whereType<ConversationFailure>().single;
+    expect(failure.message, startsWith('unexpected status 401 Unauthorized: Missing bearer'));
+    expect(usageLimitOf(failure), isNull);
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.error]);
+    await s.close();
+  });
+
+  group('usage limit', () {
+    const message =
+        "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+        'https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 3:15 PM.';
+
+    Future<List<HarnessEvent>> run(String script) async {
+      final channel = ReplayChannel(script);
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final events = _listen(s);
+      await s.send('Run the tests');
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      await s.close();
+      return events;
+    }
+
+    test("Codex's words, and when the used-up window resets from the snapshot before the error", () async {
+      final events = await run(File('$_fixtures/usage_limit.jsonl').readAsStringSync());
+      final failure = events.whereType<ConversationFailure>().single;
+      final limit = usageLimitOf(failure)!;
+      expect(limit.message, message);
+      expect(limit.resetsAt, DateTime.fromMillisecondsSinceEpoch(1793800000 * 1000, isUtc: true));
+      expect(_states(events).last, ExecutionStatus.error);
+    });
+
+    test('without a snapshot: still a usage limit, with no reset time', () async {
+      final lines = File('$_fixtures/usage_limit.jsonl').readAsLinesSync();
+      final events = await run(lines.where((l) => !l.contains('account/rateLimits/updated')).join('\n'));
+      expect(usageLimitOf(events.whereType<ConversationFailure>().single)!.resetsAt, isNull);
+    });
+
+    test('a rate limit Codex retries, then the turn completes: no failure', () async {
+      final events = await run('''
+${_upTo('usage_limit', '"method":"turn/started"')}
+{"dir":"in","msg":{"method":"error","params":{"error":{"message":"Rate limit reached","codexErrorInfo":"rateLimitExceeded","additionalDetails":null},"willRetry":true,"threadId":"thr_1","turnId":"turn_1"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[],"error":null}}}}
+''');
+      expect(events.whereType<ConversationFailure>(), isEmpty);
+      expect(_states(events).last, ExecutionStatus.finished);
     });
   });
 
