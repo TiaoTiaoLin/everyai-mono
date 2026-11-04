@@ -159,8 +159,11 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
   /// closed): the new server gets its MCP entry, token and skills in its
   /// environment. A session still open here is returned as it is.
   @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
-      _attach(conversationId, briefing);
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) => _attach(conversationId, briefing);
 
   Future<HarnessSession> _attach(String conversationId, DriverBriefing? briefing) async {
     if (_live[conversationId] case final s?) return s;

@@ -166,8 +166,11 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
   /// closed): the next process the session starts carries it. A session still
   /// open here takes it too, from its next process on.
   @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
-      _attach(conversationId, briefing);
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) => _attach(conversationId, briefing);
 
   Future<HarnessSession> _attach(String conversationId, DriverBriefing? b) async {
     if (_live[conversationId] case final s?) {

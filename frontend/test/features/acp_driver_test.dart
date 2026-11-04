@@ -411,6 +411,34 @@ void main() {
       }
     });
 
+    test('attachBriefed with the user\'s MCP servers sends them in session/load; no secret is stored', () async {
+      final r = rig(['opencode/reopen_mcp.jsonl']);
+      _stored(r, 'o1', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE', mcp: ['charts']);
+      final s = await (r.driver('acp:opencode', 'opencode') as AttachesBriefed).attachBriefed(
+        'o1',
+        DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new'),
+        mcpConfig: {
+          'charts': {
+            'command': 'npx',
+            'args': ['-y', 'chart-mcp'],
+            'env': {'KEY': 'secret-env'},
+          },
+        },
+      );
+      final seen = _Seen(s);
+      await s.send('Hi');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.notices.where((n) => n.contains('without your MCP servers')), isEmpty);
+      await s.close();
+      final meta = jsonDecode(File('${r.dataDir}/acp-sessions/o1/meta.json').readAsStringSync()) as Map;
+      expect(meta['mcpServers'], ['charts']);
+      for (final f in Directory(r.dataDir).listSync(recursive: true).whereType<File>()) {
+        expect(f.readAsStringSync(), isNot(contains('secret-env')), reason: f.path);
+        expect(f.readAsStringSync(), isNot(contains('tok-new')), reason: f.path);
+      }
+    });
+
     test('a command that ran without asking is shown with a notice; in Plan it stops the turn', () async {
       final r = rig(['opencode/unasked_plan.jsonl']);
       final s = await r.driver('acp:opencode', 'opencode').start(r.spec(mode: AgentMode.plan));

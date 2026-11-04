@@ -687,8 +687,13 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       driver: harness,
       model: info.model,
     );
+    // The user's approved MCP servers, as at start: the app's list, never repository files.
+    final mcp = <String, Object?>{
+      if (!noLocalFolder(project?.path ?? info.workingDir))
+        ...ref.read(codeMcpServersProvider).mcpConfigFor(info.projectId),
+    }..remove(everyaiServerName);
     try {
-      return await (harness as AttachesBriefed).attachBriefed(info.conversationId, briefing);
+      return await (harness as AttachesBriefed).attachBriefed(info.conversationId, briefing, mcpConfig: mcp);
     } on Object {
       ref.read(_hostTokensProvider).remove(info.id);
       await ref.read(hostServerProvider).revoke(briefing.mcpToken);
