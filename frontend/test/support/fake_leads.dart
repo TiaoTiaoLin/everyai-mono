@@ -30,7 +30,7 @@ Future<T> whenValue<T>(ProviderContainer c, ProviderListenable<T> p, bool Functi
 /// An outside agent's session: the test plays its events and reads what it
 /// was sent and answered. With [replays], a new listener gets every event
 /// played so far first, as a reopened conversation does.
-final class FakeLeadSession implements HarnessSession, SteersRuns {
+final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands {
   FakeLeadSession({this.id = 'c1', this.replays = false, List<HarnessEvent> history = const []}) {
     _history.addAll(history);
   }
@@ -53,6 +53,14 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
   List<HarnessEvent> onInterrupt = const [];
 
   List<HarnessEvent> get history => List.unmodifiable(_history);
+
+  /// Its own `/` commands (the test sets them) and the ones run, as `name|args`.
+  final nativeCommands = NativeCommandList();
+  final ran = <String>[];
+  @override
+  Stream<List<NativeCommand>> get commands => nativeCommands.stream;
+  @override
+  Future<void> runCommand(String name, String args) async => ran.add('$name|$args');
 
   @override
   Stream<HarnessEvent> get events {

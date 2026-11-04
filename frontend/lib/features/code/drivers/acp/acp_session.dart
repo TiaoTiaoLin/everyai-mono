@@ -83,7 +83,7 @@ final class AcpLauncher {
 /// app's rules or the user answer per call. The transcript is the event
 /// journal in [dir]; after an app restart the agent's own memory comes back
 /// through `session/load` when the next message is sent.
-final class AcpSession implements HarnessSession, PerCallApprovals {
+final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCommands {
   AcpSession({
     required this.id,
     required this.dir,
@@ -649,6 +649,34 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       return;
     }
     _queue(text, images);
+  }
+
+  /// The agent's `/` commands, from `available_commands_update` (live or
+  /// during a load's replay).
+  final _commands = NativeCommandList();
+
+  @override
+  Stream<List<NativeCommand>> get commands => _commands.stream;
+
+  /// An ACP command is an ordinary prompt of `/name args`. The briefing,
+  /// notes and held messages stay for the next normal prompt so the agent
+  /// still sees the command as one.
+  @override
+  Future<void> runCommand(String name, String args) async {
+    if (_closed) return;
+    final text = '/$name $args'.trim();
+    _emit(userMessageEvent(_next('u'), text));
+    try {
+      await _ensureConnected();
+    } on HarnessError catch (e) {
+      _emit(acpNotice(_next('n'), e.message));
+      _setStatus(ExecutionStatus.error);
+      return;
+    }
+    final blocks = acpPrompt(text, imagesOk: false);
+    final turn = _turns.then((_) => _prompt(blocks));
+    _turns = turn;
+    _turn = turn;
   }
 
   void _queue(String text, List<String> images) {
@@ -1218,6 +1246,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
             }),
           );
         }
+      case 'available_commands_update':
+        _commands.set(acpCommands(u['availableCommands']));
       case 'usage_update' when _replaying:
         _cost = acpUsageTotal(u) ?? _cost;
       case _ when _replaying:
@@ -1433,8 +1463,24 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       unawaited(c.close());
     }
     _listeners.clear();
+    _commands.close();
     _launcher.closed(id);
   }
 
   static Map<String, Object?> _map(Object? v) => v is Map<String, Object?> ? v : const {};
 }
+
+/// An ACP `availableCommands` list: `{name, description, input?: {hint}}`.
+List<NativeCommand> acpCommands(Object? list) => [
+  if (list is List<Object?>)
+    for (final c in list)
+      if (c case {'name': final String name} when name.isNotEmpty)
+        NativeCommand(
+          name: name,
+          description: c['description'] as String? ?? '',
+          argsHint: switch (c['input']) {
+            {'hint': final String h} when h.isNotEmpty => h,
+            _ => null,
+          },
+        ),
+];

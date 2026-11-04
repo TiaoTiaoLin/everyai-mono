@@ -7,6 +7,7 @@
 // file_change_refused, server_requests, usage_limit and models_paged. The recording tools and steps are described
 // in docs/research/batches/multi-harness/run3/x2.md.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
@@ -387,6 +388,53 @@ void main() {
       expect((usage.input, usage.onPlan), (12910, false), reason: mode);
       await s.close();
     }
+  });
+
+  test('/ commands: a fixed set (Codex lists none); compact and review go to their own methods', () async {
+    // The two methods are from the codex-cli 0.166.0 app-server schema; the replies are derived, not recorded.
+    String out(int id, String method, Map<String, Object?> params) => jsonEncode({
+      'dir': 'out',
+      'msg': {'id': id, 'method': method, 'params': params},
+    });
+    String reply(int id, Object result) => jsonEncode({
+      'dir': 'in',
+      'msg': {'id': id, 'result': result},
+    });
+    final channel = ReplayChannel(
+      [
+        _upTo('turn', '"result":{"thread"'),
+        out(10, 'thread/compact/start', {'threadId': 'thr_1'}),
+        reply(10, <String, Object?>{}),
+        out(11, 'review/start', {
+          'threadId': 'thr_1',
+          'target': {'type': 'uncommittedChanges'},
+        }),
+        reply(11, {
+          'reviewThreadId': 'thr_1',
+          'turn': {'id': 'turn_r1'},
+        }),
+        out(12, 'review/start', {
+          'threadId': 'thr_1',
+          'target': {'type': 'baseBranch', 'branch': 'main'},
+        }),
+        reply(12, {
+          'reviewThreadId': 'thr_1',
+          'turn': {'id': 'turn_r2'},
+        }),
+      ].join('\n'),
+    );
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    final native = s as HasNativeCommands;
+    expect([for (final c in await native.commands.first) c.name], ['compact', 'review']);
+    await native.runCommand('compact', '');
+    await native.runCommand('review', '');
+    await native.runCommand('review', 'main');
+    await expectLater(native.runCommand('goal', ''), throwsA(isA<HarnessError>()));
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect([for (final m in events.whereType<ChatMessage>()) m.text], ['/compact', '/review', '/review main', '/goal']);
+    await s.close();
   });
 
   test('a turn (recorded): streamed text, the answer, usage on the ChatGPT plan, finished', () async {

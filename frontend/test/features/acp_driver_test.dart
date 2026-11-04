@@ -1667,6 +1667,65 @@ void main() {
       expect(ttys, 0);
     });
   });
+
+  group('native commands', () {
+    test("OpenCode's recorded available_commands_update becomes the session's command list", () async {
+      final r = rig(['opencode/handshake.jsonl']);
+      final s = await r.driver('acp:opencode', 'opencode').start(r.spec(mode: AgentMode.plan));
+      await r.channels.single.finished;
+      await pumpEventQueue();
+      final list = await (s as HasNativeCommands).commands.first;
+      expect([for (final c in list) c.name], ['init', 'review', 'compact']);
+      expect(list.first.description, 'guided AGENTS.md setup');
+      await s.close();
+    });
+
+    test('a reopened session gets its list again once it loads', () async {
+      final r = rig(['opencode/load_then_plan.jsonl']);
+      _stored(r, 'conv-2', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE');
+      final s = await r.driver('acp:opencode', 'opencode').attach('conv-2');
+      final seen = _Seen(s);
+      await s.setMode(AgentMode.plan);
+      await s.send('Plan it.');
+      await seen.untilStatus(ExecutionStatus.error);
+      final list = await (s as HasNativeCommands).commands.first;
+      expect([for (final c in list) c.name], containsAll(['init', 'review', 'compact']));
+      await s.close();
+    });
+
+    test('a command is a bare prompt; the briefing waits for the next message; updates replace the list', () async {
+      final r = rig(['acp/native_commands.jsonl']);
+      final s = await r
+          .driver('acp:dsh', 'dsh')
+          .start(
+            r.spec(
+              briefing: DriverBriefing(
+                mcpUrl: 'http://127.0.0.1:7777/mcp',
+                mcpToken: 't',
+                skillDir: '${tmp.path}/none',
+                sessionSkill: 'Session text.',
+              ),
+            ),
+          );
+      final seen = _Seen(s);
+      final lists = <List<NativeCommand>>[];
+      final native = s as HasNativeCommands;
+      native.commands.listen(lists.add);
+      await native.runCommand('init', '');
+      await seen.untilStatus(ExecutionStatus.finished);
+      await s.send('Hi');
+      await seen.until(() => _prompts(r.channels.single).length == 2 && seen.status == ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(_prompts(r.channels.single), ['/init', '<everyai-session>\nSession text.\n</everyai-session>\n\nHi']);
+      expect(seen.messages.first.text, '/init');
+      expect(lists.last, [const NativeCommand(name: 'init', description: 'Write AGENTS.md')]);
+      expect(
+        lists.firstWhere((l) => l.length == 2).last,
+        const NativeCommand(name: 'web', description: 'Search the web', argsHint: 'query to search for'),
+      );
+      await s.close();
+    });
+  });
 }
 
 /// An agent that exits at once, saying it couldn't open a terminal.

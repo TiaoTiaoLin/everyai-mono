@@ -42,6 +42,7 @@ class CodeComposer extends ConsumerStatefulWidget {
     this.slashHost,
     this.project,
     this.attachKinds,
+    this.commands,
   });
 
   final bool busy;
@@ -77,6 +78,12 @@ class CodeComposer extends ConsumerStatefulWidget {
   /// scaled down before they travel.
   final Set<AttachmentKind>? attachKinds;
 
+  /// An outside harness's own `/` commands, which replace EveryAI's in the
+  /// menu; the app actions they push out ([CodeSlashHost]'s rewind, commit,
+  /// PR, cost and brief) move to the [SessionActionsButton]. Null: EveryAI's
+  /// menu (the EveryAI harness).
+  final List<SlashCommand>? commands;
+
   @override
   ConsumerState<CodeComposer> createState() => _CodeComposerState();
 }
@@ -92,15 +99,19 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
     super.initState();
     _slash.project = widget.project;
     _controller.addListener(() {
-      _slash.update(_controller.value, ref.read(slashCommandsProvider));
+      _slash.update(_controller.value, _commands);
       setState(() {});
     });
   }
+
+  List<SlashCommand> get _commands => widget.commands ?? ref.read(slashCommandsProvider);
 
   @override
   void didUpdateWidget(CodeComposer old) {
     super.didUpdateWidget(old);
     _slash.project = widget.project;
+    // The harness listed its commands again while the menu may be open.
+    if (!identical(old.commands, widget.commands)) _slash.update(_controller.value, _commands);
   }
 
   @override
@@ -138,8 +149,7 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
     if (!_hasText) return;
     final text = _controller.text;
     if (_files.isEmpty) {
-      if (parseSlashLine(text, ref.read(slashCommandsProvider), SlashScope.code, project: widget.project)
-          case final line?) {
+      if (parseSlashLine(text, _commands, SlashScope.code, project: widget.project) case final line?) {
         runSlash(line.command, line.args, _slashContext, complete: false);
         _focus.requestFocus();
         return;
@@ -261,6 +271,8 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
                       onPressed: () async => _add(await pickAttachmentFiles(allowed: widget.attachKinds)),
                     ),
                     ModeMenu(mode: widget.mode, onChanged: widget.onModeChanged),
+                    if (widget.slashHost case final host? when widget.commands != null)
+                      SessionActionsButton(host: host),
                     // Both sides shrink on narrow composers (project first, it is
                     // capped); the model sits at the right, next to send.
                     if (widget.leading != null) ...[
@@ -292,6 +304,37 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The app's session actions as a menu, for sessions whose `/` menu is the
+/// harness's own: each row calls what its `/` command calls in an EveryAI
+/// session. Model, Stop and the meter have controls of their own already.
+class SessionActionsButton extends StatelessWidget {
+  const SessionActionsButton({super.key, required this.host});
+
+  final CodeSlashHost host;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    return AdaptiveMenuButton(
+      tooltip: 'Session actions',
+      width: 220,
+      actions: [
+        if (host.rewind case final f?)
+          MenuAction(label: 'Rewind last turn', icon: EveryIcon.retry, onSelected: () => f('')),
+        if (host.commit case final f?) MenuAction(label: 'Commit…', icon: EveryIcon.check, onSelected: () => f('')),
+        if (host.pr case final f?)
+          MenuAction(label: 'Pull request…', icon: EveryIcon.external, onSelected: () => f('')),
+        if (host.cost case final f?) MenuAction(label: 'Cost', icon: EveryIcon.usage, onSelected: f),
+        if (host.morning case final f?) MenuAction(label: 'Morning brief', icon: EveryIcon.sun, onSelected: f),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        child: AdaptiveIcon(EveryIcon.more, size: 16, color: theme.textMuted),
+      ),
     );
   }
 }

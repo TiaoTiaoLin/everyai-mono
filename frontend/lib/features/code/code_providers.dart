@@ -2242,6 +2242,24 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     await _sendNow(out);
   }
 
+  /// Runs one of an outside harness's own `/` commands ([HasNativeCommands]),
+  /// as the harness expects it: no mode note and no pending handoff go with it
+  /// (they wait for the next message). Null once sent, else why it wasn't.
+  Future<String?> runNativeCommand(String name, String args) async {
+    final session = _session;
+    if (session is! HasNativeCommands) return 'This agent has no / commands of its own.';
+    if (_busy || _switching) return 'The agent is working. Run the command when it stops.';
+    if (!_withinBudget()) return null;
+    _touchHost();
+    await _checkpoint();
+    try {
+      await (session as HasNativeCommands).runCommand(name, args);
+    } on HarnessError catch (e) {
+      return e.message;
+    }
+    return null;
+  }
+
   /// Sends [out]. A card or plan still held for the user is closed first: the
   /// call's result says the user replied in chat, and the message follows.
   Future<void> _sendNow(Outgoing out) async {
@@ -4334,3 +4352,18 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
 }
 
 String checkpointRef(SessionWorktree w, int turn) => 'refs/everyai/${w.slug}/turn-$turn';
+
+/// An outside-led session's own `/` commands (latest first, then changes);
+/// null for a session without them (the EveryAI harness, a terminal CLI).
+/// Follows the session across lead switches and conversation swaps.
+final nativeCommandsProvider = StreamProvider.autoDispose.family<List<NativeCommand>?, String>((ref, sessionId) {
+  ref.watch(
+    codeSessionsProvider.select((all) {
+      final info = all.where((s) => s.id == sessionId).firstOrNull;
+      return (info?.harness, info?.conversationId);
+    }),
+  );
+  ref.watch(codeSessionProvider(sessionId).select((s) => s.connected));
+  final live = ref.read(_liveProvider)[sessionId];
+  return live is HasNativeCommands ? (live as HasNativeCommands).commands : Stream.value(null);
+});

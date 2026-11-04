@@ -17,7 +17,10 @@ enum SlashGroup {
   builtIn('Built-in'),
   custom('Custom'),
   skills('Skills'),
-  connectors('Connectors');
+  connectors('Connectors'),
+
+  /// An outside harness's own commands (shown alone, in place of the others).
+  native('Commands');
 
   const SlashGroup(this.label);
   final String label;

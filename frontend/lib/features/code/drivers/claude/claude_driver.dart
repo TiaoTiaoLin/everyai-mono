@@ -3,6 +3,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:uuid/uuid.dart';
 
 import '../../domain/agent_mode.dart';
@@ -275,6 +276,23 @@ Map<String, Object?>? _json(String line) {
   }
 }
 
+/// Claude Code's command list: `initialize` gives `{name, description,
+/// argumentHint}`, `system/init` bare names.
+List<NativeCommand> claudeCommands(List<Object?> list) => [
+  for (final c in list)
+    if (c is String && c.isNotEmpty)
+      NativeCommand(name: c)
+    else if (c case {'name': final String name} when name.isNotEmpty)
+      NativeCommand(
+        name: name,
+        description: c['description'] as String? ?? '',
+        argsHint: switch (c['argumentHint']) {
+          final String h when h.isNotEmpty => h,
+          _ => null,
+        },
+      ),
+];
+
 /// What [ClaudeDriver.attach] needs to continue a session: where it runs
 /// (`--resume` looks the conversation up by folder), its model and mode, and
 /// whether the CLI has had a message (before that there is nothing to resume),
@@ -288,6 +306,7 @@ final class _Meta {
     required this.mode,
     required this.sent,
     this.carry = const [],
+    this.commands = const [],
   });
 
   final String cwd;
@@ -298,11 +317,22 @@ final class _Meta {
   final bool sent;
   final List<String> carry;
 
-  /// [effort] is taken as given (null is Claude's default), not kept.
-  _Meta withLlm({required String model, required String? effort}) =>
-      _Meta(cwd: cwd, sessionTag: sessionTag, model: model, effort: effort, mode: mode, sent: sent, carry: carry);
+  /// The CLI's `/` commands as it last listed them (the menu before it starts).
+  final List<NativeCommand> commands;
 
-  _Meta copyWith({AgentMode? mode, bool? sent, List<String>? carry}) => _Meta(
+  /// [effort] is taken as given (null is Claude's default), not kept.
+  _Meta withLlm({required String model, required String? effort}) => _Meta(
+    cwd: cwd,
+    sessionTag: sessionTag,
+    model: model,
+    effort: effort,
+    mode: mode,
+    sent: sent,
+    carry: carry,
+    commands: commands,
+  );
+
+  _Meta copyWith({AgentMode? mode, bool? sent, List<String>? carry, List<NativeCommand>? commands}) => _Meta(
     cwd: cwd,
     sessionTag: sessionTag,
     model: model,
@@ -310,6 +340,7 @@ final class _Meta {
     mode: mode ?? this.mode,
     sent: sent ?? this.sent,
     carry: carry ?? this.carry,
+    commands: commands ?? this.commands,
   );
 
   Map<String, Object?> toJson() => {
@@ -320,6 +351,7 @@ final class _Meta {
     'mode': mode.name,
     'sent': sent,
     if (carry.isNotEmpty) 'carry': carry,
+    if (commands.isNotEmpty) 'commands': [for (final c in commands) c.toJson()],
   };
 
   static _Meta fromJson(Map<String, Object?> j) => _Meta(
@@ -330,6 +362,7 @@ final class _Meta {
     mode: AgentMode.values.where((m) => m.name == j['mode']).firstOrNull ?? AgentMode.ask,
     sent: j['sent'] == true,
     carry: [for (final t in j['carry'] as List<Object?>? ?? const []) ?t as String?],
+    commands: [for (final c in j['commands'] as List<Object?>? ?? const []) ?NativeCommand.fromJson(c)],
   );
 }
 
@@ -339,8 +372,9 @@ typedef _Held = ({String requestId, bool hook, Map<String, Object?> input});
 
 /// One Claude Code conversation. Refusing a call doesn't stop the run (the
 /// model is told and carries on); [resume] runs a stopped or failed turn on.
-final class ClaudeSession implements HarnessSession, PerCallApprovals {
-  ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal);
+final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNativeCommands {
+  ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal)
+    : _commands = NativeCommandList(_meta.commands);
 
   final ClaudeDriver _driver;
   @override
@@ -384,6 +418,29 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
 
   /// Calls already shown as let run ([approvedEvent]).
   final _let = <String>{};
+
+  /// The CLI's `/` commands: from its `initialize` reply, else `system/init`
+  /// (names only); kept in the record so a reopened session has them.
+  final NativeCommandList _commands;
+  var _initListed = false;
+
+  @override
+  Stream<List<NativeCommand>> get commands => _commands.stream;
+
+  /// The command goes as the turn's whole text; held `run: false` messages
+  /// wait for the next message rather than hide it.
+  @override
+  Future<void> runCommand(String name, String args) async {
+    final text = '/$name $args'.trim();
+    _emit(userMessage(const Uuid().v4(), text));
+    await _turn(text);
+  }
+
+  void _listed(List<NativeCommand> commands) {
+    if (commands.isEmpty || listEquals(commands, _commands.latest)) return;
+    _commands.set(commands);
+    unawaited(_save(_meta.copyWith(commands: _commands.latest)));
+  }
 
   /// History, then live events. Both are taken at the moment of listening,
   /// so nothing emitted in between is lost.
@@ -511,6 +568,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     await _drop();
     await _journal.close();
     await _events.close();
+    _commands.close();
   }
 
   /// Ends the CLI's process quietly; the next turn starts it again.
@@ -547,6 +605,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     );
     _channel = c;
     _requests = 0; // Ids count per process.
+    _initListed = false;
     _sub = c.lines.listen(_line, onDone: () => _gone(c));
     // Before any message; the CLI reads its stdin in order.
     _request({'subtype': 'initialize', 'hooks': gateHooks});
@@ -568,7 +627,16 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
         if (line['response'] case {'subtype': 'error', 'error': final Object error}) {
           _emit(HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': const Uuid().v4(), 'detail': '$error'}));
         }
+        // req_1 is this process's initialize.
+        if (line['response'] case {'request_id': 'req_1', 'response': {'commands': final List<Object?> list}}) {
+          _initListed = list.isNotEmpty;
+          _listed(claudeCommands(list));
+        }
       default:
+        if (line case {'type': 'system', 'subtype': 'init', 'slash_commands': final List<Object?> l}
+            when !_initListed) {
+          _listed(claudeCommands(l));
+        }
         final events = _decoder.decode(line);
         for (final e in events) {
           _emit(e);
@@ -659,8 +727,15 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     if (!_events.isClosed) _events.add(event);
   }
 
-  Future<void> _save(_Meta meta) async {
+  /// Writes one at a time (the command list is saved while a turn starts);
+  /// each write takes the record as it is by then.
+  Future<void> _save(_Meta meta) {
     _meta = meta;
-    await writeTextFile('$_dir/$id.json', jsonEncode(meta.toJson()));
+    // A failed write is its caller's; the next one still runs.
+    return _saving = _saving
+        .catchError((Object _) {})
+        .then((_) => writeTextFile('$_dir/$id.json', jsonEncode(_meta.toJson())));
   }
+
+  Future<void> _saving = Future.value();
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../domain/agent_mode.dart';
@@ -313,6 +315,77 @@ abstract interface class HasBackgroundShells {
 /// sent the message (see `steerOrResend`).
 abstract interface class SteersRuns {
   Future<void> steer(String text, {List<String> images = const []});
+}
+
+/// One of a harness's own `/` commands, as the harness lists it.
+final class NativeCommand {
+  const NativeCommand({required this.name, this.description = '', this.argsHint});
+  final String name;
+  final String description;
+
+  /// What to type after the name, when the harness says (shown as a hint).
+  final String? argsHint;
+
+  Map<String, Object?> toJson() => {
+    'name': name,
+    if (description.isNotEmpty) 'description': description,
+    if (argsHint != null) 'args_hint': argsHint,
+  };
+
+  static NativeCommand? fromJson(Object? json) {
+    if (json is! Map || json['name'] is! String) return null;
+    return NativeCommand(
+      name: json['name'] as String,
+      description: json['description'] as String? ?? '',
+      argsHint: json['args_hint'] as String?,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is NativeCommand && other.name == name && other.description == description && other.argsHint == argsHint;
+
+  @override
+  int get hashCode => Object.hash(name, description, argsHint);
+
+  @override
+  String toString() => '/$name';
+}
+
+/// A session led by an outside CLI that has `/` commands of its own. The `/`
+/// menu shows these instead of EveryAI's; sessions without it have none.
+abstract interface class HasNativeCommands {
+  /// The latest list, then each change; a new listener gets the latest first.
+  Stream<List<NativeCommand>> get commands;
+
+  /// Runs `/name args` as the harness expects, with nothing put in front of it
+  /// (no mode note, briefing or held text; those wait for the next message).
+  Future<void> runCommand(String name, String args);
+}
+
+/// The cached command list a [HasNativeCommands] session keeps: [stream]
+/// gives the latest list first, then each change. An empty update keeps the
+/// previous list (a harness that hasn't listed yet has said nothing).
+final class NativeCommandList {
+  NativeCommandList([List<NativeCommand> initial = const []]) : _latest = initial;
+
+  List<NativeCommand> _latest;
+  final _changes = StreamController<List<NativeCommand>>.broadcast();
+
+  List<NativeCommand> get latest => _latest;
+
+  void set(List<NativeCommand> commands) {
+    if (commands.isEmpty || listEquals(commands, _latest)) return;
+    _latest = List.unmodifiable(commands);
+    if (!_changes.isClosed) _changes.add(_latest);
+  }
+
+  Stream<List<NativeCommand>> get stream async* {
+    yield _latest;
+    yield* _changes.stream;
+  }
+
+  void close() => _changes.close();
 }
 
 /// A harness that can start a session from another one's history (the

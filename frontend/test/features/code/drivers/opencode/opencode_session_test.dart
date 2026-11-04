@@ -101,6 +101,61 @@ void _expectAuth(ReplayHttpClient http) {
 }
 
 void main() {
+  test(
+    "the / menu: OpenCode's command list plus compact, refreshed on command.updated; each runs on its route",
+    () async {
+      // Derived from T3 Code's OpenCode 2 fixture and the 2.1.3 binary's route and event names, not recorded.
+      const list = {
+        'location': {'directory': _cwd},
+        'data': [
+          {'name': 'init', 'description': 'guided AGENTS.md setup'},
+          {'name': 'review', 'description': 'review changes [commit|branch|pr], defaults to uncommitted'},
+        ],
+      };
+      final http = ReplayHttpClient.script(
+        [
+          _head('turn_approvals.jsonl', '/prompt'),
+          _line('out', {'id': 3, 'method': 'GET', 'path': '/api/command'}),
+          _line('in', {'id': 3, 'status': 200, 'body': list}),
+          _line('in', {
+            'event': {'type': 'command.updated', 'data': <String, Object?>{}},
+          }),
+          _line('out', {'id': 4, 'method': 'GET', 'path': '/api/command'}),
+          _line('in', {
+            'id': 4,
+            'status': 200,
+            'body': {
+              'data': [
+                {'name': 'init', 'description': 'guided AGENTS.md setup'},
+              ],
+            },
+          }),
+          _line('out', {
+            'id': 5,
+            'method': 'POST',
+            'path': '/api/session/$_ses/command',
+            'body': {'name': 'review', 'text': 'x'},
+          }),
+          _line('in', {'id': 5, 'status': 200, 'body': <String, Object?>{}}),
+          _line('out', {'id': 6, 'method': 'POST', 'path': '/api/session/$_ses/compact', 'body': <String, Object?>{}}),
+          _line('in', {'id': 6, 'status': 200, 'body': true}),
+        ].join('\n'),
+      );
+      final (:driver, data: _) = _driver(http);
+      final session = await driver.start(_spec(initial: null));
+      final native = session as HasNativeCommands;
+      final lists = <List<NativeCommand>>[];
+      native.commands.listen(lists.add);
+      await pumpEventQueue();
+      expect([for (final c in lists[1]) c.name], ['compact', 'init', 'review']);
+      expect(lists.last.map((c) => c.name), ['compact', 'init']);
+      await native.runCommand('review', 'x');
+      await native.runCommand('compact', '');
+      http.channel.expectFinished();
+      await session.close();
+    },
+  );
+
   test('a session is created with our rules, listens before the first prompt, and answers per call', () async {
     final http = _replay('turn_approvals.jsonl');
     final (:driver, :data) = _driver(http);

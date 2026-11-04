@@ -918,4 +918,81 @@ void main() {
       'session_id': '',
     });
   });
+
+  group('native commands', () {
+    late Directory dir;
+    setUp(() => dir = Directory.systemTemp.createTempSync('claude_native'));
+    tearDown(() => dir.deleteSync(recursive: true));
+    ClaudeDriver driverIn(_Spawner s) => ClaudeDriver(dataDir: () async => dir.path, spawn: s.call);
+
+    // Derived from the Agent SDK's initialize reply (the recordings scrub it to []).
+    final listed = [
+      _out(controlRequest('req_1', {'subtype': 'initialize', 'hooks': gateHooks})),
+      _in(
+        controlResponse('req_1', {
+          'commands': [
+            {'name': 'compact', 'description': 'Clear history but keep a summary', 'argumentHint': '<instructions>'},
+            {'name': 'review', 'description': 'Review a pull request', 'argumentHint': ''},
+          ],
+        }),
+      ),
+    ].join('\n');
+    String sysInit(List<String> names) =>
+        _in({'type': 'system', 'subtype': 'init', 'session_id': 's', 'slash_commands': names});
+
+    test(
+      "initialize's list wins over system/init; a command goes alone, held text waits; a reopen has the list",
+      () async {
+        final channel = ReplayChannel(
+          _script([
+            listed,
+            _say('/review auth'),
+            sysInit(['ignored']),
+            _done('r1'),
+            _say('First, quietly.\n\nNow go.'),
+            _done('r2'),
+          ]),
+        );
+        final one = await driverIn(_Spawner([channel])).start(_spec());
+        final lists = <List<NativeCommand>>[];
+        final native = one as HasNativeCommands;
+        native.commands.listen(lists.add);
+        await one.send('First, quietly.', run: false);
+        await native.runCommand('review', 'auth');
+        await pumpEventQueue();
+        await one.send('Now go.');
+        await _played(channel);
+        expect(lists.first, isEmpty);
+        expect(lists.last, const [
+          NativeCommand(name: 'compact', description: 'Clear history but keep a summary', argsHint: '<instructions>'),
+          NativeCommand(name: 'review', description: 'Review a pull request'),
+        ]);
+        await one.close();
+
+        final s = _Spawner([]);
+        final two = await driverIn(s).attach(one.id);
+        final cached = await (two as HasNativeCommands).commands.first;
+        expect(s.calls, isEmpty);
+        expect([for (final c in cached) c.name], ['compact', 'review']);
+        await two.close();
+      },
+    );
+
+    test('without an initialize list, system/init names stand in', () async {
+      final channel = ReplayChannel(
+        _script([
+          _init,
+          _say('/init'),
+          sysInit(['init', 'compact']),
+          _done('r1'),
+        ]),
+      );
+      final one = await driverIn(_Spawner([channel])).start(_spec());
+      final native = one as HasNativeCommands;
+      await native.runCommand('init', '');
+      await _played(channel);
+      expect(await native.commands.first, const [NativeCommand(name: 'init'), NativeCommand(name: 'compact')]);
+      await one.close();
+    });
+  });
 }

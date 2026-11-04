@@ -55,7 +55,7 @@ final class _Pending {
   final answer = Completer<_Decision>();
 }
 
-final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns {
+final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns, HasNativeCommands {
   CodexSession(LineChannel channel, {required this.cwd, required AgentMode mode, String? model, String? effort})
     : _currentMode = mode,
       _model = model == null || model.isEmpty ? null : model,
@@ -321,6 +321,32 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       await _startTurn(all, pictures);
     });
   }
+
+  /// Codex sends no command list (its TUI's `/` commands are its own), so
+  /// these are the app-server methods that stand for them, from the
+  /// codex-cli 0.166.0 schema: not a list Codex gave us.
+  @override
+  Stream<List<NativeCommand>> get commands => Stream.value(codexCommands);
+
+  @override
+  Future<void> runCommand(String name, String args) => _starts(() async {
+    await _ensureRunning();
+    _emit(userMessage('u-${_newId()}', '/$name $args'.trim()));
+    final branch = args.trim();
+    final res = switch (name) {
+      'compact' => await _peer.request('thread/compact/start', {'threadId': _threadId}),
+      'review' => await _peer.request('review/start', {
+        'threadId': _threadId,
+        'target': switch (branch) {
+          '' => {'type': 'uncommittedChanges'},
+          _ when !branch.contains(' ') => {'type': 'baseBranch', 'branch': branch},
+          _ => {'type': 'custom', 'instructions': branch},
+        },
+      }),
+      _ => throw HarnessError('Codex has no /$name command here.'),
+    };
+    if (res case {'turn': {'id': final String t}}) _begin(t);
+  });
 
   /// Runs [body], which starts a turn, so a Stop before the turn/start
   /// reply isn't lost; one asked after every start is in is forgotten.
@@ -851,3 +877,13 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _ => call.toolName,
   };
 }
+
+/// The commands [CodexSession] offers (see [CodexSession.commands]).
+const codexCommands = [
+  NativeCommand(name: 'compact', description: 'Summarize the conversation to free up context'),
+  NativeCommand(
+    name: 'review',
+    description: 'Review the uncommitted changes, the branch against a base branch, or what you describe',
+    argsHint: '[base branch]',
+  ),
+];

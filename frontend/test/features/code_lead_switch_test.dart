@@ -25,6 +25,7 @@ import 'package:every_ai/features/code/handoff/handoff_store.dart';
 import 'package:every_ai/features/code/handoff/lead_timeline.dart';
 import 'package:every_ai/features/code/handoff/native_import.dart';
 import 'package:every_ai/features/code/harness/events.dart';
+import 'package:every_ai/features/code/harness/harness.dart' show NativeCommand;
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
@@ -582,6 +583,41 @@ void main() {
     expect(outcome.failed || outcome.busy, isFalse);
     expect(a.interrupts, 1);
     expect(infoOf(info.id).harness, 'beta');
+  });
+
+  test("an outside lead's / command goes through as is: no mode note, no handoff; refused while busy", () async {
+    final info = await start();
+    final c = await open(info.id);
+    final a = d('alpha').latest!;
+    await turn(a, 'a1', 'Added the toggle.');
+    sessions().update(infoOf(info.id).copyWith(pendingHandoff: '<everyai-handoff>…</everyai-handoff>'));
+    final sentBefore = [...a.sent];
+    expect(await c.runNativeCommand('review', 'x'), isNull);
+    expect(a.ran, ['review|x']);
+    expect(a.sent, sentBefore);
+    expect(infoOf(info.id).pendingHandoff, isNotEmpty);
+
+    a.add(stateEvent('a2-s', ExecutionStatus.running));
+    await pumpEventQueue();
+    expect(await c.runNativeCommand('init', ''), contains('working'));
+    expect(a.ran, ['review|x']);
+  });
+
+  test('the / menu follows the lead: the new one\'s commands after a switch', () async {
+    final info = await start();
+    final c = await open(info.id);
+    await turn(d('alpha').latest!, 'a1', 'Added the toggle.');
+    d('alpha').latest!.nativeCommands.set(const [NativeCommand(name: 'alpha-cmd')]);
+    final seen = <List<NativeCommand>?>[];
+    container.listen(nativeCommandsProvider(info.id), (_, v) {
+      if (v case AsyncData(:final value)) seen.add(value);
+    }, fireImmediately: true);
+    await pumpEventQueue();
+    expect(seen.last?.single.name, 'alpha-cmd');
+    await c.switchLead('beta', run: false);
+    d('beta').latest!.nativeCommands.set(const [NativeCommand(name: 'beta-cmd')]);
+    await pumpEventQueue();
+    expect(seen.last?.single.name, 'beta-cmd');
   });
 
   test('switching from the menu sends the handoff with the next message', () async {

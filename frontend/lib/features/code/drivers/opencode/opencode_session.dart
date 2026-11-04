@@ -41,10 +41,24 @@ Map<String, Object?>? openCodeModelRef(String model, String? effort) {
 
 const _info = DriverInfo(id: 'opencode', label: 'OpenCode');
 
+/// `compact` plus the commands in `GET /api/command`'s `data:[{name, description}]`.
+List<NativeCommand> openCodeCommands(Object? data) {
+  final out = [const NativeCommand(name: 'compact', description: 'Summarize the conversation to free up context')];
+  final names = {'compact'};
+  if (data is List<Object?>) {
+    for (final c in data) {
+      if (c case {'name': final String name} when name.isNotEmpty && names.add(name)) {
+        out.add(NativeCommand(name: name, description: c['description'] as String? ?? ''));
+      }
+    }
+  }
+  return out;
+}
+
 /// One OpenCode session on its own server: events from the server's stream
 /// (only this session's), history from its message list, answers through
 /// its permission replies.
-final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprovals {
+final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprovals, HasNativeCommands {
   OpenCodeSession(
     this._server, {
     required String workingDir,
@@ -130,6 +144,40 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
     await _server.call('POST', '/api/session/$_id/prompt', body: {'text': all});
   }
 
+  /// OpenCode's `/` commands (`GET /api/command`), read when the menu first
+  /// asks and again on `command.updated`. `compact` is a session route of
+  /// its own, not a listed command. The event name and the command route's
+  /// body come from OpenCode 2.1.3's binary and T3 Code, not from docs.
+  final _commands = NativeCommandList();
+  var _commandsWanted = false;
+
+  @override
+  Stream<List<NativeCommand>> get commands {
+    if (!_commandsWanted) {
+      _commandsWanted = true;
+      unawaited(_loadCommands());
+    }
+    return _commands.stream;
+  }
+
+  Future<void> _loadCommands() async {
+    try {
+      final res = await _server.call('GET', '/api/command');
+      _commands.set(openCodeCommands(res is Map ? res['data'] : null));
+    } on Object {
+      // The menu keeps what it had.
+    }
+  }
+
+  @override
+  Future<void> runCommand(String name, String args) async {
+    if (name == 'compact') {
+      await _server.call('POST', '/api/session/$_id/compact', body: const <String, Object?>{});
+      return;
+    }
+    await _server.call('POST', '/api/session/$_id/command', body: {'name': name, 'text': args});
+  }
+
   @override
   Future<void> steer(String text, {List<String> images = const []}) =>
       _server.call('POST', '/api/session/$_id/prompt', body: {'text': text, 'delivery': 'steer'});
@@ -200,6 +248,7 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
     for (final l in _listeners.toList()) {
       await l.close();
     }
+    _commands.close();
     onClose?.call();
   }
 
@@ -213,6 +262,10 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
     if (frame is! Map<String, Object?>) return;
     if (frame['type'] == 'server.connected') {
       if (_connected case final c? when !c.isCompleted) c.complete();
+      return;
+    }
+    if (frame['type'] == 'command.updated') {
+      if (_commandsWanted) unawaited(_loadCommands());
       return;
     }
     if (_ready) {
