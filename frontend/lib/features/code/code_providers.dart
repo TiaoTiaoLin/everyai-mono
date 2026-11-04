@@ -488,7 +488,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             mode: mode,
             effort: effort,
             holdClientTools: hold,
-            initialMessage: modeNote(mode, first.text),
+            initialMessage: driver != null && driver.caps.contains(DriverCap.nativeModes)
+                ? first.text
+                : modeNote(mode, first.text),
             initialImages: first.images,
             isolated: worktree != null,
             tier: tier,
@@ -1201,9 +1203,19 @@ final class CodeSessionState {
     this.switching = false,
     this.handoffProblem = '',
     this.changing,
+    this.nativeModes = const [],
+    this.nativeMode,
   });
 
   final Transcript transcript;
+
+  /// The lead's own modes (`NativeModes`), which the picker shows instead of
+  /// ours; empty for the EveryAI harness and leads without them. [mode] is
+  /// the policy the current one runs under.
+  final List<NativeMode> nativeModes;
+
+  /// The lead's current mode among [nativeModes], or null.
+  final String? nativeMode;
 
   /// The session is moving to another lead harness; messages wait for the new one.
   final bool switching;
@@ -1269,7 +1281,12 @@ final class CodeSessionState {
     String? handoffProblem,
     LimitPick? changing,
     bool clearChanging = false,
+    List<NativeMode>? nativeModes,
+    String? nativeMode,
+    bool clearNativeMode = false,
   }) => CodeSessionState(
+    nativeModes: nativeModes ?? this.nativeModes,
+    nativeMode: clearNativeMode ? null : nativeMode ?? this.nativeMode,
     switching: switching ?? this.switching,
     handoffProblem: handoffProblem ?? this.handoffProblem,
     changing: clearChanging ? null : changing ?? this.changing,
@@ -1403,6 +1420,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   @override
   HarnessSession? get _harnessSession => _session;
   StreamSubscription<HarnessEvent>? _sub;
+  StreamSubscription<NativeModeSet>? _modesSub;
+
+  /// The lead has said which of its own modes it is in since [_watchModes].
+  var _modesSeen = false;
   var _builder = TranscriptBuilder();
 
   /// What earlier conversations showed (before a compaction): kept on screen
@@ -1584,6 +1605,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     ref.onDispose(() {
       _sub?.cancel();
+      _modesSub?.cancel();
       unawaited(_mirror.close());
       _gitTimer?.cancel();
       _disposeBuiltins();
@@ -1703,6 +1725,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
       _sub = session.events.listen(_onEvent);
+      _watchModes(session);
       Timer(liveAfter, () {
         _live = true;
         // Calls still waiting after the history replayed (an app restart).
@@ -2210,6 +2233,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
     final full = told != state.mode || _freshLead;
     _freshLead = false;
+    // A lead in one of its own modes has its own instructions for it; ours would contradict them.
+    if (_session is NativeModes && state.nativeModes.isNotEmpty) return body;
     return modeNote(state.mode, body, full: full, from: told, subagent: subagent);
   }
 
@@ -2431,6 +2456,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // Nested instruction files were in the old context; they go out again when touched.
       await _openContext(info);
       _sub = live.events.listen(_onEvent);
+      _watchModes(live);
       return CompactOutcome.compacted(summary);
     } on Object catch (e) {
       return CompactOutcome.failed('$e');
@@ -2851,7 +2877,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         tier: tier,
         harnessMode: harnessMode,
         initialMessage: run
-            ? modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn')
+            ? (outside && target.caps.contains(DriverCap.nativeModes)
+                  ? '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn'
+                  : modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn'))
             : null,
         ready: ready.future,
       );
@@ -2973,6 +3001,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _importReplay = imported != null;
     _importedNow.clear();
     _sub = live.events.listen(_onEvent);
+    _watchModes(live);
     ready.complete();
     if (imported != null) {
       // Every driver replays the history it has at once when listened to:
@@ -3958,10 +3987,87 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   Future<void> setMode(AgentMode mode) async {
+    // A lead with its own modes moves to the one that maps to [mode] (`/plan`, Start building, a handoff).
+    if (_session is NativeModes && state.nativeModes.isNotEmpty) {
+      final to = nativeModeFor(state.nativeModes, mode);
+      if (to == null) {
+        _builder.addNotice(
+          NoticeItem('mode-${_events.length}-${mode.name}', '${_driver.info.label} has no ${mode.label} mode.'),
+        );
+        state = state.copyWith(transcript: _builder.snapshot);
+        return;
+      }
+      await setNativeMode(to.id);
+      return;
+    }
     state = state.copyWith(mode: mode);
     final sessions = ref.read(codeSessionsProvider.notifier);
     if (sessions.byId(sessionId) case final info?) sessions.update(info.copyWith(mode: mode));
     await _session?.setMode(mode, holdClientTools: _holds);
+    _answered = '';
+    _autoRespond(state.transcript);
+  }
+
+  /// Moves the lead to its own mode [id] ([NativeModes]): the policy is that
+  /// mode's, kept with the session. Null once moved, else why not (the mode
+  /// is greyed, or the harness refused; nothing changes then).
+  Future<String?> setNativeMode(String id) async {
+    final session = _session;
+    if (session is! NativeModes) return 'This agent has no modes of its own.';
+    final m = nativeModeOf(state.nativeModes, id);
+    if (m == null) return "${_driver.info.label} has no mode '$id'.";
+    if (m.blocked case final why?) return why;
+    final before = (mode: state.mode, native: state.nativeMode);
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    state = state.copyWith(mode: m.policy, nativeMode: id);
+    if (info != null) sessions.update(info.copyWith(mode: m.policy, nativeMode: id));
+    try {
+      await (session as NativeModes).setNativeMode(id);
+    } on Object catch (e) {
+      state = state.copyWith(mode: before.mode, nativeMode: before.native, clearNativeMode: before.native == null);
+      if (sessions.byId(sessionId) case final i?) {
+        sessions.update(i.copyWith(mode: before.mode, nativeMode: info?.nativeMode ?? ''));
+      }
+      return e is HarnessError ? e.message : "${_driver.info.label} didn't switch to ${m.label}: $e";
+    }
+    _answered = '';
+    _autoRespond(state.transcript);
+    return null;
+  }
+
+  /// Follows [session]'s own modes ([NativeModes]), or clears them for a lead without.
+  void _watchModes(HarnessSession session) {
+    unawaited(_modesSub?.cancel());
+    _modesSub = null;
+    _modesSeen = false;
+    if (session is! NativeModes) {
+      state = state.copyWith(nativeModes: const [], clearNativeMode: true);
+      return;
+    }
+    _modesSub = (session as NativeModes).nativeModes.listen(_onNativeModes);
+  }
+
+  /// The lead's list or current mode changed. The first word after it opens
+  /// moves it back to a mode the user picked by name earlier (a reopen);
+  /// later, a move the harness made itself (Claude leaving plan, an ACP
+  /// agent's own command) takes that mode's policy.
+  void _onNativeModes(NativeModeSet set) {
+    final before = state.nativeMode;
+    state = state.copyWith(nativeModes: set.modes, nativeMode: set.current, clearNativeMode: set.current == null);
+    if (set.modes.isEmpty || set.current == null) return;
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (!_modesSeen) {
+      _modesSeen = true;
+      final saved = nativeModeOf(set.modes, info?.nativeMode);
+      if (saved != null && saved.blocked == null && saved.id != set.current) unawaited(setNativeMode(saved.id));
+      return;
+    }
+    final now = nativeModeOf(set.modes, set.current);
+    if (now == null || now.blocked != null || set.current == before) return;
+    state = state.copyWith(mode: now.policy);
+    if (info != null) sessions.update(info.copyWith(mode: now.policy, nativeMode: now.id));
     _answered = '';
     _autoRespond(state.transcript);
   }

@@ -131,7 +131,8 @@ class CodeSessionScreen extends ConsumerWidget {
     final driver = isOutsideLead(info.harness, info.workingDir)
         ? ref.read(driverRegistryProvider).resolve(info.harness)
         : null;
-    final fidelity = driver == null ? null : fidelityNote(driver, state.mode);
+    // None when it runs in one of its own modes: the harness's name for it says how it holds.
+    final fidelity = driver == null || state.nativeMode != null ? null : fidelityNote(driver, state.mode);
 
     // The header drops chips by the width it really has (the sidebar and the
     // panes take some), so the title keeps room and nothing jumps into an
@@ -329,6 +330,13 @@ class CodeSessionScreen extends ConsumerWidget {
                               // An outside lead's own commands (empty until listed, never ours); null: EveryAI's.
                               commands: ref.watch(nativeSlashMenuProvider(sessionId)),
                               onUnlistedCommand: controller.runTypedCommand,
+                              nativeModes: state.nativeModes,
+                              nativeMode: state.nativeMode,
+                              harnessLabel: driver?.info.label ?? '',
+                              onNativeModeChanged: (id) async {
+                                final why = await controller.setNativeMode(id);
+                                if (why != null && context.mounted) showAdaptiveToast(context, why);
+                              },
                             ),
                           ],
                         ),

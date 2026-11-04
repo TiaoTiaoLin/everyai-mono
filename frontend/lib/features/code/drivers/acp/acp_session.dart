@@ -83,7 +83,44 @@ final class AcpLauncher {
 /// app's rules or the user answer per call. The transcript is the event
 /// journal in [dir]; after an app restart the agent's own memory comes back
 /// through `session/load` when the next message is sent.
-final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCommands {
+/// The agent's own modes for the picker: the choices of its `mode` config
+/// option when it has one, else `modes.availableModes`. A mode runs under
+/// the profile's policy for it ([AcpProfile.modePolicy], its [AcpProfile.askMode]
+/// as Ask, its [AcpProfile.planMode] as Plan); any other one (Gemini's
+/// `yolo`, Goose's `auto`) is listed greyed, since the app can't tell
+/// whether it still asks before acting.
+NativeModeSet acpModes(AcpProfile profile, Map<String, Object?>? modes, List<Object?>? config) {
+  NativeMode entry(String id, String label, String description) {
+    final policy =
+        profile.modePolicy[id] ??
+        (id == profile.askMode
+            ? AgentMode.ask
+            : id == profile.planMode
+            ? AgentMode.plan
+            : null);
+    return NativeMode(
+      id: id,
+      label: label,
+      description: description,
+      policy: policy ?? AgentMode.fullAuto,
+      blocked: policy == null ? "Not offered: EveryAI can't tell whether this mode still asks before acting." : null,
+    );
+  }
+
+  if (acpOption(config, 'mode') case final o?) {
+    return (modes: [for (final c in o.choices) entry(c.value, c.name, '')], current: o.current);
+  }
+  return (
+    modes: [
+      for (final m in (modes?['availableModes'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>())
+        if (m['id'] case final String id when id.isNotEmpty)
+          entry(id, m['name'] as String? ?? id, m['description'] as String? ?? ''),
+    ],
+    current: modes?['currentModeId'] as String?,
+  );
+}
+
+final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes {
   AcpSession({
     required this.id,
     required this.dir,
@@ -91,6 +128,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     required this.sessionTag,
     required this._launcher,
     required this._mode,
+    String? nativeMode,
     this.briefing,
     this.mcpConfig = const {},
     this.rememberedMcp = const [],
@@ -99,7 +137,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     List<HarnessEvent> history = const [],
     List<NativeCommand> commands = const [],
   }) : _journal = openEventJournal(dir, 'events'),
-       _commands = NativeCommandList(commands) {
+       _commands = NativeCommandList(commands),
+       _native = nativeMode {
     _history.addAll(history);
   }
 
@@ -131,6 +170,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
   var _seq = 0;
 
   AgentMode _mode;
+
+  /// The agent's mode picked by its own name ([setNativeMode]), kept in
+  /// `meta.json`; null pins [AcpProfile.askMode] (or [AcpProfile.planMode]).
+  String? _native;
+  final _modeFeed = NativeModeFeed();
   ({String model, String? effort})? _llm;
   String? _acpSessionId;
   JsonRpcPeer? _peer;
@@ -512,6 +556,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     'cwd': cwd,
     'sessionTag': sessionTag,
     'mode': _mode.name,
+    'nativeMode': ?_native,
     'mcpServers': [
       for (final n in mcpGiven || mcpConfig.isNotEmpty ? mcpConfig.keys : rememberedMcp)
         if (n != everyaiServerName) n,
@@ -524,6 +569,32 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     if (reply['configOptions'] case final List<Object?> c) _config = c;
     if (reply['modes'] case final Map<String, Object?> m) _modes = {...m};
     if (reply['models'] case final Map<String, Object?> m) _models = {...m};
+    _publishModes();
+  }
+
+  void _publishModes() {
+    final set = acpModes(_profile, _modes, _config);
+    _modeFeed.set(modes: set.modes, current: set.current);
+  }
+
+  @override
+  Stream<NativeModeSet> get nativeModes => _modeFeed.stream;
+
+  /// Moves the agent to its mode [id] (a config option or `session/set_mode`);
+  /// before it runs (a reopened session), it is set when it starts.
+  @override
+  Future<void> setNativeMode(String id) async {
+    final m = offeredMode(_modeFeed.latest.modes, id, _label);
+    _native = m.id;
+    _mode = m.policy;
+    if (_peer == null || _acpSessionId == null) return;
+    await _saveMeta();
+    try {
+      await _applyMode(m.id);
+    } on JsonRpcError catch (e) {
+      throw HarnessError("$_label didn't switch to ${m.label}: ${e.message}");
+    }
+    _publishModes();
   }
 
   // ------------------------------------------------------- modes and model
@@ -532,22 +603,74 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
   /// rules decide every call; never a mode that skips asking.
   Future<void> _pinMode() async {
     await _pinConfig();
-    final targets = [if (_mode == AgentMode.plan) ?_profile.planMode, ?_profile.askMode];
+    final picked = nativeModeOf(_modeFeed.latest.modes, _native);
+    final targets = [
+      if (picked != null && picked.blocked == null) picked.id,
+      if (_mode == AgentMode.plan) ?_profile.planMode,
+      ?_profile.askMode,
+    ];
     for (final target in targets) {
       try {
-        if (await _setOption('mode', target)) return;
-        if (_modes case final m? when _offers(m['availableModes'], 'id', target)) {
-          if (m['currentModeId'] != target) {
-            await _peer!.request('session/set_mode', {'sessionId': _acpSessionId, 'modeId': target});
-            m['currentModeId'] = target;
-          }
-          return;
-        }
+        if (await _applyMode(target)) return;
       } on JsonRpcError catch (e) {
         _emit(acpNotice(_next('n'), "$_label didn't switch to its $target mode: ${e.message}"));
         return;
+      } finally {
+        _publishModes();
       }
     }
+  }
+
+  /// Sets the agent's mode [id] by its `mode` config option or
+  /// `session/set_mode`; false when it offers neither with that id.
+  Future<bool> _applyMode(String id) async {
+    if (await _setOption('mode', id)) return true;
+    if (_modes case final m? when _offers(m['availableModes'], 'id', id)) {
+      final was = m['currentModeId'];
+      if (was != id) {
+        // Set first: an update the agent sends before its reply is newer than this.
+        m['currentModeId'] = id;
+        try {
+          await _peer!.request('session/set_mode', {'sessionId': _acpSessionId, 'modeId': id});
+        } on Object {
+          if (m['currentModeId'] == id) m['currentModeId'] = was;
+          rethrow;
+        }
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// The agent moved its own mode (its command, a key): one the app can't
+  /// tell asks is set back, with a notice; another is followed.
+  void _modeMoved() {
+    final set = acpModes(_profile, _modes, _config);
+    final now = nativeModeOf(set.modes, set.current);
+    if (now == null || now.id == _modeFeed.latest.current) return _publishModes();
+    if (now.blocked == null) {
+      _native = now.id;
+      _mode = now.policy;
+      unawaited(_saveMeta().catchError((Object _) {}));
+      return _publishModes();
+    }
+    if (_peer == null) return;
+    unawaited(
+      _pinMode().then(
+        (_) {
+          final back = nativeModeOf(_modeFeed.latest.modes, _modeFeed.latest.current)?.label ?? 'its asking mode';
+          _emit(
+            acpNotice(
+              _next('n'),
+              "$_label moved to ${now.label}, which EveryAI doesn't offer; it was set back to $back.",
+            ),
+          );
+        },
+        onError: (Object e) {
+          _emit(acpNotice(_next('n'), "$_label moved to ${now.label}, and it couldn't be set back: $e"));
+        },
+      ),
+    );
   }
 
   /// Sets the profile's pinned config options ([AcpProfile.configPins])
@@ -624,6 +747,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
   @override
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
     _mode = mode;
+    _native = null;
     // Not running yet (a reopened conversation): set when it starts.
     if (_peer == null || _acpSessionId == null) return;
     await _saveMeta();
@@ -1244,8 +1368,10 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     switch (u['sessionUpdate']) {
       case 'current_mode_update':
         _modes?['currentModeId'] = u['currentModeId'];
+        _modeMoved();
       case 'config_option_update':
         if (u['configOptions'] case final List<Object?> c) _config = c;
+        _modeMoved();
         // The agent turned a pinned option back (its own command): set it again.
         if (_pinsMoved && _peer != null) {
           unawaited(
@@ -1479,6 +1605,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     }
     _listeners.clear();
     _commands.close();
+    _modeFeed.close();
     _launcher.closed(id);
   }
 

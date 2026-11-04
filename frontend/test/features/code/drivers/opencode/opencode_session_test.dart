@@ -156,6 +156,66 @@ void main() {
     },
   );
 
+  test(
+    "the modes picker: OpenCode's primary agents (hidden and subagents left out); a pick switches the agent",
+    () async {
+      // Shaped by the 2.1.3 OpenAPI's Agent.Info, not recorded.
+      Map<String, Object?> agent(String id, String mode, {bool hidden = false, String description = ''}) => {
+        'id': id,
+        'name': id,
+        'description': description,
+        'mode': mode,
+        'hidden': hidden,
+        'request': <String, Object?>{},
+        'permissions': <Object?>[],
+      };
+      final http = ReplayHttpClient.script(
+        [
+          _head('turn_approvals.jsonl', '/prompt'),
+          _line('out', {'id': 3, 'method': 'GET', 'path': '/api/agent'}),
+          _line('in', {
+            'id': 3,
+            'status': 200,
+            'body': {
+              'location': {'directory': _cwd},
+              'data': [
+                agent('build', 'primary', description: 'The default agent'),
+                agent('plan', 'primary', description: 'Plans without changing files'),
+                agent('general', 'subagent'),
+                agent('title', 'primary', hidden: true),
+                agent('docs', 'all', description: 'Writes the docs'),
+              ],
+            },
+          }),
+          _line('out', {
+            'id': 4,
+            'method': 'POST',
+            'path': '/api/session/$_ses/agent',
+            'body': {'agent': 'plan'},
+          }),
+          _line('in', {'id': 4, 'status': 204, 'body': null}),
+        ].join('\n'),
+      );
+      final (:driver, data: _) = _driver(http);
+      final session = await driver.start(_spec(initial: null));
+      final native = session as NativeModes;
+      final sets = <NativeModeSet>[];
+      native.nativeModes.listen(sets.add);
+      await pumpEventQueue();
+      final modes = sets.last.modes;
+      expect([for (final m in modes) m.id], ['build', 'plan', 'docs']);
+      expect([for (final m in modes) m.policy], [AgentMode.ask, AgentMode.plan, AgentMode.ask]);
+      expect(modes.every((m) => m.blocked == null), isTrue);
+      expect(sets.last.current, 'build');
+      await expectLater(native.setNativeMode('general'), throwsA(isA<HarnessError>()));
+      await native.setNativeMode('plan');
+      await pumpEventQueue();
+      expect(sets.last.current, 'plan');
+      http.channel.expectFinished();
+      await session.close();
+    },
+  );
+
   test('compact is offered before the list loads, and a failed load is tried again by the next listen', () async {
     final http = ReplayHttpClient.script(
       [

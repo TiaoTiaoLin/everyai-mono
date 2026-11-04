@@ -88,6 +88,7 @@ void main() {
       DriverCap.skills,
       DriverCap.switchModel,
       DriverCap.effort,
+      DriverCap.nativeModes,
     });
     expect(OpenCodeDriver().info.id, 'opencode');
   });

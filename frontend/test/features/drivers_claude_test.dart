@@ -850,6 +850,7 @@ void main() {
         DriverCap.switchModel,
         DriverCap.effort,
         DriverCap.subagents,
+        DriverCap.nativeModes,
       });
       expect((ClaudeDriver().info.id, ClaudeDriver().info.needsConsent), ('claude-code', true));
     });
@@ -1008,6 +1009,103 @@ void main() {
       await _played(channel);
       expect(await native.commands.first, const [NativeCommand(name: 'init'), NativeCommand(name: 'compact')]);
       await one.close();
+    });
+  });
+
+  group('native modes', () {
+    late Directory dir;
+    setUp(() => dir = Directory.systemTemp.createTempSync('claude_modes'));
+    tearDown(() => dir.deleteSync(recursive: true));
+    ClaudeDriver driverIn(_Spawner s) => ClaudeDriver(dataDir: () async => dir.path, spawn: s.call);
+    String setMode(String req, String mode) =>
+        _out(controlRequest(req, {'subtype': 'set_permission_mode', 'mode': mode}));
+
+    test("Claude's own modes: auto once the model says it has it, bypass greyed; current from initialize", () async {
+      final channel = ReplayChannel(_fixture('init_image_turn.jsonl'));
+      final session = await driverIn(_Spawner([channel])).start(_spec());
+      final native = session as NativeModes;
+      final before = await native.nativeModes.first;
+      expect([for (final m in before.modes) m.id], ['default', 'acceptEdits', 'plan', 'bypassPermissions']);
+      expect(before.current, 'default');
+      await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
+      await _played(channel);
+      final after = await native.nativeModes.first;
+      expect([for (final m in after.modes) m.id], ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
+      expect(after.current, 'default');
+      expect(nativeModeOf(after.modes, 'auto')!.policy, AgentMode.fullAuto);
+      expect(nativeModeOf(after.modes, 'bypassPermissions')!.blocked, contains('Not offered'));
+      expect(
+        [
+          for (final m in after.modes)
+            if (m.blocked == null) m.policy,
+        ],
+        [AgentMode.ask, AgentMode.autoEdit, AgentMode.plan, AgentMode.fullAuto],
+      );
+      await session.close();
+      // The reopened session lists auto before its CLI starts again.
+      final again = await driverIn(_Spawner([])).attach(session.id);
+      expect([for (final m in (await (again as NativeModes).nativeModes.first).modes) m.id], contains('auto'));
+      await again.close();
+    });
+
+    test('a switch is set_permission_mode under the native id; a greyed one throws and sends nothing', () async {
+      final channel = ReplayChannel(_script([_init, _say('Go.'), _done('r1'), setMode('req_2', 'acceptEdits')]));
+      final session = await driverIn(_Spawner([channel])).start(_spec(message: 'Go.'));
+      final native = session as NativeModes;
+      await pumpEventQueue();
+      await native.setNativeMode('acceptEdits');
+      await _played(channel);
+      final sent = channel.sent.length;
+      await expectLater(native.setNativeMode('bypassPermissions'), throwsA(isA<HarnessError>()));
+      await expectLater(native.setNativeMode('dontAsk'), throwsA(isA<HarnessError>()));
+      expect(channel.sent.length, sent);
+      expect((await native.nativeModes.first).current, 'acceptEdits');
+      await session.close();
+    });
+
+    test('a mode picked before the CLI starts is its --permission-mode, and kept for a reopen', () async {
+      final channel = ReplayChannel(_script([_init, _say('Plan it.'), _done('r1')]));
+      final s = _Spawner([channel]);
+      final session = await driverIn(s).start(_spec());
+      await (session as NativeModes).setNativeMode('plan');
+      await session.send('Plan it.');
+      await _played(channel);
+      expect(s.calls.single.args, containsAllInOrder(['--permission-mode', 'plan']));
+      await session.close();
+      final again = await driverIn(_Spawner([])).attach(session.id);
+      expect((await (again as NativeModes).nativeModes.first).current, 'plan');
+      await again.close();
+    });
+
+    test('an approved ExitPlanMode moves Claude back to the mode before plan', () async {
+      final plan = {'plan': 'Do it.'};
+      final channel = ReplayChannel(
+        _script([
+          _init,
+          _say('Plan it.'),
+          setMode('req_2', 'plan'),
+          _use('toolu_p', 'ExitPlanMode', plan),
+          _hook('h1', 'toolu_p', 'ExitPlanMode', plan),
+          _out(controlResponse('h1', approvalAnswer(hook: true, accept: true, input: plan))),
+          setMode('req_3', 'acceptEdits'),
+          _results(['toolu_p']),
+          _done('r1'),
+        ]),
+      );
+      final session = await driverIn(_Spawner([channel])).start(_spec(mode: AgentMode.autoEdit, message: 'Plan it.'));
+      final native = session as NativeModes;
+      final seen = <String?>[];
+      native.nativeModes.listen((m) => seen.add(m.current));
+      _record(session, (e) {
+        if (_isState(e, ExecutionStatus.waitingForConfirmation)) {
+          unawaited(session.respond(accept: true, callIds: ['toolu_p']));
+        }
+      });
+      await pumpEventQueue();
+      await native.setNativeMode('plan');
+      await _played(channel);
+      expect(seen, ['acceptEdits', 'plan', 'acceptEdits']);
+      await session.close();
     });
   });
 }

@@ -65,6 +65,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
     DriverCap.images,
     DriverCap.switchModel,
     DriverCap.effort,
+    DriverCap.nativeModes,
   };
 
   static const _notInstalled = HarnessError(
@@ -238,6 +239,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
       await respawn(),
       cwd: cwd,
       mode: AgentMode.values.asNameMap()[meta['mode']] ?? AgentMode.ask,
+      native: meta['native_mode'] as String?,
       model: meta['model'] as String?,
       effort: meta['effort'] as String?,
     );
@@ -307,6 +309,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
       'model': session.model,
       'effort': session.effort,
       'mode': session.mode.name,
+      'native_mode': ?session.native,
       if (instruct) 'instruct': true,
     }),
   );

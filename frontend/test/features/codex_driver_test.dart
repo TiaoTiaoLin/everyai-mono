@@ -1247,4 +1247,48 @@ ${_upTo('usage_limit', '"method":"turn/started"')}
     await expectLater(s.rewindTo(null), throwsA(isA<HarnessError>()));
     await s.close();
   });
+
+  group('native modes', () {
+    test("Codex's presets: Read Only asks in a read-only sandbox, Default edits; Full Access greyed", () {
+      expect([for (final m in codexModes) m.id], ['read-only', 'default', 'full-access']);
+      expect([for (final m in codexModes) m.policy], [AgentMode.ask, AgentMode.autoEdit, AgentMode.fullAuto]);
+      expect(nativeModeOf(codexModes, 'full-access')!.blocked, contains('Not offered'));
+      for (final m in codexModes) {
+        final p = codexPolicy(m.policy, native: m.id);
+        expect((p.approvalPolicy, p.approvalsReviewer, p.sandbox), ('untrusted', 'user', 'read-only'), reason: m.id);
+      }
+      expect(codexPolicy(AgentMode.ask, native: 'read-only').sandboxPolicy, {
+        'type': 'readOnly',
+        'networkAccess': true,
+      });
+      expect(codexPolicy(AgentMode.autoEdit, native: 'default').sandboxPolicy, {'type': 'dangerFullAccess'});
+      // No Plan preset: the app's Plan stays read-only as before.
+      expect(nativeModeFor(codexModes, AgentMode.plan), isNull);
+      expect(nativeModeFor(codexModes, AgentMode.fullAuto)!.id, 'default');
+    });
+
+    test('a preset picked by name goes with the next turn/start, and a reopen keeps it', () async {
+      final channel = ReplayChannel('''
+${_upTo('approve_command', '"id":3,"result"')}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}}}}
+''');
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final native = s as NativeModes;
+      expect((await native.nativeModes.first).current, 'read-only');
+      await expectLater(native.setNativeMode('full-access'), throwsA(isA<HarnessError>()));
+      await native.setNativeMode('default');
+      await native.setNativeMode('read-only');
+      await s.send('first');
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      await s.close();
+
+      final again = await _driver(data, [_fixture('resume')]).attach(s.id);
+      expect((await (again as NativeModes).nativeModes.first).current, 'read-only');
+      await again.close();
+    });
+  });
 }

@@ -64,6 +64,7 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
     DriverCap.skills,
     DriverCap.switchModel,
     DriverCap.effort,
+    DriverCap.nativeModes,
   };
 
   /// Signed in: at least one provider has a key or login

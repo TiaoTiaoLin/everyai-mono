@@ -48,6 +48,10 @@ enum DriverCap {
 
   /// Takes a reasoning effort.
   effort,
+
+  /// Has modes of its own (`NativeModes`): the picker shows them, and no
+  /// EveryAI mode note goes with its messages.
+  nativeModes,
 }
 
 /// Who a driver is: [id] is the name stored with its sessions

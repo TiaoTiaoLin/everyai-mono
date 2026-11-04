@@ -1740,6 +1740,74 @@ void main() {
       await s.close();
     });
   });
+
+  group('native modes', () {
+    Future<NativeModeSet> modesOf(HarnessSession s) async {
+      await pumpEventQueue();
+      return (s as NativeModes).nativeModes.first;
+    }
+
+    test("Gemini's own modes: Default offered, Auto Edit and YOLO greyed", () async {
+      final r = rig(['gemini/turn.jsonl']);
+      final s = await r.driver('gemini', 'gemini', args: const ['--acp']).start(r.spec(model: 'gemini-2.5-flash'));
+      final set = await modesOf(s);
+      expect(
+        [for (final m in set.modes) (m.id, m.label, m.blocked == null)],
+        [('default', 'Default', true), ('autoEdit', 'Auto Edit', false), ('yolo', 'YOLO', false)],
+      );
+      expect(set.current, 'default');
+      expect(nativeModeOf(set.modes, 'default')!.policy, AgentMode.ask);
+      await expectLater((s as NativeModes).setNativeMode('yolo'), throwsA(isA<HarnessError>()));
+      await s.close();
+    });
+
+    test("Cursor's modes all ask or only read; Kiro's come from its mode config option", () async {
+      final c = rig(['cursor/handshake.jsonl']);
+      final cursor = await c
+          .driver('cursor', 'cursor-agent')
+          .start(c.spec(mode: AgentMode.plan, briefing: _cursorBrief(_Host())));
+      final cs = await modesOf(cursor);
+      expect(
+        [for (final m in cs.modes) (m.id, m.policy, m.blocked)],
+        [('agent', AgentMode.ask, null), ('plan', AgentMode.plan, null), ('ask', AgentMode.plan, null)],
+      );
+      expect(cs.current, 'plan');
+      await cursor.close();
+
+      final k = rig(['acp/kiro_autopilot.jsonl']);
+      final kiro = await k.driver('kiro', 'kiro-cli').start(k.spec());
+      final ks = await modesOf(kiro);
+      expect(
+        [for (final m in ks.modes) (m.id, m.label, m.policy)],
+        [('vibe', 'Default', AgentMode.ask), ('plan', 'Plan', AgentMode.plan)],
+      );
+      expect(ks.current, 'vibe');
+      await kiro.close();
+    });
+
+    test('a pick is session/set_mode; the agent moving itself to a mode that never asks is set back', () async {
+      final r = rig(['acp/goose_native_mode.jsonl']);
+      final s = await r.driver('goose', 'goose').start(r.spec());
+      final seen = _Seen(s);
+      final set = await modesOf(s);
+      expect(
+        [
+          for (final m in set.modes)
+            if (m.blocked == null) m.id,
+        ],
+        ['approve', 'chat'],
+      );
+      expect(set.current, 'approve');
+      await (s as NativeModes).setNativeMode('chat');
+      await seen.until(() => seen.notices.isNotEmpty);
+      expect(seen.notices.single, contains('set back to Chat'));
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect((await modesOf(s)).current, 'chat');
+      await s.close();
+    });
+  });
 }
 
 /// An agent that exits at once, saying it couldn't open a terminal.

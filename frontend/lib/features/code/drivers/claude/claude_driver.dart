@@ -80,6 +80,7 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume
     DriverCap.images,
     DriverCap.switchModel,
     DriverCap.effort,
+    DriverCap.nativeModes,
     DriverCap.subagents,
   };
 
@@ -307,6 +308,8 @@ final class _Meta {
     required this.sent,
     this.carry = const [],
     this.commands = const [],
+    this.native,
+    this.autoMode = false,
   });
 
   final String cwd;
@@ -320,6 +323,13 @@ final class _Meta {
   /// The CLI's `/` commands as it last listed them (the menu before it starts).
   final List<NativeCommand> commands;
 
+  /// The permission mode picked by its own name ([ClaudeSession.setNativeMode]),
+  /// or null for the one [mode] maps to ([permissionModeFor]).
+  final String? native;
+
+  /// The model supports `auto` (its last `initialize` said so).
+  final bool autoMode;
+
   /// [effort] is taken as given (null is Claude's default), not kept.
   _Meta withLlm({required String model, required String? effort}) => _Meta(
     cwd: cwd,
@@ -330,9 +340,19 @@ final class _Meta {
     sent: sent,
     carry: carry,
     commands: commands,
+    native: native,
+    autoMode: autoMode,
   );
 
-  _Meta copyWith({AgentMode? mode, bool? sent, List<String>? carry, List<NativeCommand>? commands}) => _Meta(
+  /// [native] '' clears it.
+  _Meta copyWith({
+    AgentMode? mode,
+    bool? sent,
+    List<String>? carry,
+    List<NativeCommand>? commands,
+    String? native,
+    bool? autoMode,
+  }) => _Meta(
     cwd: cwd,
     sessionTag: sessionTag,
     model: model,
@@ -341,7 +361,12 @@ final class _Meta {
     sent: sent ?? this.sent,
     carry: carry ?? this.carry,
     commands: commands ?? this.commands,
+    native: native == null ? this.native : (native.isEmpty ? null : native),
+    autoMode: autoMode ?? this.autoMode,
   );
+
+  /// The permission mode the CLI runs in.
+  String get permissionMode => native ?? permissionModeFor(mode);
 
   Map<String, Object?> toJson() => {
     'cwd': cwd,
@@ -352,6 +377,8 @@ final class _Meta {
     'sent': sent,
     if (carry.isNotEmpty) 'carry': carry,
     if (commands.isNotEmpty) 'commands': [for (final c in commands) c.toJson()],
+    'native_mode': ?native,
+    if (autoMode) 'auto_mode': true,
   };
 
   static _Meta fromJson(Map<String, Object?> j) => _Meta(
@@ -363,18 +390,21 @@ final class _Meta {
     sent: j['sent'] == true,
     carry: [for (final t in j['carry'] as List<Object?>? ?? const []) ?t as String?],
     commands: [for (final c in j['commands'] as List<Object?>? ?? const []) ?NativeCommand.fromJson(c)],
+    native: j['native_mode'] as String?,
+    autoMode: j['auto_mode'] == true,
   );
 }
 
 /// A call the CLI is waiting on us for: the request to answer, whether it
 /// came from our hook (else `can_use_tool`), and the call's input.
-typedef _Held = ({String requestId, bool hook, Map<String, Object?> input});
+typedef _Held = ({String requestId, bool hook, String name, Map<String, Object?> input});
 
 /// One Claude Code conversation. Refusing a call doesn't stop the run (the
 /// model is told and carries on); [resume] runs a stopped or failed turn on.
-final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNativeCommands {
+final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes {
   ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal)
-    : _commands = NativeCommandList(_meta.commands);
+    : _commands = NativeCommandList(_meta.commands),
+      _modes = NativeModeFeed((modes: claudeModes(autoMode: _meta.autoMode), current: _meta.permissionMode));
 
   final ClaudeDriver _driver;
   @override
@@ -426,6 +456,51 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
 
   @override
   Stream<List<NativeCommand>> get commands => _commands.stream;
+
+  /// Claude's permission modes ([claudeModes]); the current one as the CLI
+  /// last said (`initialize`, `system` messages) or as we set it.
+  final NativeModeFeed _modes;
+
+  /// The mode before `plan`, set back once the plan is approved (ExitPlanMode).
+  String? _beforePlan;
+
+  @override
+  Stream<NativeModeSet> get nativeModes => _modes.stream;
+
+  @override
+  Future<void> setNativeMode(String id) async {
+    final m = offeredMode(_modes.latest.modes, id, 'Claude Code');
+    await _moveTo(m.id, m.policy);
+  }
+
+  Future<void> _moveTo(String id, AgentMode policy) async {
+    final from = _meta.permissionMode;
+    if (id == 'plan' && from != 'plan') _beforePlan = from;
+    await _save(_meta.copyWith(mode: policy, native: id));
+    _modes.set(current: id);
+    _request({'subtype': 'set_permission_mode', 'mode': id});
+  }
+
+  /// The CLI says which mode it is in (the user may have moved it, or a plan was approved).
+  void _modeSaid(String id) {
+    if (id.isEmpty || id == _modes.latest.current) return;
+    final m = nativeModeOf(_modes.latest.modes, id);
+    if (m?.blocked != null) {
+      final back = _meta.permissionMode;
+      _request({'subtype': 'set_permission_mode', 'mode': back});
+      _emit(
+        HarnessEvent.decode({
+          'kind': 'ConversationErrorEvent',
+          'id': const Uuid().v4(),
+          'source': 'environment',
+          'detail': 'Claude Code moved to ${m!.label}, which EveryAI doesn\'t offer; it was set back to $back.',
+        }),
+      );
+      return;
+    }
+    unawaited(_save(_meta.copyWith(native: id, mode: m?.policy)));
+    _modes.set(current: id);
+  }
 
   /// The command goes as the turn's whole text; held `run: false` messages
   /// wait for the next message rather than hide it.
@@ -540,8 +615,9 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
 
   @override
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
-    await _save(_meta.copyWith(mode: mode));
-    _request({'subtype': 'set_permission_mode', 'mode': permissionModeFor(mode)});
+    await _save(_meta.copyWith(mode: mode, native: ''));
+    _modes.set(current: _meta.permissionMode);
+    _request({'subtype': 'set_permission_mode', 'mode': _meta.permissionMode});
   }
 
   /// The model changes in place. The CLI has no live control for the
@@ -573,6 +649,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
     await _journal.close();
     await _events.close();
     _commands.close();
+    _modes.close();
   }
 
   /// Ends the CLI's process quietly; the next turn starts it again.
@@ -596,6 +673,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
       sessionId: id,
       resume: _meta.sent,
       mode: _meta.mode,
+      nativeMode: _meta.native,
       model: _meta.model,
       effort: _meta.effort,
       briefing: _briefing,
@@ -632,15 +710,19 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
           _emit(HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': const Uuid().v4(), 'detail': '$error'}));
         }
         // req_1 is this process's initialize.
-        if (line['response'] case {'request_id': 'req_1', 'response': {'commands': final List<Object?> list}}) {
-          _initListed = list.isNotEmpty;
-          _listed(claudeCommands(list));
+        if (line['response'] case {'request_id': 'req_1', 'response': final Map<String, Object?> init}) {
+          if (init['commands'] case final List<Object?> list) {
+            _initListed = list.isNotEmpty;
+            _listed(claudeCommands(list));
+          }
+          _initialized(init);
         }
       default:
         if (line case {'type': 'system', 'subtype': 'init', 'slash_commands': final List<Object?> l}
             when !_initListed) {
           _listed(claudeCommands(l));
         }
+        if (line case {'type': 'system', 'permissionMode': final String mode}) _modeSaid(mode);
         final events = _decoder.decode(line);
         for (final e in events) {
           _emit(e);
@@ -648,6 +730,14 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
         }
         if (line['type'] == 'result') _ended();
     }
+  }
+
+  /// What `initialize` says about modes: whether the model has `auto`, and the mode it runs in.
+  void _initialized(Map<String, Object?> init) {
+    final auto = claudeAutoMode(init, _meta.model);
+    if (auto != _meta.autoMode) unawaited(_save(_meta.copyWith(autoMode: auto)));
+    _modes.set(modes: claudeModes(autoMode: auto));
+    if (init['current_permission_mode'] case final String mode) _modeSaid(mode);
   }
 
   /// A turn ended: replace a process with an old effort, and run on when
@@ -685,7 +775,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
     final callId = body['tool_use_id'] as String? ?? '';
     final name = body['tool_name'] as String? ?? '';
     final input = body[hook ? 'tool_input' : 'input'] as Map<String, Object?>? ?? const {};
-    final held = (requestId: requestId, hook: hook, input: input);
+    final held = (requestId: requestId, hook: hook, name: name, input: input);
     if (!_decoder.knows(callId)) _emit(_decoder.action(callId, name, input));
     if (_selfAnswered(name)) return _answer(callId, held, accept: true);
     if (_early.remove(callId) case final a?) return _answer(callId, held, accept: a.accept, reason: a.reason);
@@ -700,6 +790,12 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
     if (!accept) _decoder.refused[callId] = reason == null || reason.isEmpty ? refusedByUser : reason;
     final answer = approvalAnswer(hook: h.hook, accept: accept, reason: reason, input: h.input);
     _channel?.send(jsonEncode(controlResponse(h.requestId, answer)));
+    // An approved plan: whether Claude leaves plan by itself under `-p` is unverified, so it is moved back.
+    if (accept && h.name == 'ExitPlanMode' && _meta.permissionMode == 'plan') {
+      final back = _beforePlan ?? 'default';
+      final m = nativeModeOf(_modes.latest.modes, back);
+      unawaited(_moveTo(back, m?.policy ?? AgentMode.ask));
+    }
   }
 
   /// The process ended: a turn it was running failed; the next message

@@ -55,11 +55,17 @@ final class _Pending {
   final answer = Completer<_Decision>();
 }
 
-final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns, HasNativeCommands {
-  CodexSession(LineChannel channel, {required this.cwd, required AgentMode mode, String? model, String? effort})
-    : _currentMode = mode,
-      _model = model == null || model.isEmpty ? null : model,
-      _effort = effort == null || effort.isEmpty ? null : effort {
+final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns, HasNativeCommands, NativeModes {
+  CodexSession(
+    LineChannel channel, {
+    required this.cwd,
+    required AgentMode mode,
+    this._native,
+    String? model,
+    String? effort,
+  }) : _currentMode = mode,
+       _model = model == null || model.isEmpty ? null : model,
+       _effort = effort == null || effort.isEmpty ? null : effort {
     _bind(channel);
   }
 
@@ -128,6 +134,25 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   String? get effort => _effort;
   AgentMode get mode => _currentMode;
 
+  /// The preset picked by name, or null for the one [mode] shows ([codexModeFor]).
+  String? get native => _native;
+  String? _native;
+
+  late final _modes = NativeModeFeed((modes: codexModes, current: _native ?? codexModeFor(_currentMode)));
+
+  @override
+  Stream<NativeModeSet> get nativeModes => _modes.stream;
+
+  /// Taken by the next turn/start, like [setMode].
+  @override
+  Future<void> setNativeMode(String id) async {
+    final m = offeredMode(codexModes, id, 'Codex');
+    _currentMode = m.policy;
+    _native = m.id;
+    _modes.set(current: m.id);
+    await onChanged?.call();
+  }
+
   // ------------------------------------------------------------------ setup
 
   /// The handshake, then [initRequests] (the briefing's skill roots; a
@@ -156,7 +181,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   Future<void> startThread({String? instructions}) async {
-    final p = codexPolicy(_currentMode);
+    final p = codexPolicy(_currentMode, native: _native);
     final res = await _peer.request('thread/start', {
       'cwd': cwd,
       'model': ?_model,
@@ -174,7 +199,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   /// Rejoins [threadId] without its turns: the transcript comes from our
   /// journal ([replay]), which has our own messages, refusals and usage ids.
   Future<void> resumeThread(String threadId) async {
-    final p = codexPolicy(_currentMode);
+    final p = codexPolicy(_currentMode, native: _native);
     await _peer.request('thread/resume', {
       'threadId': threadId,
       'cwd': cwd,
@@ -375,7 +400,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       if (!starting.isCompleted) starting.complete();
     }
 
-    final p = codexPolicy(_currentMode);
+    final p = codexPolicy(_currentMode, native: _native);
     final Object? res;
     try {
       res = await _peer.request('turn/start', {
@@ -511,6 +536,8 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
     _currentMode = mode;
+    _native = null;
+    _modes.set(current: codexModeFor(mode));
     await onChanged?.call();
   }
 
@@ -530,6 +557,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     // Pending approvals are settled once the peer is gone (no reply is sent).
     await _peer.close();
     await _journal?.close();
+    _modes.close();
     for (final c in [..._listeners]) {
       unawaited(c.close());
     }

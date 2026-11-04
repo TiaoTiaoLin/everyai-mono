@@ -170,7 +170,11 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   /// No steering (ACP has none) and no fork or rewind yet.
   @override
-  Set<DriverCap> get caps => resolved.profile.caps;
+  Set<DriverCap> get caps {
+    final p = resolved.profile;
+    final modes = p.askMode != null || p.planMode != null || p.modePolicy.isNotEmpty;
+    return modes ? {...p.caps, DriverCap.nativeModes} : p.caps;
+  }
 
   @override
   Future<DriverStatus> detect() async {
@@ -332,6 +336,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       sessionTag: '${meta['sessionTag']}',
       launcher: _launcher,
       mode: AgentMode.values.where((m) => m.name == meta['mode']).firstOrNull ?? AgentMode.ask,
+      nativeMode: meta['nativeMode'] as String?,
       briefing: briefing,
       mcpConfig: mcpConfig ?? const {},
       mcpGiven: mcpConfig != null,

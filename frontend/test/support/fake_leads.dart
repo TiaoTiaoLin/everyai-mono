@@ -30,7 +30,7 @@ Future<T> whenValue<T>(ProviderContainer c, ProviderListenable<T> p, bool Functi
 /// An outside agent's session: the test plays its events and reads what it
 /// was sent and answered. With [replays], a new listener gets every event
 /// played so far first, as a reopened conversation does.
-final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands {
+final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands, NativeModes {
   FakeLeadSession({this.id = 'c1', this.replays = false, List<HarnessEvent> history = const []}) {
     _history.addAll(history);
   }
@@ -67,6 +67,22 @@ final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeComm
 
   /// What [runCommand] throws (a transport error of the driver's own).
   Object? runFails;
+
+  /// Its own modes (empty until the test sets them: then the app's picker is
+  /// ours) and the ones picked by name.
+  final modeFeed = NativeModeFeed();
+  final picked = <String>[];
+
+  /// What [setNativeMode] throws.
+  Object? pickFails;
+  @override
+  Stream<NativeModeSet> get nativeModes => modeFeed.stream;
+  @override
+  Future<void> setNativeMode(String id) async {
+    if (pickFails case final e?) throw e;
+    picked.add(id);
+    modeFeed.set(current: id);
+  }
 
   @override
   Stream<HarnessEvent> get events {
