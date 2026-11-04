@@ -1,0 +1,148 @@
+{
+ "info": {
+  "id": "ses_000000000005xxxxxxxxxxxxxx",
+  "model": {
+   "id": "big-pickle",
+   "providerID": "opencode",
+   "variant": "default"
+  },
+  "cost": 0,
+  "tokens": {
+   "input": 0,
+   "output": 0,
+   "reasoning": 0,
+   "cache": {
+    "read": 0,
+    "write": 0
+   }
+  },
+  "time": {
+   "created": 1793822345724,
+   "updated": 1793822345729
+  },
+  "location": {
+   "directory": "/work/repo"
+  },
+  "title": "Imported spike"
+ },
+ "messages": [
+  {
+   "id": "msg_000000000000xxxxxxxxxxxxxxpf",
+   "type": "user",
+   "time": {
+    "created": 1793822345724
+   },
+   "text": "Please create hello.txt containing the word PINEAPPLE."
+  },
+  {
+   "id": "msg_000000000001xxxxxxxxxxxxxxLz",
+   "type": "assistant",
+   "time": {
+    "created": 1793822345725,
+    "completed": 1793822345725
+   },
+   "agent": "build",
+   "model": {
+    "id": "big-pickle",
+    "providerID": "opencode"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_imp_1",
+     "name": "write",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "path": "/work/repo/hello.txt",
+       "content": "PINEAPPLE\n"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "Wrote file successfully."
+       }
+      ],
+      "metadata": {}
+     },
+     "time": {
+      "created": 1793822345725,
+      "completed": 1793822345725
+     }
+    }
+   ],
+   "finish": "tool-calls"
+  },
+  {
+   "id": "msg_000000000002xxxxxxxxxxxxxxkQ",
+   "type": "assistant",
+   "time": {
+    "created": 1793822345726,
+    "completed": 1793822345726
+   },
+   "agent": "build",
+   "model": {
+    "id": "big-pickle",
+    "providerID": "opencode"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "Created hello.txt with PINEAPPLE."
+    }
+   ],
+   "finish": "stop"
+  },
+  {
+   "id": "msg_000000000003xxxxxxxxxxxxxxwc",
+   "type": "user",
+   "time": {
+    "created": 1793822345727
+   },
+   "text": "Now make bye.txt containing MANGO, then commit both files."
+  },
+  {
+   "id": "msg_000000000004xxxxxxxxxxxxxxKD",
+   "type": "assistant",
+   "time": {
+    "created": 1793822345728,
+    "completed": 1793822345728
+   },
+   "agent": "build",
+   "model": {
+    "id": "big-pickle",
+    "providerID": "opencode"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_imp_2",
+     "name": "shell",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "command": "echo MANGO > bye.txt"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "(no output)"
+       }
+      ],
+      "metadata": {}
+     },
+     "time": {
+      "created": 1793822345728,
+      "completed": 1793822345728
+     }
+    }
+   ],
+   "finish": "tool-calls"
+  }
+ ],
+ "location": {
+  "directory": "/work/repo"
+ }
+}

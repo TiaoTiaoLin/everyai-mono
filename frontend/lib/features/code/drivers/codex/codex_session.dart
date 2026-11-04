@@ -186,6 +186,14 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _threadId = threadId;
   }
 
+  /// Appends [items] (raw Responses API items: messages, calls and their
+  /// outputs) to the thread's history the model sees (`thread/inject_items`).
+  Future<void> injectItems(List<Map<String, Object?>> items) =>
+      _peer.request('thread/inject_items', {'threadId': _threadId, 'items': items}, codexSetupTimeout);
+
+  /// Deletes the thread (its rollout and Codex's records of it).
+  Future<void> deleteThread() => _peer.request('thread/delete', {'threadId': _threadId}, codexSetupTimeout);
+
   void useJournal(EventJournal journal) => _journal = journal;
 
   void _bind(LineChannel channel) {
