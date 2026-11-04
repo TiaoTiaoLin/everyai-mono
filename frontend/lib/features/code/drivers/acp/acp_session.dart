@@ -15,6 +15,7 @@ import '../driver_events.dart';
 import '../driver_policy.dart' show rewindRefusal;
 import '../event_journal.dart';
 import '../json_rpc.dart';
+import '../usage_limit.dart';
 import 'acp_agents.dart';
 import 'acp_files.dart';
 import 'acp_mapping.dart';
@@ -80,6 +81,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     this.briefing,
     this.mcpConfig = const {},
     this.rememberedMcp = const [],
+    this.mcpGiven = false,
     this._acpSessionId,
     List<HarnessEvent> history = const [],
   }) : _journal = openEventJournal(dir, 'events') {
@@ -100,6 +102,10 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   /// The user's MCP servers a reopened conversation had (names from
   /// `meta.json`; their settings can hold keys, so they aren't kept).
   final List<String> rememberedMcp;
+
+  /// The reopen came with the app's current server list (possibly empty), so a name
+  /// missing from it was turned off by the user, not lost.
+  final bool mcpGiven;
 
   final AcpLauncher _launcher;
   final EventJournal _journal;
@@ -279,7 +285,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
           );
         }
       }
-      if (!fresh) {
+      if (!fresh && !mcpGiven) {
         final lost = [
           for (final n in rememberedMcp)
             if (!mcpConfig.containsKey(n)) n,
@@ -384,7 +390,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     'sessionTag': sessionTag,
     'mode': _mode.name,
     'mcpServers': [
-      for (final n in mcpConfig.isNotEmpty ? mcpConfig.keys : rememberedMcp)
+      for (final n in mcpGiven || mcpConfig.isNotEmpty ? mcpConfig.keys : rememberedMcp)
         if (n != everyaiServerName) n,
     ],
   });
@@ -558,7 +564,12 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _setStatus(stop == 'cancelled' ? ExecutionStatus.paused : ExecutionStatus.finished);
     } on JsonRpcError catch (e) {
       _flush();
-      _emit(acpNotice(_next('n'), _errorText(e, closed: peer.isClosed)));
+      final limit = peer.isClosed ? null : acpUsageLimit(e, now: DateTime.now());
+      _emit(
+        limit == null
+            ? acpNotice(_next('n'), _errorText(e, closed: peer.isClosed))
+            : usageLimitEvent(_next('n'), '$_label: ${e.message}', resetsAt: limit.resetsAt),
+      );
       _setStatus(ExecutionStatus.error);
     }
   }

@@ -8,6 +8,7 @@ import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart';
 import '../driver.dart';
 import '../driver_events.dart';
+import '../usage_limit.dart';
 
 // Claude Code's stdio protocol (`claude -p --input-format stream-json
 // --output-format stream-json`, verified on 2.1.318; recordings in
@@ -312,6 +313,10 @@ final class ClaudeDecoder {
   final _tools = <String, String>{};
   var _n = 0;
 
+  /// Set by an API-error line that says the plan or key ran out; the turn's
+  /// failed `result` then becomes a usage limit.
+  ({DateTime? resetsAt})? _limit;
+
   /// Whether the call [id] has been shown.
   bool knows(String id) => _tools.containsKey(id);
 
@@ -351,6 +356,10 @@ final class ClaudeDecoder {
   }
 
   List<HarnessEvent> _assistant(Map<String, Object?> line) {
+    // Only the main thread's last frame before the result counts: a
+    // subagent's error frame (parent_tool_use_id set) doesn't end the turn,
+    // and a frame Claude Code recovered from is followed by a normal one.
+    if (line['parent_tool_use_id'] == null) _limit = line['is_api_error_message'] == true ? _limitOf(line) : null;
     final blocks = _blocks(line);
     final id = _id(line);
     final out = <HarnessEvent>[];
@@ -405,10 +414,33 @@ final class ClaudeDecoder {
       out.add(stateEvent('$id:state', ExecutionStatus.finished));
     } else {
       out
-        ..add(HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': '$id:error', 'detail': _failure(line)}))
+        ..add(switch (_limit) {
+          (:final resetsAt) => usageLimitEvent('$id:error', _failure(line), resetsAt: resetsAt),
+          null => HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': '$id:error', 'detail': _failure(line)}),
+        })
         ..add(stateEvent('$id:state', ExecutionStatus.error));
     }
+    _limit = null;
     return out;
+  }
+
+  /// Claude Code's own verdict on an API error (2.1.318): `api_error`
+  /// `usage_limit_reached` / `model_requires_usage_credits` (a plan limit,
+  /// with `rate_limit_info.resetsAt` in unix seconds) or `error:
+  /// billing_error` (an API key out of credit). `error: rate_limit` without
+  /// `api_error` is a rate limit Claude Code already retried: not a limit.
+  static ({DateTime? resetsAt})? _limitOf(Map<String, Object?> line) {
+    final api = line['api_error'];
+    if (api != 'usage_limit_reached' && api != 'model_requires_usage_credits' && line['error'] != 'billing_error') {
+      return null;
+    }
+    final info = (line['api_error_params'] as Map<String, Object?>?)?['rate_limit_info'] as Map<String, Object?>?;
+    return (
+      resetsAt: switch (info?['resetsAt']) {
+        final num s => DateTime.fromMillisecondsSinceEpoch((s * 1000).round(), isUtc: true),
+        _ => null,
+      },
+    );
   }
 
   static String _failure(Map<String, Object?> line) {

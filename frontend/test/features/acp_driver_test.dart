@@ -7,6 +7,7 @@ import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -411,6 +412,49 @@ void main() {
       }
     });
 
+    test('a reopen with an empty server list says nothing about lost servers and forgets them', () async {
+      final r = rig(['opencode/usage_reopen.jsonl']);
+      _stored(r, 'o1', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE', mcp: ['charts']);
+      // A child session reopens without a briefing, with the app's current (now empty) list.
+      final s = await r.driver('acp:opencode', 'opencode').attachWithMcp('o1', const <String, Object?>{});
+      final seen = _Seen(s);
+      await s.send('Hi');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.notices.where((n) => n.contains('without your MCP servers')), isEmpty);
+      await s.close();
+      final meta = jsonDecode(File('${r.dataDir}/acp-sessions/o1/meta.json').readAsStringSync()) as Map;
+      expect(meta['mcpServers'], isEmpty);
+    });
+
+    test('attachBriefed with the user\'s MCP servers sends them in session/load; no secret is stored', () async {
+      final r = rig(['opencode/reopen_mcp.jsonl']);
+      _stored(r, 'o1', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE', mcp: ['charts']);
+      final s = await (r.driver('acp:opencode', 'opencode') as AttachesBriefed).attachBriefed(
+        'o1',
+        DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new'),
+        mcpConfig: {
+          'charts': {
+            'command': 'npx',
+            'args': ['-y', 'chart-mcp'],
+            'env': {'KEY': 'secret-env'},
+          },
+        },
+      );
+      final seen = _Seen(s);
+      await s.send('Hi');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.notices.where((n) => n.contains('without your MCP servers')), isEmpty);
+      await s.close();
+      final meta = jsonDecode(File('${r.dataDir}/acp-sessions/o1/meta.json').readAsStringSync()) as Map;
+      expect(meta['mcpServers'], ['charts']);
+      for (final f in Directory(r.dataDir).listSync(recursive: true).whereType<File>()) {
+        expect(f.readAsStringSync(), isNot(contains('secret-env')), reason: f.path);
+        expect(f.readAsStringSync(), isNot(contains('tok-new')), reason: f.path);
+      }
+    });
+
     test('a command that ran without asking is shown with a notice; in Plan it stops the turn', () async {
       final r = rig(['opencode/unasked_plan.jsonl']);
       final s = await r.driver('acp:opencode', 'opencode').start(r.spec(mode: AgentMode.plan));
@@ -535,6 +579,19 @@ void main() {
         [for (final x in seen.results) (x.actionId, x.text)],
         [('tc-run_shell_command-3', 'Cancelled.'), ('tc-read_file-1', 'Cancelled.')],
       );
+      await s.close();
+    });
+
+    test('a spent quota ends the turn as a usage limit', () async {
+      final r = rig(['gemini/quota.jsonl']);
+      final s = await r.driver('gemini', 'gemini').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('Go on.');
+      await seen.untilStatus(ExecutionStatus.error);
+      r.expectPlayed();
+      final limit = seen.all.map(usageLimitOf).nonNulls.single;
+      expect(limit.message, startsWith('Gemini CLI: You have exhausted your capacity'));
+      expect(limit.resetsAt, isNotNull);
       await s.close();
     });
 

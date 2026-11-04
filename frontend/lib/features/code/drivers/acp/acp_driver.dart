@@ -178,6 +178,11 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   @override
   Future<HarnessSession> attach(String conversationId) => _attach(conversationId, null);
 
+  /// [attach] for a session without a briefing (a child session), still with the user's
+  /// approved MCP servers ([mcpConfig]).
+  Future<HarnessSession> attachWithMcp(String conversationId, Map<String, Object?> mcpConfig) =>
+      _attach(conversationId, null, mcpConfig);
+
   /// [attach] with a new briefing (the old session's MCP token died with the
   /// app), so the reopened agent reaches EveryAI's tools again, and the
   /// user's approved MCP servers ([mcpConfig]; `meta.json` keeps only names).
@@ -191,7 +196,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   Future<HarnessSession> _attach(
     String conversationId,
     DriverBriefing? briefing, [
-    Map<String, Object?> mcpConfig = const {},
+    Map<String, Object?>? mcpConfig,
   ]) async {
     if (_live[conversationId] case final s?) return s;
     final dir = '${await _root()}/$conversationId';
@@ -206,7 +211,8 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       launcher: _launcher,
       mode: AgentMode.values.where((m) => m.name == meta['mode']).firstOrNull ?? AgentMode.ask,
       briefing: briefing,
-      mcpConfig: mcpConfig,
+      mcpConfig: mcpConfig ?? const {},
+      mcpGiven: mcpConfig != null,
       rememberedMcp: [...?(meta['mcpServers'] as List<Object?>?)?.whereType<String>()],
       acpSessionId: meta['acpSessionId'] as String?,
       history: history,

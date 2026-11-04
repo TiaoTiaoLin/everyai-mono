@@ -164,16 +164,16 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
 
   /// [attach] with a new briefing (the old token was revoked when the session
   /// closed): the next process the session starts carries it. A session still
-  /// open here takes it too, from its next process on.
+  /// open here is returned as it is (the controller only reattaches closed ones).
   @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
-      _attach(conversationId, briefing);
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) => _attach(conversationId, briefing);
 
   Future<HarnessSession> _attach(String conversationId, DriverBriefing? b) async {
-    if (_live[conversationId] case final s?) {
-      if (b != null) await s._rebrief(await _briefing(b));
-      return s;
-    }
+    if (_live[conversationId] case final s?) return s;
     final dir = await _dir();
     final raw = await readTextFile('$dir/$conversationId.json');
     final json = raw == null ? null : _json(raw);
@@ -311,7 +311,7 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
   final String id;
   final String _dir;
   _Meta _meta;
-  Delivery? _briefing;
+  final Delivery? _briefing;
   final EventJournal _journal;
 
   final _history = <HarnessEvent>[];
@@ -515,15 +515,6 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals {
     // Before any message; the CLI reads its stdin in order.
     _request({'subtype': 'initialize', 'hooks': gateHooks});
     return c;
-  }
-
-  /// Uses [briefing] from the next process on: now when no turn runs, else
-  /// once the turn ends (the running one keeps the token it started with).
-  Future<void> _rebrief(Delivery? briefing) async {
-    _briefing = briefing;
-    if (_channel == null) return;
-    if (!_running) return _drop();
-    _respawn = true;
   }
 
   /// Sends a control request to a running CLI (one that isn't running

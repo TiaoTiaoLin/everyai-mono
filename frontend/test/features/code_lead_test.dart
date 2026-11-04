@@ -16,6 +16,7 @@ import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/gateway_key.dart';
+import 'package:every_ai/features/code/mcp_providers.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
@@ -87,6 +88,7 @@ final class _Driver implements HarnessDriver, AttachesBriefed {
   final Set<DriverCap> caps;
   final specs = <SessionSpec>[];
   final reopened = <DriverBriefing>[];
+  final reopenedMcp = <Map<String, Object?>>[];
 
   @override
   DriverInfo get info => DriverInfo(id: id, label: 'Test CLI', needsConsent: needsConsent);
@@ -103,8 +105,13 @@ final class _Driver implements HarnessDriver, AttachesBriefed {
   @override
   Future<HarnessSession> attach(String conversationId) async => session;
   @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) async {
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) async {
     reopened.add(briefing);
+    reopenedMcp.add(mcpConfig);
     return session;
   }
 
@@ -558,6 +565,20 @@ void main() {
     expect(host.revoked, isNot(contains('tok2')));
     expect(host.live[info.id], {'tok2'});
     expect(drivers['test']!.specs.single.briefing!.mcpToken, 'tok1');
+  });
+
+  test('a reopened session passes the approved MCP servers, minus one named like the app host', () async {
+    final info = await start();
+    final mcp = container.read(codeMcpServersProvider.notifier);
+    mcp.put(
+      const McpServer(name: 'charts', command: 'npx', args: ['-y', 'chart-mcp'], env: {'KEY': 'secret'}).approve(),
+    );
+    mcp.put(const McpServer(name: 'everyai', command: 'node', args: ['x.js']).approve());
+    final prefs = container.read(preferencesProvider);
+    container.dispose();
+    container = make(prefs);
+    await open(info.id);
+    expect(drivers['test']!.reopenedMcp.single.keys, ['charts']);
   });
 
   test('a reopened child of an outside session gets no briefing, as it started', () async {

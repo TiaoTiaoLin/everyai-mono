@@ -18,6 +18,7 @@ import '../../domain/subagents.dart' show forkingTaskSpec, subagentRules, taskTo
 import '../../settings/agent_prompt.dart' show forHeldClientTools;
 import '../events.dart';
 import '../harness.dart';
+import '../../drivers/usage_limit.dart';
 import 'browser_io.dart';
 import 'llm.dart';
 import 'mcp_io.dart';
@@ -1118,7 +1119,11 @@ final class EveryAISession
     } on LlmCancelled {
       _setStatus(ExecutionStatus.paused);
     } on LlmError catch (e) {
-      _emit({'kind': 'ConversationErrorEvent', 'id': _newId(), 'detail': e.message});
+      _emit(
+        e.usageLimit
+            ? {...usageLimitEvent(_newId(), e.message, resetsAt: e.resetsAt).raw}
+            : {'kind': 'ConversationErrorEvent', 'id': _newId(), 'detail': e.message},
+      );
       _setStatus(ExecutionStatus.error);
     } on Object catch (e) {
       _emit({'kind': 'ConversationErrorEvent', 'id': _newId(), 'detail': 'The agent loop failed: $e'});

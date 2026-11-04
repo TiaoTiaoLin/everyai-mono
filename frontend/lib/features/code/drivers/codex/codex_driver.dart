@@ -170,8 +170,11 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
   /// thread/start (`developerInstructions`), so it isn't sent again here. A
   /// session still open here is returned as it is.
   @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
-      _attach(conversationId, briefing);
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) => _attach(conversationId, briefing);
 
   Future<HarnessSession> _attach(String conversationId, DriverBriefing? briefing) async {
     if (_live[conversationId] case final s?) return s;

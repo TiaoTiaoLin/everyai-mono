@@ -10,6 +10,7 @@ import 'package:every_ai/features/code/drivers/claude/claude_wire.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/json_rpc.dart';
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -301,6 +302,87 @@ void main() {
         expect(AgentMode.ask.autoApproves(c), isFalse, reason: c.toolName);
       }
       expect(fetch.str('url'), 'https://example.com/?d=x');
+    });
+  });
+
+  group('usage limits', () {
+    // Shapes from Claude Code 2.1.318's wire serializer (run3/u1.md).
+    Map<String, Object?> apiError(String text, {String error = 'rate_limit', String? api, num? resetsAt}) => {
+      'type': 'assistant',
+      'uuid': 'a-${text.hashCode}',
+      'is_api_error_message': true,
+      'error': error,
+      'api_error_status': 429,
+      'api_error': ?api,
+      if (resetsAt != null)
+        'api_error_params': {
+          'rate_limit_info': {'status': 'rejected', 'resetsAt': resetsAt, 'rateLimitType': 'five_hour'},
+        },
+      'message': {
+        'content': [
+          {'type': 'text', 'text': text},
+        ],
+      },
+    };
+    Map<String, Object?> failed(String text) => {
+      'type': 'result',
+      'uuid': 'r-${text.hashCode}',
+      'subtype': 'success',
+      'is_error': true,
+      'result': text,
+      'api_error_status': 429,
+    };
+
+    test('a plan limit ends the turn as a usage limit with its reset time', () {
+      final d = ClaudeDecoder();
+      const text = "You've hit your limit · resets 3pm";
+      d.decode(apiError(text, api: 'usage_limit_reached', resetsAt: 1800000000));
+      final limit = d.decode(failed(text)).map(usageLimitOf).nonNulls.single;
+      expect(limit.message, text);
+      expect(limit.resetsAt, DateTime.fromMillisecondsSinceEpoch(1800000000 * 1000, isUtc: true));
+    });
+
+    test('a key out of credit is a limit without a reset; a retried rate limit is a plain failure', () {
+      final d = ClaudeDecoder();
+      d.decode(apiError('Credit balance is too low', error: 'billing_error'));
+      final billing = d.decode(failed('Credit balance is too low')).map(usageLimitOf).nonNulls.single;
+      expect(billing.resetsAt, isNull);
+
+      d.decode(apiError('Request rejected (429)'));
+      final events = d.decode(failed('Request rejected (429)'));
+      expect(events.whereType<ConversationFailure>().single.message, 'Request rejected (429)');
+      expect(events.map(usageLimitOf).nonNulls, isEmpty);
+    });
+
+    test('the limit is cleared by the turn it ended', () {
+      final d = ClaudeDecoder();
+      d.decode(apiError('limit', api: 'model_requires_usage_credits'));
+      expect(d.decode(failed('limit')).map(usageLimitOf).nonNulls, hasLength(1));
+      final next = d.decode({'type': 'result', 'uuid': 'r2', 'subtype': 'error_during_execution', 'is_error': true});
+      expect(next.whereType<ConversationFailure>(), hasLength(1));
+      expect(next.map(usageLimitOf).nonNulls, isEmpty);
+    });
+    test("a frame Claude Code recovered from, or a subagent's, doesn't label a later failure", () {
+      final d = ClaudeDecoder();
+      d.decode(apiError('limit', api: 'model_requires_usage_credits'));
+      d.decode({
+        'type': 'assistant',
+        'uuid': 'a2',
+        'message': {
+          'content': [
+            {'type': 'text', 'text': 'Carrying on.'},
+          ],
+        },
+      });
+      expect(d.decode(failed('Max turns')).map(usageLimitOf).nonNulls, isEmpty);
+
+      d.decode({...apiError('sub limit', api: 'usage_limit_reached'), 'parent_tool_use_id': 'task-1'});
+      expect(d.decode(failed('Max turns')).map(usageLimitOf).nonNulls, isEmpty);
+
+      // A later main-thread error frame that isn't a limit replaces one that is.
+      d.decode(apiError('limit', api: 'usage_limit_reached'));
+      d.decode(apiError('Overloaded', error: 'overloaded'));
+      expect(d.decode(failed('Overloaded')).map(usageLimitOf).nonNulls, isEmpty);
     });
   });
 
@@ -712,21 +794,16 @@ void main() {
       await three.close();
     });
 
-    test('attachBriefed on a session still open restarts its idle CLI with the new token', () async {
+    test('attachBriefed on a session still open returns it as it is', () async {
       const fresh = DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new');
       final first = ReplayChannel(_script([_init, _say('Go.'), _done('r1')]));
-      final second = ReplayChannel(_script([_init, _say('Next.'), _done('r2')]));
-      final s = _Spawner([first, second]);
+      final s = _Spawner([first]);
       final d = driver(s);
       final one = await d.start(_spec(message: 'Go.'));
       await _played(first);
       expect(await d.attachBriefed(one.id, fresh), same(one));
-      await one.send('Next.');
-      await _played(second);
-      expect(s.calls, hasLength(2));
-      expect(s.calls[0].env.containsKey(tokenEnvVar), isFalse);
-      expect(s.calls[1].env[tokenEnvVar], 'tok-new');
-      expect(s.calls[1].args, containsAllInOrder(['--resume', one.id]));
+      expect(s.calls, hasLength(1));
+      expect(s.calls.single.env.containsKey(tokenEnvVar), isFalse);
       await one.close();
     });
 
