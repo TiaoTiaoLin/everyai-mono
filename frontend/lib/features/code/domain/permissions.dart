@@ -86,6 +86,11 @@ final class PermissionRules {
   Map<String, Object?> toJson() => {'allow': allow, 'deny': deny};
 }
 
+/// Outside harnesses' own calls that end their plan mode with a plan for the
+/// user to approve (Claude Code's `ExitPlanMode`). Plan mode asks about them
+/// instead of refusing, or the harness could never leave plan.
+const planExitTools = {'ExitPlanMode'};
+
 /// Decides what happens to the agent's actions in one session.
 @immutable
 final class PermissionPolicy {
@@ -137,6 +142,10 @@ final class PermissionPolicy {
     final readOnly = AgentMode.isReadOnly(call);
     // Plan mode refuses changes; looking things up (gh reads, git fetch, curl to stdout) asks like Ask mode.
     final lookup = command != null && call.action['is_input'] != true && isPlanningShell(command);
+    // Leaving plan with a plan (Claude's ExitPlanMode) is the user's call, as present_plan is.
+    if (mode == AgentMode.plan && planExitTools.contains(call.toolName)) {
+      return const Decision(Verdict.ask, DecisionSource.mode);
+    }
     if (mode == AgentMode.plan && !readOnly && !lookup) return const Decision(Verdict.deny, DecisionSource.plan);
     if (readOnly) return const Decision(Verdict.allow, DecisionSource.readOnly);
     final edits = _editPaths(call);

@@ -39,7 +39,7 @@ typedef ClaudeSpawn = Future<LineChannel> Function(
 /// show it after a restart; the CLI keeps the conversation itself and
 /// continues it with `--resume`. It doesn't print history back, so the
 /// journal is the transcript.
-final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume {
+final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume, StartsInNativeMode {
   ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run, this.configDir});
 
   /// Replaces the CLI's config folder (tests).
@@ -68,6 +68,11 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume
     needsConsent: true,
     installHint: 'npm install -g @anthropic-ai/claude-code',
   );
+
+  @override
+  /// [permissionModeFor]: Full auto starts in `default`, which asks.
+  @override
+  bool startsNatively(AgentMode mode) => mode != AgentMode.fullAuto;
 
   @override
   Set<DriverCap> get caps => const {

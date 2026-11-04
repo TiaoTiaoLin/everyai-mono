@@ -26,7 +26,7 @@ export 'acp_session.dart' show AcpConnect;
 /// agent's session id, the folder, the session tag; nothing secret), the
 /// event journal and the agent's stderr. Models come from the last session
 /// the agent started (no session is started just to ask).
-final class AcpDriver implements HarnessDriver, AttachesBriefed {
+final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
   AcpDriver({
     required this.id,
     required this.label,
@@ -169,6 +169,14 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   );
 
   /// No steering (ACP has none) and no fork or rewind yet.
+  /// The session pins the profile's ask mode, or its plan mode in Plan.
+  @override
+  bool startsNatively(AgentMode mode) => switch (mode) {
+    AgentMode.ask => resolved.profile.askMode != null,
+    AgentMode.plan => resolved.profile.planMode != null,
+    _ => false,
+  };
+
   @override
   Set<DriverCap> get caps {
     final p = resolved.profile;

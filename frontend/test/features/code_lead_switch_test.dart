@@ -80,11 +80,11 @@ void main() {
   CodeSessionInfo infoOf(String id) => sessions().byId(id)!;
   Transcript transcriptOf(String id) => container.read(codeSessionProvider(id)).transcript;
 
-  Future<CodeSessionInfo> start({String harness = 'alpha'}) => sessions().start(
+  Future<CodeSessionInfo> start({String harness = 'alpha', AgentMode mode = AgentMode.ask}) => sessions().start(
     project: container.read(codeProjectsProvider).single,
     prompt: 'Add dark mode',
     model: '',
-    mode: AgentMode.ask,
+    mode: mode,
     harness: harness,
   );
 
@@ -641,7 +641,7 @@ void main() {
       expect(await c.setNativeMode('planner'), 'No.');
       expect(a.picked, isEmpty);
       final state = container.read(codeSessionProvider(info.id));
-      expect((state.mode, state.nativeMode, infoOf(info.id).nativeMode), (AgentMode.ask, 'careful', ''));
+      expect((state.mode, state.nativeMode, infoOf(info.id).nativeMode), (AgentMode.ask, 'careful', 'careful'));
     });
 
     test('our modes map to its own: the nearest that asks as much, else a notice and no change', () async {
@@ -662,6 +662,74 @@ void main() {
       await pumpEventQueue();
       expect(container.read(codeSessionProvider(info.id)).mode, AgentMode.plan);
       expect(infoOf(info.id).nativeMode, 'planner');
+    });
+
+    /// A session started in [mode] whose lead then lists [list], now in [current].
+    Future<(CodeSessionInfo, CodeSessionController, FakeLeadSession)> startedIn(
+      AgentMode mode, {
+      List<NativeMode> list = modes,
+      String current = 'careful',
+    }) async {
+      final info = await start(mode: mode);
+      final c = await open(info.id);
+      final a = d('alpha').latest!;
+      await turn(a, 'a1', 'Looked around.');
+      a.modeFeed.set(modes: list, current: current);
+      await pumpEventQueue();
+      return (info, c, a);
+    }
+
+    test('started in Full auto, the lead lists only asking modes: the policy follows the one it runs in', () async {
+      final (info, _, a) = await startedIn(AgentMode.fullAuto);
+      final state = container.read(codeSessionProvider(info.id));
+      // Before the fix the picker showed Careful while Full auto approved every call.
+      expect((state.mode, state.nativeMode, state.inNativeMode), (AgentMode.ask, 'careful', true));
+      expect((infoOf(info.id).mode, infoOf(info.id).nativeMode), (AgentMode.ask, 'careful'));
+      expect(a.picked, isEmpty);
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().last.message,
+        'Alpha has no Full auto mode; it runs in Careful.',
+      );
+    });
+
+    test('started in Plan while the lead runs its default: it moves to its own plan mode', () async {
+      final (info, c, a) = await startedIn(AgentMode.plan);
+      expect(a.picked, ['planner']);
+      final state = container.read(codeSessionProvider(info.id));
+      expect((state.mode, state.nativeMode, state.inNativeMode), (AgentMode.plan, 'planner', true));
+      await c.send('Go on.');
+      expect(a.sent.last, 'Go on.');
+    });
+
+    test('started in Plan on a lead with no plan mode: our Plan, its note and our picker stay', () async {
+      final (info, c, a) = await startedIn(AgentMode.plan, list: [modes.first, modes.last]);
+      expect(a.picked, isEmpty);
+      final state = container.read(codeSessionProvider(info.id));
+      expect((state.mode, state.inNativeMode), (AgentMode.plan, false));
+      await c.send('Go on.');
+      expect(a.sent.last, startsWith('<everyai-mode name="plan"'));
+    });
+
+    test('a reopen before the list loads: no mode note when the session was last in a native mode', () async {
+      final (info, _, _) = await withModes();
+      expect(infoOf(info.id).nativeMode, 'careful');
+      container.dispose();
+      container = make();
+      final c = await open(info.id);
+      final again = d('alpha').latest!;
+      await c.send('Carry on.');
+      expect(again.sent.last, 'Carry on.');
+    });
+
+    test("in its own plan mode, the lead's plan exit (ExitPlanMode) asks the user instead of being refused", () async {
+      final (info, c, a) = await withModes();
+      expect(await c.setNativeMode('planner'), isNull);
+      a
+        ..add(actionEvent(id: 'x1', toolName: 'ExitPlanMode', kind: 'ClaudeToolAction', args: {'plan': '1. Do it'}))
+        ..add(stateEvent('x1-s', ExecutionStatus.waitingForConfirmation));
+      await pumpEventQueue();
+      expect(a.answers, isEmpty);
+      expect(transcriptOf(info.id).pending.map((p) => p.id), ['x1']);
     });
 
     test('without its own modes the session keeps ours and the mode note', () async {

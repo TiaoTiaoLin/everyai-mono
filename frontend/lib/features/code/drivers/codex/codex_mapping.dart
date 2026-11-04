@@ -60,13 +60,14 @@ typedef CodexPolicy = ({
 /// `approvals_reviewer = "auto_review"` in their Codex config would
 /// otherwise let Codex's own reviewer answer calls the app must judge.
 ///
-/// [native] is the preset picked by its own name ([codexModes]): `read-only`
-/// adds the read-only sandbox outside Plan too; the approvals stay the same.
-CodexPolicy codexPolicy(AgentMode mode, {String? native}) => (
+/// The presets ([codexModes]) pick only the mode: Read Only runs as Ask,
+/// with no sandbox outside Plan, for the reason above (the app's approval is
+/// the gate, as in Codex's own Read Only, where edits need approval).
+CodexPolicy codexPolicy(AgentMode mode) => (
   approvalPolicy: 'untrusted',
   approvalsReviewer: 'user',
   sandbox: 'read-only',
-  sandboxPolicy: mode == AgentMode.plan || native == codexReadOnly
+  sandboxPolicy: mode == AgentMode.plan
       ? const {'type': 'readOnly', 'networkAccess': true}
       : const {'type': 'dangerFullAccess'},
 );
@@ -77,18 +78,22 @@ const codexReadOnly = 'read-only';
 /// `full-access` is listed greyed, never offered (Codex's `never` would skip
 /// the app's check). Codex's plan mode is the experimental collaboration
 /// mode, not used here. Descriptions are ours: in both, Codex asks the app
-/// about every edit and command it doesn't count as a safe read.
+/// about every edit and command it doesn't count as a safe read. They say
+/// there is no sandbox: unlike Codex's own presets (read-only,
+/// workspace-write), the turns run unsandboxed outside Plan, since a
+/// sandbox-blocked call that the app approved would run again outside the
+/// sandbox without asking (see [codexPolicy]).
 const codexModes = [
   NativeMode(
     id: codexReadOnly,
     label: 'Read Only',
-    description: 'Asks before edits and commands; runs in a read-only sandbox',
+    description: "Asks before edits and commands, which run outside Codex's sandbox once approved",
     policy: AgentMode.ask,
   ),
   NativeMode(
     id: 'default',
     label: 'Default',
-    description: 'Edits files without asking; commands still ask',
+    description: "Edits files without asking; commands still ask, and run outside Codex's sandbox once approved",
     policy: AgentMode.autoEdit,
   ),
   NativeMode(

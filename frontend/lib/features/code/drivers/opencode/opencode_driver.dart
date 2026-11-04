@@ -2,6 +2,7 @@
 
 import 'dart:convert';
 
+import '../../domain/agent_mode.dart';
 import '../../git/git_service.dart';
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
@@ -18,7 +19,7 @@ import 'opencode_session.dart';
 /// reopening one reads its message list back. What [attach] needs besides
 /// the id (the folder, the session's tag) is kept in
 /// `<data>/driver-sessions/opencode/<id>.json`.
-final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
+final class OpenCodeDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
   OpenCodeDriver({
     this.which,
     OpenCodeLauncher? launch,
@@ -54,6 +55,10 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
 
   /// Pictures, forks, rewinding, its own subagents and the user's MCP
   /// servers are not wired up yet.
+  /// A new session runs the `build` agent (Ask); its `plan` agent is picked once the list loads.
+  @override
+  bool startsNatively(AgentMode mode) => mode == AgentMode.ask;
+
   @override
   Set<DriverCap> get caps => const {
     DriverCap.steer,

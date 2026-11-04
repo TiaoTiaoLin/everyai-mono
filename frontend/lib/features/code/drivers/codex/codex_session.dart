@@ -181,7 +181,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   Future<void> startThread({String? instructions}) async {
-    final p = codexPolicy(_currentMode, native: _native);
+    final p = codexPolicy(_currentMode);
     final res = await _peer.request('thread/start', {
       'cwd': cwd,
       'model': ?_model,
@@ -199,7 +199,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   /// Rejoins [threadId] without its turns: the transcript comes from our
   /// journal ([replay]), which has our own messages, refusals and usage ids.
   Future<void> resumeThread(String threadId) async {
-    final p = codexPolicy(_currentMode, native: _native);
+    final p = codexPolicy(_currentMode);
     await _peer.request('thread/resume', {
       'threadId': threadId,
       'cwd': cwd,
@@ -400,7 +400,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       if (!starting.isCompleted) starting.complete();
     }
 
-    final p = codexPolicy(_currentMode, native: _native);
+    final p = codexPolicy(_currentMode);
     final Object? res;
     try {
       res = await _peer.request('turn/start', {

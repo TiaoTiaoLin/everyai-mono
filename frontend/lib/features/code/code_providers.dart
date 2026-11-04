@@ -488,9 +488,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             mode: mode,
             effort: effort,
             holdClientTools: hold,
-            initialMessage: driver != null && driver.caps.contains(DriverCap.nativeModes)
-                ? first.text
-                : modeNote(mode, first.text),
+            initialMessage: startsNatively(driver, mode) ? first.text : modeNote(mode, first.text),
             initialImages: first.images,
             isolated: worktree != null,
             tier: tier,
@@ -1216,6 +1214,15 @@ final class CodeSessionState {
 
   /// The lead's current mode among [nativeModes], or null.
   final String? nativeMode;
+
+  /// The lead runs in one of its own modes whose policy is [mode]: the
+  /// picker shows its modes and no mode note or fidelity line is needed.
+  /// Off when no native mode carries [mode] (Plan on Codex or Gemini), which
+  /// keeps our picker, the note and the line.
+  bool get inNativeMode => switch (nativeModeOf(nativeModes, nativeMode)) {
+    final m? => m.blocked == null && m.policy == mode,
+    null => false,
+  };
 
   /// The session is moving to another lead harness; messages wait for the new one.
   final bool switching;
@@ -2234,7 +2241,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final full = told != state.mode || _freshLead;
     _freshLead = false;
     // A lead in one of its own modes has its own instructions for it; ours would contradict them.
-    if (_session is NativeModes && state.nativeModes.isNotEmpty) return body;
+    // Before its list loads (a reopen), the mode it was last seen in tells.
+    final native = state.nativeModes.isNotEmpty
+        ? state.inNativeMode
+        : _session is NativeModes &&
+              (ref.read(codeSessionsProvider.notifier).byId(sessionId)?.nativeMode.isNotEmpty ?? false);
+    if (native) return body;
     return modeNote(state.mode, body, full: full, from: told, subagent: subagent);
   }
 
@@ -2877,7 +2889,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         tier: tier,
         harnessMode: harnessMode,
         initialMessage: run
-            ? (outside && target.caps.contains(DriverCap.nativeModes)
+            ? (outside && startsNatively(target, state.mode)
                   ? '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn'
                   : modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn'))
             : null,
@@ -4049,8 +4061,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   /// The lead's list or current mode changed. The first word after it opens
-  /// moves it back to a mode the user picked by name earlier (a reopen);
-  /// later, a move the harness made itself (Claude leaving plan, an ACP
+  /// brings the harness and our policy together: back to a mode the user
+  /// picked by name earlier (a reopen), else the current one when its policy
+  /// is the session's, else the nearest native mode that asks as much
+  /// ([nativeModeFor]; a lead started in Full auto, Codex's or OpenCode's
+  /// default, an earlier conversation reopened in its own last mode). With
+  /// none (Plan on Codex) the session keeps our mode, note and fidelity line.
+  /// Later, a move the harness made itself (Claude leaving plan, an ACP
   /// agent's own command) takes that mode's policy.
   void _onNativeModes(NativeModeSet set) {
     final before = state.nativeMode;
@@ -4060,8 +4077,30 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = sessions.byId(sessionId);
     if (!_modesSeen) {
       _modesSeen = true;
+      final now = nativeModeOf(set.modes, set.current);
       final saved = nativeModeOf(set.modes, info?.nativeMode);
-      if (saved != null && saved.blocked == null && saved.id != set.current) unawaited(setNativeMode(saved.id));
+      final target = saved != null && saved.blocked == null
+          ? saved
+          : now != null && now.blocked == null && now.policy == state.mode
+          ? now
+          : nativeModeFor(set.modes, state.mode);
+      if (target == null) return;
+      if (target.policy != state.mode && saved == null) {
+        _builder.addNotice(
+          NoticeItem(
+            'mode-${_events.length}-${target.id}',
+            '${_driver.info.label} has no ${state.mode.label} mode; it runs in ${target.label}.',
+          ),
+        );
+        state = state.copyWith(transcript: _builder.snapshot);
+      }
+      if (target.id != set.current) {
+        unawaited(setNativeMode(target.id));
+        return;
+      }
+      // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
+      state = state.copyWith(mode: target.policy);
+      if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
       return;
     }
     final now = nativeModeOf(set.modes, set.current);
