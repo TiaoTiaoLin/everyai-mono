@@ -589,17 +589,24 @@ void main() {
       expect(done(), isTrue);
     }
 
-    test("Full auto still refuses OpenCode's rm -rf ~ (the floor), as its reject option", () async {
+    test("Full auto on OpenCode runs in its asking build mode, so rm -rf ~ (the floor) waits on the card", () async {
       final controller = await open(
         AgentMode.fullAuto,
         harness: 'acp',
         extra: acp('opencode', 'opencode/perm_floor.jsonl', ses),
       );
       await controller.send('Clean up');
-      expect(await answered0(), 'reject');
-      await channels.single.finished;
-      channels.single.expectFinished();
-      await journalled('finished');
+      await _when(
+        container,
+        codeSessionProvider('s1').select((s) => s.transcript.pending),
+        (List<ActionCall> p) => p.isNotEmpty,
+      );
+      await pumpEventQueue();
+      // OpenCode has no mode that runs everything, so the nearest asks (see nativeModeFor).
+      expect(controller.state.nativeMode, 'build');
+      expect(controller.state.mode, AgentMode.ask);
+      expect(channels.single.sent.where((m) => m['id'] == 0 && m['method'] == null), isEmpty);
+      await journalled('waiting_for_confirmation');
     });
 
     test("Ask runs OpenCode's ls at once, allowed once", () async {
