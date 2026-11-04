@@ -356,7 +356,10 @@ final class ClaudeDecoder {
   }
 
   List<HarnessEvent> _assistant(Map<String, Object?> line) {
-    if (line['is_api_error_message'] == true) _limit = _limitOf(line) ?? _limit;
+    // Only the main thread's last frame before the result counts: a
+    // subagent's error frame (parent_tool_use_id set) doesn't end the turn,
+    // and a frame Claude Code recovered from is followed by a normal one.
+    if (line['parent_tool_use_id'] == null) _limit = line['is_api_error_message'] == true ? _limitOf(line) : null;
     final blocks = _blocks(line);
     final id = _id(line);
     final out = <HarnessEvent>[];

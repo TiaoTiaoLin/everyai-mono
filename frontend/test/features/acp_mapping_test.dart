@@ -277,9 +277,20 @@ void main() {
       expect(resets(capacity), now.add(const Duration(hours: 19, minutes: 14, seconds: 47)));
       expect(resets(const JsonRpcError(500, 'You have exhausted your daily quota on this model.')), isNull);
       expect(
-        acpUsageLimit(const JsonRpcError(500, 'Your quota will reset after 5m.'), now: now)!.resetsAt,
-        now.add(const Duration(minutes: 5)),
+        acpUsageLimit(const JsonRpcError(500, 'Your quota will reset after 2h.'), now: now)!.resetsAt,
+        now.add(const Duration(hours: 2)),
       );
+    });
+
+    test("Gemini's capacity text with a short reset is the retried throttle, not a limit", () {
+      // Google sends the same text for RATE_LIMIT_EXCEEDED (googleQuotaErrors.test.js l.231, l.258).
+      for (final e in const [
+        JsonRpcError(500, 'You have exhausted your capacity on this model. Your quota will reset after 0s.'),
+        JsonRpcError(500, 'You have exhausted your capacity on this model. Your quota will reset after 5m.'),
+        JsonRpcError(500, 'You have exhausted your capacity on this model.'),
+      ]) {
+        expect(acpUsageLimit(e, now: now), isNull, reason: e.message);
+      }
     });
 
     test("Gemini's rate limits and other errors are not limits", () {

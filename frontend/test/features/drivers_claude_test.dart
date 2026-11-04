@@ -362,6 +362,28 @@ void main() {
       expect(next.whereType<ConversationFailure>(), hasLength(1));
       expect(next.map(usageLimitOf).nonNulls, isEmpty);
     });
+    test("a frame Claude Code recovered from, or a subagent's, doesn't label a later failure", () {
+      final d = ClaudeDecoder();
+      d.decode(apiError('limit', api: 'model_requires_usage_credits'));
+      d.decode({
+        'type': 'assistant',
+        'uuid': 'a2',
+        'message': {
+          'content': [
+            {'type': 'text', 'text': 'Carrying on.'},
+          ],
+        },
+      });
+      expect(d.decode(failed('Max turns')).map(usageLimitOf).nonNulls, isEmpty);
+
+      d.decode({...apiError('sub limit', api: 'usage_limit_reached'), 'parent_tool_use_id': 'task-1'});
+      expect(d.decode(failed('Max turns')).map(usageLimitOf).nonNulls, isEmpty);
+
+      // A later main-thread error frame that isn't a limit replaces one that is.
+      d.decode(apiError('limit', api: 'usage_limit_reached'));
+      d.decode(apiError('Overloaded', error: 'overloaded'));
+      expect(d.decode(failed('Overloaded')).map(usageLimitOf).nonNulls, isEmpty);
+    });
   });
 
   group('sessions', () {

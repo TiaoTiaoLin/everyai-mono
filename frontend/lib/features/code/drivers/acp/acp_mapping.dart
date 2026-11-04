@@ -239,22 +239,36 @@ ConversationFailure acpNotice(String id, String message) =>
 ///   `provider.rate-limit` isn't.
 /// - gemini-cli 0.33.2 drops its error types at the ACP boundary (a
 ///   `TerminalQuotaError` arrives as code 500 with only the message), so its
-///   quota messages are matched: "You have exhausted your daily quota on this
-///   model." and "…exhausted your capacity… Your quota will reset after
-///   19h14m47s." Its code 429 "Rate limit exceeded" and "Suggested retry
-///   after 60s." are the retryable kind.
+///   quota messages are matched. "You have exhausted your daily quota on this
+///   model." is a limit. Google's Cloud Code text "You have exhausted your
+///   capacity on this model. Your quota will reset after 19h14m47s." is the
+///   same for the terminal QUOTA_EXHAUSTED and the retryable per-minute
+///   RATE_LIMIT_EXCEEDED (googleQuotaErrors.test.js l.231, l.258, l.599), so
+///   it is a limit only when the reset is [_longReset] or more away. Its code
+///   429 "Rate limit exceeded" and "Suggested retry after 60s." are the
+///   retryable kind.
 ({DateTime? resetsAt})? acpUsageLimit(JsonRpcError e, {required DateTime now}) {
   if (e.data case {'errorName': final Object name}) {
     return name == 'provider.quota' || name == 'provider.free-limit' ? (resetsAt: null) : null;
   }
-  if (!_geminiQuota.hasMatch(e.message)) return null;
+  final daily = _geminiDaily.hasMatch(e.message);
+  if (!daily && !_geminiCapacity.hasMatch(e.message)) return null;
   final after = _resetAfter.firstMatch(e.message);
-  if (after == null || [1, 2, 3].every((i) => after.group(i) == null)) return (resetsAt: null);
-  int part(int i) => int.tryParse(after.group(i) ?? '') ?? 0;
-  return (resetsAt: now.add(Duration(hours: part(1), minutes: part(2), seconds: part(3))));
+  final wait = after == null || [1, 2, 3].every((i) => after.group(i) == null)
+      ? null
+      : Duration(hours: _part(after, 1), minutes: _part(after, 2), seconds: _part(after, 3));
+  if (!daily && (wait == null || wait < _longReset)) return null;
+  return (resetsAt: wait == null ? null : now.add(wait));
 }
 
-final _geminiQuota = RegExp(r'exhausted your (daily quota|capacity)|quota will reset after', caseSensitive: false);
+int _part(RegExpMatch m, int i) => int.tryParse(m.group(i) ?? '') ?? 0;
+
+/// How far away a Cloud Code "reset after" must be for it to count as a
+/// spent quota rather than a throttle gemini-cli already retried.
+const _longReset = Duration(minutes: 15);
+
+final _geminiDaily = RegExp(r'exhausted your daily quota', caseSensitive: false);
+final _geminiCapacity = RegExp(r'exhausted your capacity|quota will reset after', caseSensitive: false);
 final _resetAfter = RegExp(r'reset after (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?', caseSensitive: false);
 
 /// The text of a content chunk (`{type: text, text}`), '' for anything else.
