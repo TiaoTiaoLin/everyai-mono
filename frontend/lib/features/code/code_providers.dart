@@ -5038,6 +5038,9 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
   /// Squashes the session onto its base branch in the main checkout.
   Future<String> squashMerge(String message) async {
     final sha = await GitService.squashMerge(_w, message);
+    if (_info case final i? when i.prNumber != null) {
+      ref.read(codeSessionsProvider.notifier).update(i.copyWith(clearPr: true));
+    }
     await refresh();
     return sha;
   }
@@ -5046,7 +5049,12 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
 
   Future<String> createPr({required String title, required String body}) async {
     await GitService.push(_w);
-    return GitService.createPr(_w, title: title, body: body);
+    final url = await GitService.createPr(_w, title: title, body: body);
+    final number = prNumberOf(url);
+    if (number != null && _info != null) {
+      ref.read(codeSessionsProvider.notifier).update(_info!.copyWith(prNumber: number));
+    }
+    return url;
   }
 
   /// Puts the files back to how they were before user turn [turn] (1-based).
@@ -5063,6 +5071,12 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
     await ref.read(codeSessionsProvider.notifier).remove(sessionId);
     await GitService.removeWorktree(w, hooksDir: '$data/git-hooks');
   }
+}
+
+/// The number in a pull request URL (`…/pull/42`), or null.
+int? prNumberOf(String url) {
+  final m = RegExp(r'/pull/(\d+)').firstMatch(url);
+  return m == null ? null : int.parse(m.group(1)!);
 }
 
 String checkpointRef(SessionWorktree w, int turn) => 'refs/everyai/${w.slug}/turn-$turn';

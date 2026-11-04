@@ -15,6 +15,7 @@ import '../../chat/chat_providers.dart';
 import '../../chat/data/chat_repository.dart';
 import '../../chat/domain/message.dart';
 import '../../code/code_providers.dart';
+import '../../code/domain/code_session.dart';
 import '../../code/ui/code_home.dart';
 import '../../remote/ui/remote_code.dart' show RemoteSessionList;
 import '../../settings/ui/account_menu.dart';
@@ -48,6 +49,9 @@ class _SidebarState extends ConsumerState<Sidebar> {
   Timer? _debounce;
   bool _searching = false;
 
+  /// The Code sessions query (chats search through [_matches] instead).
+  String _codeQuery = '';
+
   /// Null when the query is empty; otherwise the matching conversation ids.
   Set<String>? _matches;
 
@@ -65,16 +69,28 @@ class _SidebarState extends ConsumerState<Sidebar> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _searchFocus.requestFocus());
   }
 
+  @override
+  void didUpdateWidget(Sidebar old) {
+    super.didUpdateWidget(old);
+    // A query belongs to the space it was typed in.
+    if (old.location.startsWith(Routes.code) != widget.location.startsWith(Routes.code) && _searching) _closeSearch();
+  }
+
   void _closeSearch() {
     _debounce?.cancel();
     _search.clear();
     setState(() {
       _searching = false;
       _matches = null;
+      _codeQuery = '';
     });
   }
 
   void _onQuery(String query) {
+    if (widget.location.startsWith(Routes.code)) {
+      setState(() => _codeQuery = query);
+      return;
+    }
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 200), () async {
       if (query.trim().isEmpty) {
@@ -112,6 +128,18 @@ class _SidebarState extends ConsumerState<Sidebar> {
               _Destination(EveryIcon.add, 'New session', loc == Routes.code, Routes.code, accent: true)
             else
               _Destination(EveryIcon.projects, 'Sessions', loc == Routes.code, Routes.code),
+            if (Host.isDesktop) ...[
+              _Destination(
+                EveryIcon.search,
+                'Search',
+                _searching,
+                null,
+                onTap: _searching ? _closeSearch : _openSearch,
+                glyph: 'search',
+              ),
+              // The project picker lives on the Code home page.
+              _Destination(EveryIcon.projects, 'Projects', false, Routes.code, glyph: 'projects'),
+            ],
             if (collapsed) _Destination(EveryIcon.chat, 'Chat', false, Routes.newChat, glyph: 'chat'),
             _Destination(EveryIcon.models, 'Models', loc == Routes.models, Routes.models, glyph: 'models'),
           ]
@@ -211,7 +239,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
             ],
           ),
         ),
-        if (!collapsed && _searching && !codeMode)
+        if (!collapsed && _searching && (!codeMode || Host.isDesktop))
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
             child: CallbackShortcuts(
@@ -219,7 +247,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
               child: AdaptiveTextField(
                 controller: _search,
                 focusNode: _searchFocus,
-                placeholder: 'Search chats',
+                placeholder: codeMode ? 'Search sessions' : 'Search chats',
                 prefix: AdaptiveIcon(EveryIcon.search, size: 15, color: theme.textMuted),
                 onChanged: _onQuery,
                 textInputAction: TextInputAction.search,
@@ -230,7 +258,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
           child: collapsed
               ? const SizedBox.shrink()
               : codeMode
-              ? _CodeRecents(location: loc, onNavigate: widget.onNavigate)
+              ? CodeSessionList(location: loc, query: _codeQuery, onNavigate: widget.onNavigate)
               : _Recents(location: loc, matches: _matches, onNavigate: widget.onNavigate),
         ),
         Container(height: 1, color: theme.border),
@@ -310,11 +338,46 @@ class _SpaceSwitch extends StatelessWidget {
   }
 }
 
-/// Code mode: projects, each with its sessions.
-class _CodeRecents extends ConsumerWidget {
-  const _CodeRecents({required this.location, required this.onNavigate});
+/// [sessions] that match [query] (title, branch or project name; case-insensitive); all when it is blank.
+List<CodeSessionInfo> filterSessions(
+  List<CodeSessionInfo> sessions,
+  String query, {
+  Map<String, String> projectNames = const {},
+}) {
+  final q = query.trim().toLowerCase();
+  if (q.isEmpty) return sessions;
+  bool has(String text) => text.toLowerCase().contains(q);
+  return [
+    for (final s in sessions)
+      if (has(s.title) || has(s.branch) || has(projectNames[s.projectId] ?? '')) s,
+  ];
+}
+
+/// The sidebar's Code lists: pinned sessions (newest first), then the rest in stored order. Subagents open from
+/// their parent's transcript, so they are in neither.
+({List<CodeSessionInfo> pinned, List<CodeSessionInfo> recent}) groupCodeSessions(List<CodeSessionInfo> sessions) {
+  final own = [
+    for (final s in sessions)
+      if (!s.isSubagent) s,
+  ];
+  return (
+    pinned: [
+      for (final s in own)
+        if (s.pinned) s,
+    ]..sort((a, b) => b.createdAt.compareTo(a.createdAt)),
+    recent: [
+      for (final s in own)
+        if (!s.pinned) s,
+    ],
+  );
+}
+
+/// Code mode: pinned sessions, then projects, each with its sessions (public for tests).
+class CodeSessionList extends ConsumerWidget {
+  const CodeSessionList({super.key, required this.location, required this.query, required this.onNavigate});
 
   final String location;
+  final String query;
   final ValueChanged<String> onNavigate;
 
   @override
@@ -322,8 +385,9 @@ class _CodeRecents extends ConsumerWidget {
     if (!Host.isDesktop) return RemoteSessionList(location: location, onNavigate: onNavigate, dense: true);
     final theme = EveryTheme.of(context);
     final projects = ref.watch(codeProjectsProvider);
-    // Subagents open from their parent's transcript.
-    final sessions = ref.watch(codeSessionsProvider).where((s) => !s.isSubagent).toList();
+    final names = {for (final p in projects) p.id: p.name};
+    final groups = groupCodeSessions(filterSessions(ref.watch(codeSessionsProvider), query, projectNames: names));
+    final searching = query.trim().isNotEmpty;
     final active = location.startsWith('/code/s/') ? location.substring('/code/s/'.length) : null;
     if (projects.isEmpty) {
       return Padding(
@@ -331,34 +395,57 @@ class _CodeRecents extends ConsumerWidget {
         child: Text('Open a project to start a session.', style: theme.type.callout.tint(theme.textMuted)),
       );
     }
+    if (searching && groups.pinned.isEmpty && groups.recent.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(20),
+        child: Text('No matching sessions.', style: theme.type.callout.tint(theme.textMuted)),
+      );
+    }
+    Widget label(String text) => Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+      child: Text(text, style: theme.type.caption.semibold.tint(theme.textMuted)),
+    );
     return ListView(
       padding: const EdgeInsets.only(bottom: 8),
       children: [
-        for (final p in projects) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-            child: Row(
-              children: [
-                AdaptiveIcon(EveryIcon.projects, size: 13, color: theme.textMuted),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    p.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.type.caption.semibold.tint(theme.textMuted),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          for (final s in sessions.where((s) => s.projectId == p.id))
+        if (groups.pinned.isNotEmpty) ...[
+          label('Pinned'),
+          for (final s in groups.pinned)
             SessionTile(
               info: s,
               dense: true,
               selected: s.id == active,
+              caption: names[s.projectId],
               onOpen: () => onNavigate(Routes.codeSession(s.id)),
             ),
+          if (groups.recent.isNotEmpty) label('Recents'),
         ],
+        for (final p in projects)
+          if (!searching || groups.recent.any((s) => s.projectId == p.id)) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+              child: Row(
+                children: [
+                  AdaptiveIcon(EveryIcon.projects, size: 13, color: theme.textMuted),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      p.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.type.caption.semibold.tint(theme.textMuted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            for (final s in groups.recent.where((s) => s.projectId == p.id))
+              SessionTile(
+                info: s,
+                dense: true,
+                selected: s.id == active,
+                onOpen: () => onNavigate(Routes.codeSession(s.id)),
+              ),
+          ],
       ],
     );
   }

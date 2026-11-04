@@ -19,6 +19,7 @@ import '../../attachments/attachment.dart';
 import '../../../core/platform/platform_kind.dart';
 import '../agent_models.dart';
 import '../code_providers.dart';
+import '../../remote/host_mirror.dart' show remoteFollowedProvider;
 import '../sample/sample_project.dart';
 import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
@@ -498,6 +499,38 @@ class _ProjectPicker extends StatelessWidget {
   }
 }
 
+/// The sidebar's status mark for a session: the working mark while it runs, a dot when it needs you or failed,
+/// nothing when it is idle or done (so Recents stay quiet). Always the same width.
+class SessionStatusIcon extends StatelessWidget {
+  const SessionStatusIcon({super.key, required this.status});
+
+  final SessionStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    Widget dot(String key, Color color) => Container(
+      key: ValueKey(key),
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+    return SizedBox(
+      width: 14,
+      height: 14,
+      child: Center(
+        child: switch (status) {
+          SessionStatus.running ||
+          SessionStatus.starting => const EveryMarkActivity(key: ValueKey('status-running'), size: 14),
+          SessionStatus.needsInput => dot('status-needs-input', theme.warning),
+          SessionStatus.failed => dot('status-failed', theme.danger),
+          SessionStatus.idle || SessionStatus.done => null,
+        },
+      ),
+    );
+  }
+}
+
 /// A session in a list: status dot, title, age.
 class SessionTile extends ConsumerStatefulWidget {
   const SessionTile({
@@ -507,9 +540,13 @@ class SessionTile extends ConsumerStatefulWidget {
     this.selected = false,
     this.dense = false,
     this.badge,
+    this.caption,
   });
 
   final CodeSessionInfo info;
+
+  /// Muted text under the title (the project, in a list that has no project headers).
+  final String? caption;
 
   /// A small mark after the title ("EveryAI" in a list that mixes in other harnesses' sessions).
   final String? badge;
@@ -531,6 +568,8 @@ class _SessionTileState extends ConsumerState<SessionTile> {
     final status = ref.exists(codeSessionProvider(widget.info.id))
         ? ref.watch(codeSessionProvider(widget.info.id).select((s) => s.status))
         : ref.watch(codeStatusesProvider.select((all) => all[widget.info.id])) ?? SessionStatus.idle;
+    final followed = ref.watch(remoteFollowedProvider.select((ids) => ids.contains(widget.info.id)));
+    final pr = widget.info.prNumber;
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hover = true),
@@ -541,7 +580,9 @@ class _SessionTileState extends ConsumerState<SessionTile> {
         child: Semantics(
           button: true,
           selected: widget.selected,
-          label: '${widget.info.title}, ${status.label}',
+          label:
+              '${widget.info.title}, ${status.label}'
+              '${pr == null ? '' : ', pull request $pr'}${followed ? ', followed from another device' : ''}',
           child: Container(
             margin: EdgeInsets.symmetric(horizontal: widget.dense ? 8 : 0, vertical: 1),
             padding: EdgeInsets.symmetric(horizontal: 10, vertical: widget.dense ? 7 : 9),
@@ -555,16 +596,45 @@ class _SessionTileState extends ConsumerState<SessionTile> {
             ),
             child: Row(
               children: [
-                StatusPill(status: status, dense: true),
+                if (widget.dense) SessionStatusIcon(status: status) else StatusPill(status: status, dense: true),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    widget.info.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.type.callout.tint(theme.text),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.info.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.type.callout.tint(theme.text),
+                      ),
+                      if (widget.caption case final c?)
+                        Text(
+                          c,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.type.caption.tint(theme.textMuted),
+                        ),
+                    ],
                   ),
                 ),
+                if (pr != null) ...[
+                  Text(
+                    '#$pr',
+                    key: const ValueKey('session-pr'),
+                    style: theme.type.caption.medium.tint(theme.textMuted),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                if (followed) ...[
+                  AdaptiveIcon(
+                    EveryIcon.devices,
+                    key: const ValueKey('session-followed'),
+                    size: 13,
+                    color: theme.textMuted,
+                  ),
+                  const SizedBox(width: 6),
+                ],
                 if (widget.badge case final b?) ...[
                   Text(b, style: theme.type.caption.medium.tint(theme.accent)),
                   const SizedBox(width: 8),
@@ -575,6 +645,12 @@ class _SessionTileState extends ConsumerState<SessionTile> {
                   child: AdaptiveMenuButton(
                     tooltip: 'Session options',
                     actions: [
+                      MenuAction(
+                        label: widget.info.pinned ? 'Unpin' : 'Pin',
+                        icon: EveryIcon.pin,
+                        onSelected: () =>
+                            ref.read(codeSessionsProvider.notifier).setPinned(widget.info.id, !widget.info.pinned),
+                      ),
                       MenuAction(label: 'Rename', icon: EveryIcon.edit, onSelected: _rename),
                       MenuAction(label: 'Export transcript…', icon: EveryIcon.download, onSelected: _export),
                       MenuAction(label: 'Delete', icon: EveryIcon.delete, destructive: true, onSelected: _delete),
