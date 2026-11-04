@@ -125,6 +125,7 @@ CodeSlashHost codeSlashHost(BuildContext context, WidgetRef ref, String sessionI
         message: rewindPrompt(
           back == 1 ? 'your last message' : 'your last $back messages',
           files: info?.worktree != null,
+          conversation: controller().rewindsConversation,
         ),
         confirmLabel: 'Rewind',
         destructive: true,

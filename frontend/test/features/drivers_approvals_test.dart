@@ -14,6 +14,8 @@ import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
+import 'package:every_ai/features/code/domain/transcript.dart';
+import 'package:every_ai/features/code/git/git_service.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
@@ -92,8 +94,9 @@ final class _Session implements HarnessSession {
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {}
   @override
   Future<void> switchLlm(SessionSpec spec) async {}
+  final rewound = <String?>[];
   @override
-  Future<void> rewindTo(String? head) async {}
+  Future<void> rewindTo(String? head) async => rewound.add(head);
   @override
   Future<void> close() => _events.close();
 }
@@ -164,6 +167,7 @@ void main() {
     String harness = 'test',
     List<String> deny = const [],
     Map<String, HarnessDriver> extra = const {},
+    SessionWorktree? worktree,
   }) async {
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: tmp.path).toJson()]);
@@ -175,9 +179,10 @@ void main() {
         conversationId: 'c1',
         model: 'm',
         mode: mode,
-        workingDir: tmp.path,
+        workingDir: worktree?.path ?? tmp.path,
         createdAt: DateTime(2026),
         harness: harness,
+        worktree: worktree,
       ).toJson(),
     ]);
     // The user turned on "Use my own installed CLIs" for the extra drivers that need it (Gemini).
@@ -311,6 +316,106 @@ void main() {
     expect(out.kind, RewindKind.failed);
     expect(out.message, contains("Test CLI can't go back"));
     expect(session.steered, isEmpty);
+  });
+
+  group('rewind on an outside lead with a worktree', () {
+    Future<String> git(String dir, List<String> args) async {
+      final r = await Process.run('git', ['-C', dir, ...args]);
+      if (r.exitCode != 0) fail('git ${args.join(' ')}: ${r.stderr}');
+      return '${r.stdout}'.trim();
+    }
+
+    late String repo;
+    late SessionWorktree w;
+
+    setUp(() async {
+      repo = '${tmp.path}/app';
+      await Directory(repo).create(recursive: true);
+      await git(repo, ['init', '-q', '-b', 'main']);
+      await git(repo, ['config', 'user.name', 'Dev']);
+      await git(repo, ['config', 'user.email', 'dev@example.com']);
+      File('$repo/README.md').writeAsStringSync('# App\n');
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-q', '-m', 'Initial commit']);
+      w = await GitService.createWorktree(
+        repoRoot: repo,
+        slug: 'rewind-test',
+        worktreesDir: '${tmp.path}/worktrees/app',
+        hooksDir: '${tmp.path}/hooks',
+      );
+    });
+
+    /// Sends [text] through the controller and echoes it back as the harness does.
+    Future<void> turn(CodeSessionController controller, String id, String text) async {
+      await controller.send(text);
+      final turns = container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>().length;
+      session.add(
+        HarnessEvent.decode({
+          'kind': 'MessageEvent',
+          'id': id,
+          'source': 'user',
+          'llm_message': {'role': 'user', 'content': text},
+        }),
+      );
+      await _when(
+        container,
+        codeSessionProvider('s1').select((s) => s.transcript.items.whereType<UserTurn>().length),
+        (int n) => n > turns,
+      );
+    }
+
+    test('checkpoints are taken on hidden refs only', () async {
+      final head = await git(repo, ['rev-parse', 'HEAD']);
+      final branches = await git(repo, ['branch', '--list']);
+      final status = await git(repo, ['status', '--porcelain']);
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      File('${w.path}/one.txt').writeAsStringSync('1');
+      await turn(controller, 'm2', 'Add another');
+      expect(await git(repo, ['rev-parse', '--verify', checkpointRef(w, 2)]), isNotEmpty);
+      expect(await git(repo, ['rev-parse', 'HEAD']), head);
+      expect(await git(repo, ['branch', '--list']), branches);
+      expect(await git(repo, ['status', '--porcelain']), status);
+      expect(await git(w.path, ['rev-parse', 'HEAD']), w.baseCommit);
+    });
+
+    test('the files go back, the harness keeps the turns and hears about it once', () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      final out = await controller.rewind(2);
+      expect((out.kind, out.files, out.conversation), (RewindKind.done, true, false));
+      expect(out.label, contains('Test CLI still remembers'));
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
+      expect(session.rewound, isEmpty);
+      expect(container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>(), hasLength(2));
+      await controller.send('try again');
+      expect(session.steered.last, contains('<everyai-rewind>'));
+      expect(session.steered.last, contains('"Add a decrement method"'));
+      await controller.send('and once more');
+      expect(session.steered.last, isNot(contains('<everyai-rewind>')));
+    });
+
+    test('a driver with its own rewind takes the conversation back too', () async {
+      final controller = await open(
+        AgentMode.fullAuto,
+        harness: 'native',
+        worktree: w,
+        extra: {
+          'native': _TestDriver('native', session, caps: const {DriverCap.approvals, DriverCap.rewind}),
+        },
+      );
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      final out = await controller.rewind(2);
+      expect((out.kind, out.files, out.conversation), (RewindKind.done, true, true));
+      expect(session.rewound, ['m1']);
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
+      await controller.send('try again');
+      expect(session.steered.last, isNot(contains('<everyai-rewind>')));
+    });
   });
 
   test('a mid-run message on a driver without steering interrupts and is sent again', () async {

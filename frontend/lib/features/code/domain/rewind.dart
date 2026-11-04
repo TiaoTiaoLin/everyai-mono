@@ -122,9 +122,24 @@ final class RewindOutcome {
 enum RewindKind { done, busy, nothing, failed }
 
 /// The confirmation text for rewinding to before [what] ("this message",
-/// "your last 2 messages"); [files] when the session has checkpoints.
-String rewindPrompt(String what, {required bool files}) => files
+/// "your last 2 messages"); [files] when the session has checkpoints, and
+/// [conversation] when the harness can go back too (else it keeps the turns).
+String rewindPrompt(String what, {required bool files, bool conversation = true}) => files && !conversation
+    ? "Puts this session's files back to how they were before $what. "
+          'The agent keeps the conversation and is told the files went back.'
+    : files
     ? "Takes the conversation and this session's files back to before $what. "
           'The agent forgets $what and everything it did after.'
     : 'Takes the conversation back to before $what: the agent forgets it and everything it did after. '
           'The files stay as they are.';
+
+/// Goes before the next message after the files were rewound but the
+/// harness kept the conversation: [userText] is the turn the files went
+/// back to the start of.
+String rewindNote(String userText) {
+  final line = userText.trim().replaceAll(RegExp(r'\s+'), ' ');
+  final quoted = line.length > 80 ? '${line.substring(0, 80)}…' : line;
+  return '<everyai-rewind>The user put the project\'s files back to how they were before their message "$quoted". '
+      'Every file change made after that point is undone, even though this conversation still shows it. '
+      'Read files again before relying on what you remember of them.</everyai-rewind>';
+}

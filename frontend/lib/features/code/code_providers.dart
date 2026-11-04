@@ -2226,6 +2226,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   String _tierNote = '';
 
+  /// Set when files were rewound but the harness kept the conversation; goes with the next message.
+  String _rewindNote = '';
+
+  /// Whether [rewind] takes the conversation back too (the driver has its own rewind).
+  bool get rewindsConversation => _driver.caps.contains(DriverCap.rewind);
+
   /// `/skip-phase`: moves the Max or Ultra flow past where it is stuck.
   void skipPhase() {
     if (_session case final PhasedSession phased) unawaited(phased.skipPhase());
@@ -2235,8 +2241,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Nested instruction files found since the last message go first, after the mode note.
   String _noted(String text) {
     final told = state.transcript.notedMode;
-    final context = [_context?.takeNote() ?? '', _tierNote].where((n) => n.isNotEmpty).join('\n\n');
+    final context = [_context?.takeNote() ?? '', _tierNote, _rewindNote].where((n) => n.isNotEmpty).join('\n\n');
     _tierNote = '';
+    _rewindNote = '';
     final body = context.isEmpty ? text : (text.isEmpty ? context : '$context\n\n$text');
     final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
     final full = told != state.mode || _freshLead;
@@ -3009,8 +3016,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final session = _session;
     if (info == null || session == null) return const RewindOutcome.failed('The session is not connected.');
-    // Before anything is stopped or restored.
-    if (rewindRefusal(_driver.info, _driver.caps) case final refusal?) return RewindOutcome.failed(refusal);
+    // Our checkpoints take the files back for any harness; the conversation
+    // only goes back on a driver with its own rewind. Neither: refuse before
+    // anything is stopped.
+    final native = rewindsConversation;
+    if (!native && info.worktree == null) {
+      if (rewindRefusal(_driver.info, _driver.caps) case final refusal?) return RewindOutcome.failed(refusal);
+    }
     if (_compacting || _switching) return const RewindOutcome.busy();
     final turns = state.transcript.items.whereType<UserTurn>().toList();
     if (turn < 1 || turn > turns.length) return const RewindOutcome.nothing();
@@ -3022,7 +3034,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final message = turns[turn - 1].key;
     var conversation = false;
     var note = '';
-    if (_events.any((e) => e.id == message) && !_replayed.contains(message)) {
+    if (!native) {
+      note = '${_driver.info.label} still remembers the later turns; your next message tells it the files went back.';
+    } else if (_events.any((e) => e.id == message) && !_replayed.contains(message)) {
       final head = rewindHead(_events, message);
       try {
         await session.rewindTo(head);
@@ -3051,6 +3065,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       try {
         await ref.read(codeGitProvider(sessionId).notifier).rewind(turn);
         files = true;
+        // The harness kept the later turns: it hears about the files with the next message.
+        if (!conversation) _rewindNote = rewindNote(turns[turn - 1].text);
       } on Object catch (e) {
         note = "The files weren't restored: $e";
       }

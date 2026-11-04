@@ -114,6 +114,17 @@ void main() {
       );
       expect(const RewindOutcome.busy().label, contains('stop it'));
       expect(rewindPrompt('this message', files: false), contains('The files stay as they are.'));
+      final filesOnly = rewindPrompt('this message', files: true, conversation: false);
+      expect(filesOnly, contains('files back'));
+      expect(filesOnly, isNot(contains('forgets')));
+    });
+
+    test('the note for a harness that kept the conversation', () {
+      final note = rewindNote('  Add a\n  decrement method ');
+      expect(note, rewindNote('Add a decrement method'));
+      expect(note, startsWith('<everyai-rewind>'));
+      expect(note, contains('"Add a decrement method"'));
+      expect(rewindNote('x' * 200), contains('${'x' * 80}…"'));
     });
   });
 

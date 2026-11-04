@@ -430,7 +430,11 @@ class CodeSessionScreen extends ConsumerWidget {
     final ok = await showAdaptiveConfirm(
       context,
       title: 'Rewind to here?',
-      message: rewindPrompt('this message', files: files),
+      message: rewindPrompt(
+        'this message',
+        files: files,
+        conversation: ref.read(codeSessionProvider(sessionId).notifier).rewindsConversation,
+      ),
       confirmLabel: 'Rewind',
       destructive: true,
     );
