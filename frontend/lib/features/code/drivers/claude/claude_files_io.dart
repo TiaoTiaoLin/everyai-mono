@@ -39,3 +39,18 @@ Future<String?> runQuiet(String executable, List<String> args) async {
     return null;
   }
 }
+
+Future<bool> claudeSessionExists(String cwd, String id, {String? configDir}) async {
+  final env = Platform.environment;
+  final home = env['HOME'] ?? env['USERPROFILE'] ?? '';
+  final root = configDir ?? env['CLAUDE_CONFIG_DIR'] ?? (home.isEmpty ? '' : '$home/.claude');
+  // Unreadable settings: let the resume try.
+  if (root.isEmpty) return true;
+  // The CLI names a folder's store after its path with every other character a dash.
+  final folder = cwd.replaceAll(RegExp(r'[^A-Za-z0-9]'), '-');
+  try {
+    return await File('$root/projects/$folder/$id.jsonl').exists();
+  } on FileSystemException {
+    return true;
+  }
+}

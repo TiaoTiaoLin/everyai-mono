@@ -117,7 +117,7 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
 /// A driver over fake sessions. Given [session], every start and attach
 /// returns it; otherwise each start makes a new one (`<id>-c1`, `<id>-c2`, …)
 /// and attach reopens it, replaying what it played ([attachFails] refuses).
-final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
+final class FakeLeadDriver implements HarnessDriver, AttachesBriefed, ChecksResume {
   FakeLeadDriver(
     this.id, {
     this.session,
@@ -144,6 +144,12 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   final attached = <String>[];
   final conversations = <String, FakeLeadSession>{};
   var attachFails = false;
+
+  /// What [resumeProblem] says (null: it can be resumed).
+  String? problem;
+
+  @override
+  Future<String?> resumeProblem(String conversationId) async => problem;
 
   /// [start] throws (the CLI didn't start).
   var startFails = false;

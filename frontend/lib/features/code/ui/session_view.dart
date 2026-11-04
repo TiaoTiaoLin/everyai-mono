@@ -413,11 +413,17 @@ class CodeSessionScreen extends ConsumerWidget {
           ? '$from is still working. Stop it, then switch.'
           : outcome.failed
           ? outcome.message
-          : run
-          ? '$to is taking over.'
-          : '$to takes over with your next message.',
+          : '${run ? '$to is taking over.' : '$to takes over with your next message.'}'
+                '${outcome.path == null ? '' : _pathSuffix(outcome.path!)}',
     );
   }
+
+  /// What the toast adds about the path: only a return that reused or rebuilt the lead's conversation.
+  String _pathSuffix(LeadPath path) => switch (path) {
+    LeadPath.resumed => ' It continues its earlier conversation.',
+    LeadPath.imported => ' It got a copy of the conversation in its own format.',
+    LeadPath.fresh => '',
+  };
 
   Future<void> _rewind(BuildContext context, WidgetRef ref, int turn) async {
     final files = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.worktree != null;

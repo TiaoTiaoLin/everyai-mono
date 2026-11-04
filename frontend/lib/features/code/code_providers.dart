@@ -1319,12 +1319,36 @@ typedef LimitPick = ({UsageLimit limit, String ranOut, String problem, bool chan
 /// The native importer for a driver id ([nativeImporterFor]); tests swap in fakes.
 final nativeImporterProvider = Provider<NativeImporter? Function(String)>((ref) => nativeImporterFor);
 
+/// Where the new lead's conversation came from.
+enum LeadPath { resumed, imported, fresh }
+
+/// The transcript line for the path a switch took, or null when there is nothing to say (a first handoff).
+String? leadPathNote(String lead, LeadPath path, String? why) {
+  final because = why == null || why.isEmpty ? '' : ' ($why)';
+  return switch (path) {
+    LeadPath.resumed => '$lead picked up its earlier conversation and what happened since.',
+    LeadPath.imported when why != null =>
+      "$lead couldn't reopen its earlier conversation$because; it got a copy of the conversation in its own format.",
+    LeadPath.fresh when why != null => '$lead started a new conversation$because; it got the full handoff.',
+    _ => null,
+  };
+}
+
 /// How [CodeSessionController.switchLead] went.
 @immutable
 final class LeadSwitchOutcome {
-  const LeadSwitchOutcome.switched(this.kind) : message = '', busy = false, failed = false;
-  const LeadSwitchOutcome.busy() : message = '', kind = null, busy = true, failed = false;
-  const LeadSwitchOutcome.failed(this.message) : kind = null, busy = false, failed = true;
+  const LeadSwitchOutcome.switched(this.kind, {this.path = LeadPath.fresh, this.why})
+    : message = '',
+      busy = false,
+      failed = false;
+  const LeadSwitchOutcome.busy() : message = '', kind = null, path = null, why = null, busy = true, failed = false;
+  const LeadSwitchOutcome.failed(this.message) : kind = null, path = null, why = null, busy = false, failed = true;
+
+  /// How the new lead got the work: its own conversation again, a copy written in its format, or a new one.
+  final LeadPath? path;
+
+  /// Why an earlier conversation wasn't used, when one should have been.
+  final String? why;
 
   /// The handoff the new lead got: full, or only what it missed.
   final HandoffKind? kind;
@@ -2670,6 +2694,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       }
     }
     var resumable = rec != null && rec.conversationId.isNotEmpty && target.caps.contains(DriverCap.resume);
+    final couldResume = resumable;
+    // The first thing that stopped its earlier conversation being used.
+    String? why;
 
     // The old lead is kept for a return. One that never got its handoff (a
     // menu switch, then away before any message) hasn't seen the work, so its
@@ -2699,14 +2726,19 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // Its old conversation is tried first: a delta needs it.
       if (handoffScope(record, since: since, resumable: resumable).kind == HandoffKind.delta) {
         try {
-          live = await sessions.attachSession(
-            info.copyWith(harness: to, conversationId: rec!.conversationId, model: pick.model, effort: pick.effort),
-            keepCurrent: true,
-          );
-        } on Object {
-          // Its conversation can't be reopened: a new one, with everything.
-          resumable = false;
+          // A CLI whose attach doesn't touch its own store is asked first.
+          why = target is ChecksResume ? await (target as ChecksResume).resumeProblem(rec!.conversationId) : null;
+          if (why == null) {
+            live = await sessions.attachSession(
+              info.copyWith(harness: to, conversationId: rec!.conversationId, model: pick.model, effort: pick.effort),
+              keepCurrent: true,
+            );
+          }
+        } on Object catch (e) {
+          why = e is HarnessError ? e.message : '$e';
         }
+        // Its conversation can't be reopened: the copy or a new one, with everything.
+        if (live == null) resumable = false;
       }
       handoff = buildHandoff(
         record,
@@ -2722,6 +2754,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         transcript: transcript,
       );
       carryOn = carryOnMessage(fromLabel, cut: handoff.cut != null);
+      // A return that fell back to everything for another reason (too much happened, the turn is gone).
+      if (couldResume && live == null) why ??= handoff.staleReason;
       // Not on a return to a conversation it can reopen (the delta is less).
       if (live == null) {
         try {
@@ -2818,6 +2852,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     } on Object {
       // Nothing listens to it any more.
     }
+    final path = handoff.kind == HandoffKind.delta
+        ? LeadPath.resumed
+        : imported != null
+        ? LeadPath.imported
+        : LeadPath.fresh;
+    final pathText = leadPathNote(target.info.label, path, why);
+    final pathNote = pathText == null ? null : NoticeItem('lead-path-${live.id}', pathText);
     final importNote = imported == null
         ? null
         : NoticeItem(
@@ -2830,7 +2871,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       conversationId: info.conversationId,
       events: [
         ...current,
-        for (final n in [?notice, ?importNote]) leadNoticeEvent(n),
+        for (final n in [?notice, ?importNote, ?pathNote]) leadNoticeEvent(n),
       ],
     );
     _timeline = [..._timeline, segment];
@@ -2877,7 +2918,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     // It is at work from the start: messages typed meanwhile wait for its turn to end.
     if (run) _builder.add(_statusEvent('running'));
     _builder.lead = target.info.label;
-    for (final n in [?notice, ?importNote]) {
+    for (final n in [?notice, ?importNote, ?pathNote]) {
       _builder.addNotice(n);
     }
     _carried = _builder.snapshot.items;
@@ -2922,7 +2963,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // It started with the whole note.
       _freshLead = false;
     }
-    return LeadSwitchOutcome.switched(handoff.kind);
+    return LeadSwitchOutcome.switched(handoff.kind, path: path, why: why);
   }
 
   /// Takes the session back to just before user turn [turn] (1-based): the

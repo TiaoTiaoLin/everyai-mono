@@ -288,6 +288,107 @@ void main() {
     expect(d('alpha').specs.last.initialMessage, contains('Added the toggle.'));
   });
 
+  test('going back says it picked up its earlier conversation', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.path, outcome.why), (LeadPath.resumed, null));
+    expect(
+      transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+      contains('Alpha picked up its earlier conversation and what happened since.'),
+    );
+  });
+
+  test('alpha, beta, alpha, beta: each return gets only what that lead missed', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    await c.switchLead('alpha', run: true);
+    await turn(d('alpha').latest!, 'a3', 'Fixed the tests.');
+    final outcome = await c.switchLead('beta', run: true);
+    expect(outcome.kind, HandoffKind.delta);
+    expect(d('beta').specs, hasLength(1));
+    expect(d('beta').attached, ['beta-c1']);
+    final delta = d('beta').latest!.sent.last;
+    expect(delta, contains('Fixed the tests.'));
+    expect(delta, isNot(contains('Wrote the tests.')));
+    expect(delta, isNot(contains('Added the toggle.')));
+    expect(infoOf(info.id).leads.keys, ['alpha']);
+    expect(infoOf(info.id).conversationId, 'beta-c1');
+    await pumpEventQueue();
+    final texts = transcriptOf(info.id).items.whereType<AgentText>().map((t) => t.text).toList();
+    expect(texts, ['Added the toggle.', 'Wrote the tests.', 'Fixed the tests.']);
+  });
+
+  test("a conversation that can't be reopened is copied into its format when it can be", () async {
+    importerFor = (h) => h == 'alpha'
+        ? _FakeImporter('alpha', (_) {
+            // Only the old conversation is gone.
+            d('alpha').attachFails = false;
+            d('alpha').conversations['alpha-imp'] = FakeLeadSession(id: 'alpha-imp', replays: true);
+            return const ImportedSession(nativeId: 'alpha-imp');
+          })
+        : null;
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    d('alpha').attachFails = true;
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.path, outcome.why), (LeadPath.imported, 'That conversation is gone.'));
+    expect(d('alpha').specs, hasLength(1));
+    final sent = d('alpha').conversations['alpha-imp']!.sent.single;
+    expect(sent, endsWith(carryOnMessage('Beta')));
+    expect(sent, isNot(contains(handoffOpen)));
+    expect(infoOf(info.id).conversationId, 'alpha-imp');
+    expect(
+      transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+      contains(
+        "Alpha couldn't reopen its earlier conversation (That conversation is gone.); "
+        'it got a copy of the conversation in its own format.',
+      ),
+    );
+  });
+
+  for (final fails in [false, true]) {
+    test('an importer that ${fails ? 'fails' : 'gives nothing'} leaves the full handoff, with the reason', () async {
+      importerFor = (h) => h == 'alpha' ? _FakeImporter('alpha', (_) => fails ? throw StateError('no') : null) : null;
+      final (info, c) = await limited();
+      await c.switchLead('beta', run: true);
+      await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+      d('alpha').attachFails = true;
+      final outcome = await c.switchLead('alpha', run: true);
+      expect((outcome.kind, outcome.path), (HandoffKind.full, LeadPath.fresh));
+      expect(d('alpha').specs.last.initialMessage, contains('Added the toggle.'));
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+        contains('Alpha started a new conversation (That conversation is gone.); it got the full handoff.'),
+      );
+    });
+  }
+
+  test('a CLI that says its conversation is gone is not reopened', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    d('alpha').problem = 'Alpha no longer has that conversation.';
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.kind, outcome.path), (HandoffKind.full, LeadPath.fresh));
+    expect(outcome.why, 'Alpha no longer has that conversation.');
+    expect(d('alpha').attached, isEmpty);
+    expect(infoOf(info.id).conversationId, 'alpha-c2');
+  });
+
+  test('a return with too much to catch up on says so', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'x' * (handoffDeltaMaxChars + 10));
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.kind, outcome.path), (HandoffKind.full, LeadPath.fresh));
+    expect(outcome.why, startsWith('too much happened'));
+    expect(transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message), isNotEmpty);
+  });
+
   test('a harness that cannot resume gets everything each time', () async {
     final (info, c) = await limited();
     await c.switchLead('term', run: true);

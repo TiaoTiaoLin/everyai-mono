@@ -38,8 +38,11 @@ typedef ClaudeSpawn = Future<LineChannel> Function(
 /// show it after a restart; the CLI keeps the conversation itself and
 /// continues it with `--resume`. It doesn't print history back, so the
 /// journal is the transcript.
-final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
-  ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run});
+final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume {
+  ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run, this.configDir});
+
+  /// Replaces the CLI's config folder (tests).
+  final String? configDir;
 
   /// Replaces the PATH lookup in [detect] (tests).
   final Future<String?> Function(String command)? which;
@@ -176,6 +179,19 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
     DriverBriefing briefing, {
     Map<String, Object?> mcpConfig = const {},
   }) => _attach(conversationId, briefing);
+
+  @override
+  Future<String?> resumeProblem(String conversationId) async {
+    if (_live.containsKey(conversationId)) return null;
+    final raw = await readTextFile('${await _dir()}/$conversationId.json');
+    final json = raw == null ? null : _json(raw);
+    if (json == null) return "This Claude Code session's record is gone.";
+    final meta = _Meta.fromJson(json);
+    // Before its first message the CLI has nothing to resume.
+    if (!meta.sent) return null;
+    if (await claudeSessionExists(meta.cwd, conversationId, configDir: configDir)) return null;
+    return 'Claude Code no longer has that conversation.';
+  }
 
   Future<HarnessSession> _attach(String conversationId, DriverBriefing? b) async {
     if (_live[conversationId] case final s?) return s;

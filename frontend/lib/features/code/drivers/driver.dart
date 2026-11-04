@@ -153,6 +153,13 @@ abstract interface class HarnessDriver implements Harness {
   Future<List<DriverModel>> models();
 }
 
+/// A driver whose attach doesn't touch the CLI's own conversation: the switch asks first whether
+/// it can still be resumed, so a gone one falls back before anything is sent.
+abstract interface class ChecksResume {
+  /// Why [conversationId] can't be resumed, or null when it can (or can't be told).
+  Future<String?> resumeProblem(String conversationId);
+}
+
 /// A driver that says how it holds each mode (its sandbox, its own approval
 /// modes), for the session's fidelity line. Optional: without it the line
 /// comes from [HarnessDriver.caps].
