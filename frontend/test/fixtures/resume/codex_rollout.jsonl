@@ -1,0 +1,12 @@
+{"timestamp":"2026-11-02T09:00:00.000Z","type":"session_meta","payload":{"id":"THREAD","cwd":"CWD","git":{"branch":"dev","commit_hash":"0000000"},"source":"vscode","originator":"everyai","cli_version":"0.166.0"}}
+{"timestamp":"2026-11-02T09:00:01.000Z","type":"turn_context","payload":{"cwd":"CWD","model":"gpt-5.6-luna","effort":"low"}}
+{"timestamp":"2026-11-02T09:00:01.500Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>not shown</environment_context>"}]}}
+{"timestamp":"2026-11-02T09:00:02.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"um1","content":[{"type":"text","text":"List the files and fix the typo in notes.txt","text_elements":[]}]}}}
+{"timestamp":"2026-11-02T09:00:03.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"r1","summary_text":["Listing first."],"raw_content":[]}}}
+{"timestamp":"2026-11-02T09:00:04.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"c1","command":["/bin/zsh","-lc","ls"],"cwd":"CWD","status":"completed","aggregated_output":"notes.txt\n","exit_code":0}}}
+{"timestamp":"2026-11-02T09:00:05.000Z","type":"event_msg","payload":{"type":"plan_update","plan":[{"step":"Fix the typo","status":"in_progress"},{"step":"Check","status":"pending"}]}}
+{"timestamp":"2026-11-02T09:00:06.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"FileChange","id":"f1","changes":{"CWD/notes.txt":{"type":"update","unified_diff":"-teh\n+the\n","move_path":null}},"status":"completed"}}}
+{broken
+{"timestamp":"2026-11-02T09:00:07.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Fixed the typo."}],"phase":"final_answer"}}}
+{"timestamp":"2026-11-02T09:05:00.000Z","type":"turn_context","payload":{"cwd":"CWD","model":"gpt-6.1-sol"}}
+{"timestamp":"2026-11-02T09:05:01.000Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"um2","content":[{"type":"text","text":"Thanks"}]}}}
