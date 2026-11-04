@@ -1,4 +1,6 @@
+import 'package:every_ai/features/code/domain/transcript.dart' show planApprovedReason, planRevisionLead;
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_cursor.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/json_rpc.dart';
@@ -566,6 +568,88 @@ void main() {
       expect(env['X'], '1');
       expect(env['OPENCODE_CONFIG_CONTENT'], contains('"mcp"'));
       expect(env['OPENCODE_CONFIG_CONTENT'], contains('"permission":{"*":"ask"'));
+    });
+  });
+  group('Cursor', () {
+    test('both of its names get its profile: `acp` pinned, skip-approval flags dropped, never its ask mode', () {
+      for (final exe in ['agent', 'cursor-agent', '/Users/me/.local/bin/agent']) {
+        final p = acpProfileOf(exe);
+        expect(p.agent, AcpAgent.cursor, reason: exe);
+        expect((p.askMode, p.planMode, p.needsConsent, p.mcpInConfig), ('agent', 'plan', true, false));
+      }
+      expect(acpCommand('cursor-agent', ['--force', '-f', '--yolo', '--model', 'gpt-6']).args, [
+        'acp',
+        '--model',
+        'gpt-6',
+      ]);
+      expect(acpCommand('agent acp', const []).args, ['acp']);
+    });
+
+    test('to-dos: merge updates or adds by id, otherwise the list is replaced', () {
+      var todos = cursorTodos({}, {
+        'merge': false,
+        'todos': [
+          {'id': 'a', 'content': 'A', 'status': 'pending'},
+          {'id': 'b', 'content': 'B', 'status': 'pending'},
+        ],
+      });
+      todos = cursorTodos(todos, {
+        'merge': true,
+        'todos': [
+          {'id': 'b', 'status': 'completed'},
+          {'id': 'c', 'content': 'C', 'status': 'in_progress'},
+        ],
+      });
+      expect(
+        [for (final t in todos.values) (t['content'], t['status'])],
+        [('A', 'pending'), ('B', 'completed'), ('C', 'in_progress')],
+      );
+      expect(cursorTodos(todos, {'todos': <Object?>[]}), isEmpty);
+      final (call, result) = cursorTodoEvents(todos, id: 'x');
+      expect((call.toolName, call.actionKind, result.actionId), ('acp:update_todos', 'TaskTrackerAction', 'x'));
+    });
+
+    test('plan replies: approved, changes with the words, anything else cancelled', () {
+      expect(cursorPlanReply((text: planApprovedReason, isError: false)), {
+        'outcome': {'outcome': 'accepted'},
+      });
+      expect(cursorPlanReply((text: '$planRevisionLead Smaller.', isError: false)), {
+        'outcome': {'outcome': 'rejected', 'reason': '$planRevisionLead Smaller.'},
+      });
+      expect(cursorPlanReply((text: planApprovedReason, isError: true)), cursorCancelled);
+      expect(cursorPlanReply((text: 'Something else', isError: false)), cursorCancelled);
+      expect(cursorPlanArgs(const {})['title'], 'Plan');
+    });
+
+    test("a question card's answer that isn't an answers message goes back as skipped with its text", () {
+      const params = {
+        'questions': [
+          {
+            'id': 'q',
+            'prompt': 'Go?',
+            'options': [
+              {'id': 'y', 'label': 'Yes'},
+            ],
+          },
+        ],
+      };
+      expect(cursorAnswerReply(params, (text: 'Whatever', isError: false)), cursorSkipped('Whatever'));
+      expect(cursorQuestionProblem(params), isNull);
+      expect(cursorQuestionProblem(const {}), isNotNull);
+    });
+
+    test('a subagent of a custom type, and its duration', () {
+      final call = cursorTaskCall({
+        'description': 'Review',
+        'prompt': 'Look',
+        'subagentType': {'custom': 'reviewer'},
+        'model': 'fast',
+      }, id: 't');
+      expect((call.actionKind, call.str('agent'), call.str('model')), ('TaskAction', 'reviewer', 'fast'));
+      expect(
+        [cursorTaskDone(4200), cursorTaskDone(65000), cursorTaskDone(null)],
+        ['Done in 4.2 s.', 'Done in 65 s.', 'Done.'],
+      );
     });
   });
 }

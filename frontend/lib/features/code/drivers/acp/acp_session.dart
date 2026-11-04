@@ -8,6 +8,7 @@ import '../../domain/agent_mode.dart';
 import '../../domain/permissions.dart' show typedReason;
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
+import '../../host/host.dart' show HostCall, HostEnd, HostResult;
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart' show acpMcpServer;
 import '../driver.dart';
@@ -17,6 +18,7 @@ import '../event_journal.dart';
 import '../json_rpc.dart';
 import '../usage_limit.dart';
 import 'acp_agents.dart';
+import 'acp_cursor.dart';
 import 'acp_files.dart';
 import 'acp_mapping.dart';
 
@@ -165,6 +167,17 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   /// Messages sent with `run: false`, for the next prompt.
   final _held = <({String text, List<String> images})>[];
+
+  /// Cursor's question and plan requests waiting on their card, by its
+  /// tool call id: completing one gives the card up.
+  final _extWaits = <String, Completer<HostEnd>>{};
+
+  /// Tool call ids an extension request shows (cards, subagents): Cursor's
+  /// ordinary `tool_call` for the same id adds no second row.
+  final _extOwned = <String>{};
+
+  /// Cursor's to-do list, by id in order (`cursor/update_todos`).
+  var _todos = <String, Map<String, Object?>>{};
 
   ExecutionStatus get status => _status;
   String get _label => _launcher.info.label;
@@ -333,6 +346,17 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _cancelledResult(a.callId);
     }
     _asking.clear();
+    _endExtWaits(HostEnd.clientGone);
+  }
+
+  /// Gives up every card an extension request waits on ([why]); each request
+  /// then answers `cancelled` and its row closes.
+  void _endExtWaits(HostEnd why) {
+    for (final (callId, ended) in [for (final e in _extWaits.entries) (e.key, e.value)]) {
+      if (!ended.isCompleted) ended.complete(why);
+      _cancelledResult(callId);
+    }
+    _extWaits.clear();
   }
 
   Future<Delivery?> _delivery() async {
@@ -645,6 +669,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _cancelledResult(entry.value.callId);
     }
     _asking.clear();
+    _endExtWaits(HostEnd.cancelled);
     _flush();
     for (final callId in _shown.keys.toList()) {
       if (!_done.contains(callId) && callId != running) _cancelledResult(callId);
@@ -747,6 +772,9 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   };
 
   Future<Object?> _onRequest(String method, Object? params) async {
+    // ACP keeps `_` names for extensions; Cursor's doc writes them without.
+    final name = method.startsWith('_') ? method.substring(1) : method;
+    if (name.startsWith('cursor/')) return _cursorRequest(name, _map(params));
     if (method != 'session/request_permission') {
       throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');
     }
@@ -766,9 +794,126 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     return reply.future;
   }
 
+  // ------------------------------------------------------ Cursor extensions
+
+  /// A `cursor/*` request. Questions and plans wait on their card; an
+  /// unknown one is answered `cancelled`, never with an error (Cursor can
+  /// hang the turn on a failed `cursor/create_plan`).
+  Future<Object?> _cursorRequest(String method, Map<String, Object?> p) async {
+    switch (method) {
+      case 'cursor/ask_question':
+        return _cursorCard(p, question: true);
+      case 'cursor/create_plan':
+        return _cursorCard(p, question: false);
+      case 'cursor/update_todos' || 'cursor/task':
+        if (!_replaying) _cursorUpdate(method, p);
+        return {
+          'outcome': {'outcome': method == 'cursor/task' ? 'completed' : 'accepted'},
+        };
+      default:
+        return cursorCancelled;
+    }
+  }
+
+  /// Shows a question or plan request as the card of the app's
+  /// `ask_user_question` / `present_plan` host tool (the row is named like
+  /// the agent's call to our MCP server, so the controller answers it the
+  /// same way) and replies with what the user decided.
+  Future<Object?> _cursorCard(Map<String, Object?> p, {required bool question}) async {
+    if (_closed || _cancelled) return cursorCancelled;
+    final host = briefing?.host;
+    if (host == null) {
+      return question
+          ? cursorSkipped('Nobody can answer questions in this session; decide yourself and say what you assumed.')
+          : cursorCancelled;
+    }
+    if (question) {
+      if (cursorQuestionProblem(p) case final why?) return cursorSkipped(why);
+    }
+    final callId = p['toolCallId'] as String? ?? _next('ext');
+    if (_extOwned.contains(callId)) return cursorCancelled;
+    _extOwned.add(callId);
+    final tool = question ? askUserQuestionTool : presentPlanTool;
+    final args = question ? cursorQuestionArgs(p) : cursorPlanArgs(p);
+    _flush();
+    final row = actionEvent(
+      id: 'tc-$callId',
+      toolName: '${everyaiServerName}__$tool',
+      kind: 'MCPToolAction',
+      toolCallId: callId,
+      args: args,
+    );
+    _shown[callId] = row;
+    _emit(row);
+    final ended = _extWaits[callId] = Completer<HostEnd>();
+    HostResult result;
+    try {
+      result = await Future.any([
+        host.call(HostCall(id: row.id, sessionId: id, name: tool, args: args, ended: ended.future)),
+        ended.future.then((_) => (text: 'Cancelled.', isError: true)),
+      ]);
+    } on Object catch (e) {
+      result = (text: 'Error: $e', isError: true);
+    }
+    _extWaits.remove(callId);
+    if (ended.isCompleted || _closed) {
+      _cancelledResult(callId);
+      return cursorCancelled;
+    }
+    if (_done.add(callId)) {
+      _emit(
+        resultEvent(
+          id: 'tr-$callId',
+          actionId: row.id,
+          toolName: row.toolName,
+          text: result.text,
+          isError: result.isError,
+        ),
+      );
+    }
+    return question ? cursorAnswerReply(p, result) : cursorPlanReply(result);
+  }
+
+  /// Cursor's to-do list and subagent updates.
+  void _cursorUpdate(String method, Map<String, Object?> p) {
+    switch (method) {
+      case 'cursor/update_todos':
+        _flush();
+        _todos = cursorTodos(_todos, p);
+        final (call, result) = cursorTodoEvents(_todos, id: _next('todos'));
+        _emit(call);
+        _emit(result);
+      case 'cursor/task':
+        final callId = p['toolCallId'] as String? ?? _next('task');
+        if (_done.contains(callId)) return;
+        _extOwned.add(callId);
+        var row = _shown[callId];
+        if (row == null) {
+          _flush();
+          row = _shown[callId] = cursorTaskCall(p, id: 'tc-$callId', toolCallId: callId);
+          _emit(row);
+        }
+        if (p['durationMs'] != null && _done.add(callId)) {
+          _emit(
+            resultEvent(
+              id: 'tr-$callId',
+              actionId: row.id,
+              toolName: row.toolName,
+              text: cursorTaskDone(p['durationMs']),
+            ),
+          );
+        }
+    }
+  }
+
   // ----------------------------------------------------------------- updates
 
   void _onNotify(String method, Object? params) {
+    final name = method.startsWith('_') ? method.substring(1) : method;
+    if (name.startsWith('cursor/')) {
+      if (!_replaying) _cursorUpdate(name, _map(params));
+      return;
+    }
     if (method != 'session/update') return;
     final p = _map(params);
     if (p['sessionId'] case final String s when _acpSessionId != null && s != _acpSessionId) return;
@@ -822,7 +967,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   void _toolUpdate(Map<String, Object?> u) {
     final callId = u['toolCallId'];
-    if (callId is! String || _done.contains(callId)) return;
+    if (callId is! String || _done.contains(callId) || _extOwned.contains(callId)) return;
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, u);
     final status = call['status'] as String? ?? 'pending';
     final finished = status == 'completed' || status == 'failed';
@@ -928,6 +1073,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     }
     _asking.clear();
     await _peer?.close();
+    // After the agent is gone, so nothing is sent to it.
+    _endExtWaits(HostEnd.sessionClosed);
     await _journal.close();
     for (final c in _listeners.toList()) {
       unawaited(c.close());

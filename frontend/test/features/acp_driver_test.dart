@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
+import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
@@ -11,6 +13,8 @@ import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
+import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/questions/domain/questions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/replay_transport.dart';
@@ -32,16 +36,23 @@ final class _Rig {
   String get dataDir => '$root/data';
   String get work => '$root/work';
 
-  AcpDriver driver(String id, String command, {List<String> args = const [], Duration? initTimeout}) => AcpDriver(
+  AcpDriver driver(
+    String id,
+    String command, {
+    List<String> args = const [],
+    Duration? initTimeout,
+    Future<String?> Function(String command)? which,
+  }) => AcpDriver(
     id: id,
     label: switch (command) {
       'gemini' => 'Gemini CLI',
       'opencode' => 'OpenCode',
+      'cursor-agent' => 'Cursor CLI',
       _ => command,
     },
     command: command,
     args: args,
-    which: (c) async => '/usr/local/bin/$c',
+    which: which ?? (c) async => '/usr/local/bin/$c',
     dataDir: () async => dataDir,
     initTimeout: initTimeout ?? const Duration(seconds: 60),
     replayQuiet: Duration.zero,
@@ -131,6 +142,58 @@ Directory _stored(
   );
   if (events.isNotEmpty) File('${dir.path}/events.jsonl').writeAsStringSync('${events.map(jsonEncode).join('\n')}\n');
   return dir;
+}
+
+/// The app's side of the MCP host for a session: records each call and
+/// answers it when the test says.
+final class _Host implements HostTools {
+  final calls = <HostCall>[];
+  final _replies = <Completer<HostResult>>[];
+
+  @override
+  Future<HostResult> call(HostCall call) {
+    calls.add(call);
+    final c = Completer<HostResult>();
+    _replies.add(c);
+    return c.future;
+  }
+
+  void answer(String text, {bool isError = false}) => _replies.removeAt(0).complete((text: text, isError: isError));
+}
+
+DriverBriefing _cursorBrief(HostTools host) =>
+    DriverBriefing(mcpUrl: 'http://127.0.0.1:7777/mcp', mcpToken: 'tok-cursor', host: host);
+
+/// Our reply to the agent's request [id] on [c].
+Object? _replyTo(ReplayChannel c, String id) =>
+    c.sent.singleWhere((m) => m['id'] == id && m['method'] == null)['result'];
+
+/// The question card arguments of `cursor/ask.jsonl`'s request.
+Map<String, Object?> _askArgs() => {
+  'questions': [
+    {
+      'question': 'Which database?',
+      'options': [
+        {'label': 'Postgres'},
+        {'label': 'SQLite'},
+      ],
+    },
+    {
+      'question': 'Which extras?',
+      'multi_select': true,
+      'options': [
+        {'label': 'Auth'},
+        {'label': 'Billing'},
+        {'label': 'Search'},
+      ],
+    },
+  ],
+};
+
+Transcript _transcript(List<HarnessEvent> events) {
+  final b = TranscriptBuilder();
+  events.forEach(b.add);
+  return b.snapshot;
 }
 
 void main() {
@@ -836,6 +899,316 @@ void main() {
       expect(config['permission'], isA<Map<String, Object?>>());
       expect(r.spawns.single.args, ['acp']);
       await s.close();
+    });
+  });
+  group('Cursor CLI (derived from its ACP doc)', () {
+    test(
+      'the handshake: `acp`, Plan pinned to its plan mode, our server in session/new and no .cursor/mcp.json',
+      () async {
+        final r = rig(['cursor/handshake.jsonl']);
+        final s = await r
+            .driver('cursor', 'cursor-agent', args: const ['--force'])
+            .start(r.spec(mode: AgentMode.plan, briefing: _cursorBrief(_Host())));
+        await r.channels.single.finished;
+        r.expectPlayed();
+        expect(r.spawns.single.args, ['acp']);
+        expect(Directory('${r.work}/.cursor').existsSync(), isFalse);
+        await s.close();
+      },
+    );
+
+    test('`agent` is found when `cursor-agent` is not on PATH', () async {
+      final r = rig(['cursor/load_unknown.jsonl']);
+      _stored(r, 'c0', 'cur-old');
+      final d = r.driver('cursor', 'cursor-agent', which: (c) async => c == 'agent' ? '/opt/cursor/agent' : null);
+      final s = await d.attach('c0');
+      final seen = _Seen(s);
+      await s.send('Hello');
+      await seen.untilStatus(ExecutionStatus.finished);
+      expect(r.spawns.single.executable, '/opt/cursor/agent');
+      // session/load answered "Session not found": a fresh session, and the user is told.
+      r.expectPlayed();
+      expect(seen.notices.single, contains("couldn't reopen its conversation, so it starts fresh"));
+    });
+
+    Future<(_Rig, HarnessSession, _Seen, _Host)> asking(String script) async {
+      final r = rig([script]);
+      final host = _Host();
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec(briefing: _cursorBrief(host)));
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.until(() => host.calls.isNotEmpty);
+      return (r, s, seen, host);
+    }
+
+    test('cursor/ask_question is our question card; the picks go back as option ids', () async {
+      final (r, s, seen, host) = await asking('cursor/ask.jsonl');
+      final row = seen.calls.single;
+      expect(
+        (row.toolName, row.actionKind, hostToolOf(row)),
+        ('everyai__ask_user_question', 'MCPToolAction', askUserQuestionTool),
+      );
+      final call = host.calls.single;
+      expect((call.name, call.id), (askUserQuestionTool, row.id));
+      expect(call.args, {
+        'questions': [
+          {
+            'question': 'Which database?',
+            'header': 'Setup',
+            'multi_select': false,
+            'options': [
+              {'label': 'Postgres', 'description': ''},
+              {'label': 'SQLite', 'description': ''},
+            ],
+          },
+          {
+            'question': 'Which extras?',
+            'header': '',
+            'multi_select': true,
+            'options': [
+              {'label': 'Auth', 'description': ''},
+              {'label': 'Billing', 'description': ''},
+              {'label': 'Search', 'description': ''},
+            ],
+          },
+        ],
+      });
+      for (final e in call.args.entries) {
+        expect(row.action[e.key], e.value);
+      }
+      // Waiting on a card isn't waiting on an approval.
+      expect(seen.status, ExecutionStatus.running);
+      final questions = Question.listFrom(call.args);
+      final answers = [
+        const QuestionAnswer(selected: {0}),
+        const QuestionAnswer(selected: {0, 2}),
+      ];
+      host.answer(answersReason(questions, answers));
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(_replyTo(r.channels.single, 'q1'), {
+        'outcome': {
+          'outcome': 'answered',
+          'answers': [
+            {
+              'questionId': 'db',
+              'selectedOptionIds': ['pg'],
+            },
+            {
+              'questionId': 'extras',
+              'selectedOptionIds': ['auth', 'search'],
+            },
+          ],
+        },
+      });
+      // Cursor's own tool_call for the same id added no second row.
+      expect(seen.calls, hasLength(1));
+      final card = _transcript(seen.all).items.whereType<QuestionItem>().single;
+      expect(card.answers, answers);
+      await s.close();
+    });
+
+    test(
+      'an Other answer or a reply in chat goes back as skipped with the words; a given-up card as cancelled',
+      () async {
+        final questions = Question.listFrom(_askArgs());
+        final other = answersReason(questions, [
+          const QuestionAnswer(selected: {1}),
+          const QuestionAnswer(other: 'Only logging'),
+        ]);
+        for (final (text, isError, want) in [
+          (
+            other,
+            false,
+            {
+              'outcome': {'outcome': 'skipped', 'reason': other},
+            },
+          ),
+          (
+            repliedInChat,
+            false,
+            {
+              'outcome': {'outcome': 'skipped', 'reason': repliedInChat},
+            },
+          ),
+          (
+            'Error: no longer waiting.',
+            true,
+            {
+              'outcome': {'outcome': 'cancelled'},
+            },
+          ),
+        ]) {
+          final (r, s, seen, host) = await asking('cursor/ask.jsonl');
+          host.answer(text, isError: isError);
+          await seen.untilStatus(ExecutionStatus.finished);
+          r.expectPlayed();
+          expect(_replyTo(r.channels.single, 'q1'), want, reason: text);
+          expect(seen.results.single.text, text);
+          await s.close();
+        }
+      },
+    );
+
+    test(
+      'the _cursor/ spelling is handled; over 4 questions are skipped with a note; unknown requests cancelled',
+      () async {
+        final r = rig(['cursor/ask_misc.jsonl']);
+        final host = _Host();
+        final s = await r.driver('cursor', 'cursor-agent').start(r.spec(briefing: _cursorBrief(host)));
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.finished);
+        r.expectPlayed();
+        expect(host.calls, isEmpty);
+        expect(seen.calls, isEmpty);
+        await s.close();
+      },
+    );
+
+    test('without a briefing questions are skipped and plans cancelled, and nothing waits', () async {
+      final r = rig(['cursor/no_host.jsonl']);
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.calls, isEmpty);
+      await s.close();
+    });
+
+    test('cursor/create_plan is our plan card: approved is accepted, changes are rejected with the words', () async {
+      final revise = '$planRevisionLead Use a stateful widget.';
+      for (final (text, want) in [
+        (
+          planApprovedReason,
+          {
+            'outcome': {'outcome': 'accepted'},
+          },
+        ),
+        (
+          revise,
+          {
+            'outcome': {'outcome': 'rejected', 'reason': revise},
+          },
+        ),
+      ]) {
+        final (r, s, seen, host) = await asking('cursor/plan.jsonl');
+        final row = seen.calls.single;
+        expect((row.toolName, hostToolOf(row)), ('everyai__present_plan', presentPlanTool));
+        expect(host.calls.single.args, {
+          'title': 'Add a counter',
+          'summary': 'A counter with tests.',
+          'steps': [
+            {'title': 'Write the widget'},
+            {'title': 'Add a test'},
+          ],
+          'body': '## Steps\n\nBuild it, then test it.',
+        });
+        final plan = _transcript(seen.all).items.whereType<PlanProposal>().single;
+        expect(plan.markdown, contains('Build it, then test it.'));
+        expect(plan.steps.map((st) => st.title), ['Write the widget', 'Add a test']);
+        host.answer(text);
+        await seen.untilStatus(ExecutionStatus.finished);
+        r.expectPlayed();
+        expect(_replyTo(r.channels.single, 'p1'), want);
+        final settled = _transcript(seen.all).items.whereType<PlanProposal>().single;
+        expect(settled.verdict, text == planApprovedReason ? PlanVerdict.approved : PlanVerdict.revised);
+        await s.close();
+      }
+    });
+
+    test('Stop while a plan waits: the card is given up, Cursor gets cancelled, the row is Cancelled', () async {
+      final (r, s, seen, host) = await asking('cursor/plan_stop.jsonl');
+      await s.interrupt();
+      expect(await host.calls.single.ended, HostEnd.cancelled);
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      expect(seen.results.single.text, 'Cancelled.');
+      expect(seen.results.single.actionId, seen.calls.single.id);
+      await s.close();
+    });
+
+    test('closing the session, or the agent exiting, gives up a waiting card', () async {
+      final (_, s, _, host) = await asking('cursor/plan.jsonl');
+      await s.close();
+      expect(await host.calls.single.ended, HostEnd.sessionClosed);
+
+      final (_, s2, seen2, host2) = await asking('cursor/ask_eof.jsonl');
+      expect(await host2.calls.single.ended, HostEnd.clientGone);
+      await seen2.until(() => seen2.results.isNotEmpty);
+      expect(seen2.results.single.text, 'Cancelled.');
+      await s2.close();
+    });
+
+    test('cursor/update_todos is the task list (replace or merge by id); cursor/task a subagent row', () async {
+      final r = rig(['cursor/todos_task.jsonl']);
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final lists = [
+        for (final c in seen.calls)
+          if (c.actionKind == 'TaskTrackerAction') c,
+      ];
+      expect({for (final c in lists) c.toolName}, {'acp:update_todos'});
+      List<Object?> tasks(ActionCall c) => c.action['task_list']! as List<Object?>;
+      expect(tasks(lists[0]), [
+        {'title': 'Read the code', 'status': 'todo', 'notes': ''},
+        {'title': 'Fix the bug', 'status': 'in_progress', 'notes': ''},
+      ]);
+      expect(tasks(lists[1]), [
+        {'title': 'Read the code', 'status': 'done', 'notes': ''},
+        {'title': 'Fix the bug', 'status': 'in_progress', 'notes': ''},
+        {'title': 'Write docs', 'status': 'done', 'notes': 'cancelled'},
+      ]);
+      // The request form replaces too, and is acked.
+      expect(tasks(lists[2]), [
+        {'title': 'Ship it', 'status': 'todo', 'notes': ''},
+      ]);
+      final task = seen.calls.singleWhere((c) => c.actionKind == 'TaskAction');
+      expect((task.toolName, task.str('description'), task.str('agent')), ('acp:task', 'Explore the repo', 'explore'));
+      expect(seen.results.singleWhere((x) => x.actionId == task.id).text, 'Done in 4.2 s.');
+      // Its tool_call for the same id added no row.
+      expect(seen.calls.where((c) => c.toolCallId == 'task-1'), hasLength(1));
+      final items = _transcript(seen.all).items;
+      expect(items.whereType<SubagentItem>(), hasLength(1));
+      expect(items.whereType<PlanItem>().last.tasks.single.title, 'Ship it');
+      await s.close();
+    });
+
+    test('a subagent still running when the user stops closes as Cancelled', () async {
+      final r = rig(['cursor/task_stop.jsonl']);
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.until(() => seen.calls.isNotEmpty);
+      expect(seen.calls.single.str('agent'), 'reviewer');
+      await s.interrupt();
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      expect(seen.results.single.text, 'Cancelled.');
+      await s.close();
+    });
+
+    test("to-dos Cursor replays while loading a conversation aren't shown again", () async {
+      final r = rig(['cursor/load_replay.jsonl']);
+      _stored(r, 'c1', 'cur-old');
+      final s = await r.driver('cursor', 'cursor-agent').attach('c1');
+      final seen = _Seen(s);
+      await s.send('Next');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.calls, isEmpty);
+      await s.close();
+    });
+
+    test('signed in: a key in the environment; the keychain entry by exit code only', () async {
+      final p = acpProfileOf('cursor-agent');
+      expect(await p.signedIn('/x/cursor-agent', env: const {'CURSOR_API_KEY': 'k'}), isTrue);
+      expect(await p.signedIn('/x/cursor-agent', env: const {'CURSOR_AUTH_TOKEN': 't'}), isTrue);
+      expect([cursorSignedInFrom(0), cursorSignedInFrom(44), cursorSignedInFrom(1)], [true, false, null]);
     });
   });
 }

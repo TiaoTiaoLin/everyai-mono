@@ -136,33 +136,38 @@ void main() {
           'mistral-vibe',
           'auggie',
           'factory-droid',
+          'cursor',
         ],
       );
     });
 
-    test('each ACP agent is listed with its command, label and install hint; only Google asks for consent', () {
-      final r = container.read(driverRegistryProvider);
-      const want = {
-        'antigravity': ('agy', 'Antigravity CLI'),
-        'gemini': ('gemini', 'Gemini CLI (API key or enterprise)'),
-        'github-copilot-cli': ('copilot', 'GitHub Copilot CLI'),
-        'kiro': ('kiro-cli', 'Kiro CLI'),
-        'kimi': ('kimi', 'Kimi Code CLI'),
-        'qwen-code': ('qwen', 'Qwen Code'),
-        'cline': ('cline', 'Cline CLI'),
-        'goose': ('goose', 'goose'),
-        'mistral-vibe': ('vibe-acp', 'Mistral Vibe'),
-        'auggie': ('auggie', 'Auggie'),
-        'factory-droid': ('droid', 'Factory Droid'),
-      };
-      for (final MapEntry(key: id, value: (command, label)) in want.entries) {
-        final d = r.resolve(id)! as AcpDriver;
-        expect((d.command, d.info.label), (command, label), reason: id);
-        expect(d.info.installHint, isNotEmpty, reason: id);
-        expect(d.info.needsConsent, id == 'antigravity' || id == 'gemini', reason: id);
-      }
-      expect(r.resolve('github-copilot-cli')!.info.installHint, 'npm i -g @github/copilot');
-    });
+    test(
+      'each ACP agent is listed with its command, label and install hint; only Google and Cursor ask for consent',
+      () {
+        final r = container.read(driverRegistryProvider);
+        const want = {
+          'antigravity': ('agy', 'Antigravity CLI'),
+          'gemini': ('gemini', 'Gemini CLI (API key or enterprise)'),
+          'github-copilot-cli': ('copilot', 'GitHub Copilot CLI'),
+          'kiro': ('kiro-cli', 'Kiro CLI'),
+          'kimi': ('kimi', 'Kimi Code CLI'),
+          'qwen-code': ('qwen', 'Qwen Code'),
+          'cline': ('cline', 'Cline CLI'),
+          'goose': ('goose', 'goose'),
+          'mistral-vibe': ('vibe-acp', 'Mistral Vibe'),
+          'auggie': ('auggie', 'Auggie'),
+          'factory-droid': ('droid', 'Factory Droid'),
+          'cursor': ('cursor-agent', 'Cursor CLI'),
+        };
+        for (final MapEntry(key: id, value: (command, label)) in want.entries) {
+          final d = r.resolve(id)! as AcpDriver;
+          expect((d.command, d.info.label), (command, label), reason: id);
+          expect(d.info.installHint, isNotEmpty, reason: id);
+          expect(d.info.needsConsent, id == 'antigravity' || id == 'gemini' || id == 'cursor', reason: id);
+        }
+        expect(r.resolve('github-copilot-cli')!.info.installHint, 'npm i -g @github/copilot');
+      },
+    );
 
     test("an acp: driver for a listed agent's program runs on that agent's consent switch", () {
       final r = container.read(driverRegistryProvider);
@@ -172,6 +177,16 @@ void main() {
       expect(consentProblem(agy.info, const {}), contains("Turn on 'Use my own installed CLIs'"));
       expect(r.resolve('acp:/opt/bin/gemini --sandbox')!.info.consentId, 'gemini');
       expect(r.resolve('acp:dsh')!.info.consentId, 'acp:dsh');
+      // Cursor installs as `cursor-agent` and `agent`: either shares the listed entry's switch.
+      final cursor = r.resolve('cursor')!;
+      expect((cursor.info.needsConsent, cursor.info.consentId), (true, 'cursor'));
+      expect(consentProblem(cursor.info, const {}), contains("Turn on 'Use my own installed CLIs' for Cursor CLI"));
+      expect(consentProblem(cursor.info, const {'cursor'}), isNull);
+      expect(r.resolve('acp:agent')!.info.consentId, 'cursor');
+      expect(
+        leadBlocked(cursor.info, const DriverStatus(installed: true, signedIn: true), consented: false),
+        'Turn on in Settings',
+      );
     });
 
     test('harnessFor goes through the registry; the demo and removed harnesses are unchanged', () async {

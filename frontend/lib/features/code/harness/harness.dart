@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../domain/agent_mode.dart';
+import '../host/host.dart' show HostTools;
 import 'events.dart';
 
 /// How an outside harness reaches EveryAI from inside its session: the MCP
@@ -11,12 +12,17 @@ import 'events.dart';
 /// driver hands it to the CLI's instructions slot as `BriefingInput.sessionText`).
 @immutable
 final class DriverBriefing {
-  const DriverBriefing({required this.mcpUrl, required this.mcpToken, this.skillDir, this.sessionSkill});
+  const DriverBriefing({required this.mcpUrl, required this.mcpToken, this.skillDir, this.sessionSkill, this.host});
 
   final String mcpUrl;
   final String mcpToken;
   final String? skillDir;
   final String? sessionSkill;
+
+  /// What the session's calls to the MCP server reach, for an agent whose
+  /// own question and plan requests show as the same cards (Cursor's ACP
+  /// extensions); null when nobody answers them.
+  final HostTools? host;
 }
 
 /// What a new coding session needs.

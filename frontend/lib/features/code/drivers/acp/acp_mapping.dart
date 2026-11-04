@@ -168,25 +168,29 @@ ToolResult acpRejectedEvent({
 
 /// An ACP `plan` (its entries replace the last) as the app's task list, plus
 /// its result so it never waits for approval.
-(ActionCall, ToolResult) acpPlanEvents(List<Object?> entries, {required String id}) {
-  final tasks = [
-    for (final e in entries.whereType<Map<String, Object?>>())
-      {
-        'title': _str(e['content']) ?? '',
-        'status': switch (e['status']) {
-          'in_progress' => 'in_progress',
-          'completed' => 'done',
-          _ => 'todo',
-        },
-        'notes': '',
+(ActionCall, ToolResult) acpPlanEvents(List<Object?> entries, {required String id}) => taskListEvents([
+  for (final e in entries.whereType<Map<String, Object?>>())
+    {
+      'title': _str(e['content']) ?? '',
+      'status': switch (e['status']) {
+        'in_progress' => 'in_progress',
+        'completed' => 'done',
+        _ => 'todo',
       },
-  ];
-  const name = '${acpToolPrefix}plan';
-  return (
-    actionEvent(id: id, toolName: name, kind: 'TaskTrackerAction', args: {'command': 'plan', 'task_list': tasks}),
-    resultEvent(id: '$id-r', actionId: id, toolName: name, text: 'Plan updated.'),
-  );
-}
+      'notes': '',
+    },
+], id: id);
+
+/// A task list (`{title, status: todo|in_progress|done, notes}` each) as a
+/// task-tracker call named [toolName], plus its result.
+(ActionCall, ToolResult) taskListEvents(
+  List<Map<String, Object?>> tasks, {
+  required String id,
+  String toolName = '${acpToolPrefix}plan',
+}) => (
+  actionEvent(id: id, toolName: toolName, kind: 'TaskTrackerAction', args: {'command': 'plan', 'task_list': tasks}),
+  resultEvent(id: '$id-r', actionId: id, toolName: toolName, text: 'Plan updated.'),
+);
 
 /// The agent's reply, flushed from its chunks.
 ChatMessage agentMessageEvent(String id, String text, {String reasoning = ''}) => HarnessEvent.decode({

@@ -16,7 +16,7 @@ import 'acp_files.dart';
 // Agents without logic of their own are [AcpAgent.generic] plus data.
 
 /// The agents with logic of their own; anything else is [generic].
-enum AcpAgent { gemini, openCode, qwen, kiro, generic }
+enum AcpAgent { gemini, openCode, qwen, kiro, cursor, generic }
 
 /// How to run one ACP agent so every risky call comes to the app as a
 /// `session/request_permission`.
@@ -38,6 +38,7 @@ final class AcpProfile {
     this.needsConsent = false,
     this.configPins = const {},
     this.notThis,
+    this.alsoNamed = const [],
   });
 
   final AcpAgent agent;
@@ -90,6 +91,10 @@ final class AcpProfile {
   /// program of the same name, and what to tell the user then.
   final ({String line, String problem})? notThis;
 
+  /// Other names the same CLI installs under, looked up on PATH in order
+  /// when the command's own name isn't found.
+  final List<String> alsoNamed;
+
   /// How the session's briefing reaches it (`drivers/briefing/recipes.dart`).
   Delivery deliver(BriefingInput i, List<({String name, String description})> skills) => switch (agent) {
     AcpAgent.gemini => recipes.gemini(i, skills: skills),
@@ -124,6 +129,7 @@ final class AcpProfile {
       AcpAgent.gemini => geminiSignedIn(env: env),
       AcpAgent.openCode => openCodeSignedIn(executable),
       AcpAgent.kiro => kiroSignedIn(executable),
+      AcpAgent.cursor => cursorSignedIn(),
       _ => null,
     };
   }
@@ -161,6 +167,17 @@ bool? kiroSignedInFrom(int code, String stdout) {
   if (code == 0) return true;
   return stdout.contains('"account":null') ? false : null;
 }
+
+/// Whether `security find-generic-password -s cursor-access-token -a
+/// cursor-user` (attributes only, never the secret) exiting with [code]
+/// means Cursor CLI is signed in: 0 found the entry, 44 found none, anything
+/// else is unknown (null).
+// The entry's name is from T3 Code (MIT), packages/provider-cursor/src/server/CursorKeychain.ts.
+bool? cursorSignedInFrom(int code) => switch (code) {
+  0 => true,
+  44 => false,
+  _ => null,
+};
 
 const _asks = {DriverCap.approvals, DriverCap.perCallApprovals};
 const _shared = {DriverCap.resume, ..._asks};
@@ -385,6 +402,29 @@ const _droid = AcpProfile._(
   keyEnv: ['FACTORY_API_KEY'],
 );
 
+// Cursor CLI (cursor.com/docs/cli/acp): `agent acp`, installed as both
+// `cursor-agent` and `agent`; the unambiguous name is looked for first.
+// Never its `ask` mode: that is read-only Q&A, while the app's Ask still
+// edits after approval, so every app mode but Plan pins `agent` and Cursor's
+// permission requests carry the approvals. Its question, plan, to-do and
+// subagent requests are `cursor/*` extensions (`acp_cursor.dart`). Consent:
+// Cursor documents ACP for custom clients, but its terms weren't read.
+const _cursor = AcpProfile._(
+  agent: AcpAgent.cursor,
+  pinned: [
+    ['acp'],
+  ],
+  // Its headless skip-approval flags.
+  dropped: ['--force', '--yolo', '-f'],
+  caps: {..._shared, DriverCap.mcp, DriverCap.switchModel, DriverCap.subagents},
+  askMode: 'agent',
+  planMode: 'plan',
+  signIn: 'Run `agent login` in a terminal',
+  keyEnv: ['CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'],
+  needsConsent: true,
+  alsoNamed: ['cursor-agent', 'agent'],
+);
+
 /// `<name> version: v1.2.3`: how the same-named AWS Copilot CLI and pressly's
 /// goose print their version, unlike the agents.
 const _otherCli = r'^\S+ version: v\d';
@@ -405,6 +445,7 @@ AcpProfile acpProfileOf(String executable) => switch (executable.split('/').last
   'vibe-acp' => _vibe,
   'auggie' => _auggie,
   'droid' => _droid,
+  'cursor-agent' || 'agent' => _cursor,
   _ => _generic,
 };
 

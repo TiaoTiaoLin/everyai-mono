@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/every_icons.dart';
+import '../../../chat/ui/chat_markdown.dart';
 import '../../domain/transcript.dart';
 
 final _mono = EveryType.resolve().caption.mono.copyWith(height: 1.4);
@@ -104,6 +105,7 @@ class _PlanCardState extends State<PlanCard> {
             const SizedBox(height: 6),
             Text(plan.summary, style: theme.type.callout.copyWith(color: theme.textMuted, height: 1.4)),
           ],
+          if (plan.body.trim().isNotEmpty) ...[const SizedBox(height: 8), ChatMarkdown(plan.body.trim())],
           const SizedBox(height: 10),
           for (final (i, step) in steps.indexed)
             Padding(

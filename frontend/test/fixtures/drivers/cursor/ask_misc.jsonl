@@ -1,0 +1,11 @@
+// Derived from Cursor's ACP doc (cursor.com/docs/cli/acp, read 2026-11-04), not recorded: unverified against a real `agent acp`.
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "everyai", "title": "EveryAI", "version": "0.1.0"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "authMethods": [{"id": "cursor_login", "name": "Cursor Login", "description": "Run `agent login` in a terminal"}], "agentCapabilities": {"loadSession": true, "promptCapabilities": {"embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/new", "id": 2, "params": {"cwd": "{{cwd}}", "mcpServers": [{"type": "http", "name": "everyai", "url": "http://127.0.0.1:7777/mcp", "headers": [{"name": "Authorization", "value": "Bearer tok-cursor"}]}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "cur-1"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/prompt", "id": 3, "params": {"sessionId": "cur-1", "prompt": [{"type": "text", "text": "go"}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": "q1", "method": "_cursor/ask_question", "params": {"sessionId": "cur-1", "toolCallId": "ask-5", "questions": [{"id": "q0", "prompt": "Q0?", "options": [{"id": "y", "label": "Yes"}]}, {"id": "q1", "prompt": "Q1?", "options": [{"id": "y", "label": "Yes"}]}, {"id": "q2", "prompt": "Q2?", "options": [{"id": "y", "label": "Yes"}]}, {"id": "q3", "prompt": "Q3?", "options": [{"id": "y", "label": "Yes"}]}, {"id": "q4", "prompt": "Q4?", "options": [{"id": "y", "label": "Yes"}]}]}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": "q1", "result": {"outcome": {"outcome": "skipped", "reason": "The app shows at most 4 questions at a time; ask again with 4 or fewer."}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": "g1", "method": "cursor/generate_image", "params": {"sessionId": "cur-1", "toolCallId": "img-1", "prompt": "a cat"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": "g1", "result": {"outcome": {"outcome": "cancelled"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}

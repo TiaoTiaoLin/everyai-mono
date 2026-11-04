@@ -102,7 +102,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   @override
   Future<DriverStatus> detect() async {
-    final s = await detectCli(resolved.executable, which: which);
+    final s = await detectCli(resolved.executable, which: (_) => _find());
     if (!s.installed || s.path == null) return s;
     final signed = await (signedIn ?? () => resolved.profile.signedIn(s.path!))();
     final hint = resolved.profile.signIn.isEmpty ? 'Sign in to it in a terminal' : resolved.profile.signIn;
@@ -148,8 +148,19 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     });
   }
 
+  /// The executable's path: its own name, else the other names the CLI
+  /// installs under ([AcpProfile.alsoNamed]).
+  Future<String?> _find() async {
+    final find = which ?? whichCommand;
+    final exe = resolved.executable;
+    for (final name in {exe, if (!exe.contains('/')) ...resolved.profile.alsoNamed}) {
+      if (await find(name) case final path?) return path;
+    }
+    return null;
+  }
+
   Future<String> _executable() async {
-    final path = await (which ?? whichCommand)(resolved.executable);
+    final path = await _find();
     if (path == null) throw HarnessError("$label isn't installed: `${resolved.executable}` wasn't found on your PATH.");
     return path;
   }

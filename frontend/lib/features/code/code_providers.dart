@@ -642,13 +642,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (!keepCurrent) {
       if (tokens.remove(id) case final old?) await host.revoke(old);
     }
-    final token = await host.mint(
-      id,
-      _HostForward(
-        () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
-        ready ?? Future<void>.value(),
-      ),
+    final forward = _HostForward(
+      () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
+      ready ?? Future<void>.value(),
     );
+    final token = await host.mint(id, forward);
     try {
       final export = await _exportBriefing(
         id,
@@ -663,6 +661,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         mcpToken: token.token,
         skillDir: export.skillDir,
         sessionSkill: export.text,
+        host: forward,
       );
     } on Object {
       await host.revoke(token.token);

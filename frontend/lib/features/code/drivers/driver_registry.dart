@@ -41,12 +41,14 @@ final class DriverRegistry {
   }
 
   /// The id of the listed ACP driver that runs the same program as
-  /// [command], whose consent an `acp:<command>` shares.
+  /// [command] (by any of its names), whose consent an `acp:<command>` shares.
   static String? _listedFor(Map<String, HarnessDriver> fixed, String command) {
     final exe = acpCommand(command, const []).executable.split('/').last;
     return [
       for (final MapEntry(:key, :value) in fixed.entries)
-        if (value is AcpDriver && value.resolved.executable.split('/').last == exe) key,
+        if (value is AcpDriver &&
+            {value.resolved.executable.split('/').last, ...value.resolved.profile.alsoNamed}.contains(exe))
+          key,
     ].firstOrNull;
   }
 
@@ -84,6 +86,7 @@ const _acpAgents = [
   ('mistral-vibe', 'Mistral Vibe', 'vibe-acp', 'uv tool install mistral-vibe'),
   ('auggie', 'Auggie', 'auggie', 'npm i -g @augmentcode/auggie'),
   ('factory-droid', 'Factory Droid', 'droid', 'npm i -g droid'),
+  ('cursor', 'Cursor CLI', 'cursor-agent', 'curl https://cursor.com/install -fsS | bash'),
 ];
 
 /// Whether each listed driver can run here, by id; looked up once and kept

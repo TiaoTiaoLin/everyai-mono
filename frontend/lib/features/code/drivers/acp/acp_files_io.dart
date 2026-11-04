@@ -6,7 +6,7 @@ import 'dart:io';
 
 import '../../../skills/domain/skill_format.dart' show parseFrontMatter;
 import '../../harness/everyai/shell_io.dart' show ShellEnv;
-import 'acp_agents.dart' show kiroSignedInFrom;
+import 'acp_agents.dart' show cursorSignedInFrom, kiroSignedInFrom;
 
 Future<Map<String, Object?>?> readJsonFile(String path) async {
   try {
@@ -131,6 +131,19 @@ Future<bool?> openCodeSignedIn(String executable) async {
 Future<bool?> kiroSignedIn(String executable) async {
   final out = await _status(executable, const ['whoami', '--format', 'json']);
   return out == null ? null : kiroSignedInFrom(out.code, out.stdout);
+}
+
+Future<bool?> cursorSignedIn() async {
+  if (!Platform.isMacOS) return null;
+  // Without -w or -g, `security` prints the entry's attributes, never its secret.
+  final out = await _status('/usr/bin/security', const [
+    'find-generic-password',
+    '-s',
+    'cursor-access-token',
+    '-a',
+    'cursor-user',
+  ]);
+  return out == null ? null : cursorSignedInFrom(out.code);
 }
 
 /// [executable] [args]'s exit code and output, or null when it can't run or

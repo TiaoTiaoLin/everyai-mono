@@ -39,6 +39,11 @@ Future<bool?> openCodeSignedIn(String executable) => impl.openCodeSignedIn(execu
 /// call; read by `kiroSignedInFrom` in `acp_agents.dart`).
 Future<bool?> kiroSignedIn(String executable) => impl.kiroSignedIn(executable);
 
+/// Whether Cursor CLI has a sign-in in the macOS keychain (the entry's
+/// presence only, read by `cursorSignedInFrom` in `acp_agents.dart`); null
+/// elsewhere.
+Future<bool?> cursorSignedIn() => impl.cursorSignedIn();
+
 /// Why Kiro CLI must not start in [cwd], or null: the project's
 /// `.kiro/agents/` (agent configs offered as its modes, which can pre-allow
 /// tools and run hooks) or `.kiro/settings/mcp.json`.
