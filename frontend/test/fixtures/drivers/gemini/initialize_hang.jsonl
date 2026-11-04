@@ -1,0 +1,3 @@
+// Recorded from gemini 0.33.2 `gemini --acp` (2026-11-04): it never answered initialize (a stale Google sign-in);
+// the recording ended by killing it, so the eof line is left out.
+{"dir":"out","msg":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"}}}}
