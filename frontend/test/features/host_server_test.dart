@@ -50,6 +50,7 @@ final class _FakeTools implements HostTools {
   Future<HostResult> call(HostCall call) {
     calls.add(call);
     if (call.name == 'memory') return Future.value((text: 'saved: ${call.args['text']}', isError: false));
+    if (call.name == 'fork') return Future.value((text: 'Started fork f1.', isError: false));
     final c = held[call.id] = Completer();
     if (_waiting.isNotEmpty) {
       _waiting.removeAt(0).complete(call);
@@ -129,13 +130,36 @@ void main() {
       'headers': {'Authorization': 'Bearer ${tok.token}'},
     });
     addTearDown(c.close);
-    expect([for (final t in c.tools) t['name']], ['ask_user_question', 'present_plan', 'memory', 'saved_plans']);
+    expect([for (final t in c.tools) t['name']], [
+      'ask_user_question',
+      'present_plan',
+      'memory',
+      'saved_plans',
+      'fork',
+      'check_forks',
+      'answer_fork',
+      'stop_fork',
+    ]);
     expect(c.tools.first['description'], contains('come back as the result of this call'));
     expect(c.tools.first['inputSchema'], isA<Map<String, Object?>>());
     final out = await c.call('memory', {'action': 'add', 'text': '- run make'});
     expect(out.text, 'saved: - run make');
     expect(out.isError, isFalse);
     expect(tools.calls.single.sessionId, 's1');
+  });
+
+  test('a fork call reaches the session and returns at once, with no held timer', () async {
+    final c = await McpConnection.open('everyai', {
+      'url': '${tok.url}',
+      'headers': {'Authorization': 'Bearer ${tok.token}'},
+    });
+    addTearDown(c.close);
+    final fork = c.tools.firstWhere((t) => t['name'] == 'fork');
+    expect((fork['inputSchema']! as Map)['required'], ['task']);
+    final out = await c.call('fork', {'task': 'Add the settings page', 'worktree': true});
+    expect(out.text, 'Started fork f1.');
+    expect(tools.calls.single.args, {'task': 'Add the settings page', 'worktree': true});
+    expect(timers.where((t) => t.after == held), isEmpty);
   });
 
   test('bug_check is listed and callable only for a Bug fix session', () async {
@@ -282,7 +306,7 @@ void main() {
       final list = resultOf(r);
       expect(list['resultType'], 'complete');
       expect(list['ttlMs'], isA<int>());
-      expect((list['tools'] as List).length, 4);
+      expect((list['tools'] as List).length, 8);
     });
 
     test('a tools/call names the tool in Mcp-Name, base64 too', () async {

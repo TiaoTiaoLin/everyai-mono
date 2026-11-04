@@ -76,6 +76,7 @@ import 'harness/harness.dart';
 import 'harness/session_processes.dart';
 import 'harness/summarizer.dart';
 import 'host/host.dart';
+import 'host/host_max_tools.dart';
 import 'host/host_notes.dart';
 import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
@@ -186,6 +187,7 @@ const _hostToolInfos = <HostToolInfo>[
         'user stated, pitfalls and their fixes.',
   ),
   (name: savedPlansTool, when: 'the task continues earlier work: list and read the plans the user approved before.'),
+  ...maxHostToolInfos,
 ];
 
 /// Ends the outside CLIs and the MCP host when the app quits (provider
@@ -1028,18 +1030,41 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     bool fork = false,
     ForkCopy? forkCopy,
     List<String>? researchSites,
+    String? harness,
+    bool briefed = false,
   }) async {
     model ??= parent.model;
     effort ??= parent.effort;
+    harness ??= parent.harness;
     final id = const Uuid().v7();
     projectDir ??=
         ref.read(codeProjectsProvider).where((p) => p.id == parent.projectId).firstOrNull?.path ?? parent.workingDir;
     workingDir ??= forkCopy?.path ?? parent.workingDir;
-    final harness = await harnessFor(ref, parent.workingDir, harness: parent.harness);
+    final runner = await harnessFor(ref, parent.workingDir, harness: harness);
     // A driver that can't fork can't start one from the parent's history yet.
-    if (harness case final HarnessDriver d when fork && !d.caps.contains(DriverCap.fork)) throw forkUnavailable(d.info);
-    Future<HarnessSession> begin(SessionSpec spec) =>
-        (fork ? forkSession(harness, parent.conversationId, spec) : null) ?? harness.start(spec);
+    if (runner case final HarnessDriver d when fork && !d.caps.contains(DriverCap.fork)) throw forkUnavailable(d.info);
+    // A briefed outside child gets its own host token, so it can ask (a Max fork's question reaches its lead).
+    final saved = Completer<void>();
+    final driver = briefed && runner is HarnessDriver && isOutsideLead(harness, workingDir) ? runner : null;
+    final briefing = driver == null
+        ? null
+        : await _brief(
+            id,
+            projectDir: projectDir,
+            workingDir: workingDir,
+            driver: driver,
+            model: model,
+            ready: saved.future,
+          );
+    Future<HarnessSession> begin(SessionSpec spec) async {
+      try {
+        return await ((fork ? forkSession(runner, parent.conversationId, spec) : null) ?? runner.start(spec));
+      } on Object {
+        if (briefing != null) await _unbrief(id);
+        rethrow;
+      }
+    }
+
     final live = await begin(
       await specFor(
         isolated: workingDir != parent.workingDir || parent.worktree != null,
@@ -1060,8 +1085,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         // The parent's, so a fork's prompt (and cache) matches it.
         tier: parent.tier,
         researchSites: researchSites,
-        // The child isn't saved yet, so its harness (the parent's) can't be looked up by id.
-        harness: parent.harness,
+        // The child isn't saved yet, so its harness can't be looked up by id.
+        harness: harness,
+        briefing: briefing,
       ),
     );
     ref.read(_liveProvider)[id] = live;
@@ -1075,7 +1101,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       workingDir: workingDir,
       createdAt: DateTime.now(),
       branch: parent.branch,
-      harness: parent.harness,
+      harness: harness,
       effort: effort,
       parentId: parent.id,
       parentCallId: callId,
@@ -1085,6 +1111,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     );
     state = [...state, info];
     _save();
+    saved.complete();
     return info;
   }
 
@@ -1366,7 +1393,9 @@ final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeS
   CodeSessionController.new,
 );
 
-final class CodeSessionController extends Notifier<CodeSessionState> with _SessionBuiltins implements HostTools {
+final class CodeSessionController extends Notifier<CodeSessionState>
+    with _SessionBuiltins
+    implements HostTools, HostForks {
   CodeSessionController(this.sessionId);
   @override
   final String sessionId;
@@ -1509,11 +1538,14 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
           }),
         );
         _bindHostWaits();
+        _childHostWait();
         return wait.done.future;
       case 'memory':
         return hostMemory(dir, call.args);
       case savedPlansTool:
         return hostSavedPlans(dir, call.args);
+      case _ when maxHostTools.contains(call.name):
+        return maxHostCall(this, call);
       case bugCheckTool:
         return (text: "Error: bug_check is for Bug fix mode, which this session isn't in.", isError: true);
       default:
@@ -1854,7 +1886,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (!_mirror.isClosed) _mirror.add(event);
     final transcript = _builder.snapshot;
     state = state.copyWith(transcript: transcript);
-    if (_hostWaits.isNotEmpty) _bindHostWaits();
+    if (_hostWaits.isNotEmpty) {
+      _bindHostWaits();
+      _childHostWait();
+    }
     // An answer goes with its call's result, and the rest when the run ends.
     // Not when the batch moves on: a driver that runs each call once it is
     // allowed (OpenCode) can ask about the next one while the first still
@@ -1884,6 +1919,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _syncSubagents();
     _syncForkTools();
     _deliver();
+    _sendForkNotices();
     _goalTick(turnEnded: wasRunning && !transcript.running);
     _sendQueued();
     if (_live && event is ConversationFailure) {
@@ -3216,9 +3252,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final pending = state.transcript.pending;
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     // A subagent tells the session that started it, which carries on without it.
+    // Through the container: the parent listens to this session, so a ref read of it would be a dependency loop.
     if (info?.parentId case final parent?) {
-      if (ref.exists(codeSessionProvider(parent))) {
-        ref.read(codeSessionProvider(parent).notifier).subagentStopped(sessionId, stoppedReport(state.transcript));
+      if (ref.container.exists(codeSessionProvider(parent))) {
+        ref.container
+            .read(codeSessionProvider(parent).notifier)
+            .subagentStopped(sessionId, stoppedReport(state.transcript));
       }
     }
     if (pending.isNotEmpty || state.transcript.held.any(isTaskCall)) {
@@ -3336,7 +3375,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (outcome?.status == SubagentStatus.failed && _retryOnParentModel(callId, outcome!)) return;
     if (outcome != null) return _finishChild(callId, outcome);
     final question = child.transcript.openQuestion;
-    final asked = question != null && child.transcript.held.any((c) => c.id == question.call.id);
+    final kid = _childOf[callId]!;
+    // Held by the EveryAI harness, or (an outside fork) waiting on its host call.
+    final asked =
+        question != null &&
+        (child.transcript.held.any((c) => c.id == question.call.id) ||
+            (ref.exists(codeSessionProvider(kid)) &&
+                ref.read(codeSessionProvider(kid).notifier).waitsOnHost(question.call.id)));
     if (asked && _forwarded.add(question.call.id)) _forwardQuestion(callId, question);
     // A question is the orchestrator's to answer; only approvals need the user.
     final waiting = child.status == SessionStatus.needsInput && !asked;
@@ -3621,7 +3666,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       _childWaiting.remove(callId);
       state = state.copyWith(subagentNeedsInput: _childWaiting.isNotEmpty);
       // While the agent works this joins its next step; when idle it wakes it.
-      unawaited(_session?.send(taskNotification(bg.childId, bg.title, report)).catchError((Object _) {}));
+      _notifyLead(taskNotification(bg.childId, bg.title, report));
       return;
     }
     _reports[callId] = report;
@@ -3659,7 +3704,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         ),
     ]);
     if (_background.containsKey(callId)) {
-      unawaited(_session?.send(forkQuestionMessage(childId, title, text)).catchError((Object _) {}));
+      _notifyLead(forkQuestionMessage(childId, title, text));
       return;
     }
     for (final MapEntry<String, String>(key: id, value: kid) in [..._childOf.entries]) {
@@ -3669,6 +3714,154 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       _reports[id] = id == callId ? forkAsks(kid, t, text) : movedToBackground(kid);
     }
     _deliver();
+  }
+
+  // ------------------------------------------------ Max forks over the host
+
+  /// Background fork reports and questions for an outside lead that was busy
+  /// (an ACP prompt sent mid-turn can fail), sent together once it is idle.
+  final _forkNotices = <String>[];
+
+  /// Sends [text] (a background fork's report or question) to this agent: at
+  /// once on the EveryAI harness, which takes it into its next step; an
+  /// outside lead gets it when its turn ends.
+  void _notifyLead(String text) {
+    if (!_onOutsideLead) {
+      unawaited(_session?.send(text).catchError((Object _) {}));
+      return;
+    }
+    _forkNotices.add(text);
+    _sendForkNotices();
+  }
+
+  /// Not through [send]: that would close the lead's own open cards. A
+  /// queued message of the user's goes first; the notices follow its turn.
+  void _sendForkNotices() {
+    final t = state.transcript;
+    final session = _session;
+    if (_forkNotices.isEmpty || session == null || t.running || t.pending.isNotEmpty || state.queued.isNotEmpty) {
+      return;
+    }
+    final text = _forkNotices.join('\n\n');
+    _forkNotices.clear();
+    unawaited(session.send(text).catchError((Object _) {}));
+  }
+
+  /// Whether this session's question card [rowId] waits on its agent's host call.
+  bool waitsOnHost(String rowId) => _hostFor(rowId) != null;
+
+  /// A host call of this child session found its card: its parent may now
+  /// pass the question on (the card can come before the call).
+  void _childHostWait() {
+    final parentId = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.parentId;
+    // Through the container, as in [stop]: the parent listens to this session.
+    if (parentId == null || !ref.container.exists(codeSessionProvider(parentId))) return;
+    final parent = ref.container.read(codeSessionProvider(parentId).notifier);
+    final callId = parent._childOf.entries.where((e) => e.value == sessionId).firstOrNull?.key;
+    if (callId != null) parent._onSubagent(callId, state);
+  }
+
+  /// The `fork` host tool (the Max approach on an outside lead): a fresh
+  /// background child on this session's harness, or another the user lets
+  /// the app run, in its own worktree when asked. It returns at once; the
+  /// report and any question come as background notices. A fork on the
+  /// EveryAI harness would spend EveryAI's credits, so an outside lead can't.
+  @override
+  Future<HostResult> startFork(HostCall call) async {
+    HostResult no(String text) => (text: text.startsWith('Error') ? text : 'Error: $text', isError: true);
+    String str(String key) => call.args[key] is String ? (call.args[key]! as String).trim() : '';
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (info == null) return no('this session is closed.');
+    if (info.parentId != null) return no("a fork can't start forks. Do this part yourself.");
+    final task = str('task');
+    if (task.isEmpty) return no('task is empty. Say in full what the fork should do.');
+    if (_childOf.length + _spawning.length >= maxConcurrentSubagents) {
+      return no(
+        'at most $maxConcurrentSubagents forks run at once. Start this one once another has reported '
+        '(check_forks lists them).',
+      );
+    }
+    final registry = ref.read(driverRegistryProvider);
+    final lead = registry.resolve(info.harness)?.info.label ?? info.harness;
+    final harness = str('harness').isEmpty ? info.harness : str('harness');
+    if (isOutsideLead(info.harness, info.workingDir) && !isOutsideLead(harness, info.workingDir)) {
+      return no(forkOnEveryaiOff(lead));
+    }
+    final driver = registry.resolve(harness);
+    if (driver == null) return no('there is no harness called "$harness". Leave out harness to fork on $lead.');
+    final label = driver.info.label;
+    if (harness != info.harness) {
+      if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) return no(why);
+      final status = await driver.detect();
+      if (!status.installed) return no("$label isn't installed on this computer. Leave out harness to fork on $lead.");
+    }
+    // A model id means nothing on another CLI: its default unless that CLI lists the one asked for.
+    var model = str('model');
+    if (model.isEmpty) {
+      model = harness == info.harness ? info.model : '';
+    } else {
+      List<DriverModel> listed;
+      try {
+        listed = await driver.models();
+      } on Object {
+        listed = const [];
+      }
+      if (listed.isNotEmpty && !listed.any((m) => m.id == model)) {
+        return no('$label has no model "$model". It has: ${listed.map((m) => m.id).join(', ')}.');
+      }
+    }
+    final title = str('title').isEmpty ? CodeSessions.titleFor(task) : str('title');
+    // Its own id, not the host call's (which repeats after a restart).
+    final callId = 'mf-${const Uuid().v7()}';
+    _spawning.add(callId);
+    try {
+      final isolate = call.args['worktree'] is bool
+          ? call.args['worktree']! as bool
+          : ref.read(codeSettingsProvider).forksIsolated;
+      ForkCopy? copy;
+      if (isolate) {
+        try {
+          copy = await GitService.forkCopy(
+            info.workingDir,
+            worktreesDir: '${await ref.read(driverDataDirProvider)()}/forks',
+            slug: sessionSlug(title, const Uuid().v7()),
+          );
+        } on Object {
+          copy = null; // Shares the folder instead.
+        }
+      }
+      final child = await sessions.startChild(
+        parent: info,
+        title: title,
+        brief: hostForkBrief(SubagentTask(description: title, prompt: task)),
+        mode: subagentMode(state.mode),
+        callId: callId,
+        harness: harness,
+        model: model,
+        effort: harness == info.harness ? null : '',
+        forkCopy: copy,
+        briefed: true,
+      );
+      if (!ref.mounted || _abandoned.remove(callId)) {
+        unawaited(ref.read(_liveProvider)[child.id]?.interrupt());
+        return no('the session stopped before the fork started.');
+      }
+      _background[callId] = (childId: child.id, title: child.title);
+      _watch(callId, child.id);
+      return (
+        text:
+            'Started fork ${child.id} ("$title") on $label${model.isEmpty ? '' : ', $model'}'
+            '${copy == null ? '' : ', in its own worktree'}. Its report arrives as a <task-notification>; carry on '
+            'with other work meanwhile, and leave the files it works on alone.'
+            '${isolate && copy == null ? '\n$sharedFolderNote' : ''}',
+        isError: false,
+      );
+    } on Object catch (e) {
+      return no("the fork couldn't start: $e");
+    } finally {
+      _spawning.remove(callId);
+    }
   }
 
   /// Answers the orchestrator's check_forks / answer_fork / stop_fork calls.
@@ -3696,16 +3889,20 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     for (final MapEntry(key: callId, value: childId) in _childOf.entries) childId: callId,
   };
 
-  Future<String> _forkTool(ActionCall call) async {
+  Future<String> _forkTool(ActionCall call) => forkTool(call.toolName, call.action);
+
+  @override
+  Future<String> forkTool(String name, Map<String, Object?> args) async {
     final sessions = ref.read(codeSessionsProvider.notifier);
-    final forkId = call.str('fork_id').trim();
-    switch (call.toolName) {
+    String str(String key) => args[key] is String ? args[key]! as String : '';
+    final forkId = str('fork_id').trim();
+    switch (name) {
       case checkForksTool:
         if (_activeForks.isEmpty) return 'No forks are running. Every fork you started has reported.';
         return [for (final id in _activeForks.keys) _forkStatus(id)].join('\n\n');
       case answerForkTool:
         if (!_activeForks.containsKey(forkId)) return _noSuchFork(forkId);
-        final ok = await ref.read(codeSessionProvider(forkId).notifier).answerFromOrchestrator(call.str('answer'));
+        final ok = await ref.read(codeSessionProvider(forkId).notifier).answerFromOrchestrator(str('answer'));
         return ok
             ? 'Sent. The fork carries on; its report arrives as a <task-notification>.'
             : 'That fork has no open question now (it may have been answered in its own view).';
@@ -3715,7 +3912,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         await ref.read(codeSessionProvider(forkId).notifier).stop();
         return 'Stopped "$title". What it did so far arrives as its report.';
     }
-    return 'Error: unknown tool ${call.toolName}.';
+    return 'Error: unknown tool $name.';
   }
 
   static String _noSuchFork(String id) => 'Error: no running fork has id "$id". check_forks lists them.';
@@ -3762,6 +3959,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// The orchestrator answers this fork's open question.
   Future<bool> answerFromOrchestrator(String answer) async {
     final item = state.transcript.openQuestion;
+    // An outside fork asked through the host: the answer is its call's result.
+    if (item != null) {
+      if (_hostFor(item.call.id) case final wait?) {
+        _answerHost(wait, forkAnswerReason(answer));
+        return true;
+      }
+    }
     final session = _session;
     if (item == null || session == null || !_isHeld(item.call)) return false;
     _markDecided([item.call.id], accept: false);

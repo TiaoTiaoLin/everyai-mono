@@ -12,6 +12,7 @@ import '../domain/agent_mode.dart' show askUserQuestionTool, clientToolSpecs, pr
 import '../domain/phases.dart' show bugCheckSpec, bugCheckTool;
 import '../harness/everyai/project_notes_io.dart' show memoryToolSpec;
 import 'host.dart';
+import 'host_max_tools.dart' show maxForkSpecs;
 
 // MCP over Streamable HTTP, tools only, stateless (no Mcp-Session-Id), on
 // one endpoint that speaks both eras the spec defines:
@@ -30,12 +31,14 @@ const _metaVersion = 'io.modelcontextprotocol/protocolVersion';
 const _maxBody = 4 << 20;
 
 /// `ask_user_question` and `present_plan` with the held wording (the answer
-/// is the call's result), then memory, saved plans and bug_check.
+/// is the call's result), then memory, saved plans, the Max fork tools and
+/// bug_check.
 final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   for (final name in [askUserQuestionTool, presentPlanTool])
     _mcpTool(clientToolSpecs(held: true).firstWhere((s) => s['name'] == name)),
   _mcpTool(memoryToolSpec),
   savedPlansSpec,
+  for (final s in maxForkSpecs) _mcpTool(s),
   // It runs the agent's repro command, so a client must not auto-allow it as harmless.
   {
     ..._mcpTool(bugCheckSpec),

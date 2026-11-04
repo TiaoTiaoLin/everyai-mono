@@ -12,7 +12,7 @@ void main() {
 
   test('the bundled skills pass the strict validator', () async {
     final skills = await loadBuiltinSkills();
-    expect(skills.map((s) => s.name), ['draw-diagram', 'make-deck', 'vector-art', 'write-artifact']);
+    expect(skills.map((s) => s.name), ['draw-diagram', 'everyai-max', 'make-deck', 'vector-art', 'write-artifact']);
     for (final s in skills) {
       final md = utf8.decode(s.files['SKILL.md']!);
       final check = checkSkill(
@@ -33,6 +33,17 @@ void main() {
     }
   });
 
+  test('the Max approach skill goes to outside harnesses and is Code-only in Chat', () async {
+    final max = (await loadBuiltinSkills()).singleWhere((s) => s.name == 'everyai-max');
+    final m = checkSkill(dirName: max.name, skillMd: utf8.decode(max.files['SKILL.md']!), entries: const []).manifest!;
+    // No metadata.tool: the briefing export ships it (tool skills are Chat's).
+    expect(m.metadata['tool'], isNull);
+    for (final tool in ['ask_user_question', 'present_plan', 'fork', 'check_forks', 'answer_fork', 'stop_fork']) {
+      expect(m.body, contains('`$tool`'), reason: tool);
+    }
+    expect(m.body, contains('run_subagent'));
+  });
+
   test('seeding installs once, respects removal and updates on a new digest', () async {
     final skills = await loadBuiltinSkills();
     final lib = await Directory.systemTemp.createTemp('builtin-skills');
@@ -42,7 +53,7 @@ void main() {
     await store.seedBuiltins(dir, skills);
     expect(File('$dir/make-deck/SKILL.md').existsSync(), isTrue);
     final scanned = await store.scan((library: dir, shared: null, projects: const []));
-    expect(scanned.where((s) => s.usable && s.source == SkillSource.library), hasLength(4));
+    expect(scanned.where((s) => s.usable && s.source == SkillSource.library), hasLength(5));
 
     // Removed by the user: stays removed.
     await store.delete('$dir/make-deck');
