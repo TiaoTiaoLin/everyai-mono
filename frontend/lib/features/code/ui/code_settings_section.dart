@@ -22,6 +22,7 @@ import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
 import '../drivers/driver.dart' show DriverStatus;
 import '../drivers/driver_registry.dart';
+import '../drivers/registry_install/ui/add_agent_list.dart' show AddAgentEntry;
 import '../permissions_providers.dart';
 import '../settings/setting_defs.dart';
 import '../settings/settings.dart' as files;
@@ -599,8 +600,8 @@ class HarnessesSetting extends ConsumerWidget {
                   const SizedBox(width: 8),
                   AdaptiveSwitch(
                     key: ValueKey('code-settings.own-cli.${d.info.id}'),
-                    value: own.contains(d.info.id),
-                    onChanged: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.id, v),
+                    value: own.contains(d.info.consentId),
+                    onChanged: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.consentId, v),
                   ),
                 ],
               ],
@@ -632,6 +633,8 @@ class HarnessesSetting extends ConsumerWidget {
             ],
           ],
         ),
+        const SizedBox(height: 8),
+        const AddAgentEntry(),
       ],
     );
   }

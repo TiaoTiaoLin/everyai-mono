@@ -35,6 +35,9 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     this.needsConsent = false,
     this.consentId,
     this.installHint,
+    this.profile,
+    this.prefix = const [],
+    this.knownVersion,
     this.which,
     Future<String> Function()? dataDir,
     AcpConnect? connect,
@@ -60,6 +63,18 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   /// How to install it, as one line ([DriverInfo.installHint]).
   final String? installHint;
+
+  /// Replaces the profile picked by [command]'s name (an ACP registry agent
+  /// keeps its own when it runs through `npx`).
+  final AcpProfile? profile;
+
+  /// Arguments before the profile's pinned ones (`-y <package>` for npx).
+  final List<String> prefix;
+
+  /// The version an ACP registry install put here. When set, [detect] only
+  /// looks the command up: nothing runs (no `--version`, no sign-in check
+  /// that runs it), and a missing runner reads as what to install.
+  final String? knownVersion;
 
   /// Replaces the PATH lookup in [detect] and at start (tests).
   final Future<String?> Function(String command)? which;
@@ -88,7 +103,10 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   var _tty = false;
 
   /// What runs: the executable, its arguments and its profile.
-  late final AcpCommand resolved = acpCommand(command, args);
+  late final AcpCommand resolved = acpCommand(command, args, profile: profile, prefix: prefix);
+
+  /// Whether a session of it is open in this app run.
+  bool get busy => _live.isNotEmpty;
 
   static Future<LineChannel> _spawn({
     required String executable,
@@ -156,6 +174,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   @override
   Future<DriverStatus> detect() async {
+    if (knownVersion case final version?) return _detectInstalled(version);
     final s = await detectCli(resolved.executable, which: (_) => _find());
     if (!s.installed || s.path == null) return s;
     final signed = await (signedIn ?? () => resolved.profile.signedIn(s.path!))();
@@ -171,6 +190,23 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
           acpVersionProblem(resolved.profile, label, s.version) ??
           (signed == false ? 'Not signed in. $hint.' : null),
     );
+  }
+
+  /// [detect] for an ACP registry agent: the lookup only.
+  Future<DriverStatus> _detectInstalled(String version) async {
+    final path = await _find();
+    if (path == null) {
+      return DriverStatus(
+        problem: switch (resolved.executable) {
+          'npx' => 'Needs Node.js',
+          'uvx' => 'Needs uv',
+          _ => 'Its files are gone. Install it again in Settings.',
+        },
+      );
+    }
+    final keys = resolved.profile.keyEnv;
+    final signed = await (signedIn ?? () async => await envHasAny(keys, env: await _loginEnv()) ? true : null)();
+    return DriverStatus(installed: true, path: path, version: version, signedIn: signed);
   }
 
   @override
@@ -207,7 +243,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   Future<String?> _find() async {
     final find = which ?? whichCommand;
     final exe = resolved.executable;
-    for (final name in {exe, if (!exe.contains('/')) ...resolved.profile.alsoNamed}) {
+    for (final name in {exe, if (!exe.contains('/') && knownVersion == null) ...resolved.profile.alsoNamed}) {
       if (await find(name) case final path?) return path;
     }
     return null;
