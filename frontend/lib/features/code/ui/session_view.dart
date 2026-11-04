@@ -22,6 +22,8 @@ import '../domain/permissions.dart';
 import '../domain/questions.dart';
 import '../domain/rewind.dart';
 import '../domain/transcript.dart';
+import '../drivers/driver_policy.dart' show fidelityNote;
+import '../drivers/driver_registry.dart';
 import '../harness/events.dart' show ExecutionStatus;
 import 'agent_menu.dart';
 import 'code_composer.dart';
@@ -75,8 +77,9 @@ class CodeSessionScreen extends ConsumerWidget {
         t.items.lastOrNull is AgentText &&
         t.items.whereType<UserTurn>().isNotEmpty;
 
-    // The live mode → tier → Model → Effort menu, in the composer.
+    // The live harness → mode → tier → Model → Effort menu, in the composer.
     Widget agentMenu() => AgentMenu(
+      harness: info.harness,
       model: info.model,
       effort: info.effort,
       tier: info.tier,
@@ -93,6 +96,12 @@ class CodeSessionScreen extends ConsumerWidget {
       ),
     );
 
+    // How far the mode holds on an outside lead, in one line under the bar.
+    final driver = isOutsideLead(info.harness, info.workingDir)
+        ? ref.read(driverRegistryProvider).resolve(info.harness)
+        : null;
+    final fidelity = driver == null ? null : fidelityNote(driver, state.mode);
+
     // The header drops chips by the width it really has (the sidebar and the
     // panes take some), so the title keeps room and nothing jumps into an
     // overflow menu.
@@ -103,6 +112,19 @@ class CodeSessionScreen extends ConsumerWidget {
           title: info.title,
           onBack: info.parentId == null ? null : () => context.go(Routes.codeSession(info.parentId!)),
           backTooltip: 'Back to the parent session',
+          header: fidelity == null
+              ? null
+              : Padding(
+                  key: const ValueKey('session.fidelity'),
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+                  child: Text(
+                    fidelity,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.type.caption.tint(theme.textMuted),
+                  ),
+                ),
           actions: [
             CodeTopBar(sessionId: sessionId),
             if (info.diffTarget != null && tier != TopBarTier.narrow) _ChangesButton(sessionId: sessionId),

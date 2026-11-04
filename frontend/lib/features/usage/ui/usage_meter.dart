@@ -188,6 +188,8 @@ class UsageBreakdown extends StatelessWidget {
             row('EveryAI credits', formatMicros(totals.chargedMicros)),
             row('On your own key', formatMicros(totals.ownKeyMicros)),
           ],
+          // What an outside CLI did on the user's own subscription, priced as the API would charge.
+          if (totals.planMicros > 0) row('On your plan', '${formatMicros(totals.planMicros)} at API prices'),
           row('Cost', formatMicros(totals.spentMicros), strong: true),
         ],
       ),

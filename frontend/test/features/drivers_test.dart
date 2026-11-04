@@ -279,4 +279,74 @@ void main() {
     await pumpEventQueue();
     await p.close();
   });
+
+  group('outside leads', () {
+    ActionCall mcp(String name) => actionEvent(id: 'a', toolName: name, kind: 'MCPToolAction');
+
+    test('host tool calls are known by name in every CLI\'s style', () {
+      for (final name in [
+        'mcp__everyai__ask_user_question',
+        'everyai__ask_user_question',
+        'everyai.ask_user_question',
+        'everyai/ask_user_question',
+      ]) {
+        expect(hostToolOf(mcp(name)), askUserQuestionTool, reason: name);
+      }
+      expect(hostToolOf(mcp('mcp__everyai__saved_plans')), 'saved_plans');
+      // Another server's tool, an unknown tool of ours, or a plain tool with our name are not ours.
+      expect(hostToolOf(mcp('mcp__github__ask_user_question')), isNull);
+      expect(hostToolOf(mcp('mcp__everyai__rm')), isNull);
+      expect(hostToolOf(actionEvent(id: 'a', toolName: 'everyai__memory', kind: 'TerminalAction')), isNull);
+      // The call's own arguments can't make a foreign tool ours.
+      final spoof = actionEvent(
+        id: 'a',
+        toolName: 'mcp__evil__x',
+        kind: 'MCPToolAction',
+        args: {'server': 'everyai', 'tool': 'memory'},
+      );
+      expect(hostToolOf(spoof), isNull);
+    });
+
+    test('a lead is blocked for the first reason in order', () {
+      const plain = DriverInfo(id: 'codex', label: 'Codex');
+      const paid = DriverInfo(id: 'claude-code', label: 'Claude Code', needsConsent: true);
+      String? b(DriverInfo i, DriverStatus? s, {bool consented = false}) => leadBlocked(i, s, consented: consented);
+      expect(b(const DriverInfo(id: 'everyai', label: 'EveryAI'), null), isNull);
+      expect(b(plain, null), 'Checking…');
+      expect(b(plain, const DriverStatus(installed: true, problem: notBuiltProblem)), 'Not built yet');
+      expect(b(plain, const DriverStatus()), 'Not installed');
+      expect(b(plain, const DriverStatus(installed: true, signedIn: false)), 'Not signed in');
+      expect(b(paid, const DriverStatus(installed: true, signedIn: true)), 'Turn on in Settings');
+      expect(b(paid, const DriverStatus(installed: true), consented: true), isNull);
+      expect(b(plain, const DriverStatus(installed: true, problem: 'Too old')), 'Too old');
+    });
+
+    test('the fidelity line says how far the mode holds', () {
+      expect(
+        fidelityNote(_Explaining(caps: const {DriverCap.approvals}), AgentMode.plan),
+        'Plan on X: enforced by its sandbox',
+      );
+      expect(
+        fidelityNote(_Explaining(caps: const {DriverCap.approvals}, how: null), AgentMode.ask),
+        'Ask on X: approvals only for what X asks about',
+      );
+      expect(fidelityNote(_Explaining(how: null), AgentMode.plan), 'Plan on X: not enforced, X acts without asking');
+      expect(fidelityNote(EveryAIDriver(FakeHarness()), AgentMode.plan), isNull);
+    });
+  });
+}
+
+final class _Explaining extends _Detecting implements ExplainsModes {
+  _Explaining({this.caps = const {}, this.how = 'enforced by its sandbox'})
+    : super('x', () async => const DriverStatus(installed: true));
+
+  @override
+  final Set<DriverCap> caps;
+  final String? how;
+
+  @override
+  DriverInfo get info => const DriverInfo(id: 'x', label: 'X');
+
+  @override
+  String? howEnforced(AgentMode mode) => how;
 }

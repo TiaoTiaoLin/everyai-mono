@@ -97,16 +97,21 @@ base class NoInstalledSkills extends InstalledSkills {
   Future<List<InstalledSkill>> build() async => const [];
 }
 
-/// The `agent_context.skills` for a new session in [projectId], read from
-/// disk now so a project skill changed since it was trusted stays out.
-Future<List<Map<String, Object?>>> codeSkillsFor(Ref ref, String? projectId) async {
+/// The skills a new Code session in [projectId] gets, read from disk now
+/// so a project skill changed since it was trusted stays out.
+Future<List<InstalledSkill>> codeInstalledSkillsFor(Ref ref, String? projectId) async {
   final projects = [
     for (final p in ref.read(codeProjectsProvider))
       if (p.id == projectId) (id: p.id, path: p.path),
   ];
   final all = await scanSkills(await skillRoots(projects));
-  return [for (final s in sessionSkills(all, ref.read(skillSettingsProvider), projectId)) openHandsSkill(s)];
+  return sessionSkills(all, ref.read(skillSettingsProvider), projectId);
 }
+
+/// [codeInstalledSkillsFor] as `agent_context.skills`.
+Future<List<Map<String, Object?>>> codeSkillsFor(Ref ref, String? projectId) async => [
+  for (final s in await codeInstalledSkillsFor(ref, projectId)) openHandsSkill(s),
+];
 
 /// The skills Chat offers (library and shared, active, sorted), from the
 /// last scan; empty until it finished. See [chatSkillsNow].

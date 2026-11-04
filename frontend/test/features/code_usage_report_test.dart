@@ -9,11 +9,31 @@ import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/harness/events.dart';
+import 'package:every_ai/core/theme/every_theme.dart';
+import 'package:every_ai/core/platform/platform_kind.dart';
+import 'package:every_ai/features/code/ui/code_top_bar.dart' show SessionMeter;
+import 'package:every_ai/features/models/domain/model_catalog.dart';
+import 'package:every_ai/features/models/models_providers.dart';
+import 'package:every_ai/features/usage/ui/usage_meter.dart' show UsageBreakdown;
 import 'package:every_ai/features/usage/usage_totals.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart' as m;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+
+class _FixedCatalog extends CatalogController {
+  @override
+  ModelCatalog build() => builtInCatalog;
+}
+
+Widget _host(Widget child) => m.MaterialApp(
+  home: EveryThemeScope(
+    theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
+    child: m.Scaffold(body: Center(child: child)),
+  ),
+);
 
 void main() {
   test('a usage report keeps its kind through the wire, so the mirror carries it', () {
@@ -148,8 +168,40 @@ void main() {
           .report(UsageReport.of(id: 'u1', input: 1000, output: 100, costMicros: 5000));
       expect(again.read(codeUsageProvider('s1')).requireValue.ownKeyMicros, 5000);
       // Removing the session drops what it kept.
-      again.read(codeSessionsProvider.notifier).remove('s1');
+      await again.read(codeSessionsProvider.notifier).remove('s1');
       expect(prefs.keysStartingWith(codeUsageReportsPrefix), isEmpty);
+    });
+  });
+
+  group('on your plan', () {
+    const plan = UsageTotals(calls: 2, promptTokens: 12000, completionTokens: 800, planMicros: 41000);
+
+    testWidgets('the meter says the session ran on the user\'s plan, with no spend', (tester) async {
+      final db = AppDatabase(NativeDatabase.memory());
+      late Preferences prefs;
+      await tester.runAsync(() async => prefs = await Preferences.load(db));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            preferencesProvider.overrideWithValue(prefs),
+            modelCatalogProvider.overrideWith(_FixedCatalog.new),
+            codeUsageProvider.overrideWithBuild((ref, n) async => plan),
+          ],
+          child: _host(const SessionMeter(sessionId: 's1', model: 'm')),
+        ),
+      );
+      await tester.pump();
+      expect(find.textContaining('on your plan'), findsOneWidget);
+      expect(find.textContaining(r'$'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(db.close);
+    });
+
+    testWidgets('the breakdown prices it at API rates, apart from the cost', (tester) async {
+      await tester.pumpWidget(_host(const UsageBreakdown(totals: plan, contextWindow: 0)));
+      expect(find.text('On your plan'), findsOneWidget);
+      expect(find.text(r'$0.04 at API prices'), findsOneWidget);
     });
   });
 }

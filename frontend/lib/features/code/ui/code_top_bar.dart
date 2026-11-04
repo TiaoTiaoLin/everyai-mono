@@ -268,9 +268,11 @@ class SessionMeter extends ConsumerWidget {
     final window = spec?.contextLength ?? 0;
     final fill = budgetFill(totals.chargedMicros, budget);
     final spent = formatMicros(totals.chargedMicros);
+    // An outside CLI on the user's own subscription: no spend to show.
+    final onPlan = totals.planMicros > 0 && totals.spentMicros == 0;
     final label = [
       if (!totals.isEmpty) formatTokens(totals.totalTokens),
-      budget == null ? spent : '$spent / ${formatMicros((budget * 1e6).round())}',
+      if (onPlan) 'on your plan' else budget == null ? spent : '$spent / ${formatMicros((budget * 1e6).round())}',
     ].join(' · ');
     final color = fill == null || fill < 0.8
         ? theme.textMuted

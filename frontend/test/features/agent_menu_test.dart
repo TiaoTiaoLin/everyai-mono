@@ -4,6 +4,7 @@ import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/core/ui/adaptive.dart';
 import 'package:every_ai/features/code/agent_models.dart';
 import 'package:every_ai/features/code/domain/agent_menu.dart';
+import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/ui/agent_menu.dart';
 import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:flutter/foundation.dart';
@@ -111,7 +112,7 @@ void main() {
         ),
       ),
     );
-    // Harness switching is stubbed out of the menu.
+    // Without leads to pick from there is no Harness row.
     expect(find.text('Harness'), findsNothing);
     expect(find.text('Harness mode'), findsOneWidget);
     expect(find.text('Opus 5.5 · Everyday · Orchestrator'), findsOneWidget);
@@ -257,5 +258,123 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('agent-menu.harness-mode.bugFix')));
     await tester.pump();
     expect(picks, [HarnessMode.bugFix]);
+  });
+
+  group('the lead harness', () {
+    const everyai = DriverInfo(id: 'everyai', label: 'EveryAI');
+    const claude = DriverInfo(id: 'claude-code', label: 'Claude Code', needsConsent: true);
+    const codex = DriverInfo(id: 'codex', label: 'Codex');
+    const ready = DriverInfo(id: 'test', label: 'Test CLI');
+    const leads = <LeadOption>[
+      (info: everyai, blocked: null, detail: ''),
+      (info: claude, blocked: 'Turn on in Settings', detail: '2.1.318'),
+      (info: codex, blocked: 'Not built yet', detail: ''),
+      (info: ready, blocked: null, detail: '1.0'),
+    ];
+    const testModels = [
+      DriverModel(id: 'fast', label: 'Fast', isDefault: true, efforts: ['low', 'high']),
+      DriverModel(id: 'deep', label: 'Deep'),
+    ];
+
+    testWidgets('blocked harnesses are greyed with the reason; a ready one swaps the model list', (tester) async {
+      var harness = 'everyai';
+      final picked = <String>[];
+      await tester.pumpWidget(
+        _host(
+          StatefulBuilder(
+            builder: (context, setState) => SizedBox(
+              width: 320,
+              height: 700,
+              child: AgentMenuPanel(
+                groups: agentMenuGroups(_catalog),
+                model: harness == 'everyai' ? 'anthropic/claude-opus-5.5' : 'fast',
+                effort: '',
+                onChanged: (m, e) => picked.add('$m@$e'),
+                close: () {},
+                onTier: (_) {},
+                leads: leads,
+                harness: harness,
+                onHarness: (h) => setState(() => harness = h),
+                driverModels: harness == 'everyai' ? null : testModels,
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Tier'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness')));
+      await tester.pump();
+      expect(find.text('Turn on in Settings'), findsOneWidget);
+      expect(find.text('Not built yet'), findsOneWidget);
+      // Greyed rows don't pick.
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness.codex')));
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness.claude-code')));
+      await tester.pump();
+      expect(harness, 'everyai');
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness.test')));
+      await tester.pump();
+      expect(harness, 'test');
+      // Back on the root: no tiers or Bug fix for an outside lead, and its own models.
+      expect(find.text('Tier'), findsNothing);
+      expect(find.text('Bug fix comes later for outside agents'), findsOneWidget);
+      expect(find.text('Test CLI'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.model')));
+      await tester.pump();
+      expect(find.text('Anthropic'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.model.deep')));
+      await tester.pump();
+      expect(picked, ['deep@']);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.effort')));
+      await tester.pump();
+      // Deep takes no effort; only the default is listed.
+      expect(find.byKey(const ValueKey('agent-menu.effort.low')), findsNothing);
+    });
+
+    testWidgets('an outside lead without a model list runs its default', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 320,
+            height: 700,
+            child: AgentMenuPanel(
+              groups: const [],
+              model: '',
+              effort: '',
+              onChanged: (_, _) {},
+              close: () {},
+              leads: leads,
+              harness: 'test',
+              onHarness: (_) {},
+              driverModels: const [],
+            ),
+          ),
+        ),
+      );
+      expect(find.text('Its default model'), findsOneWidget);
+      expect(find.text('Not used by this model'), findsOneWidget);
+    });
+
+    testWidgets('in a session the harness is shown, not switched', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 320,
+            height: 700,
+            child: AgentMenuPanel(
+              groups: agentMenuGroups(_catalog),
+              model: 'anthropic/claude-opus-5.5',
+              effort: '',
+              onChanged: (_, _) {},
+              close: () {},
+              leads: const [(info: everyai, blocked: null, detail: '')],
+            ),
+          ),
+        ),
+      );
+      expect(find.text('EveryAI · Switching comes later'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness')));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('agent-menu.harness.everyai')), findsNothing);
+    });
   });
 }
