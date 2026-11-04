@@ -110,14 +110,15 @@ String _userText(String raw) => userTextOf(raw);
 bool _isUser(HarnessEvent e) => e is ChatMessage && e.fromUser;
 
 /// Whether [e] is part of what the model saw (not state or socket events).
-bool _counts(HarnessEvent e) => e is ChatMessage || e is ActionCall || e is ToolResult || e is ConversationFailure;
+bool countsForModel(HarnessEvent e) =>
+    e is ChatMessage || e is ActionCall || e is ToolResult || e is ConversationFailure;
 
 /// Splits [events] (one conversation, oldest first) into a span to summarize
 /// and a tail kept word for word: whole turns when they fit in the budget,
 /// else the newest steps of the current turn. Null when there's nothing to
 /// summarize.
 CompactionPlan? planCompaction(List<HarnessEvent> events, {CompactionBudget budget = const CompactionBudget()}) {
-  final all = events.where(_counts).toList();
+  final all = events.where(countsForModel).toList();
   var previous = '';
   var carried = '';
   var start = 0;
@@ -194,7 +195,7 @@ String renderTail(CompactionPlan plan, {CompactionBudget budget = const Compacti
 String renderSessionRecord(List<HarnessEvent> events, {int maxChars = 60000}) {
   final text = [
     for (final e in events)
-      if (_counts(e)) _render(e, outputCap: 800, argsCap: 600),
+      if (countsForModel(e)) _render(e, outputCap: 800, argsCap: 600),
   ].where((p) => p.isNotEmpty).join('\n\n');
   if (text.length <= maxChars) return text;
   final cut = text.indexOf('\n\n', text.length - maxChars);
@@ -448,6 +449,28 @@ String? cleanSummary(String reply) {
   return found >= 3 ? s : null;
 }
 
+/// Writes [body] to [b] inside `<tag>` with [lead] on the line above, after a
+/// blank line; nothing when [body] is blank.
+void writeTaggedBlock(StringBuffer b, String tag, String lead, String body) {
+  if (body.trim().isEmpty) return;
+  b
+    ..writeln()
+    ..writeln(lead)
+    ..writeln('<$tag>')
+    ..writeln(body.trim())
+    ..writeln('</$tag>');
+}
+
+/// A to-do list as Markdown checkboxes: `[x]` done, `[~]` in progress.
+String checklist(Iterable<({String title, String status})> items) => [
+  for (final t in items)
+    '- [${switch (t.status) {
+      'completed' || 'done' => 'x',
+      'in_progress' => '~',
+      _ => ' ',
+    }}] ${t.title}',
+].join('\n');
+
 /// The first message of the continuation conversation: [summary], then what
 /// the agent was working from ([plan] the user approved, its [todos], the
 /// current text of the [files] it touched last, the [skills] it loaded),
@@ -473,15 +496,7 @@ String continuationMessage({
     ..writeln(_summaryOpen)
     ..writeln(summary.trim())
     ..writeln(_summaryClose);
-  void section(String tag, String lead, String body) {
-    if (body.trim().isEmpty) return;
-    b
-      ..writeln()
-      ..writeln(lead)
-      ..writeln('<$tag>')
-      ..writeln(body.trim())
-      ..writeln('</$tag>');
-  }
+  void section(String tag, String lead, String body) => writeTaggedBlock(b, tag, lead, body);
 
   section('approved-plan', 'The plan the user approved, which still stands:', plan);
   section('todos', 'Your checklist as you last wrote it:', todos);
