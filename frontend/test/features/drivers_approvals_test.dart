@@ -589,7 +589,7 @@ void main() {
       expect(done(), isTrue);
     }
 
-    test("Full auto on OpenCode runs in its asking build mode, so rm -rf ~ (the floor) waits on the card", () async {
+    test('Full auto on OpenCode runs in its asking build mode, so rm -rf ~ (the floor) waits on the card', () async {
       final controller = await open(
         AgentMode.fullAuto,
         harness: 'acp',
