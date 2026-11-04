@@ -9,9 +9,11 @@ import 'package:macos_window_utils/widgets/transparent_macos_sidebar.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
 import '../core/platform/platform_kind.dart';
+import '../core/net/api_client.dart' show ServerStatus;
 import '../core/preferences.dart';
+import '../core/providers.dart' show apiClientProvider, serverStatusProvider;
 import '../core/theme/every_theme.dart';
-import '../core/ui/adaptive.dart' show showAdaptiveToast;
+import '../core/ui/adaptive.dart' show AdaptiveButton, AdaptiveProgress, GlassSurface, GlassLevel, showAdaptiveToast;
 import '../features/code/code_providers.dart' show driverShutdownProvider;
 import '../features/history/ui/sidebar.dart';
 import '../features/remote/remote_providers.dart' show remoteHostingProvider;
@@ -222,11 +224,62 @@ class _AppShellState extends ConsumerState<AppShell> {
       );
     }
 
+    // A deployed backend may still be starting: say so instead of failing quietly.
+    final server = ref.watch(serverStatusProvider).value;
+    if (server == ServerStatus.waking || server == ServerStatus.unreachable) {
+      body = Stack(
+        children: [
+          body,
+          Positioned(
+            top: 12,
+            left: 0,
+            right: 0,
+            child: Center(child: _ServerBanner(status: server!)),
+          ),
+        ],
+      );
+    }
+
     // Material widgets need a Material ancestor for ink and text styles.
     if (theme.design == DesignLanguage.material || theme.design == DesignLanguage.adwaita) {
       body = m.Material(color: theme.background, child: body);
     }
     return body;
+  }
+}
+
+/// "Waking up the EveryAI server…" while it starts; Retry when it didn't come up.
+class _ServerBanner extends ConsumerWidget {
+  const _ServerBanner({required this.status});
+
+  final ServerStatus status;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = EveryTheme.of(context);
+    final waking = status == ServerStatus.waking;
+    return GlassSurface(
+      level: GlassLevel.thick,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (waking) const SizedBox.square(dimension: 16, child: AdaptiveProgress()),
+          if (waking) const SizedBox(width: 10),
+          Text(
+            waking ? 'Waking up the EveryAI server…' : "Can't reach the EveryAI server.",
+            style: theme.type.callout.copyWith(color: theme.text),
+          ),
+          if (!waking) ...[
+            const SizedBox(width: 10),
+            AdaptiveButton(
+              label: 'Retry',
+              onPressed: () => ref.read(apiClientProvider).awaitOnline().catchError((Object _) {}),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
 
