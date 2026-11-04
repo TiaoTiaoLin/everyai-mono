@@ -34,6 +34,35 @@ void main() {
     expect(table.sessionProcesses(tag: 'b', workingDir: '/w/session-b', ownsDir: true), [31]);
   });
 
+  test("a driver CLI's tools are the session's, the CLI itself is spared", () {
+    // The app (5) started the CLI (50); its tools carry no visible tag.
+    final t = ProcessTable([
+      _row(5, 1, '/Applications/EveryAI.app/EveryAI'),
+      _row(50, 5, '/usr/local/bin/claude', tag: 'a'),
+      _row(51, 50, '/bin/bash -c npm test', env: false),
+      _row(52, 51, 'node jest', env: false),
+      _row(60, 5, '/usr/local/bin/codex', tag: 'b'),
+      _row(61, 60, 'cargo build', env: false),
+    ]);
+    expect(t.sessionProcesses(tag: 'a', workingDir: dir, ownsDir: true, roots: {50}), [51, 52]);
+    // Without a root its tools can't be told apart.
+    expect(t.sessionProcesses(tag: 'a', workingDir: dir, ownsDir: true), isEmpty);
+    // A root that has exited is skipped.
+    expect(t.sessionProcesses(tag: 'a', workingDir: dir, ownsDir: true, roots: {99}), isEmpty);
+  });
+
+  test('driver roots are kept per session until unregistered', () {
+    registerDriverRoot('t1', 50);
+    registerDriverRoot('t1', 51);
+    registerDriverRoot('t2', 60);
+    expect(driverRootsOf('t1'), {50, 51});
+    unregisterDriverRoot('t1', 50);
+    unregisterDriverRoot('t1', 51);
+    unregisterDriverRoot('t2', 60);
+    expect(driverRootsOf('t1'), isEmpty);
+    expect(driverRootsOf('t2'), isEmpty);
+  });
+
   test('untagged orphans count by working directory', () {
     final t = ProcessTable([_row(41, 1, '/bin/sleep 900', env: false), _row(43, 1, '/bin/sleep 900', env: false)]);
     final cwds = {41: dir, 43: '/w/session-b'};

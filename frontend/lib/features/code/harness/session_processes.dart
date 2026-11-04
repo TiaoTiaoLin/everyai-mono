@@ -16,7 +16,7 @@ const sessionEnvVar = 'EVERYAI_SESSION';
 /// directory is inside [workingDir] and [ownsDir] says no other session
 /// works there (a per-session worktree). Returns the pids signalled.
 Future<List<int>> killSessionProcesses({required String tag, required String workingDir, required bool ownsDir}) =>
-    impl.killSessionProcesses(tag: tag, workingDir: workingDir, ownsDir: ownsDir);
+    impl.killSessionProcesses(tag: tag, workingDir: workingDir, ownsDir: ownsDir, roots: driverRootsOf(tag));
 
 /// The process table and the pids [killSessionProcesses] would signal, for
 /// the Processes pane; null where processes can't be listed.
@@ -24,7 +24,26 @@ Future<(ProcessTable, List<int>)?> findSessionProcesses({
   required String tag,
   required String workingDir,
   required bool ownsDir,
-}) => impl.findSessionProcesses(tag: tag, workingDir: workingDir, ownsDir: ownsDir);
+}) => impl.findSessionProcesses(tag: tag, workingDir: workingDir, ownsDir: ownsDir, roots: driverRootsOf(tag));
+
+final _driverRoots = <String, Set<int>>{};
+
+/// Marks [pid], a coding CLI the app started for session [tag], as the root
+/// of the session's processes: what it runs is the session's (Stop ends it,
+/// the Processes pane lists it), while the CLI itself is spared, like the
+/// terminal's shell. Its own environment alone wouldn't do: the table
+/// follows terminal shells and orphans only.
+void registerDriverRoot(String tag, int pid) => (_driverRoots[tag] ??= {}).add(pid);
+
+void unregisterDriverRoot(String tag, int pid) {
+  final roots = _driverRoots[tag];
+  if (roots == null) return;
+  roots.remove(pid);
+  if (roots.isEmpty) _driverRoots.remove(tag);
+}
+
+/// The driver processes registered for [tag].
+Set<int> driverRootsOf(String tag) => {...?_driverRoots[tag]};
 
 /// One row of the process table.
 @immutable
@@ -136,14 +155,15 @@ final class ProcessTable {
   ];
 
   /// What to signal for session [tag]: everything under shells whose tree
-  /// carries its tag (not the shells), and orphaned processes it started
-  /// (with their children). [cwds] maps pids from [needsCwd] to working
-  /// directories.
+  /// carries its tag (not the shells), under its driver [roots] (not the
+  /// roots), and orphaned processes it started (with their children).
+  /// [cwds] maps pids from [needsCwd] to working directories.
   List<int> sessionProcesses({
     required String tag,
     required String workingDir,
     required bool ownsDir,
     Map<int, String> cwds = const {},
+    Set<int> roots = const {},
   }) {
     bool inDir(int pid) => switch (cwds[pid]) {
       final String c => c == workingDir || c.startsWith(workingDir.endsWith('/') ? workingDir : '$workingDir/'),
@@ -161,12 +181,15 @@ final class ProcessTable {
     for (final shell in shells) {
       if (treeTag(shell) == tag) out.addAll(descendants(shell));
     }
+    for (final root in roots) {
+      if (rows.containsKey(root)) out.addAll(descendants(root));
+    }
     for (final o in orphans) {
       final r = rows[o]!;
       final ours = r.tag == tag || (r.tag == null && !r.envVisible && ownsDir && inDir(o));
       if (ours) out.addAll([o, ...descendants(o)]);
     }
-    out.removeWhere((p) => rows[p]?.isTerminalHost ?? true);
+    out.removeWhere((p) => roots.contains(p) || (rows[p]?.isTerminalHost ?? true));
     return out.toList()..sort();
   }
 }
