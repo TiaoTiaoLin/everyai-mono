@@ -26,6 +26,9 @@ enum SettingKind {
 
   /// Lives in another section (MCP servers, skills): a link there.
   link,
+
+  /// The coding agents the app can drive, with their status and consent.
+  harnesses,
 }
 
 /// Where a setting's value lives.
@@ -249,6 +252,15 @@ const settingDefs = <SettingDef>[
     scopes: _s,
     kind: SettingKind.money,
     store: SettingStore.session,
+  ),
+  SettingDef(
+    key: 'harnesses',
+    title: 'Harnesses',
+    help: 'The coding agents a session can run on, and whether each is ready on this computer.',
+    scopes: _g,
+    kind: SettingKind.harnesses,
+    store: SettingStore.none,
+    addable: false,
   ),
   SettingDef(
     key: 'mcp',

@@ -78,7 +78,7 @@ owner's local notes (gitignored); the task board is the GitHub Project.
       OpenHands/LiteLLM.
     - `images.zig`: `/v1/images`.
     - `openrouter.zig`: upstream client, stream parsing, Fake.
-    - SSE parsing uses `anole.sse.Parser`; migrations use `anole.db.migrate` with the list in `migrations.zig` (Anole 0.4.1).
+    - SSE parsing uses `anole.sse.Parser`; migrations use `anole.db.migrate` with the list in `migrations.zig` (Anole 0.5.1 since 2026-11-04).
 - `docs/`: `ROADMAP.md` (product and moat) and `CODE_ROADMAP.md` (Code architecture and next steps); keep them current.
 
 ## /v1 contract (backend-exp ⇄ app)
@@ -375,6 +375,10 @@ owner's local notes (gitignored); the task board is the GitHub Project.
   - OpenHands quirk: the `task` tool (subagents) breaks conversation create in 1.59.0; removed from the tool list.
   - macOS app is **unsandboxed** now (entitlements); the DB moved to Application Support (`core/db/db_location_io.dart` copies the old container DB on first run).
   - Verified live: Ask-mode session on the sample repo with Haiku via the gateway → explore, approve, edits + tests, `dart test` 3/3, Done. Ledger: 7 gateway calls, 58% of prompt tokens cached.
+- **Launcher (no local backend):** `scripts/launch.sh [build] [macos|linux|windows|web|ios-sim|ios|android|<device>]
+  [-- flutter args]` runs or builds the app against the deployed dev server (`EVERYAI_API` overrides it), installing
+  Flutter/CocoaPods with Homebrew when missing; defines in `.dev/defines-launch.json`. `Launch Flutter (macOS).command`
+  = `launch.sh build macos` + open.
 - **Dev runner:** `scripts/dev.sh [macos|web|ios-sim|ios|<device>] [-- flutter args]` starts backend-exp (reuses one on :8080), fetches the agent-server for macOS, writes `.dev/defines-<target>.json` from `config/dev.json` with the right `API_BASE_URL` (LAN IP + backend `HOST=0.0.0.0` for a physical iPhone), and `flutter run`s. New backend setting `HOST` (default 127.0.0.1).
 - **Web/iOS:** web needs `web/sqlite3.wasm` + `web/drift_worker.js` (added, from drift 2.35.3); verified loading the catalog from the backend. iOS Simulator build verified (this Xcode has no Simulator.app; it runs headless, `xcrun simctl io booted screenshot`). The Code switch shows on desktop hosts only.
 - **Type scale:** Cupertino on a desktop host uses desktop sizes (`_desktopCupertinoText`, 14pt body; text fields 14.5); lighter sidebar/headlines.
@@ -620,12 +624,58 @@ owner's local notes (gitignored); the task board is the GitHub Project.
   `UsageReport` (plan usage in `UsageTotals.planMicros`), `SessionSpec.briefing`; replay kit
   `test/support/replay_transport.dart`. `features/code/host/`: a loopback MCP server, with tokens per session, idle
   expiry, and `HostTools` (not wired yet). `drivers/briefing/`: skill export per session, `sessionBriefing`, and
-  recipes for each CLI. 832 tests pass. Run 2 (drivers + Stage 2) is in progress on `batch/mh-2`.
+  recipes for each CLI. 832 tests pass.
+
+- **Multi-harness run 2: drivers + Stage 2 (2026-11-04; PR #1, merge aa8baa5).** Notes in
+  `docs/research/batches/multi-harness/run2/`. Drivers: `drivers/acp/` (Gemini `--acp`, `opencode acp`, `acp:<cmd>`),
+  `drivers/opencode/` (`opencode serve`), `drivers/codex/` (`codex app-server`; fixtures derived from the schema and
+  marked unverified), `drivers/claude/` (`claude -p` stream-json, approvals via a host permission tool),
+  `drivers/terminal/` (pty paste). A repo's own CLI config can't switch approvals off; no tokens on disk.
+  `AttachesBriefed`: a reopened outside session gets a fresh host token and the old one is revoked; child sessions
+  reopen without a briefing. Stage 2: lead + model at session start, per-CLI consent (Claude Code and Gemini off by
+  default), briefing, `HostTools` on the controller, fidelity label, Settings → Code → Harnesses. Max/Ultra/Bug fix
+  show "Coming later" on outside leads. 1023 tests pass. Nothing has run live: no real turn through any driver, Codex
+  isn't installed, Gemini sign-in is untested. Open nits: ACP reopen drops the user's MCP servers; a race in the Claude
+  rebrief while it spawns (not reachable today).
+- **Multi-harness run 3, no-spend handoff (2026-11-04; branch `batch/mh-3`, 609f9d1).** Owner: EveryAI spends nothing
+  on a session it doesn't lead. The handoff (`code/handoff/`) has no utility-model summary any more (old stored JSON
+  with one still loads). It is facts plus the whole conversation as `.everyai/handoffs/<stem>.md` (git-excluded),
+  which the new lead may read. A turn the usage limit cut off (`cutTurn`: the last real request with no finished reply
+  before the limit; carry-ons count as the same turn) goes over as `<cut-turn>` with its calls and results, and the
+  new lead finishes it. Gated on outside leads (`domain/no_spend.dart`): `/btw`, `/goal` and `/learn` are refused
+  with a reason; `/commit` and `/pr` drafts are written without a model; no decide risk label (`riskLabelDir`). Audit
+  in `docs/research/batches/multi-harness/run3/no-spend.md` (untracked). Not live-tested.
+- **Dev deployment 0.1.0-dev-nonsigned (2026-11-04).** Anole 0.5.1. Backend live at
+  `https://everyai.136-108-68-64.sslip.io:8443` on the `ttt-server` VM (GCP `ttt-ultimate-b7097a`, us-east1-b, e2-micro,
+  shared with the owner's ttt stack: never touch its containers or `/opt/ttt` beyond the one Caddy block). Details:
+  `backend-exp/deploy/README.md`; redeploy with `backend-exp/deploy/deploy.sh`.
+  - Dev build: `DEV_AUTH=true` (no sign-in), **no server keys** (BYOK or local models only; the image holds only the
+    binary), SQLite in the `everyai_data` volume. New config: `TLS_CERT_PATH`/`TLS_KEY_PATH` (Anole serves HTTPS
+    itself; SIGHUP reloads) and `RATE_LIMIT_PER_MINUTE` (600 per client address, its own `global_limiter`).
+  - TLS: ttt's Caddy owns 80/443 and only obtains/renews the cert (a site block that serves nothing); the container
+    mounts Caddy's cert folder read-only; `everyai-cert-reload.timer` sends SIGHUP daily. Port 8443 via firewall rule
+    `everyai-api` (network tag `everyai-api`). Caddyfile backup: `/opt/ttt/Caddyfile.bak-everyai`.
+  - App: `ApiClient(waitForServer:)` holds requests until `GET /v1/ping` answers (90 s, backoff), shell banner "Waking
+    up the EveryAI server…" (`serverStatusProvider`). `scripts/launch.sh` runs or builds the app against the server
+    (detects the OS; web, ios-sim, ios, android, `build <target>`); `Launch Flutter (macOS).command` builds and opens
+    the macOS app. Windows/Linux builds: `.github/workflows/dev-builds.yml` (push `builds/*` or run it by hand).
+  - Entry screen (`features/onboarding/`): a five-step tour shown once per `appVersion` (`core/config/version.dart`,
+    kept equal to pubspec by a test): welcome, expect bugs (GitHub issue link with the version), add a key (live
+    `keyCheckProvider`, rejected keys not saved), Code agents found here (`driverStatusesProvider`, consent buttons;
+    remote-control text off desktop), accept the Dev Build Terms (`TERMS-DEV.md`, same text as `devBuildTerms`).
+    Headlines type themselves out (`TypewriterText`). Gate: `onboardingAcceptedProvider` in the shell.
+  - Unsigned macOS Release: `keychain-access-groups` removed from `Release.entitlements` (needs a team); add it back
+    for the signed release. macOS shows the version as 0.1.0 (Flutter drops the pre-release part there).
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
 0. **Every harness in one workspace** (`TODO-multi-harness.md`, plan `~/.claude/plans/multi-harness.md`): Stages 1–2
-   are being built (run 1 merged, run 2 running). Claude Code and Gemini sit behind a consent setting until the owner's ToS check.
+   are built (PR #1) and await live testing; Stage 3 (handoff) is run 3. Claude Code and Gemini sit behind a consent setting until the owner's ToS check.
+   **Re-planned 2026-11-04** (read the Direction section of `TODO-multi-harness.md` before touching `PhaseFlow` or the
+   drivers): outside harnesses keep their native feel (native slash commands and modes, our floor as advice) plus our
+   increments; EveryAI spends nothing in their sessions; Ultra, Bug fix and Security review become `workflow.js` files
+   run in Deno, Max an approach skill + MCP tools; Lead Mode with the EveryAI harness as the only lead; local LLMs and
+   BYOK are the EveryAI harness's focus; billing is parked.
    EveryAI harness upgrades are in `TODO-harness.md` (split from TODO.md 2026-11-04).
 1. **Current plan (`~/.claude/plans/few-tasks-in-your-parsed-piglet.md`)**: §1–3 bug fixes done; next §4 tiered agent models (`/v1/agents`, effort), §5 git worktrees (App Support, squash merge), §6 agent evals, §7 `docs/CODE_ROADMAP.md`.
 1. **Phase B, the Code workspace** (desktop; see the plan file for the full spec):

@@ -9,17 +9,28 @@ import '../../models/domain/model_catalog.dart';
 import '../../billing/billing_providers.dart' show formatMicros;
 import '../../models/models_providers.dart';
 import '../agent_models.dart';
+import '../code_providers.dart' show driverModelsProvider;
+import '../code_settings_providers.dart' show codeSettingsProvider;
 import '../domain/agent_menu.dart';
+import '../domain/code_session.dart' show everyaiHarnessName;
+import '../drivers/driver.dart';
+import '../drivers/driver_policy.dart' show leadBlocked;
+import '../drivers/driver_registry.dart';
 import '../settings/agent_prompt.dart' show HarnessMode, HarnessTier;
 import '../settings/code_settings.dart' show budgetPresets;
 import '../../settings/byok_keys.dart' show byokUltraCapProvider, modelBillingProvider;
 import '../ultra/ultra_access.dart' show ultraAccessProvider;
 
-/// The agent menu: Harness mode, the tier bar (Efficient → Ultra),
-/// Model (the user's own models that can call tools) and Effort, in one
-/// popover on every design language (never a bottom sheet). [onChanged] gets
-/// the new model and effort ('' is the model's default); an open session
-/// applies it live, and [onTier] likewise.
+/// A harness that can lead a session, as the menu lists it: why it can't
+/// now ([blocked], null when it can) and its version.
+typedef LeadOption = ({DriverInfo info, String? blocked, String detail});
+
+/// The agent menu: the lead Harness, Harness mode, the tier bar (Efficient
+/// → Ultra), Model (the user's own models that can call tools, or an
+/// outside agent's own) and Effort, in one popover on every design language
+/// (never a bottom sheet). [onChanged] gets the new model and effort ('' is
+/// the model's default); an open session applies it live, and [onTier]
+/// likewise.
 class AgentMenu extends ConsumerWidget {
   const AgentMenu({
     super.key,
@@ -34,7 +45,20 @@ class AgentMenu extends ConsumerWidget {
     this.onHarnessMode,
     this.budget,
     this.onBudget,
+    this.harness = everyaiHarnessName,
+    this.onHarness,
+    this.switchesLive = false,
   });
+
+  /// The lead harness (a driver id).
+  final String harness;
+
+  /// Picks the lead; null shows it without a choice (a subagent, the demo).
+  final ValueChanged<String>? onHarness;
+
+  /// An open session: picking a harness closes the menu and moves the
+  /// session to it (which may ask first).
+  final bool switchesLive;
 
   /// Picks Build or Bug fix; null shows the mode without a choice.
   final ValueChanged<HarnessMode>? onHarnessMode;
@@ -70,11 +94,39 @@ class AgentMenu extends ConsumerWidget {
     // Max includes Ultra; on the user's own key it runs under their spend cap.
     final ownKey = ref.watch(modelBillingProvider).ownKey(ModelId(model));
     final ultraAllowed = (ref.watch(ultraAccessProvider).value ?? false) || ownKey;
-    final label = [
-      agentMenuLabel(current?.name ?? model.split('/').last, effort),
-      if (onTier != null) tier.label,
-      if (harnessMode == HarnessMode.bugFix) 'Bug fix',
-    ].join(' · ');
+    final registry = ref.watch(driverRegistryProvider);
+    final lead = registry.resolve(harness)?.info ?? DriverInfo(id: harness, label: harness);
+    final outside = harness != everyaiHarnessName;
+    // Every harness with what is in its way, when the lead can be picked; else only its own.
+    final List<LeadOption> leads;
+    if (onHarness == null) {
+      leads = [(info: lead, blocked: null, detail: '')];
+    } else {
+      final statuses = ref.watch(driverStatusesProvider).value;
+      final own = ref.watch(codeSettingsProvider.select((s) => s.ownClis));
+      leads = [
+        for (final d in registry.listed)
+          (
+            info: d.info,
+            blocked: leadBlocked(d.info, statuses?[d.info.id], consented: own.contains(d.info.id)),
+            detail: statuses?[d.info.id]?.version ?? '',
+          ),
+      ];
+    }
+    final driverModels = outside ? ref.watch(driverModelsProvider(harness)).value ?? const <DriverModel>[] : null;
+    final label = outside
+        ? [
+            lead.label,
+            agentMenuLabel(
+              driverModels?.where((m) => m.id == model).firstOrNull?.label ?? (model.isEmpty ? 'Default model' : model),
+              effort,
+            ),
+          ].join(' · ')
+        : [
+            agentMenuLabel(current?.name ?? model.split('/').last, effort),
+            if (onTier != null) tier.label,
+            if (harnessMode == HarnessMode.bugFix) 'Bug fix',
+          ].join(' · ');
     return AnchoredPopover(
       width: 320,
       builder: (context, close) => AgentMenuPanel(
@@ -93,6 +145,15 @@ class AgentMenu extends ConsumerWidget {
         keyCap: ownKey ? ref.watch(byokUltraCapProvider) : null,
         budget: budget,
         onBudget: onBudget,
+        leads: leads,
+        harness: harness,
+        onHarness: onHarness == null || !switchesLive
+            ? onHarness
+            : (h) {
+                close();
+                onHarness!(h);
+              },
+        driverModels: driverModels,
       ),
       child: Semantics(
         button: true,
@@ -126,7 +187,7 @@ class AgentMenu extends ConsumerWidget {
   }
 }
 
-enum _Page { root, model, effort, budget }
+enum _Page { root, harness, model, effort, budget }
 
 /// The popover's content: a root list whose rows open their submenu in place,
 /// with a back row to return.
@@ -148,7 +209,20 @@ class AgentMenuPanel extends StatefulWidget {
     this.keyCap,
     this.budget,
     this.onBudget,
+    this.leads = const [],
+    this.harness = everyaiHarnessName,
+    this.onHarness,
+    this.driverModels,
   });
+
+  /// The harnesses the Harness row lists (none: no row).
+  final List<LeadOption> leads;
+  final String harness;
+  final ValueChanged<String>? onHarness;
+
+  /// An outside lead's own models (its Model and Effort pages list these);
+  /// null for the EveryAI harness, whose models are [groups].
+  final List<DriverModel>? driverModels;
 
   final HarnessTier tier;
   final ValueChanged<HarnessTier>? onTier;
@@ -186,6 +260,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
   late HarnessTier _tier = widget.tier;
   late double? _budget = widget.budget;
   late HarnessMode _mode = widget.harnessMode;
+  late String _harness = widget.harness;
 
   @override
   void didUpdateWidget(AgentMenuPanel old) {
@@ -195,7 +270,13 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
     if (old.tier != widget.tier) _tier = widget.tier;
     if (old.budget != widget.budget) _budget = widget.budget;
     if (old.harnessMode != widget.harnessMode) _mode = widget.harnessMode;
+    if (old.harness != widget.harness) _harness = widget.harness;
   }
+
+  /// The lead is an outside agent: its own models, and no tiers or Bug fix yet.
+  bool get _outside => widget.driverModels != null;
+
+  DriverModel? get _driverModel => widget.driverModels?.where((m) => m.id == _model).firstOrNull;
 
   /// Why [t] can't be picked, or null.
   String? _blocked(HarnessTier t) => t.phased && widget.demo
@@ -223,20 +304,36 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
     final more = AdaptiveIcon(EveryIcon.chevronRight, size: 12, color: theme.textMuted);
     final current = _current;
 
+    final lead = widget.leads.where((l) => l.info.id == _harness).firstOrNull;
+    final efforts = _outside ? ['', ...?_driverModel?.efforts] : agentMenuEfforts;
+    final reasons = _outside ? efforts.length > 1 : widget.reasons;
     final rows = switch (_page) {
       _Page.root => [
         const PopoverHeader('Agent'),
+        if (widget.leads.isNotEmpty)
+          PopoverRow(
+            key: const ValueKey('agent-menu.harness'),
+            title: 'Harness',
+            subtitle: [
+              lead?.info.label ?? _harness,
+              if (widget.onHarness == null) 'Switching comes later' else ?lead?.blocked,
+            ].join(' · '),
+            trailing: widget.onHarness == null ? null : more,
+            onTap: widget.onHarness == null ? null : () => setState(() => _page = _Page.harness),
+          ),
         PopoverRow(
           key: const ValueKey('agent-menu.harness-mode'),
           title: 'Harness mode',
-          subtitle: _mode == HarnessMode.bugFix
+          subtitle: _outside
+              ? 'Bug fix comes later for outside agents'
+              : _mode == HarnessMode.bugFix
               ? 'Reproduce, triage, research, plan, fix, verify'
               : widget.demo
               ? 'Bug fix isn\'t in the demo'
               : 'Build things, or switch to fix a bug, issue or PR',
           trailing: _ModeSwitch(
-            mode: _mode,
-            onPick: widget.onHarnessMode == null
+            mode: _outside ? HarnessMode.build : _mode,
+            onPick: widget.onHarnessMode == null || _outside
                 ? null
                 : (m) {
                     if (m == HarnessMode.bugFix && widget.demo) return;
@@ -245,7 +342,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
                   },
           ),
         ),
-        if (widget.onTier != null)
+        if (widget.onTier != null && !_outside)
           _TierBar(
             tier: _tier,
             blocked: _blocked,
@@ -257,17 +354,19 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
         PopoverRow(
           key: const ValueKey('agent-menu.model'),
           title: 'Model',
-          subtitle: [
-            current?.name ?? _model.split('/').last,
-            if (current?.tierHint case final h? when h.isNotEmpty) h,
-          ].join(' · '),
+          subtitle: _outside
+              ? _driverModel?.label ?? (_model.isEmpty ? 'Its default model' : _model)
+              : [
+                  current?.name ?? _model.split('/').last,
+                  if (current?.tierHint case final h? when h.isNotEmpty) h,
+                ].join(' · '),
           trailing: more,
           onTap: () => setState(() => _page = _Page.model),
         ),
         PopoverRow(
           key: const ValueKey('agent-menu.effort'),
           title: 'Effort',
-          subtitle: widget.reasons ? effortLabel(_effort) : 'Not used by this model',
+          subtitle: reasons ? effortLabel(_effort) : 'Not used by this model',
           trailing: more,
           onTap: widget.demo ? null : () => setState(() => _page = _Page.effort),
         ),
@@ -301,6 +400,50 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             },
           ),
       ],
+      _Page.harness => [
+        _Back('Harness', onTap: () => setState(() => _page = _Page.root)),
+        for (final l in widget.leads)
+          PopoverRow(
+            key: ValueKey('agent-menu.harness.${l.info.id}'),
+            title: l.info.label,
+            subtitle: l.blocked ?? (l.detail.isEmpty ? null : l.detail),
+            selected: l.info.id == _harness,
+            trailing: check(l.info.id == _harness),
+            onTap: l.blocked != null
+                ? null
+                : l.info.id == _harness
+                ? () => setState(() => _page = _Page.root)
+                : () {
+                    setState(() {
+                      _harness = l.info.id;
+                      _page = _Page.root;
+                    });
+                    widget.onHarness!(l.info.id);
+                  },
+          ),
+      ],
+      _Page.model when _outside => [
+        _Back('Model', onTap: () => setState(() => _page = _Page.root)),
+        if (widget.driverModels!.isEmpty)
+          PopoverRow(
+            key: const ValueKey('agent-menu.model.default'),
+            title: 'Its default model',
+            selected: true,
+            trailing: check(true),
+            onTap: () => setState(() => _page = _Page.root),
+          ),
+        for (final m in widget.driverModels!)
+          PopoverRow(
+            key: ValueKey('agent-menu.model.${m.id}'),
+            title: m.label,
+            subtitle: m.isDefault ? 'default' : null,
+            selected: m.id == _model,
+            trailing: check(m.id == _model),
+            onTap: m.id == _model
+                ? () => setState(() => _page = _Page.root)
+                : () => _pick(m.id, m.efforts.contains(_effort) ? _effort : ''),
+          ),
+      ],
       _Page.model => [
         _Back('Model', onTap: () => setState(() => _page = _Page.root)),
         for (final (vendor, models) in widget.groups) ...[
@@ -320,18 +463,18 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
       ],
       _Page.effort => [
         _Back('Effort', onTap: () => setState(() => _page = _Page.root)),
-        for (final e in agentMenuEfforts)
+        for (final e in efforts)
           PopoverRow(
             key: ValueKey('agent-menu.effort.${e.isEmpty ? 'default' : e}'),
             title: effortLabel(e),
             subtitle: [
               effortBlurb(e),
-              if (current != null && e.isNotEmpty && current.efforts.contains(e))
+              if (!_outside && current != null && e.isNotEmpty && current.efforts.contains(e))
                 e == current.recommendedEffort ? 'recommended' : 'tested',
             ].where((s) => s.isNotEmpty).join(' · '),
             selected: e == _effort,
             trailing: check(e == _effort),
-            onTap: !widget.reasons
+            onTap: !reasons
                 ? null
                 : e == _effort
                 ? () => setState(() => _page = _Page.root)

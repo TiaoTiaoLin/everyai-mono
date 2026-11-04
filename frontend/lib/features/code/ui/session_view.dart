@@ -22,6 +22,10 @@ import '../domain/permissions.dart';
 import '../domain/questions.dart';
 import '../domain/rewind.dart';
 import '../domain/transcript.dart';
+import '../code_settings_providers.dart' show codeSettingsProvider;
+import '../drivers/driver_policy.dart' show fidelityNote;
+import '../../settings/byok_keys.dart' show modelBillingProvider;
+import '../drivers/driver_registry.dart';
 import '../harness/events.dart' show ExecutionStatus;
 import 'agent_menu.dart';
 import 'code_composer.dart';
@@ -35,6 +39,7 @@ import 'panes/session_panes.dart';
 import 'transcript/approval_card.dart';
 import 'transcript/aside_card.dart';
 import 'transcript/goal_card.dart';
+import 'transcript/lead_offer_card.dart';
 import 'transcript/plan_card.dart';
 import 'transcript/retry_row.dart';
 import 'transcript/subagent_card.dart';
@@ -75,8 +80,9 @@ class CodeSessionScreen extends ConsumerWidget {
         t.items.lastOrNull is AgentText &&
         t.items.whereType<UserTurn>().isNotEmpty;
 
-    // The live mode → tier → Model → Effort menu, in the composer.
+    // The live harness → mode → tier → Model → Effort menu, in the composer.
     Widget agentMenu() => AgentMenu(
+      harness: info.harness,
       model: info.model,
       effort: info.effort,
       tier: info.tier,
@@ -84,6 +90,11 @@ class CodeSessionScreen extends ConsumerWidget {
       onHarnessMode: controller.setHarnessMode,
       onTier: controller.setTier,
       demo: isDemoPath(info.workingDir),
+      // Any time, from the menu; a subagent keeps its parent's lead.
+      onHarness: info.isSubagent || isDemoPath(info.workingDir)
+          ? null
+          : (harness) => _switchLead(context, ref, harness, run: false),
+      switchesLive: true,
       onChanged: (model, effort) => switchCodeAgent(
         context,
         ref,
@@ -92,6 +103,25 @@ class CodeSessionScreen extends ConsumerWidget {
         effort: effort == info.effort ? null : effort,
       ),
     );
+
+    // The lead ran out: carry on with another harness that is ready, or wait.
+    final limit = controller.leadOffer;
+    final offer = limit == null
+        ? null
+        : LeadOfferCard(
+            lead: _label(ref, info.harness),
+            limit: limit,
+            credits: !isOutsideLead(info.harness, info.workingDir),
+            choices: _leadChoices(ref, info, controller),
+            onSwitch: (harness) => _switchLead(context, ref, harness, run: true),
+            onWait: controller.waitForLimit,
+          );
+
+    // How far the mode holds on an outside lead, in one line under the bar.
+    final driver = isOutsideLead(info.harness, info.workingDir)
+        ? ref.read(driverRegistryProvider).resolve(info.harness)
+        : null;
+    final fidelity = driver == null ? null : fidelityNote(driver, state.mode);
 
     // The header drops chips by the width it really has (the sidebar and the
     // panes take some), so the title keeps room and nothing jumps into an
@@ -103,6 +133,19 @@ class CodeSessionScreen extends ConsumerWidget {
           title: info.title,
           onBack: info.parentId == null ? null : () => context.go(Routes.codeSession(info.parentId!)),
           backTooltip: 'Back to the parent session',
+          header: fidelity == null
+              ? null
+              : Padding(
+                  key: const ValueKey('session.fidelity'),
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+                  child: Text(
+                    fidelity,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.type.caption.tint(theme.textMuted),
+                  ),
+                ),
           actions: [
             CodeTopBar(sessionId: sessionId),
             if (info.diffTarget != null && tier != TopBarTier.narrow) _ChangesButton(sessionId: sessionId),
@@ -139,6 +182,8 @@ class CodeSessionScreen extends ConsumerWidget {
                       onRetry: controller.retry,
                       sessionId: sessionId,
                       workingDir: info.workingDir,
+                      offer: offer,
+                      showLeads: info.leads.isNotEmpty,
                     ),
                   ),
                 ),
@@ -179,8 +224,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                   onDeny: controller.deny,
                                   onMode: controller.setMode,
                                   remember: controller.rememberable(),
-                                  // The demo's commands never run; no need to ask about them.
-                                  workingDir: isDemoPath(info.workingDir) ? null : info.workingDir,
+                                  // None for the demo (its commands never run) or an outside lead (no EveryAI spend).
+                                  workingDir: riskLabelDir(info),
                                   session: info.billingTag,
                                   decided: state.decided,
                                   rememberBy: controller.rememberBy(),
@@ -284,6 +329,71 @@ class CodeSessionScreen extends ConsumerWidget {
     );
   }
 
+  static String _label(WidgetRef ref, String harness) =>
+      ref.read(driverRegistryProvider).resolve(harness)?.info.label ?? harness;
+
+  /// The harnesses the session can move to now: connected, signed in and
+  /// allowed, each with the model it would use and how that is paid.
+  static List<LeadChoice> _leadChoices(WidgetRef ref, CodeSessionInfo info, CodeSessionController controller) {
+    final statuses = ref.watch(driverStatusesProvider).value;
+    final own = ref.watch(codeSettingsProvider.select((s) => s.ownClis));
+    final catalog = ref.watch(modelCatalogProvider);
+    return [
+      for (final d in readyLeads(ref.read(driverRegistryProvider).listed, statuses, own, current: info.harness))
+        if (controller.leadModelFor(d.id) case (:final model, effort: _))
+          (
+            id: d.id,
+            label: d.label,
+            subtitle: isOutsideLead(d.id, info.workingDir)
+                ? '${model.isEmpty ? 'Default model' : model} · on your plan'
+                : '${catalog[ModelId(model)]?.name ?? model.split('/').last} · '
+                      '${ref.read(modelBillingProvider).ownKey(ModelId(model)) ? 'your own key' : 'credits'}',
+          ),
+    ];
+  }
+
+  /// Moves the session to [harness]: a busy one is stopped first, once the user agrees.
+  Future<void> _switchLead(BuildContext context, WidgetRef ref, String harness, {required bool run}) async {
+    final controller = ref.read(codeSessionProvider(sessionId).notifier);
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null) return;
+    if (ref.read(codeSessionProvider(sessionId)).switching) {
+      showAdaptiveToast(context, 'The session is already switching harness.');
+      return;
+    }
+    final t = ref.read(codeSessionProvider(sessionId)).transcript;
+    final working = t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty;
+    // Background forks and research workers on EveryAI stop when it no longer leads.
+    final children = controller.leaveStopsChildren(harness);
+    final busy = working || children;
+    final from = _label(ref, info.harness);
+    final to = _label(ref, harness);
+    if (busy &&
+        !await showAdaptiveConfirm(
+          context,
+          title: 'Stop $from and switch to $to?',
+          message:
+              '${working ? '$from stops where it is. ' : ''}'
+              '${children ? 'Its background forks and researchers stop too. ' : ''}'
+              '$to gets the work so far, and the files stay as they are.',
+          confirmLabel: 'Stop and switch',
+        )) {
+      return;
+    }
+    final outcome = await controller.switchLead(harness, run: run, stopFirst: busy);
+    if (!context.mounted) return;
+    showAdaptiveToast(
+      context,
+      outcome.busy
+          ? '$from is still working. Stop it, then switch.'
+          : outcome.failed
+          ? outcome.message
+          : run
+          ? '$to is taking over.'
+          : '$to takes over with your next message.',
+    );
+  }
+
   Future<void> _rewind(BuildContext context, WidgetRef ref, int turn) async {
     final files = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.worktree != null;
     final ok = await showAdaptiveConfirm(
@@ -359,7 +469,16 @@ class TranscriptList extends StatelessWidget {
     this.sessionId,
     this.workingDir = '',
     this.trailing = const [],
+    this.offer,
+    this.showLeads = false,
   });
+
+  /// Shown at the end in place of the "stopped" notice: the offer to carry
+  /// on with another harness after a usage limit.
+  final Widget? offer;
+
+  /// Each message names the harness it went to (the session had several).
+  final bool showLeads;
 
   /// Shown newest-side, below the items (the session's Ultra runs).
   final List<Widget> trailing;
@@ -396,6 +515,8 @@ class TranscriptList extends StatelessWidget {
         )
       else if (t.running)
         const KeyedSubtree(key: ValueKey('transcript-tail'), child: _Working())
+      else if (offer case final offer?)
+        KeyedSubtree(key: const ValueKey('transcript-tail'), child: offer)
       else if (t.status == ExecutionStatus.error || t.status == ExecutionStatus.stuck)
         NoticeView(
           item: NoticeItem(
@@ -440,11 +561,12 @@ class TranscriptList extends StatelessWidget {
   }
 
   Widget _itemView(TranscriptItem item) => switch (item) {
-    UserTurn(:final text, :final mode) => Padding(
+    UserTurn(:final text, :final mode, :final lead) => Padding(
       padding: const EdgeInsets.only(top: 10),
       child: UserTurnView(
         text: text,
         mode: mode,
+        lead: showLeads ? lead : '',
         onRewind: onRewind == null
             ? null
             : () => onRewind!(transcript.items.whereType<UserTurn>().toList().indexOf(item) + 1),

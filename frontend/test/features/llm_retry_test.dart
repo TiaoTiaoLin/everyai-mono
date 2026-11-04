@@ -108,6 +108,53 @@ void main() {
     });
   });
 
+  group('usage limits', () {
+    Scripted failing(int status, Map<String, Object?> error) => (
+      status: status,
+      headers: const {},
+      lines: [
+        jsonEncode({'error': error}),
+      ],
+      dropAfter: null,
+    );
+    Future<LlmError> errorOf(Scripted s) async {
+      try {
+        await call(gateway([s]).client, policy: const RetryPolicy(maxAttempts: 1));
+      } on LlmError catch (e) {
+        return e;
+      }
+      fail('no error');
+    }
+
+    test('a 402 is a limit unless it is an in-flight budget; retrying is unchanged', () async {
+      final credits = await errorOf(failing(402, {'message': 'Insufficient credits'}));
+      expect((credits.usageLimit, credits.retryable), (true, false));
+      final inFlight = await errorOf(
+        failing(402, {
+          'message': 'Busy',
+          'metadata': {'limit_source': 'openrouter_in_flight_budget'},
+        }),
+      );
+      expect(inFlight.usageLimit, isFalse);
+    });
+
+    test("Anthropic's low credit balance is a limit; 429 and 503 stay retryable, not limits", () async {
+      final low = await errorOf(
+        failing(400, {'message': 'Your credit balance is too low to access the Anthropic API.'}),
+      );
+      expect(low.usageLimit, isTrue);
+      for (final status in [429, 503]) {
+        final e = await errorOf(failing(status, {'message': 'Try again'}));
+        expect((e.usageLimit, e.retryable), (false, true), reason: '$status');
+      }
+    });
+
+    test('a mid-stream out-of-credits error is a limit', () {
+      expect(usageLimitOfError({'message': 'Out of EveryAI credits', 'code': 'out_of_credits'}, null), isNotNull);
+      expect(usageLimitOfError({'message': 'Rate limit exceeded', 'code': 429}, 429), isNull);
+    });
+  });
+
   group('completeWithRetry', () {
     test('a 529 with Retry-After is retried, then the reply comes through', () async {
       final g = gateway([

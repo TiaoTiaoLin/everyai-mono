@@ -98,6 +98,10 @@ Describe the change itself; don't mention tools, assistants or who wrote it.''';
   return (title: title, body: stripBranding(rest.join('\n').trim()).trim());
 }
 
+/// A pull request body written without a model: the commit subjects
+/// (newest first, as `git log` lists them) as a list; '' when there are none.
+String plainPrBody(List<String> commits) => [for (final c in commits) '- $c'].join('\n');
+
 /// The GitHub page that opens a pull request from [branch] into [base], when
 /// [remoteUrl] is a GitHub remote (https or ssh); null otherwise.
 String? githubCompareUrl(String remoteUrl, {required String base, required String branch}) {

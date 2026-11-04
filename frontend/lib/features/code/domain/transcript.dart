@@ -1,10 +1,12 @@
 import 'package:flutter/foundation.dart';
 
 import 'phases.dart';
+import '../drivers/driver_policy.dart' show hostToolOf;
+import '../drivers/usage_limit.dart';
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import 'agent_mode.dart';
-import 'compaction.dart' show splitCompacted;
+import 'compaction.dart' show splitCompacted, splitHandoff;
 import 'questions.dart';
 import 'subagents.dart';
 
@@ -19,11 +21,15 @@ sealed class TranscriptItem {
 }
 
 final class UserTurn extends TranscriptItem {
-  const UserTurn(super.key, this.text, {this.mode});
+  const UserTurn(super.key, this.text, {this.mode, this.lead = ''});
   final String text;
 
   /// The mode note the message carried (shown as a chip), if any.
   final AgentMode? mode;
+
+  /// The harness that got it, by name ('' when not known); shown once a
+  /// session has had more than one lead.
+  final String lead;
 }
 
 final class AgentText extends TranscriptItem {
@@ -187,12 +193,16 @@ const planApprovedReason =
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';
 
 final class NoticeItem extends TranscriptItem {
-  const NoticeItem(super.key, this.message, {this.error = false, this.detail = ''});
+  const NoticeItem(super.key, this.message, {this.error = false, this.detail = '', this.limit});
   final String message;
   final bool error;
 
   /// More to show on request (a compaction's summary), or ''.
   final String detail;
+
+  /// The lead stopped on a usage limit (its plan, or EveryAI credits): the
+  /// session offers to carry on with another harness.
+  final UsageLimit? limit;
 }
 
 /// Whether an error is the account running out of EveryAI credits (the
@@ -303,6 +313,10 @@ final class TranscriptBuilder {
   AgentMode? _notedMode;
   RetryState? _retry;
 
+  /// The harness the events come from now, by name: stamped on user turns,
+  /// and the lead a handoff went to. Set by a session that switched leads.
+  String lead = '';
+
   Transcript get snapshot => Transcript(
     items: List.unmodifiable(_items),
     streaming: _streaming.toString(),
@@ -353,6 +367,10 @@ final class TranscriptBuilder {
             _parts.add(tool);
           }
         }
+      case StateChange(key: approvedCallsKey, :final raw):
+        for (final id in raw['value'] as List<Object?>? ?? const []) {
+          _open.remove(id);
+        }
       case StateChange(:final executionStatus) when executionStatus != ExecutionStatus.unknown:
         _status = executionStatus;
       case StateChange():
@@ -362,13 +380,22 @@ final class TranscriptBuilder {
         _retry = e;
       case ChatMessage(fromUser: true, text: final raw):
         final (mode, noted) = splitModeNote(raw);
-        final (_, text) = splitContextNotes(noted);
+        var (_, text) = splitContextNotes(noted);
         final changed = mode != null && mode != _notedMode;
         if (mode != null) _notedMode = mode;
         // A continuation conversation opens with the summary, not something the user typed.
         if (splitCompacted(text) case final c?) {
           _items.add(NoticeItem(e.id, contextCompactedNotice, detail: c.summary));
           return;
+        }
+        final (handedOver, said) = splitHandoff(text);
+        if (handedOver != null) {
+          final from = RegExp(r'from="([^"]*)"').firstMatch(handedOver)?[1] ?? '';
+          final title = lead.isNotEmpty ? 'Handoff to $lead' : 'Handed over${from.isEmpty ? '' : ' from $from'}';
+          // The handoff, then what the user wrote with it (sent with their next message).
+          _items.add(NoticeItem(said.isEmpty ? e.id : '${e.id}-handoff', title, detail: handedOver));
+          if (said.isEmpty) return;
+          text = said;
         }
         if (_answer(text) || _reported(text)) return;
         if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
@@ -392,7 +419,7 @@ final class TranscriptBuilder {
           );
           return;
         }
-        _items.add(UserTurn(e.id, text, mode: changed ? mode : null));
+        _items.add(UserTurn(e.id, text, mode: changed ? mode : null, lead: lead));
         _settleOpenCards(text);
       case ChatMessage(:final text, :final reasoning):
         if (text.trim().isEmpty && reasoning.trim().isEmpty) return;
@@ -402,7 +429,9 @@ final class TranscriptBuilder {
       case ToolResult():
         _result(e);
       case ConversationFailure(:final message):
-        _items.add(NoticeItem(e.id, message, error: true));
+        // EveryAI's own limit is the gateway's 402: no reset time.
+        final limit = usageLimitOf(e) ?? (isOutOfCredits(message) ? UsageLimit(message: message) : null);
+        _items.add(NoticeItem(e.id, message, error: true, limit: limit));
       case UnknownEvent() || ConnectionChange() || UsageReport():
         break;
     }
@@ -438,14 +467,27 @@ final class TranscriptBuilder {
     if (_items[i] case QuestionItem(:final call, :final questions)) _items[i] = QuestionItem(call, questions, answers);
   }
 
+  /// Closes plan card [id] at once, before the agent's result arrives (an
+  /// outside agent's host call answered in the app).
+  void settlePlan(String id, PlanVerdict verdict) {
+    final i = _byAction[id];
+    if (i == null) return;
+    if (_items[i] case PlanProposal(:final call, verdict: null)) _items[i] = PlanProposal(call, verdict: verdict);
+  }
+
+  /// A note the app adds itself (not from the agent).
+  void addNotice(NoticeItem notice) => _items.add(notice);
+
   void _action(ActionCall call) {
     _byToolCall[call.toolCallId] = call.id;
     _open[call.id] = call;
-    if (call.toolName == askUserQuestionTool) {
+    // An outside agent's call to the app's MCP host is the same card.
+    final card = hostToolOf(call) ?? call.toolName;
+    if (card == askUserQuestionTool) {
       _push(call.id, QuestionItem(call, Question.listFrom(call.action)));
       return;
     }
-    if (call.toolName == presentPlanTool) {
+    if (card == presentPlanTool) {
       _push(call.id, PlanProposal(call));
       return;
     }
@@ -586,6 +628,19 @@ final class TranscriptBuilder {
         call,
         verdict: _reason(r).startsWith(planApprovedReason) ? PlanVerdict.approved : PlanVerdict.revised,
       ),
+      // A host call's result is the answer itself; an error (timed out, the
+      // session ended) closes the card unanswered.
+      QuestionItem(:final call, :final questions, answers: null) when hostToolOf(call) != null => QuestionItem(
+        call,
+        questions,
+        r.outcome == ToolOutcome.ok ? parseAnswers(r.text, questions) ?? const [] : const [],
+      ),
+      PlanProposal(:final call, verdict: null) when hostToolOf(call) != null => PlanProposal(
+        call,
+        verdict: r.outcome == ToolOutcome.ok && r.text.trimLeft().startsWith(planApprovedReason)
+            ? PlanVerdict.approved
+            : PlanVerdict.revised,
+      ),
       final other => other,
     };
   }
@@ -633,6 +688,23 @@ final class TranscriptBuilder {
     }
     return false;
   }
+}
+
+/// Whether [text] (a user-role message, mode and context notes split off)
+/// came from the app or the harness rather than from the user: a compaction
+/// continuation, a phase note, a background task's notification, subagent
+/// reports, a research workflow's reports, or answers to a question card.
+/// [TranscriptBuilder] shows none of these as a [UserTurn]; nor is any of
+/// them a request a handoff finishes.
+bool isHarnessNote(String text) {
+  final t = text.trimLeft();
+  return splitCompacted(t) != null ||
+      t.startsWith('<$researchWorkflowTag') ||
+      parsePhaseNote(t) != null ||
+      parseTaskNotification(t) != null ||
+      parseSubagentReports(t).isNotEmpty ||
+      t.startsWith(answersHeading) ||
+      t.startsWith(answersReasonLead);
 }
 
 /// A short label for a tool step ("Read lib/a.dart", "Ran flutter test").

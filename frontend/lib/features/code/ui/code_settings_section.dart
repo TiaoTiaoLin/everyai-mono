@@ -18,6 +18,8 @@ import '../code_providers.dart';
 import '../code_settings_providers.dart';
 import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
+import '../drivers/driver.dart' show DriverStatus;
+import '../drivers/driver_registry.dart';
 import '../permissions_providers.dart';
 import '../settings/setting_defs.dart';
 import '../settings/settings.dart' as files;
@@ -359,6 +361,9 @@ class _CodeSettingsSectionState extends ConsumerState<CodeSettingsSection> {
           raw: l.raw,
           onWrite: (edit) => _writeFile(l, edit),
         );
+      case SettingKind.harnesses:
+        block = true;
+        control = const HarnessesSetting();
       case SettingKind.link:
         control = AdaptiveButton(
           label: 'Open',
@@ -537,6 +542,91 @@ final class _Layer {
   final Map<String, Object?> below;
   final StoredCodeSettings prefs;
 }
+
+/// Settings → Code → Harnesses: each driver with what was found on this
+/// computer, the consent switch for subscription CLIs, and Refresh.
+class HarnessesSetting extends ConsumerWidget {
+  const HarnessesSetting({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = EveryTheme.of(context);
+    final statuses = ref.watch(driverStatusesProvider);
+    final own = ref.watch(codeSettingsProvider.select((s) => s.ownClis));
+    final drivers = ref.watch(driverRegistryProvider).listed.toList();
+    final consent = [
+      for (final d in drivers)
+        if (d.info.needsConsent) d.info.label,
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final d in drivers)
+          Padding(
+            key: ValueKey('code-settings.harness.${d.info.id}'),
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(d.info.label, style: theme.type.callout.medium.tint(theme.text)),
+                      Text(switch (statuses) {
+                        AsyncData(:final value) when value[d.info.id] != null => harnessStatusLine(
+                          d.info.id,
+                          value[d.info.id]!,
+                        ),
+                        AsyncError() => "Couldn't check",
+                        _ => 'Checking…',
+                      }, style: theme.type.caption.tint(theme.textMuted)),
+                    ],
+                  ),
+                ),
+                if (d.info.needsConsent) ...[
+                  Text('Use my own installed CLI', style: theme.type.caption.tint(theme.textMuted)),
+                  const SizedBox(width: 8),
+                  AdaptiveSwitch(
+                    key: ValueKey('code-settings.own-cli.${d.info.id}'),
+                    value: own.contains(d.info.id),
+                    onChanged: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.id, v),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        if (consent.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            '${consent.join(' and ')} run the copy installed on this computer, signed in to your own account, so '
+            'what they do counts against your plan with that company. They stay off until you turn them on.',
+            style: theme.type.caption.tint(theme.textMuted),
+          ),
+        ],
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: AdaptiveButton(
+            key: const ValueKey('code-settings.harnesses.refresh'),
+            label: 'Refresh',
+            emphasis: ButtonEmphasis.secondary,
+            onPressed: () => ref
+              ..invalidate(driverStatusesProvider)
+              ..invalidate(driverModelsProvider),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// One driver's status in plain words: the version or "Not installed",
+/// whether it is signed in (when known) and what is in the way.
+String harnessStatusLine(String id, DriverStatus s) => [
+  if (id == everyaiHarnessName) 'Built in' else if (s.installed) s.version ?? 'Installed' else 'Not installed',
+  if (s.signedIn case final signed?) signed ? 'signed in' : 'not signed in',
+  if (s.problem case final p? when p.isNotEmpty) p.endsWith('.') ? p.substring(0, p.length - 1) : p,
+].join(' · ');
 
 /// A wrap of removable chips and an add chip.
 class _Chips extends StatelessWidget {

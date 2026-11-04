@@ -391,4 +391,25 @@ void main() {
     expect(s.rulesFor('other').allow, isEmpty);
     expect(StoredPermissions.fromJson(s.toJson()).rulesFor('p1').deny, r.deny);
   });
+
+  group('host tools of an outside agent', () {
+    ActionCall host(String tool) => _call({'kind': 'MCPToolAction'}, tool: 'mcp__everyai__$tool');
+    const outside = PermissionPolicy(workingDir: _dir, hostTools: true);
+
+    test('cards and notes run without asking in Plan and Ask; bug_check does not', () {
+      for (final m in [AgentMode.plan, AgentMode.ask]) {
+        for (final t in [askUserQuestionTool, presentPlanTool, 'memory', 'saved_plans']) {
+          expect(outside.decide(host(t), m).verdict, Verdict.allow, reason: '$t in $m');
+        }
+        expect(outside.decide(host('bug_check'), m).verdict, Verdict.ask);
+      }
+    });
+
+    test('only for an outside agent, and a deny rule still wins', () {
+      const ours = PermissionPolicy(workingDir: _dir);
+      expect(ours.decide(host(askUserQuestionTool), AgentMode.ask).verdict, Verdict.ask);
+      const denying = PermissionPolicy(rules: PermissionRules(deny: ['Mcp(mcp__everyai__memory)']), hostTools: true);
+      expect(denying.decide(host('memory'), AgentMode.ask).verdict, Verdict.deny);
+    });
+  });
 }

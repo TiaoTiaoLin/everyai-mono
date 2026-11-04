@@ -13,6 +13,7 @@ final class UsageTotals {
     this.chargedMicros = 0,
     this.ownKeyMicros = 0,
     this.planMicros = 0,
+    this.planCalls = 0,
     this.lastPromptTokens = 0,
     this.lastCompletionTokens = 0,
   });
@@ -31,6 +32,7 @@ final class UsageTotals {
       chargedMicros: n('charged_micros'),
       ownKeyMicros: n('byok_cost_micros'),
       planMicros: n('plan_cost_micros'),
+      planCalls: n('plan_calls'),
       lastPromptTokens: n('last_prompt_tokens'),
       lastCompletionTokens: n('last_completion_tokens'),
     );
@@ -45,6 +47,7 @@ final class UsageTotals {
     'charged_micros': chargedMicros,
     if (ownKeyMicros > 0) 'byok_cost_micros': ownKeyMicros,
     if (planMicros > 0) 'plan_cost_micros': planMicros,
+    if (planCalls > 0) 'plan_calls': planCalls,
     'last_prompt_tokens': lastPromptTokens,
     'last_completion_tokens': lastCompletionTokens,
   };
@@ -66,6 +69,13 @@ final class UsageTotals {
   /// What calls an outside harness ran on the user's subscription would have
   /// cost (shown; the plan already paid, so it isn't spending).
   final int planMicros;
+
+  /// Calls an outside harness ran on the user's subscription, priced or not
+  /// (some CLIs report tokens without a price).
+  final int planCalls;
+
+  /// Whether any call ran on the user's subscription.
+  bool get onPlan => planCalls > 0 || planMicros > 0;
 
   /// All spending, charged or on the user's keys: what a spend cap counts.
   int get spentMicros => chargedMicros + ownKeyMicros;
@@ -91,6 +101,7 @@ final class UsageTotals {
     int charged = 0,
     int ownKey = 0,
     int plan = 0,
+    bool onPlan = false,
     bool context = true,
   }) => UsageTotals(
     calls: calls + 1,
@@ -101,6 +112,7 @@ final class UsageTotals {
     chargedMicros: chargedMicros + charged,
     ownKeyMicros: ownKeyMicros + ownKey,
     planMicros: planMicros + plan,
+    planCalls: planCalls + (onPlan ? 1 : 0),
     lastPromptTokens: context ? prompt : lastPromptTokens,
     lastCompletionTokens: context ? completion : lastCompletionTokens,
   );
@@ -115,6 +127,7 @@ final class UsageTotals {
     chargedMicros: chargedMicros,
     ownKeyMicros: ownKeyMicros,
     planMicros: planMicros,
+    planCalls: planCalls,
     lastPromptTokens: prompt,
     lastCompletionTokens: completion,
   );
@@ -129,6 +142,7 @@ final class UsageTotals {
     chargedMicros: chargedMicros + other.chargedMicros,
     ownKeyMicros: ownKeyMicros + other.ownKeyMicros,
     planMicros: planMicros + other.planMicros,
+    planCalls: planCalls + other.planCalls,
     lastPromptTokens: other.lastPromptTokens > 0 ? other.lastPromptTokens : lastPromptTokens,
     lastCompletionTokens: other.lastPromptTokens > 0 ? other.lastCompletionTokens : lastCompletionTokens,
   );
@@ -144,6 +158,7 @@ final class UsageTotals {
       other.chargedMicros == chargedMicros &&
       other.ownKeyMicros == ownKeyMicros &&
       other.planMicros == planMicros &&
+      other.planCalls == planCalls &&
       other.lastPromptTokens == lastPromptTokens &&
       other.lastCompletionTokens == lastCompletionTokens;
 
@@ -157,6 +172,7 @@ final class UsageTotals {
     chargedMicros,
     ownKeyMicros,
     planMicros,
+    planCalls,
     lastPromptTokens,
     lastCompletionTokens,
   );

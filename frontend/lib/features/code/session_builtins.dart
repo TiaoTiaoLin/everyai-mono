@@ -17,6 +17,7 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
   set _asideIds(int value);
   void _putAside(Aside aside);
   void dismissAside(int id);
+  String _leadLabel(String harness);
   Future<void> send(String text, {List<Attachment> files = const []});
 
   /// Reviewer subagents running, by aside id.
@@ -34,8 +35,11 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
   CodeSessionInfo? get _info => ref.read(codeSessionsProvider.notifier).byId(sessionId);
 
   /// The cheap model for side jobs (the judge, commit messages), billed to
-  /// the session; null for the demo, which has no model.
+  /// the session; null for the demo, which has no model, and on an outside
+  /// lead, where EveryAI spends nothing (commit and PR drafts are then
+  /// written without a model).
   Future<Summarizer?> _sideModel(CodeSessionInfo info) async {
+    if (_outside(info)) return null;
     final override = ref.read(codeSideModelProvider);
     if (override != null) return override;
     if (isDemoPath(info.workingDir)) return null;
@@ -47,6 +51,8 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
       onUnauthorized: (k) => remintGatewayKey(ref, k),
     );
   }
+
+  bool _outside(CodeSessionInfo info) => isOutsideLead(info.harness, info.workingDir);
 
   Aside _newAside(AsideKind kind, String question) {
     final aside = Aside(id: ++_asideIds, kind: kind, question: question.trim(), busy: true);
@@ -122,7 +128,10 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
 
   /// Sets a standing objective: after each turn a cheap judge checks it and,
   /// while it isn't met and turns remain, sends the agent back to work.
-  Future<void> setGoal(String objective, {int budget = defaultGoalTurns}) async {
+  /// Returns why it can't be set (an outside lead: the judge is an EveryAI
+  /// model), else null.
+  Future<String?> setGoal(String objective, {int budget = defaultGoalTurns}) async {
+    if (_info case final info? when _outside(info)) return goalOff(_leadLabel(info.harness));
     final goal = Goal(objective: objective.trim(), budget: budget);
     state = state.copyWith(goal: goal);
     final moment = goalMoment(state.transcript, queued: state.queued.isNotEmpty);
@@ -133,6 +142,7 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
     } else if (moment != GoalMoment.later) {
       await send(goalStartMessage(goal));
     }
+    return null;
   }
 
   void clearGoal() => state = state.copyWith(clearGoal: true);
@@ -186,6 +196,9 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
       if (_harnessSession case final AsksAside self) {
         // The session's own model judges from its cached history.
         reply = await self.askAside(goalSelfCheck(start.objective));
+      } else if (_outside(info)) {
+        // The lead moved to an outside harness after the goal was set.
+        return _pauseGoal(goalOff(_leadLabel(info.harness)));
       } else {
         final model = await _sideModel(info);
         if (model == null) return _pauseGoal('Goals need a real session: the demo has no model to check with.');
@@ -282,7 +295,7 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
       if (files.isEmpty && commits.isEmpty) {
         return _settle(aside.failed('There are no changes to open a pull request for.'));
       }
-      var draft = (title: info.title, body: '');
+      var draft = (title: info.title, body: plainPrBody(commits));
       try {
         final model = await _sideModel(info);
         if (model != null) {
@@ -349,6 +362,7 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
           aside.done('Imported ${[for (final c in ok) '**${c.dirName}**'].join(', ')} into your skills library.'),
         );
       }
+      if (_info case final info? when _outside(info)) return _settle(aside.failed(learnOff(_leadLabel(info.harness))));
       final drafter = ref.read(skillDrafterProvider);
       final skill = switch (source) {
         LearnFromUrl(:final url, :final hint) => await drafter.draftFrom(url: url, hint: hint, session: sessionId),

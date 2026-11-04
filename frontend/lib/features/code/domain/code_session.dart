@@ -39,6 +39,27 @@ const everyaiHarnessName = 'everyai';
 /// The stored harness name of sessions from the removed OpenHands harness.
 const openHandsHarnessName = 'openHands';
 
+/// A harness that led a session before and may lead it again: its
+/// conversation (reopened with only what it missed, when its driver can
+/// resume) and the model it ran on.
+@immutable
+final class LeadRecord {
+  const LeadRecord({required this.conversationId, this.model = '', this.effort = ''});
+
+  /// '' when there is none to reopen (it gets the whole handoff again).
+  final String conversationId;
+  final String model;
+  final String effort;
+
+  factory LeadRecord.fromJson(Map<String, Object?> json) => LeadRecord(
+    conversationId: json['conversation_id'] as String? ?? '',
+    model: json['model'] as String? ?? '',
+    effort: json['effort'] as String? ?? '',
+  );
+
+  Map<String, Object?> toJson() => {'conversation_id': conversationId, 'model': model, 'effort': effort};
+}
+
 @immutable
 final class CodeSessionInfo {
   const CodeSessionInfo({
@@ -64,6 +85,8 @@ final class CodeSessionInfo {
     this.forkCopy,
     this.tier = HarnessTier.efficient,
     this.harnessMode = HarnessMode.build,
+    this.leads = const {},
+    this.pendingHandoff = '',
   });
 
   final String id;
@@ -92,6 +115,15 @@ final class CodeSessionInfo {
   /// id, or [openHandsHarnessName] for sessions from before that harness was
   /// removed (they can't reopen).
   final String harness;
+
+  /// The harnesses that led this session before the current one ([harness],
+  /// whose conversation, model and effort are the fields above), by driver
+  /// id. Empty for a session that never switched.
+  final Map<String, LeadRecord> leads;
+
+  /// A handoff to the current lead not sent yet (the user switched from the
+  /// menu): it goes out with their next message. '' when none.
+  final String pendingHandoff;
 
   /// Started on a harness the app no longer has.
   bool get removedHarness => harness == openHandsHarnessName;
@@ -147,6 +179,9 @@ final class CodeSessionInfo {
     String? effort,
     HarnessTier? tier,
     HarnessMode? harnessMode,
+    String? harness,
+    Map<String, LeadRecord>? leads,
+    String? pendingHandoff,
     bool merged = false,
   }) => CodeSessionInfo(
     id: id,
@@ -160,7 +195,7 @@ final class CodeSessionInfo {
     branch: branch ?? this.branch,
     worktree: worktree,
     baseline: baseline,
-    harness: harness,
+    harness: harness ?? this.harness,
     mainAgent: mainAgent,
     effort: effort ?? this.effort,
     holdClientTools: holdClientTools,
@@ -172,6 +207,8 @@ final class CodeSessionInfo {
     forkCopy: merged ? null : forkCopy,
     tier: tier ?? this.tier,
     harnessMode: harnessMode ?? this.harnessMode,
+    leads: leads ?? this.leads,
+    pendingHandoff: pendingHandoff ?? this.pendingHandoff,
   );
 
   factory CodeSessionInfo.fromJson(Map<String, Object?> json) => CodeSessionInfo(
@@ -205,6 +242,12 @@ final class CodeSessionInfo {
     forkCopy: ForkCopy.fromJson(json['fork_copy']),
     tier: HarnessTier.parse(json['tier']),
     harnessMode: HarnessMode.parse(json['harness_mode']),
+    leads: {
+      if (json['leads'] case final Map<String, Object?> leads)
+        for (final MapEntry(:key, :value) in leads.entries)
+          if (value case final Map<String, Object?> lead) key: LeadRecord.fromJson(lead),
+    },
+    pendingHandoff: json['pending_handoff'] as String? ?? '',
   );
 
   Map<String, Object?> toJson() => {
@@ -230,5 +273,7 @@ final class CodeSessionInfo {
     if (forkCopy case final f?) 'fork_copy': f.toJson(),
     'tier': tier.name,
     if (harnessMode != HarnessMode.build) 'harness_mode': harnessMode.name,
+    if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
+    if (pendingHandoff.isNotEmpty) 'pending_handoff': pendingHandoff,
   };
 }

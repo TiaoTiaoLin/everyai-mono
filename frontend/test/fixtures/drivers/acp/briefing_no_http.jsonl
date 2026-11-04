@@ -1,0 +1,8 @@
+// A made-up generic ACP agent, shaped by the ACP spec (agentclientprotocol.com).
+// No mcpCapabilities.http, so our server stays out of session/new.
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"}}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{}},"authMethods":[]}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/new","id":2,"params":{"cwd":"{{cwd}}","mcpServers":[]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"dsh-1"}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/prompt","id":3,"params":{"sessionId":"dsh-1","prompt":["{{any}}"]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}}

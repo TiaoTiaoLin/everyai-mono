@@ -64,6 +64,9 @@ pub const App = struct {
     relay: remote.Relay = .{},
     /// Request buckets for the rate-limited routes (auth, pairing); set up in `routes`.
     limiter: anole.ratelimit.MemoryLimiter = undefined,
+    /// The API-wide limit's buckets, apart from `limiter`'s: a bucket is per key, so
+    /// sharing one table would let the large policy refill the auth and pairing ones.
+    global_limiter: anole.ratelimit.MemoryLimiter = undefined,
     /// The decoy password hash for sign-ins to unknown addresses (auth.zig).
     decoy: struct { mutex: std.Io.Mutex = .init, buf: [128]u8 = undefined, len: usize = 0 } = .{},
     /// Earlier web_search results per user and chat (web.zig).
@@ -138,9 +141,17 @@ fn catalogLoaded(ctx: ?*anyopaque) bool {
 pub fn routes(app: *anole.Server(App), state: *App) !void {
     // One process: buckets live in memory (the caller deinits it).
     state.limiter = .init(state.gpa, app.io(), .{});
+    state.global_limiter = .init(state.gpa, app.io(), .{});
+    // One bucket per client address for every route, so nobody can hammer the
+    // server; refuses when the limiter fails rather than letting a flood through.
+    if (state.cfg.rate_limit_per_minute > 0) app.use(anole.ratelimit.Middleware.init(state.global_limiter.limiter(), .{
+        .limit = state.cfg.rate_limit_per_minute,
+        .window = .fromSeconds(60),
+        .on_error = .deny,
+    }));
     // /readyz waits for the model catalog: without it chat can't price or route.
     try app.health(.{}).addCheck("catalog", catalogLoaded, state);
-    app.openapi(.{ .info = .{ .title = "EveryAI API", .version = "0.1.0" } });
+    app.openapi(.{ .info = .{ .title = "EveryAI API", .version = "0.1.0-dev-nonsigned" } });
     app.get("/v1/ping", ping);
     auth.routes(app, state);
     billing.routes(app, state);
@@ -216,8 +227,19 @@ pub fn main(init: std.process.Init) !void {
     // After the server (defers run last first): rooms outlive their sockets.
     defer state.relay.deinit();
 
+    if ((cfg.tls_cert_path == null) != (cfg.tls_key_path == null)) {
+        std.log.err("refusing to start: set both TLS_CERT_PATH and TLS_KEY_PATH, or neither", .{});
+        return error.HalfTlsConfig;
+    }
+    const tls = cfg.tls_cert_path != null;
     var app = try anole.Server(App).init(init.gpa, .{
-        .http = .{ .address = cfg.host, .port = cfg.port },
+        // HTTPS from PEM files when they're set (a deployment), else plain HTTP.
+        .http = if (tls) null else .{ .address = cfg.host, .port = cfg.port },
+        .https = if (!tls) null else .{
+            .address = cfg.host,
+            .port = cfg.port,
+            .cert = .{ .files = .{ .cert_path = cfg.tls_cert_path.?, .key_path = cfg.tls_key_path.? } },
+        },
         // The same files for Anole's own variables (ANOLE_*, PORT).
         .env_files = env_files,
         // Argon2 runs on the blocking pool, not an executor.
@@ -273,6 +295,7 @@ pub fn main(init: std.process.Init) !void {
 
     try routes(&app, &state);
     defer state.limiter.deinit();
+    defer state.global_limiter.deinit();
     std.log.info("EveryAI backend-exp on :{d} (dev_auth={}, markup={d:.2}, stripe={s}, claude via {s})", .{
         cfg.port, cfg.dev_auth, cfg.markup, if (cfg.stripe_secret_key == null) "mock" else "test", state.route("anthropic/", true).provider,
     });

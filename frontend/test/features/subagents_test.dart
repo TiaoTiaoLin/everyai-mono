@@ -307,7 +307,7 @@ void main() {
       expect((done.transcript.items.last as AgentText).text, contains('A subagent added three tests'));
 
       // Removing the session removes its subagent too.
-      container.read(codeSessionsProvider.notifier).remove(id);
+      await container.read(codeSessionsProvider.notifier).remove(id);
       expect(container.read(codeSessionsProvider), isEmpty);
     });
 

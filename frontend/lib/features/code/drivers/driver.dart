@@ -2,6 +2,7 @@
 
 import 'package:flutter/foundation.dart';
 
+import '../domain/agent_mode.dart';
 import '../harness/harness.dart';
 
 export '../harness/harness.dart' show DriverBriefing;
@@ -119,4 +120,13 @@ abstract interface class HarnessDriver implements Harness {
 
   /// Its own models; empty when the app's catalog serves it.
   Future<List<DriverModel>> models();
+}
+
+/// A driver that says how it holds each mode (its sandbox, its own approval
+/// modes), for the session's fidelity line. Optional: without it the line
+/// comes from [HarnessDriver.caps].
+abstract interface class ExplainsModes {
+  /// A few words ("enforced by its read-only sandbox"), or null for the
+  /// caps' default.
+  String? howEnforced(AgentMode mode);
 }

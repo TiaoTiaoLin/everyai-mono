@@ -12,7 +12,8 @@ import 'package:every_ai/features/code/harness/everyai/llm.dart';
 import 'package:every_ai/features/code/harness/everyai/prompt_io.dart';
 import 'package:every_ai/features/code/harness/everyai/shell_io.dart';
 import 'package:every_ai/features/code/domain/phases.dart';
-import 'package:every_ai/features/code/domain/transcript.dart' show planApprovedReason;
+import 'package:every_ai/features/code/domain/transcript.dart' show isOutOfCredits, planApprovedReason;
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/everyai/scrub.dart';
 import 'package:every_ai/features/code/harness/everyai/tools_io.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -46,6 +47,9 @@ final class FakeGateway {
   static Future<FakeGateway> start() async => FakeGateway._(await HttpServer.bind(InternetAddress.loopbackIPv4, 0));
 
   String get baseUrl => 'http://127.0.0.1:${_server.port}/v1';
+
+  /// An error reply: HTTP [status] with [error] as the JSON body's `error`.
+  void fail(int status, Map<String, Object?> error) => replies.add({'status': status, 'error': error});
 
   /// A reply with [text] and these tool calls (name, arguments).
   void reply({String text = '', List<(String, Map<String, Object?>)> calls = const []}) => replies.add({
@@ -92,6 +96,14 @@ final class FakeGateway {
     }
     await Future<void>.delayed(delay);
     final next = replies.isEmpty ? {'text': 'Done.', 'calls': const <(String, String)>[]} : replies.removeAt(0);
+    if (next['status'] case final int status) {
+      req.response
+        ..statusCode = status
+        ..headers.contentType = ContentType.json
+        ..write(jsonEncode({'error': next['error']}));
+      await req.response.close();
+      return;
+    }
     req.response.headers.contentType = ContentType('text', 'event-stream');
     void chunk(Map<String, Object?> delta, {String? finish}) => req.response.write(
       'data: ${jsonEncode({
@@ -234,6 +246,40 @@ void main() {
     final reopened = await fresh.attach(session.id);
     final replay = await reopened.events.take(3).toList();
     expect(replay.whereType<ChatMessage>().first.text, 'make hello.py');
+  });
+
+  group('usage limits', () {
+    tearDown(() => EveryAISession.testRetryPolicy = null);
+
+    test('out of EveryAI credits is a usage limit, not retried, and still reads as out of credits', () async {
+      gateway.fail(402, {'message': 'Out of EveryAI credits', 'type': 'insufficient_quota', 'code': 'out_of_credits'});
+      final events = await drive(await harness.start(spec('go')));
+      final limit = events.map(usageLimitOf).nonNulls.single;
+      expect(isOutOfCredits(limit.message), isTrue);
+      expect(limit.resetsAt, isNull);
+      expect(gateway.requests, hasLength(1));
+    });
+
+    test("a key's spent budget is a usage limit with its reset", () async {
+      gateway.fail(403, {
+        'message': 'Key limit exceeded',
+        'code': 403,
+        'metadata': {'limit_source': 'openrouter_key_limit', 'resets_at': '2026-11-05T00:00:00Z'},
+      });
+      final events = await drive(await harness.start(spec('go')));
+      expect(events.map(usageLimitOf).nonNulls.single.resetsAt, DateTime.utc(2026, 11, 5));
+    });
+
+    test('a rate limit that outlasts the retries is a plain failure', () async {
+      EveryAISession.testRetryPolicy = const RetryPolicy(maxAttempts: 2, base: Duration.zero, cap: Duration.zero);
+      for (var i = 0; i < 2; i++) {
+        gateway.fail(429, {'message': 'Rate limit exceeded', 'code': 429});
+      }
+      final events = await drive(await harness.start(spec('go')));
+      expect(gateway.requests, hasLength(2));
+      expect(events.whereType<ConversationFailure>().single.message, 'Rate limit exceeded');
+      expect(events.map(usageLimitOf).nonNulls, isEmpty);
+    });
   });
 
   test('a held question is answered inside the call and the agent keeps its turn', () async {

@@ -102,8 +102,14 @@ Cached and cache-write tokens are recorded per call in `usage_events`.
 - With `DEV_AUTH=true`, credential-less requests act as a seeded `dev-user`
   (pro plan, $20 wallet).
 
+## Deployment
+
+The dev server (0.1.0-dev-nonsigned, BYOK only, no sign-in) runs on a GCP VM with Anole's own TLS and a global
+per-address rate limit: see [`deploy/README.md`](deploy/README.md). `TLS_CERT_PATH`/`TLS_KEY_PATH` switch the listener
+to HTTPS; `RATE_LIMIT_PER_MINUTE` (600, 0 = off) limits every route per client address.
+
 ## Anole pieces
 
 Outbound SSE parsing uses `anole.sse.Parser` and migrations use
-`anole.db.migrate` (Anole 0.4.1). The migration list lives in
+`anole.db.migrate` (Anole 0.5.1). The migration list lives in
 `src/migrations.zig`; the SQL files are in `src/migrations/`.

@@ -25,8 +25,15 @@ Future<DriverProcess> spawnDriver({
 }) =>
     impl.spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
 
+final _closers = <Future<void> Function()>{};
+
+/// Registers [close] to run when the app quits (processes that don't come from [spawnDriver], e.g. a pty).
+void trackDriverClose(Future<void> Function() close) => _closers.add(close);
+void untrackDriverClose(Future<void> Function() close) => _closers.remove(close);
+
 /// Ends every driver process still running (the app is quitting).
-Future<void> closeAllDriverProcesses() => impl.closeAllDriverProcesses();
+Future<void> closeAllDriverProcesses() =>
+    Future.wait([impl.closeAllDriverProcesses(), for (final c in _closers.toList()) c()]);
 
 /// Looks for [command] on the login shell's PATH (an app started from the
 /// Dock doesn't have the user's) and asks it for its version: installed,
@@ -38,6 +45,9 @@ Future<DriverStatus> detectCli(
   Future<String?> Function(String command)? which,
 }) => impl.detectCli(command, versionArgs: versionArgs, which: which);
 
+/// The problem a driver whose sessions aren't built yet reports.
+const notBuiltProblem = 'Not built yet.';
+
 /// [detectCli] for a driver whose sessions aren't built yet.
 Future<DriverStatus> notBuiltYet(String command, {Future<String?> Function(String command)? which}) async =>
-    (await detectCli(command, which: which)).withProblem('Not built yet.');
+    (await detectCli(command, which: which)).withProblem(notBuiltProblem);

@@ -9,9 +9,8 @@
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
-	<key>keychain-access-groups</key>
-	<array>
-		<string>$(AppIdentifierPrefix)dev.alidirect.everyai</string>
-	</array>
+	<!-- Unsigned dev builds (0.1.0-dev-nonsigned): no keychain-access-groups, which needs a team.
+	     Add <key>keychain-access-groups</key> with $(AppIdentifierPrefix)dev.alidirect.everyai back for the signed
+	     release (TODO.md: macOS signing). Keys still go to the login keychain, as in Debug. -->
 </dict>
 </plist>

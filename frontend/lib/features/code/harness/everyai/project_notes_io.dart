@@ -16,6 +16,16 @@ const projectMemoryLimit = 4000;
 String plansDir(String root) => '$root/.everyai/plans';
 String memoryPath(String root) => '$root/.everyai/memory.md';
 
+/// Why [path] (a notes path under [root]) isn't used: it, or a folder
+/// between it and [root], is a link, which a cloned repository could point
+/// anywhere on disk. Null for a plain path.
+String? notesLinkProblem(String root, String path) {
+  for (var p = path; p.startsWith('$root/'); p = File(p).parent.path) {
+    if (FileSystemEntity.isLinkSync(p)) return '${p.substring(root.length + 1)} is a link, so it is not used.';
+  }
+  return null;
+}
+
 /// [markdown] (an approved plan) saved as `.everyai/plans/<date>-<slug>.md`;
 /// returns its path. The slug comes from the first heading.
 String savePlan(String root, String markdown, {DateTime? now}) {
@@ -26,6 +36,7 @@ String savePlan(String root, String markdown, {DateTime? now}) {
   var slug = heading.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '-').replaceAll(RegExp(r'^-+|-+$'), '');
   if (slug.length > 48) slug = slug.substring(0, 48).replaceAll(RegExp(r'-+$'), '');
   if (slug.isEmpty) slug = 'plan';
+  if (notesLinkProblem(root, plansDir(root)) case final why?) throw FileSystemException(why, plansDir(root));
   final dir = Directory(plansDir(root))..createSync(recursive: true);
   var file = File('${dir.path}/$date-$slug.md');
   for (var n = 2; file.existsSync() && file.readAsStringSync() != markdown; n++) {
@@ -38,8 +49,8 @@ String savePlan(String root, String markdown, {DateTime? now}) {
 /// The newest saved plan, or null.
 File? latestPlan(String root) {
   final dir = Directory(plansDir(root));
-  if (!dir.existsSync()) return null;
-  final plans = dir.listSync().whereType<File>().where((f) => f.path.endsWith('.md')).toList()
+  if (!dir.existsSync() || notesLinkProblem(root, dir.path) != null) return null;
+  final plans = dir.listSync(followLinks: false).whereType<File>().where((f) => f.path.endsWith('.md')).toList()
     ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
   return plans.firstOrNull;
 }
@@ -60,7 +71,7 @@ Future<bool> _tracked(String root, String path) async {
 Future<String> projectNotesBlock(String root) async {
   final parts = <String>[];
   final memory = File(memoryPath(root));
-  if (memory.existsSync()) {
+  if (memory.existsSync() && notesLinkProblem(root, memory.path) == null) {
     if (await _tracked(root, memory.path)) {
       parts.add('(The repository ships its own .everyai/memory.md; it is not loaded, as it is not this user\'s.)');
     } else {
@@ -116,6 +127,7 @@ final memoryToolSpec = <String, Object?>{
 /// Runs a memory call in [root].
 ToolOutput runMemory(String root, Map<String, Object?> args) {
   final file = File(memoryPath(root));
+  if (notesLinkProblem(root, file.path) case final why?) return ToolOutput('Error: $why', isError: true);
   final current = file.existsSync() ? file.readAsStringSync() : '';
   final text = (args['text'] as String? ?? '').trim();
   final old = (args['old_text'] as String? ?? '').trim();
