@@ -162,13 +162,13 @@ void main() {
         }),
         at(2000),
       );
-      // A used-up window without a time is skipped.
+      // A used-up window without a time may last longer: no time at all.
       expect(
         codexLimitResetsAt({
           'primary': {'usedPercent': 100, 'resetsAt': null},
           'secondary': {'usedPercent': 100, 'resetsAt': 1500},
         }),
-        at(1500),
+        isNull,
       );
       expect(
         codexLimitResetsAt({
@@ -785,6 +785,50 @@ ${dies ? '{"dir":"eof"}' : ''}
       await s.close();
     },
   );
+
+  test('Stop before the turn/start reply: kept, and sent once the turn has started', () async {
+    // interrupt_early without its first, refused interrupt.
+    final lines = File('$_fixtures/interrupt_early.jsonl').readAsLinesSync();
+    final channel = ReplayChannel(
+      [
+        for (final l in lines)
+          if (!l.contains('"id":5')) l,
+      ].join('\n'),
+    );
+    final s = await _driver(data, [channel]).start(_spec(work, mode: AgentMode.plan, model: ''));
+    final events = _listen(s);
+    final sending = s.send('reply OK');
+    await s.interrupt(); // turn/start isn't even out yet.
+    await sending;
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(channel.sent.where((m) => m['method'] == 'turn/interrupt'), hasLength(1));
+    expect(_states(events).last, ExecutionStatus.paused);
+    await s.close();
+  });
+
+  test('a steer Codex refuses before turn/started goes again after it, in the same turn', () async {
+    final channel = ReplayChannel('''
+${_upTo('approve_command', '"id":3,"result"')}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"out","msg":{"id":5,"method":"turn/steer","params":{"threadId":"thr_1","input":[{"type":"text","text":"also this"}],"expectedTurnId":"turn_1"}}}
+{"dir":"in","msg":{"error":{"code":-32600,"message":"no active turn to steer"},"id":5}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"out","msg":{"id":6,"method":"turn/steer","params":{"threadId":"thr_1","input":[{"type":"text","text":"also this"}],"expectedTurnId":"turn_1"}}}
+{"dir":"in","msg":{"id":6,"result":{"turnId":"turn_1"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}}}}
+''');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    await s.send('first');
+    await (s as SteersRuns).steer('also this');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(_turnStarts(channel), ['first']);
+    await s.close();
+  });
 
   test('a failed turn (recorded 401): retries add nothing, then one plain failure', () async {
     final skills = '${tmp.path}/session/briefing/skills';

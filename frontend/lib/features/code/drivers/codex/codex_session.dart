@@ -91,6 +91,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   Object? _lastErrorInfo;
   String? _startedTurn;
   String? _interruptOnStart;
+
+  /// Sends between their call and the turn/start reply, and whether a Stop
+  /// came meanwhile (it goes to the turn they start).
+  var _starting = 0;
+  var _stopAsked = false;
+  Completer<void>? _started;
   Map<String, Object?>? _rateLimits;
   CodexTokens? _total;
   var _status = ExecutionStatus.idle;
@@ -275,16 +281,34 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
 
   @override
   Future<void> send(String text, {bool run = true, List<String> images = const []}) async {
-    if (run) await _ensureRunning();
-    _emit(userMessage('u-${_newId()}', text));
-    _held.add(text);
-    _heldImages.addAll(images);
-    if (!run) return;
-    final all = _held.join('\n\n');
-    final pictures = [..._heldImages];
-    _held.clear();
-    _heldImages.clear();
-    await _startTurn(all, pictures);
+    if (!run) {
+      _emit(userMessage('u-${_newId()}', text));
+      _held.add(text);
+      _heldImages.addAll(images);
+      return;
+    }
+    await _starts(() async {
+      await _ensureRunning();
+      _emit(userMessage('u-${_newId()}', text));
+      _held.add(text);
+      _heldImages.addAll(images);
+      final all = _held.join('\n\n');
+      final pictures = [..._heldImages];
+      _held.clear();
+      _heldImages.clear();
+      await _startTurn(all, pictures);
+    });
+  }
+
+  /// Runs [body], which starts a turn, so a Stop before the turn/start
+  /// reply isn't lost; one asked after every start is in is forgotten.
+  Future<void> _starts(Future<void> Function() body) async {
+    _starting++;
+    try {
+      await body();
+    } finally {
+      if (--_starting == 0) _stopAsked = false;
+    }
   }
 
   Future<void> _startTurn(String text, List<String> images) async {
@@ -322,6 +346,14 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     };
     if (turn != null) _begin(turn);
     if (turn == null ? _turnId == null : _ended.contains(turn)) release();
+    if (turn != null && _stopAsked && !_ended.contains(turn)) {
+      _stopAsked = false;
+      if (_startedTurn == turn) {
+        unawaited(_interruptAgain(turn));
+      } else {
+        _interruptOnStart = turn;
+      }
+    }
   }
 
   static List<Map<String, Object?>> _input(String text, List<String> images) => [
@@ -354,11 +386,24 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     final turn = _turnId;
     if (turn == null || _peer.isClosed) return send(text, images: images);
     _emit(userMessage('u-${_newId()}', text));
+    if (await _steer(turn, text, images)) return;
+    // Before turn/started Codex has no turn to steer ("no active turn to
+    // steer", seen live with 0.166.0): the steer goes again once it starts.
+    if (_turnId == turn && !_ended.contains(turn) && _startedTurn != turn) {
+      final started = _started ??= Completer<void>();
+      await Future.any([started.future, ?_turnDone?.future, _peer.done]);
+      if (_turnId == turn && !_ended.contains(turn) && await _steer(turn, text, images)) return;
+    }
+    // The turn ended meanwhile: the message starts the next one.
+    await _starts(() => _startTurn(text, images));
+  }
+
+  Future<bool> _steer(String turn, String text, List<String> images) async {
     try {
       await _peer.request('turn/steer', {'threadId': _threadId, 'input': _input(text, images), 'expectedTurnId': turn});
+      return true;
     } on JsonRpcError {
-      // The turn ended meanwhile: the message starts the next one.
-      await _startTurn(text, images);
+      return false;
     }
   }
 
@@ -368,7 +413,10 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> interrupt() async {
     final turn = _turnId;
-    if (turn == null) return;
+    if (turn == null) {
+      if (_starting > 0) _stopAsked = true;
+      return;
+    }
     try {
       await _peer.request('turn/interrupt', {'threadId': _threadId, 'turnId': turn});
     } on JsonRpcError {
@@ -467,6 +515,8 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
           _begin(turn);
           _startedTurn = turn;
           _state(ExecutionStatus.running);
+          _started?.complete();
+          _started = null;
           if (_interruptOnStart == turn) {
             _interruptOnStart = null;
             unawaited(_interruptAgain(turn));

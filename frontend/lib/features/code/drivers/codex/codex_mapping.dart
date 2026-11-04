@@ -69,18 +69,24 @@ bool codexUsageLimit(Object? codexErrorInfo) => codexErrorInfo == 'usageLimitExc
 /// (`account/rateLimits/updated`'s `RateLimitSnapshot`) have all reset: the
 /// latest `resetsAt` (epoch seconds) of `primary`, `secondary` and
 /// `individualLimit` among those used up (`usedPercent` 100, or no
-/// `remainingPercent` left). Windows without a time are skipped; null when
-/// none is used up.
+/// `remainingPercent` left). Null when none is used up, or when a used-up
+/// window has no time (it may last longer than the others; T3's
+/// `codexUsageLimitResetAt` makes the same call).
 DateTime? codexLimitResetsAt(Map<String, Object?>? snapshot) {
   bool usedUp(Object? window) => switch (window) {
     {'usedPercent': final num used} => used >= 100,
     {'remainingPercent': final num left} => left <= 0,
     _ => false,
   };
-  final times = [
-    for (final w in [snapshot?['primary'], snapshot?['secondary'], snapshot?['individualLimit']])
-      if (w case {'resetsAt': final int at} when usedUp(w)) at,
-  ];
+  final times = <int>[];
+  for (final w in [snapshot?['primary'], snapshot?['secondary'], snapshot?['individualLimit']]) {
+    if (!usedUp(w)) continue;
+    if (w case {'resetsAt': final int at}) {
+      times.add(at);
+    } else {
+      return null;
+    }
+  }
   if (times.isEmpty) return null;
   return DateTime.fromMillisecondsSinceEpoch(times.reduce((a, b) => a > b ? a : b) * 1000, isUtc: true);
 }
