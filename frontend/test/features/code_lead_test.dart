@@ -21,144 +21,12 @@ import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
-import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:flutter_test/flutter_test.dart';
 
-class _FixedCatalog extends CatalogController {
-  @override
-  ModelCatalog build() => builtInCatalog;
-}
-
-/// The first value of [p] that meets [cond], now or when it changes.
-Future<T> _when<T>(ProviderContainer c, ProviderListenable<T> p, bool Function(T) cond) {
-  final done = Completer<T>();
-  final sub = c.listen<T>(p, (_, v) {
-    if (cond(v) && !done.isCompleted) done.complete(v);
-  }, fireImmediately: true);
-  return done.future.whenComplete(sub.close);
-}
-
-/// An outside agent's session: the test plays its events and reads what it was sent and answered.
-final class _Session implements HarnessSession, SteersRuns {
-  final _events = StreamController<HarnessEvent>.broadcast();
-  final answers = <({bool accept, String? reason})>[];
-  final sent = <String>[];
-  final steered = <String>[];
-
-  @override
-  String get id => 'c1';
-  @override
-  Stream<HarnessEvent> get events => _events.stream;
-
-  void add(HarnessEvent e) => _events.add(e);
-
-  @override
-  Future<void> respond({required bool accept, String? reason, List<String>? callIds}) async =>
-      answers.add((accept: accept, reason: reason));
-  @override
-  Future<void> send(String text, {bool run = true, List<String> images = const []}) async => sent.add(text);
-  @override
-  Future<void> steer(String text, {List<String> images = const []}) async => steered.add(text);
-  @override
-  Future<void> interrupt() async {}
-  @override
-  Future<void> pause() async {}
-  @override
-  Future<void> resume() async {}
-  @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {}
-  @override
-  Future<void> switchLlm(SessionSpec spec) async {}
-  @override
-  Future<void> rewindTo(String? head) async {}
-  @override
-  Future<void> close() async {}
-}
-
-final class _Driver implements HarnessDriver, AttachesBriefed {
-  _Driver(this.id, this.session, {this.needsConsent = false, this.caps = const {DriverCap.approvals}});
-  final String id;
-  final _Session session;
-  final bool needsConsent;
-  @override
-  final Set<DriverCap> caps;
-  final specs = <SessionSpec>[];
-  final reopened = <DriverBriefing>[];
-  final reopenedMcp = <Map<String, Object?>>[];
-
-  @override
-  DriverInfo get info => DriverInfo(id: id, label: 'Test CLI', needsConsent: needsConsent);
-  @override
-  Future<DriverStatus> detect() async => const DriverStatus(installed: true);
-  @override
-  Future<List<DriverModel>> models() async => const [];
-  @override
-  Future<HarnessSession> start(SessionSpec spec) async {
-    specs.add(spec);
-    return session;
-  }
-
-  @override
-  Future<HarnessSession> attach(String conversationId) async => session;
-  @override
-  Future<HarnessSession> attachBriefed(
-    String conversationId,
-    DriverBriefing briefing, {
-    Map<String, Object?> mcpConfig = const {},
-  }) async {
-    reopened.add(briefing);
-    reopenedMcp.add(mcpConfig);
-    return session;
-  }
-
-  @override
-  Future<Map<String, ExecutionStatus>> statuses(List<String> conversationIds) async => const {};
-}
-
-/// The MCP host: records tokens and hands the test each session's tools.
-final class _Host implements HostServer {
-  final minted = <String>[];
-  final revoked = <String>[];
-  final revokedSessions = <String>[];
-  final tools = <String, HostTools>{};
-
-  /// Live tokens by session; a revoked one leaves.
-  final live = <String, Set<String>>{};
-  var touchOk = true;
-  var _n = 0;
-
-  @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
-    minted.add(sessionId);
-    this.tools[sessionId] = tools;
-    final token = 'tok${++_n}';
-    (live[sessionId] ??= {}).add(token);
-    return (url: Uri.parse('http://127.0.0.1:9/mcp'), token: token);
-  }
-
-  @override
-  bool touch(String token) => touchOk;
-  @override
-  Future<void> revoke(String token) async {
-    revoked.add(token);
-    for (final t in live.values) {
-      t.remove(token);
-    }
-  }
-
-  @override
-  Future<void> revokeSession(String sessionId) async {
-    revokedSessions.add(sessionId);
-    revoked.addAll(live.remove(sessionId) ?? const {});
-  }
-
-  @override
-  Future<void> stop() async {}
-}
+import '../support/fake_leads.dart';
 
 const _questions = {
   'questions': [
@@ -186,17 +54,17 @@ void main() {
   late AppDatabase db;
   late Directory tmp;
   late Directory project;
-  late _Session session;
-  late _Host host;
+  late FakeLeadSession session;
+  late FakeHost host;
   late ProviderContainer container;
-  late Map<String, _Driver> drivers;
+  late Map<String, FakeLeadDriver> drivers;
   var calls = 0;
 
   ProviderContainer make(Preferences prefs) => ProviderContainer(
     overrides: [
       databaseProvider.overrideWithValue(db),
       preferencesProvider.overrideWithValue(prefs),
-      modelCatalogProvider.overrideWith(_FixedCatalog.new),
+      modelCatalogProvider.overrideWith(FixedCatalog.new),
       codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
       driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
       hostServerProvider.overrideWithValue(host),
@@ -219,7 +87,7 @@ void main() {
   /// The session's controller, connected.
   Future<CodeSessionController> open(String id) async {
     container.listen(codeSessionProvider(id), (_, _) {});
-    await _when(container, codeSessionProvider(id).select((s) => s.connected), (bool c) => c);
+    await whenValue(container, codeSessionProvider(id).select((s) => s.connected), (bool c) => c);
     return container.read(codeSessionProvider(id).notifier);
   }
 
@@ -243,13 +111,13 @@ void main() {
     db = AppDatabase(NativeDatabase.memory());
     tmp = await Directory.systemTemp.createTemp('code-lead');
     project = await Directory('${tmp.path}/project').create();
-    session = _Session();
-    host = _Host();
+    session = FakeLeadSession();
+    host = FakeHost();
     drivers = {
-      everyaiHarnessName: _Driver(everyaiHarnessName, session),
-      'test': _Driver('test', session),
-      'cli': _Driver('cli', session, needsConsent: true),
-      'steers': _Driver('steers', session, caps: const {DriverCap.approvals, DriverCap.steer}),
+      everyaiHarnessName: FakeLeadDriver(everyaiHarnessName, session: session),
+      'test': FakeLeadDriver('test', session: session),
+      'cli': FakeLeadDriver('cli', session: session, needsConsent: true),
+      'steers': FakeLeadDriver('steers', session: session, caps: const {DriverCap.approvals, DriverCap.steer}),
     };
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
@@ -605,7 +473,7 @@ void main() {
       overrides: [
         databaseProvider.overrideWithValue(db),
         preferencesProvider.overrideWithValue(prefs),
-        modelCatalogProvider.overrideWith(_FixedCatalog.new),
+        modelCatalogProvider.overrideWith(FixedCatalog.new),
         driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
         hostServerProvider.overrideWithValue(host),
         gatewayKeysProvider.overrideWith((ref) => throw StateError('no key in tests')),
