@@ -146,6 +146,9 @@ void main() {
         final password = env['OPENCODE_PASSWORD']!;
         expect(password.length, greaterThanOrEqualTo(40));
         expect(env['OPENCODE_DISABLE_AUTOUPDATE'], '1');
+        // A repository's own OpenCode config and Claude skills don't load: they'd run before any approval.
+        expect(env['OPENCODE_DISABLE_PROJECT_CONFIG'], '1');
+        expect(env['OPENCODE_DISABLE_CLAUDE_CODE_SKILLS'], '1');
         expect(env[tokenEnvVar], 'tok-secret');
         expect(env['OPENCODE_CONFIG_CONTENT'], contains('"everyai"'));
         expect(env['OPENCODE_CONFIG_CONTENT'], isNot(contains('tok-secret')));
@@ -169,6 +172,7 @@ void main() {
                 env = const {},
               }) async {
                 expect(env['OPENCODE_PASSWORD'], isNot(password));
+                expect(env['OPENCODE_DISABLE_PROJECT_CONFIG'], '1');
                 expect(env.containsKey('OPENCODE_CONFIG_CONTENT'), isFalse);
                 return _FakeProcess(['server listening on http://127.0.0.1:51235']);
               },

@@ -103,10 +103,19 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
   }
 
   /// Ties the session to OpenCode's [sessionId]. With [replay] (reopening)
-  /// its history and waiting requests are read first.
+  /// its history and waiting requests are read first; a run the history
+  /// leaves going that this server isn't running (the app quit mid-turn)
+  /// ends there.
   Future<void> bind(String sessionId, {bool replay = false}) async {
     _id = sessionId;
-    if (replay) await _replay(resync: false);
+    if (replay) {
+      await _replay(resync: false);
+      if (_mapper.status == ExecutionStatus.running) {
+        final active = await _server.call('GET', '/api/session/active');
+        final data = active is Map ? active['data'] : null;
+        if (data is! Map || !data.containsKey(_id)) _mapper.notRunning().forEach(_emit);
+      }
+    }
     _flush();
   }
 
@@ -138,8 +147,9 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
 
   /// Accepting allows the call once (never "always": remembering is the
   /// app's job). Refusing chosen calls sends the reason, which the model
-  /// reads and carries on; refusing all of them (no [callIds]) sends a bare
-  /// refusal, which stops the run.
+  /// reads and carries on. Refusing all of them (no [callIds]) stops the
+  /// run: with a reason, the refusals carry it and the run is interrupted
+  /// (the model reads it next turn); without one, a bare refusal stops it.
   @override
   Future<void> respond({required bool accept, String? reason, List<String>? callIds}) async {
     final pending = _mapper.pending;
@@ -148,11 +158,12 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
         if (callIds == null || callIds.contains(e.key)) e.value,
     ];
     final decision = accept ? 'once' : 'reject';
+    final why = (reason ?? '').trim();
+    final stop = !accept && callIds == null && why.isNotEmpty;
     for (final request in targets) {
       final body = <String, Object?>{
         'decision': decision,
-        if (!accept && callIds != null)
-          'message': (reason ?? '').trim().isEmpty ? 'The user refused this call.' : reason,
+        if (!accept && (callIds != null || stop)) 'message': why.isEmpty ? 'The user refused this call.' : reason,
       };
       try {
         await _server.call('POST', '/api/session/$_id/permission/$request/reply', body: body);
@@ -162,6 +173,7 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
       }
       _mapper.replied(request, decision);
     }
+    if (stop && targets.isNotEmpty) await interrupt();
   }
 
   /// The app's policy decides every request, whatever the mode.
@@ -243,8 +255,10 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
   void _onDrop() {
     if (_closed) return;
     _ready = false;
+    // Closed while connecting: whoever is connecting gets the error.
     if (_connected case final c? when !c.isCompleted) {
       c.completeError(const HarnessError("OpenCode's event stream closed."));
+      return;
     }
     if (_reconnecting) return;
     _reconnecting = true;
@@ -271,6 +285,10 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
       _emit(const ConnectionChange(connected: true));
       return;
     }
+    // A stream that came back without its history would buffer for good.
+    unawaited(_sub?.cancel());
+    _sub = null;
+    _early.clear();
     _emit(_failure("The app lost touch with OpenCode's server."));
   }
 

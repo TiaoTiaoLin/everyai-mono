@@ -80,11 +80,12 @@ final class OpenCodeServer {
     }
   }
 
-  /// Ends the server and everything it runs.
-  Future<void> close() async {
+  /// Ends the server and everything it runs (once, however often it's asked).
+  Future<void> close() => _closing ??= () async {
     client.close();
     await process?.close();
-  }
+  }();
+  Future<void>? _closing;
 
   static String _errorText(String body) {
     try {
@@ -121,6 +122,20 @@ typedef OpenCodeLauncher = Future<OpenCodeServer> Function({
 
 /// The arguments of `opencode serve`: a free port on loopback only.
 const openCodeServeArgs = ['serve', '--port', '0', '--hostname', '127.0.0.1'];
+
+/// What every session's server gets in its environment, besides its password.
+/// A repository's own OpenCode config (`opencode.json`, `.opencode/`: MCP
+/// servers, plugins, agents, skills, `{env:…}` lookups) and its
+/// `.claude/skills` are not loaded: they would run before the user approved
+/// anything, and MCP servers come only from the app (`StoredMcpServers`). The
+/// user's global OpenCode config still loads, and so does our briefing
+/// (`OPENCODE_CONFIG_CONTENT` is not project config). In 2.1.3 the same
+/// switch also skips the project's AGENTS.md (instruction discovery).
+const openCodeServeEnv = {
+  'OPENCODE_DISABLE_AUTOUPDATE': '1',
+  'OPENCODE_DISABLE_PROJECT_CONFIG': '1',
+  'OPENCODE_DISABLE_CLAUDE_CODE_SKILLS': '1',
+};
 
 /// What the session's server adds to its environment for [briefing]: our
 /// MCP server, skills and session text through the [openCode] recipe
@@ -163,7 +178,7 @@ Future<OpenCodeServer> launchOpenCode({
     cwd: cwd,
     sessionTag: sessionTag,
     logPath: logPath,
-    env: {...env, 'OPENCODE_PASSWORD': password, 'OPENCODE_DISABLE_AUTOUPDATE': '1'},
+    env: {...env, ...openCodeServeEnv, 'OPENCODE_PASSWORD': password},
   );
   OpenCodeServer? server;
   try {

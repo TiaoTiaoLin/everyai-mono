@@ -45,6 +45,9 @@ final class OpenCodeDriver implements HarnessDriver {
   /// provider list.
   Set<String>? _oauth;
 
+  /// Where `opencode` was found, so sessions don't look it up again.
+  String? _path;
+
   @override
   DriverInfo get info => const DriverInfo(id: 'opencode', label: 'OpenCode');
 
@@ -69,6 +72,7 @@ final class OpenCodeDriver implements HarnessDriver {
     final status = await detectCli('opencode', which: which);
     final path = status.path;
     if (!status.installed || path == null || status.problem != null) return status;
+    _path = path;
     final signedIn = (await _providers(path))?.isNotEmpty;
     return DriverStatus(
       installed: true,
@@ -106,7 +110,7 @@ final class OpenCodeDriver implements HarnessDriver {
       logPath: '$dir/driver-sessions/opencode/${spec.sessionTag}.log',
       env: openCodeBriefingEnv(spec.briefing),
     );
-    final OpenCodeSession session;
+    OpenCodeSession? session;
     try {
       session = await _open(server, spec.workingDir, exe);
       final model = openCodeModelRef(spec.model, spec.effort);
@@ -133,14 +137,15 @@ final class OpenCodeDriver implements HarnessDriver {
         }),
       );
       _live[id] = session;
+      if (spec.initialMessage case final text? when text.isNotEmpty) {
+        await session.send(text, run: spec.runInitial, images: spec.initialImages);
+      }
+      return session;
     } on Object {
-      await server.close();
+      // The caller never gets the session: nothing of it may keep running.
+      await (session?.close() ?? server.close());
       rethrow;
     }
-    if (spec.initialMessage case final text? when text.isNotEmpty) {
-      await session.send(text, run: spec.runInitial, images: spec.initialImages);
-    }
-    return session;
   }
 
   /// Reopens a session after a restart: a new server in its folder, its
@@ -161,18 +166,17 @@ final class OpenCodeDriver implements HarnessDriver {
       sessionTag: tag,
       logPath: '$dir/driver-sessions/opencode/$tag.log',
     );
+    OpenCodeSession? session;
     try {
-      final session = await _open(server, workingDir, exe);
+      session = await _open(server, workingDir, exe);
       await session.bind(conversationId, replay: true);
       _live[conversationId] = session;
       return session;
-    } on OpenCodeHttpError catch (e) {
-      await server.close();
+    } on Object catch (e) {
+      await (session?.close() ?? server.close());
+      if (e is! OpenCodeHttpError) rethrow;
       if (e.status == 404) throw const HarnessError("OpenCode doesn't have this session any more.");
       throw HarnessError(e.message);
-    } on Object {
-      await server.close();
-      rethrow;
     }
   }
 
@@ -202,7 +206,13 @@ final class OpenCodeDriver implements HarnessDriver {
       reconnectDelay: reconnectDelay,
       onClose: () => _live.removeWhere((_, s) => identical(s, session)),
     );
-    await session.connect();
+    try {
+      await session.connect();
+    } on Object {
+      // A drop while connecting starts the session's reconnect loop; closing ends it (and the server).
+      await session.close();
+      rethrow;
+    }
     return session;
   }
 
@@ -210,18 +220,10 @@ final class OpenCodeDriver implements HarnessDriver {
   Future<List<String>?> _providers(String exe) async {
     try {
       final res = await _cli(exe, ['auth', 'list', '--standalone', '--format', 'json']);
-      final list = res.exitCode == 0 ? _decode(res.stdout) : null;
-      if (list is! List) return null;
-      final signedIn = <String>[];
-      final oauth = <String>{};
-      for (final p in list.whereType<Map<String, Object?>>()) {
-        final connections = (p['connections'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>();
-        if (connections.isEmpty) continue;
-        signedIn.add('${p['id']}');
-        if (connections.any((c) => c['method'] == 'oauth')) oauth.add('${p['id']}');
-      }
-      _oauth = oauth;
-      return signedIn;
+      final auth = openCodeAuth(res.exitCode == 0 ? _decode(res.stdout) : null);
+      if (auth == null) return null;
+      _oauth = auth.oauth;
+      return auth.signedIn;
     } on Object {
       return null;
     }
@@ -234,10 +236,11 @@ final class OpenCodeDriver implements HarnessDriver {
   }
 
   Future<String> _executable() async {
+    if (_path case final p?) return p;
     final status = await detectCli('opencode', which: which);
     final path = status.path;
     if (!status.installed || path == null) throw const HarnessError('OpenCode is not installed.');
-    return path;
+    return _path = path;
   }
 
   static String _recordPath(String dir, String id) =>
@@ -250,6 +253,25 @@ final class OpenCodeDriver implements HarnessDriver {
       return null;
     }
   }
+}
+
+/// The providers in `opencode auth list --format json` ([list]) with a key or
+/// login ([signedIn]) and those signed in with a login ([oauth]: a
+/// subscription, so its usage is on the user's plan); null when [list] isn't
+/// one. A plan paid with a key (MiniMax's Token Plan) can't be told from a
+/// metered key: OpenCode reports its cost as 0, so it shows tokens, no cost,
+/// and not as on a plan.
+({List<String> signedIn, Set<String> oauth})? openCodeAuth(Object? list) {
+  if (list is! List) return null;
+  final signedIn = <String>[];
+  final oauth = <String>{};
+  for (final p in list.whereType<Map<String, Object?>>()) {
+    final connections = (p['connections'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>();
+    if (connections.isEmpty) continue;
+    signedIn.add('${p['id']}');
+    if (connections.any((c) => c['method'] == 'oauth')) oauth.add('${p['id']}');
+  }
+  return (signedIn: signedIn, oauth: oauth);
 }
 
 /// [DriverModel]s from `GET /api/model` ([list]) and `GET /api/model/default`

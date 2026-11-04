@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/opencode/opencode_driver.dart';
 import 'package:every_ai/features/code/drivers/opencode/opencode_events.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -78,7 +79,10 @@ void main() {
   });
 
   test('a step reports its usage with the cache counted in, and no cost when OpenCode says 0', () {
-    final m = OpenCodeMapper(workingDir: _cwd, onPlan: (p) => p == 'minimax-coding-plan');
+    // The driver's own rule: only providers signed in with a login are on a plan.
+    final auth = openCodeAuth(jsonDecode(File('$_dir/auth_list.json').readAsStringSync()))!;
+    expect(auth.oauth, {'anthropic'});
+    final m = OpenCodeMapper(workingDir: _cwd, onPlan: auth.oauth.contains);
     final events = _play(m, _frames(_ses));
     final usage = events.whereType<UsageReport>().toList();
     final last = usage.firstWhere((u) => u.id == 'msg_1a520f12c001Q00sM7f4zqEI1P');
@@ -87,7 +91,8 @@ void main() {
     expect(last.output, 46);
     expect(last.contextTokens, 324 + 9984);
     expect(last.costMicros, isNull);
-    expect(last.onPlan, isTrue);
+    // MiniMax's Token Plan is paid with a key: tokens show, with no cost and not as on a plan.
+    expect(last.onPlan, isFalse);
     // Reasoning counts as output; an interrupted step still reports what it used.
     expect(usage.firstWhere((u) => u.id == 'msg_1a520c5e2001wntb199n7nT3U3').output, 39 + 196);
     expect(usage.map((u) => u.id), contains('msg_1a5215228001J63jOIWnmZ5XF6'));
@@ -247,5 +252,103 @@ void main() {
     expect(p.actionKind, 'ApplyPatchAction');
     expect(p.action['paths'], ['$_cwd/a.txt', '$_cwd/b/c.txt']);
     expect(autoDecidable(p), isTrue);
+  });
+
+  test('a web fetch runs on this machine, so only the user answers it', () {
+    final m = OpenCodeMapper(workingDir: _cwd);
+    m.live({
+      'type': 'session.tool.input.started',
+      'data': {'id': 'call_w', 'name': 'webfetch'},
+    });
+    m.live({
+      'type': 'session.tool.called',
+      'data': {
+        'id': 'call_w',
+        'input': {'url': 'http://169.254.169.254/latest/meta-data/'},
+      },
+    });
+    final call = m
+        .live({
+          'type': 'permission.asked',
+          'data': {
+            'id': 'per_w',
+            'action': 'webfetch',
+            'resources': ['http://169.254.169.254/latest/meta-data/'],
+            'source': {'type': 'tool', 'id': 'call_w'},
+          },
+        })
+        .whereType<ActionCall>()
+        .single;
+    expect(call.actionKind, 'OpenCodeWebFetch');
+    expect(autoDecidable(call), isFalse);
+  });
+
+  test('a shell request read without its input is judged on every sub-command', () {
+    final m = OpenCodeMapper(workingDir: _cwd);
+    final call = m
+        .requests([
+          {
+            'id': 'per_s',
+            'action': 'shell',
+            'resources': ['ls', 'rm -rf build'],
+            'source': {'type': 'tool', 'id': 'call_s'},
+          },
+        ])
+        .whereType<ActionCall>()
+        .single;
+    expect(call.str('command'), 'ls && rm -rf build');
+  });
+
+  test('history leaves the text a message is still writing to the stream, which then gives it whole', () {
+    final m = OpenCodeMapper(workingDir: _cwd);
+    final events = m.history([
+      {
+        'id': 'msg_u',
+        'type': 'user',
+        'text': 'hi',
+        'time': {'created': 1},
+      },
+      {
+        'id': 'msg_a',
+        'type': 'assistant',
+        'time': {'created': 2},
+        'content': [
+          {
+            'type': 'reasoning',
+            'text': 'Thinking done.',
+            'time': {'created': 2, 'completed': 3},
+          },
+          {'type': 'text', 'text': 'Half of the ans'},
+        ],
+      },
+    ]);
+    final agent = events.whereType<ChatMessage>().where((c) => !c.fromUser).toList();
+    expect(agent.map((c) => c.id), ['msg_a/reasoning/0']);
+    final ended = m.live({
+      'type': 'session.text.ended',
+      'data': {'sessionID': _ses, 'assistantMessageID': 'msg_a', 'ordinal': 0, 'text': 'Half of the answer, whole.'},
+    });
+    expect(ended.whereType<ChatMessage>().single.text, 'Half of the answer, whole.');
+  });
+
+  test('a run the history leaves going ends as interrupted when nothing runs it', () {
+    final m = OpenCodeMapper(workingDir: _cwd);
+    m.history([
+      {
+        'id': 'msg_u',
+        'type': 'user',
+        'text': 'hi',
+        'time': {'created': 1},
+      },
+      {
+        'id': 'msg_a',
+        'type': 'assistant',
+        'time': {'created': 2},
+        'content': <Object?>[],
+      },
+    ]);
+    expect(m.status, ExecutionStatus.running);
+    expect(m.notRunning().single, isA<StateChange>().having((s) => s.executionStatus, 'status', ExecutionStatus.idle));
+    expect(m.notRunning(), isEmpty);
   });
 }

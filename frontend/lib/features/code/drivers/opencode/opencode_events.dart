@@ -117,10 +117,15 @@ final class OpenCodeMapper {
         case 'assistant':
           _lastMessage = id;
           _provider = _str(_map(m['model'])?['providerID']);
+          final parts = (m['content'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>().toList();
+          // A message still being written may still be adding to its last
+          // text: that part comes from the stream's `*.ended` instead.
+          final open = _map(m['time'])?['completed'] == null && parts.isNotEmpty ? parts.last : null;
           final ordinals = <String, int>{};
-          for (final part in (m['content'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>()) {
+          for (final part in parts) {
             final type = _str(part['type']);
             final n = ordinals[type] = (ordinals[type] ?? -1) + 1;
+            if (identical(part, open) && type != 'tool' && _map(part['time'])?['completed'] == null) continue;
             switch (type) {
               case 'text':
                 _text(out, '$id/text/$n', _str(part['text']));
@@ -152,6 +157,16 @@ final class OpenCodeMapper {
       } else {
         _end(out, last, error: failure);
       }
+    }
+    return out;
+  }
+
+  /// The run the history left going isn't running on this server (it was
+  /// cut off when the app quit): it ends as interrupted.
+  List<HarnessEvent> notRunning() {
+    final out = <HarnessEvent>[];
+    if (status == ExecutionStatus.running || status == ExecutionStatus.waitingForConfirmation) {
+      _end(out, ExecutionStatus.idle);
     }
     return out;
   }
@@ -343,15 +358,16 @@ final class OpenCodeMapper {
 
   /// The app's action kind and fields for OpenCode's tool [name] (see
   /// `HarnessDriver`): the fields the permission rules read are filled, paths
-  /// absolute. A read outside the project and tools the rules can't judge
-  /// keep kinds of their own, so only the user answers them.
+  /// absolute. A read outside the project, a web fetch and tools the rules
+  /// can't judge keep kinds of their own, so only the user answers them.
   (String, Map<String, Object?>) _kindOf(String name, Map<String, Object?> input, Map<String, Object?>? req) {
     final resources = [for (final r in req?['resources'] as List<Object?>? ?? const []) '$r'];
     if (req?['action'] == 'external_directory') {
       return ('OpenCodeExternalDirectory', {...input, 'path': resources.isEmpty ? '' : resources.first});
     }
     final path = _abs(_str(input['path'] ?? input['filePath'] ?? input['file_path']));
-    final command = _str(input['command']).isNotEmpty ? _str(input['command']) : (resources.firstOrNull ?? '');
+    // Without the input, every sub-command OpenCode lists, so none slips past the rules.
+    final command = _str(input['command']).isNotEmpty ? _str(input['command']) : resources.join(' && ');
     return switch (name) {
       'shell' || 'bash' => ('TerminalAction', {...input, 'command': command}),
       'read' => ('ReadFileAction', {...input, 'path': path}),
@@ -372,7 +388,9 @@ final class OpenCodeMapper {
       'patch' => ('ApplyPatchAction', {...input, 'paths': _patchPaths(resources, req)}),
       'glob' => ('GlobAction', {...input, 'path': path.isEmpty ? workingDir : path}),
       'grep' => ('GrepAction', {...input, 'path': path.isEmpty ? workingDir : path}),
-      'webfetch' => ('WebFetchAction', input),
+      // It fetches from this machine (loopback and the local network too), not
+      // through the backend's safe fetch, so only the user answers it.
+      'webfetch' => ('OpenCodeWebFetch', input),
       'websearch' => ('WebSearchAction', input),
       'todowrite' => ('TaskTrackerAction', input),
       _ when name.startsWith('everyai_') => ('MCPToolAction', input),

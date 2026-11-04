@@ -93,6 +93,18 @@ final class _Session implements HarnessSession {
   Future<void> close() => _events.close();
 }
 
+/// [_Session] for a driver that takes one answer per call and runs each
+/// call once it is allowed (OpenCode).
+final class _PerCallSession extends _Session implements PerCallApprovals {
+  final answeredIds = <List<String>?>[];
+
+  @override
+  Future<void> respond({required bool accept, String? reason, List<String>? callIds}) {
+    answeredIds.add(callIds);
+    return super.respond(accept: accept, reason: reason, callIds: callIds);
+  }
+}
+
 final class _TestDriver implements HarnessDriver {
   _TestDriver(this.id, this.session, {this.caps = const {DriverCap.approvals}});
   final String id;
@@ -264,5 +276,43 @@ void main() {
     await controller.steer('use tabs');
     expect(session.steered.first, '(interrupt)');
     expect(session.steered.last, contains('use tabs'));
+  });
+
+  test('a call allowed and still running is not asked about again when the next call asks', () async {
+    final perCall = session = _PerCallSession();
+    final controller = await open(AgentMode.ask);
+    perCall.ask('shell', 'TerminalAction', {'command': 'npm install'});
+    await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s.transcript.pending),
+      (List<ActionCall> p) => p.length == 1,
+    );
+    await controller.approve(ApprovalScope.once, ['a1']);
+    // a1 runs; while it does, a2 asks.
+    perCall
+      ..add(stateEvent('r1', ExecutionStatus.running))
+      ..ask('shell', 'TerminalAction', {'command': 'git push'});
+    final s = await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s),
+      (CodeSessionState s) => s.transcript.pending.length == 2,
+    );
+    await pumpEventQueue();
+    expect(s.transcript.pending.map((c) => c.id), ['a1', 'a2']);
+    expect(container.read(codeSessionProvider('s1')).decided, {'a1': true});
+    // Deny all refuses only a2, the one still undecided.
+    await controller.deny('no');
+    expect(container.read(codeSessionProvider('s1')).decided, {'a1': true, 'a2': false});
+    // A result settles its own answer; the rest go when the run ends.
+    perCall.add(resultEvent(id: 'r2', actionId: 'a1', toolName: 'shell', text: 'ok'));
+    await pumpEventQueue();
+    expect(container.read(codeSessionProvider('s1')).decided, {'a2': false});
+    perCall.add(stateEvent('e', ExecutionStatus.idle));
+    await pumpEventQueue();
+    expect(container.read(codeSessionProvider('s1')).decided, isEmpty);
+    expect(perCall.answeredIds, [
+      ['a1'],
+      null,
+    ]);
   });
 }
