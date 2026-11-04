@@ -10,6 +10,10 @@ import '../drivers/driver_policy.dart' show leadFix;
 import '../drivers/driver_registry.dart';
 import '../drivers/event_journal.dart';
 import '../harness/events.dart';
+import 'acp_sessions.dart';
+import 'claude_sessions.dart';
+import 'codex_sessions.dart';
+import 'opencode_sessions.dart';
 import 'past_sessions.dart';
 
 // New session → the picked folder's earlier sessions from every installed
@@ -17,17 +21,26 @@ import 'past_sessions.dart';
 // asked), merged with EveryAI's own sessions for that folder.
 
 /// Where each harness's earlier sessions come from. Filled in where the sources are wired; tests override it.
-final pastSessionSourcesProvider = Provider<List<PastSessionSource>>((ref) => const []);
+final pastSessionSourcesProvider = Provider<List<PastSessionSource>>(
+  (ref) => [claudePastSessions(), codexPastSessions(), openCodePastSessions(), ?acpPastSessions('gemini')],
+);
+
+/// Harnesses with a source above. ACP agents that only answer `session/list` need a launcher for [acpPastSessions]
+/// and aren't offered yet.
+const _withSources = {'everyai', claudeHarness, codexHarness, 'opencode', 'gemini'};
 
 /// How long one harness may take to list a folder's sessions before it is left out.
 final pastSessionTimeoutProvider = Provider<Duration>((ref) => const Duration(seconds: 5));
 
 /// Why [driverId] has no earlier sessions to offer (it can't list or load them), for Settings → Code →
 /// Harnesses; null when it can (or isn't known). Filled in where the sources are wired.
-final resumeUnsupportedProvider = Provider<String? Function(String driverId)>(
-  (ref) =>
-      (_) => null,
-);
+final resumeUnsupportedProvider = Provider<String? Function(String driverId)>((ref) => resumeUnsupported);
+
+String? resumeUnsupported(String driverId) {
+  if (_withSources.contains(driverId)) return null;
+  if (driverId.startsWith('terminal:')) return 'A terminal-only harness keeps no sessions this app can read.';
+  return acpResumeUnsupported(driverId) ?? "Its earlier sessions aren't listed yet.";
+}
 
 /// One row of the list: one of EveryAI's own sessions ([ours]), or a harness's own ([past]) with what is in the
 /// way of resuming it ([blocked], the picker's one-line fix; null when it can resume).
