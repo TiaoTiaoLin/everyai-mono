@@ -5,6 +5,7 @@ import '../drivers/driver_policy.dart' show hostToolOf;
 import '../drivers/usage_limit.dart';
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
+import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
 import 'agent_mode.dart';
 import 'compaction.dart' show splitCompacted, splitHandoff;
 import 'questions.dart';
@@ -22,8 +23,12 @@ sealed class TranscriptItem {
 }
 
 final class UserTurn extends TranscriptItem {
-  const UserTurn(super.key, this.text, {this.mode, this.lead = ''});
+  const UserTurn(super.key, this.text, {this.mode, this.lead = '', this.workflow = ''});
   final String text;
+
+  /// What the workflow notes it carried said ("Started Bug fix", "Max on"),
+  /// shown as a chip; '' for none.
+  final String workflow;
 
   /// The mode note the message carried (shown as a chip), if any.
   final AgentMode? mode;
@@ -426,7 +431,9 @@ final class TranscriptBuilder {
         if (briefed != null) _items.add(NoticeItem('${e.id}-briefing', briefingNotice, detail: briefed));
         if (briefed != null && raw.isEmpty) return;
         final (mode, noted) = splitModeNote(raw);
-        var text = splitRewindNote(splitContextNotes(noted).$2);
+        final (_, afterContext) = splitContextNotes(noted);
+        final (flows, afterFlows) = splitWorkflowNotes(afterContext);
+        var text = splitRewindNote(afterFlows);
         final changed = mode != null && mode != _notedMode;
         if (mode != null) _notedMode = mode;
         // A continuation conversation opens with the summary, not something the user typed.
@@ -465,7 +472,9 @@ final class TranscriptBuilder {
           );
           return;
         }
-        _items.add(UserTurn(e.id, text, mode: changed ? mode : null, lead: lead));
+        // A note the app sent alone (a workflow that didn't start) shows as the app's notice instead.
+        if (flows.isNotEmpty && text.trim().isEmpty) return;
+        _items.add(UserTurn(e.id, text, mode: changed ? mode : null, lead: lead, workflow: flows.join(' · ')));
         _settleOpenCards(text);
       case ChatMessage(:final text, :final reasoning):
         if (text.trim().isEmpty && reasoning.trim().isEmpty) return;

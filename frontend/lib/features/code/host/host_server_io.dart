@@ -13,6 +13,7 @@ import '../harness/everyai/project_notes_io.dart' show memoryToolSpec;
 import 'host.dart';
 import 'host_checks.dart';
 import 'host_script.dart';
+import 'host_prompts.dart';
 
 // MCP over Streamable HTTP, tools only, stateless (no Mcp-Session-Id), on
 // one endpoint that speaks both eras the spec defines:
@@ -43,6 +44,7 @@ final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   diffStatsSpec,
   goalCheckSpec,
   if (hostScriptsAvailable) hostRunScriptSpec,
+  runWorkflowSpec,
 ]);
 
 /// An OpenAI-style spec (flat or `{function: …}`) in MCP's shape.
@@ -303,7 +305,7 @@ final class _HostServer implements HostServer {
       final name = _decodeName(req.headers.value('mcp-name'));
       if (header != modern ||
           req.headers.value('mcp-method') != method ||
-          (method == 'tools/call' && name != params['name'])) {
+          ((method == 'tools/call' || method == 'prompts/get') && name != params['name'])) {
         return _reply(req, 400, _error(id, -32020, 'Headers do not match the body'));
       }
     } else if (header != null && !_legacy.contains(header)) {
@@ -330,6 +332,7 @@ final class _HostServer implements HostServer {
     const cached = {'ttlMs': 3600000, 'cacheScope': 'private'};
     const capabilities = {
       'tools': {'listChanged': false},
+      'prompts': {'listChanged': false},
     };
     const serverInfo = {'name': 'EveryAI', 'version': '1.0'};
     switch (method) {
@@ -359,6 +362,11 @@ final class _HostServer implements HostServer {
         return _reply(req, 200, done({}));
       case 'tools/list':
         return _reply(req, 200, done({'tools': grant.specs, if (modern != null) ...cached}));
+      case 'prompts/list':
+        return _reply(req, 200, done(await promptsList(grant.tools)));
+      case 'prompts/get':
+        final r = await promptsGet(grant.tools, params);
+        return _reply(req, 200, r.result != null ? done(r.result!) : _error(id, r.code, r.message));
       case 'tools/call':
         final name = params['name'];
         if (name is! String || !grant.specs.any((t) => t['name'] == name)) {

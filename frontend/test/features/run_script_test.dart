@@ -64,17 +64,16 @@ void main() {
     );
   }
 
-  test('tiers: Efficient decides only, Thorough+ query and score compaction, Ultra recurses', () {
+  test('levels: Efficient decides only, Thorough queries and scores compaction', () {
     const claude = 'anthropic/claude-sonnet-5.5';
     final efficient = scriptCapsFor(HarnessTier.efficient, claude);
     expect((efficient.enabled, efficient.queries, efficient.smartCompaction), (true, 0, false));
     final thorough = scriptCapsFor(HarnessTier.thorough, claude);
     expect((thorough.queries, thorough.depth, thorough.smartCompaction), (20, 1, true));
-    expect(scriptCapsFor(HarnessTier.ultra, claude).depth, 2);
     // Weaker families keep plain tool calls unless the user set a level.
-    expect(scriptCapsFor(HarnessTier.max, 'qwen/qwen3-coder').enabled, isFalse);
-    expect(scriptCapsFor(HarnessTier.max, 'qwen/qwen3-coder', level: ScriptLevel.decide).enabled, isTrue);
-    final off = scriptCapsFor(HarnessTier.max, claude, level: ScriptLevel.off);
+    expect(scriptCapsFor(HarnessTier.thorough, 'qwen/qwen3-coder').enabled, isFalse);
+    expect(scriptCapsFor(HarnessTier.thorough, 'qwen/qwen3-coder', level: ScriptLevel.decide).enabled, isTrue);
+    final off = scriptCapsFor(HarnessTier.thorough, claude, level: ScriptLevel.off);
     expect((off.enabled, off.smartCompaction), (false, true));
     expect(ScriptCaps.fromJson(thorough.toJson()), thorough);
   });

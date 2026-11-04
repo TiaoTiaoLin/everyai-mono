@@ -122,7 +122,7 @@ void main() {
       expect(s.projectPrompts, isEmpty);
 
       expect(isSetInPrefs(tier, s, null), isFalse);
-      s = writePrefsValue(tier, s, null, HarnessTier.max);
+      s = writePrefsValue(tier, s, null, HarnessTier.thorough);
       expect(isSetInPrefs(tier, s, null), isTrue);
       expect(clearPrefsValue(tier, s, null).tier, HarnessTier.efficient);
 

@@ -146,8 +146,8 @@ const settingDefs = <SettingDef>[
   ),
   SettingDef(
     key: 'tier',
-    title: 'Harness tier',
-    help: 'How much care new sessions take, from quick fixes to researched, planned builds.',
+    title: 'Effort level',
+    help: 'How much care new EveryAI sessions take. Max, Ultra and Bug fix are workflows in the agent menu.',
     scopes: _g,
     kind: SettingKind.choice,
     store: SettingStore.prefs,
@@ -155,20 +155,8 @@ const settingDefs = <SettingDef>[
       ('Ultra efficient', HarnessTier.ultraEfficient),
       ('Efficient', HarnessTier.efficient),
       ('Thorough', HarnessTier.thorough),
-      ('Max', HarnessTier.max),
-      ('Ultra', HarnessTier.ultra),
     ],
     fallback: HarnessTier.efficient,
-  ),
-  SettingDef(
-    key: 'harnessMode',
-    title: 'Harness mode',
-    help: 'Build, or Bug fix (reproduce first, then fix and prove it), for new sessions.',
-    scopes: _g,
-    kind: SettingKind.choice,
-    store: SettingStore.prefs,
-    choices: [('Build', HarnessMode.build), ('Bug fix', HarnessMode.bugFix)],
-    fallback: HarnessMode.build,
   ),
   SettingDef(
     key: 'scripts',
@@ -411,7 +399,6 @@ bool isSetInPrefs(SettingDef d, StoredCodeSettings s, String? projectId) {
 Object? readPrefsValue(SettingDef d, StoredCodeSettings s, String? projectId) => switch (d.key) {
   'prompt' => s.promptFor(projectId),
   'tier' => s.tier,
-  'harnessMode' => s.harnessMode,
   'autoCompact' => s.autoCompactPercent,
   'forks' => s.forksIsolated,
   'scripts' => s.scripts,
@@ -424,7 +411,6 @@ StoredCodeSettings writePrefsValue(SettingDef d, StoredCodeSettings s, String? p
     switch (d.key) {
       'prompt' => s.withPrompt(projectId, value as String? ?? ''),
       'tier' => s.withTier(value! as HarnessTier),
-      'harnessMode' => s.withHarnessMode(value! as HarnessMode),
       'autoCompact' => s.withAutoCompact(value! as int),
       'forks' => s.withForksIsolated(value! as bool),
       'scripts' => s.withScripts(value! as ScriptLevel),

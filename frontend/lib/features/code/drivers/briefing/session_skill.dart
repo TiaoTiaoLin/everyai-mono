@@ -6,10 +6,14 @@ import 'skill_render.dart';
 /// name is fixed here.
 typedef HostToolInfo = ({String name, String when});
 
+/// A workflow the session can start, and when it fits.
+typedef WorkflowInfo = ({String id, String when});
+
 /// A connected harness, by name and model.
 typedef RosterEntry = ({String name, String model});
 
-/// Everything the session briefing says. Only [worktree], [projectRoot], the roster and the profiles vary per session.
+/// Everything the session briefing says. Only [worktree], [projectRoot], the roster, the profiles and the workflows
+/// vary per session.
 class SessionSkillInput {
   const SessionSkillInput({
     required this.worktree,
@@ -18,6 +22,7 @@ class SessionSkillInput {
     this.others = const [],
     this.hostTools = const [],
     this.runtimeProfiles = const [],
+    this.workflows = const [],
   });
 
   final String worktree;
@@ -28,6 +33,9 @@ class SessionSkillInput {
 
   /// One line each: how to build, test and run this project. None are recorded yet.
   final List<String> runtimeProfiles;
+
+  /// The workflows this project can run (bundled, then the trusted project ones).
+  final List<WorkflowInfo> workflows;
 }
 
 /// The session briefing: plain Markdown for each CLI's instructions slot (not a skill, so no CLI loads it twice).
@@ -119,6 +127,18 @@ String sessionBriefing(SessionSkillInput input) {
   } else {
     for (final p in input.runtimeProfiles) {
       b.writeln('- $p');
+    }
+  }
+  if (input.workflows.isNotEmpty) {
+    b
+      ..writeln()
+      ..writeln('## Workflows')
+      ..writeln()
+      ..writeln('Start one with `run_workflow` when the task fits, or the user may type it as a command. Each runs')
+      ..writeln('several agents on the user\'s plan, so offer it rather than starting it unasked.')
+      ..writeln();
+    for (final w in input.workflows) {
+      b.writeln('- `${w.id}`: ${w.when}');
     }
   }
   return defuseInlineCommands(b.toString());

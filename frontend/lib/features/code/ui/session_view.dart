@@ -34,8 +34,6 @@ import 'code_composer.dart';
 import 'code_slash_host.dart';
 import 'transcript/files_card.dart';
 import 'code_top_bar.dart';
-import 'phase_strip.dart';
-import '../domain/phases.dart' show Phase;
 import '../panes/panes_providers.dart';
 import 'panes/session_panes.dart';
 import 'transcript/approval_card.dart';
@@ -46,6 +44,9 @@ import 'transcript/plan_card.dart';
 import 'transcript/retry_row.dart';
 import 'transcript/subagent_card.dart';
 import 'transcript/transcript_items.dart';
+import '../workflows/ui/workflow_card.dart';
+import '../workflows/workflow_engine.dart' show WorkflowStatus;
+import '../workflows/workflow_runs.dart' show workflowRunsProvider;
 
 const _maxWidth = 780.0;
 
@@ -87,10 +88,16 @@ class CodeSessionScreen extends ConsumerWidget {
       harness: info.harness,
       model: info.model,
       effort: info.effort,
-      tier: info.tier,
-      harnessMode: info.harnessMode,
-      onHarnessMode: controller.setHarnessMode,
-      onTier: controller.setTier,
+      level: info.tier,
+      onLevel: controller.setTier,
+      // A workflow's own agents and subagents don't start workflows.
+      workflow: controller.workflowPick,
+      onWorkflow: info.isSubagent ? null : controller.pickWorkflow,
+      workflowBusy: ref.watch(workflowRunsProvider(sessionId)).any((r) => r.status == WorkflowStatus.running)
+          ? 'A workflow is running: pick another once its result is in'
+          : null,
+      projectDir:
+          ref.watch(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull?.path ?? info.workingDir,
       demo: isDemoPath(info.workingDir),
       // Any time, from the menu; a subagent keeps its parent's lead.
       onHarness: info.isSubagent || isDemoPath(info.workingDir)
@@ -194,7 +201,10 @@ class CodeSessionScreen extends ConsumerWidget {
                       sessionId: sessionId,
                       workingDir: info.workingDir,
                       offer: pick?.change ?? true ? null : offer,
-                      trailing: [if (pick?.change ?? false) offer!],
+                      trailing: [
+                        WorkflowRunsView(key: const ValueKey('workflow-runs'), sessionId: sessionId),
+                        if (pick?.change ?? false) offer!,
+                      ],
                       onChangeHandoff: controller.changeHandoff,
                       showLeads: info.leads.isNotEmpty,
                     ),
@@ -254,11 +264,6 @@ class CodeSessionScreen extends ConsumerWidget {
                                 padding: const EdgeInsets.only(bottom: 8),
                                 child: PlanView(tasks: t.plan, compact: true),
                               ),
-                            if (t.phase case final p? when p.phase != Phase.done)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: PhaseStrip(flow: p.flow, phase: p.phase, stuck: p.stuck),
-                              ),
                             if (showStartBuilding)
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
@@ -309,7 +314,7 @@ class CodeSessionScreen extends ConsumerWidget {
                               busy: busy,
                               mode: state.mode,
                               onModeChanged: controller.setMode,
-                              onSend: (text, files) => controller.send(text, files: files),
+                              onSend: (text, files) => controller.sendTyped(text, files: files),
                               onSteer: (text, files) => controller.steer(text, files: files),
                               onStop: controller.stop,
                               queued: [for (final q in state.queued) q.text],
@@ -605,11 +610,12 @@ class TranscriptList extends StatelessWidget {
   }
 
   Widget _itemView(TranscriptItem item) => switch (item) {
-    UserTurn(:final text, :final mode, :final lead) => Padding(
+    UserTurn(:final text, :final mode, :final lead, :final workflow) => Padding(
       padding: const EdgeInsets.only(top: 10),
       child: UserTurnView(
         text: text,
         mode: mode,
+        workflow: workflow,
         lead: showLeads ? lead : '',
         onRewind: onRewind == null
             ? null

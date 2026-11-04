@@ -1,5 +1,4 @@
 import 'package:every_ai/features/code/domain/fork_files.dart';
-import 'package:every_ai/features/code/domain/phases.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -77,24 +76,12 @@ void main() {
     expect(waitForSubagent(_bash('sed -i "" s/a/b/ old-index.html'), owned, dir), isNull);
   });
 
-  test('before Build a Max flow writes only its own notes, and starts only lookers', () {
-    expect(refusedBeforeBuild(_edit('/p/os/index.html'), Phase.plan, 'Max', dir), contains('plan phase'));
-    expect(refusedBeforeBuild(_edit('/p/os/.everyai/scratch/plan.md'), Phase.plan, 'Max', dir), isNull);
-    expect(refusedBeforeBuild(_edit('/p/os/index.html'), Phase.build, 'Max', dir), isNull);
-    expect(refusedBeforeBuild(_edit('/p/os/index.html'), Phase.reproduce, 'Bug fix', dir), isNull);
-    expect(refusedBeforeBuild(_bash('mkdir -p .everyai/scratch'), Phase.research, 'Ultra', dir), isNull);
-    // A patch is refused for any project file it touches, not just its first.
+  test('a patch names every file it touches', () {
     final patch = _call({
       'kind': 'ApplyPatchAction',
       'path': '/p/os/.everyai/scratch/notes.md',
       'paths': ['/p/os/.everyai/scratch/notes.md', '/p/os/index.html'],
     });
     expect(writeTargets(patch), hasLength(2));
-    expect(refusedBeforeBuild(patch, Phase.plan, 'Max', dir), contains('plan phase'));
-
-    expect(subagentBeforeBuild('', Phase.plan, 'Ultra'), contains('Not started'));
-    expect(subagentBeforeBuild('researcher', Phase.research, 'Max'), isNull);
-    expect(subagentBeforeBuild('reviewer', Phase.plan, 'Max'), isNull);
-    expect(subagentBeforeBuild('', Phase.build, 'Max'), isNull);
   });
 }

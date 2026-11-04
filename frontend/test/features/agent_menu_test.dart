@@ -9,7 +9,7 @@ import 'package:every_ai/features/code/ui/agent_menu.dart';
 import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
-import 'package:every_ai/features/code/settings/agent_prompt.dart' show HarnessMode, HarnessTier;
+import 'package:every_ai/features/code/settings/agent_prompt.dart' show HarnessTier;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
@@ -114,7 +114,9 @@ void main() {
     );
     // Without leads to pick from there is no Harness row.
     expect(find.text('Harness'), findsNothing);
-    expect(find.text('Harness mode'), findsOneWidget);
+    // Without a pick handler there is no Workflow row or effort level.
+    expect(find.text('Workflow'), findsNothing);
+    expect(find.text('Effort level'), findsNothing);
     expect(find.text('Opus 5.5 · Everyday · Orchestrator'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('agent-menu.model')));
@@ -191,73 +193,31 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('the tier bar picks a tier; Max and Ultra aren\'t in the demo, Ultra needs the Max plan', (tester) async {
+  testWidgets('the effort level picks Efficient or Thorough, the only levels offered', (tester) async {
     final picks = <HarnessTier>[];
-    Future<void> show({bool demo = false, bool ultraAllowed = false}) => tester.pumpWidget(
+    await tester.pumpWidget(
       _host(
         SizedBox(
           width: 320,
           height: 700,
           child: AgentMenuPanel(
-            key: ValueKey('$demo$ultraAllowed'),
             groups: agentMenuGroups(_catalog),
             model: 'anthropic/claude-opus-5.5',
             effort: 'medium',
-            demo: demo,
             onChanged: (_, _) {},
             close: () {},
-            onTier: picks.add,
-            ultraAllowed: ultraAllowed,
+            onLevel: picks.add,
           ),
         ),
       ),
     );
-    await show(demo: true);
-    expect(find.text('Harness mode'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('agent-menu.tier.max')));
-    await tester.tap(find.byKey(const ValueKey('agent-menu.tier.thorough')));
+    expect(HarnessTier.offered, [HarnessTier.efficient, HarnessTier.thorough]);
+    expect(find.text('Effort level'), findsOneWidget);
+    expect(find.text('Max'), findsNothing);
+    await tester.tap(find.text('Thorough'));
     await tester.pump();
     expect(picks, [HarnessTier.thorough]);
-
-    await show();
-    await tester.tap(find.byKey(const ValueKey('agent-menu.tier.ultra')));
-    await tester.tap(find.byKey(const ValueKey('agent-menu.tier.max')));
-    await tester.pump();
-    expect(picks, [HarnessTier.thorough, HarnessTier.max]);
-
-    await show(ultraAllowed: true);
-    await tester.tap(find.byKey(const ValueKey('agent-menu.tier.ultra')));
-    expect(picks.last, HarnessTier.ultra);
-  });
-
-  testWidgets('the harness mode switch picks Bug fix, except in the demo', (tester) async {
-    final picks = <HarnessMode>[];
-    Future<void> show({bool demo = false}) => tester.pumpWidget(
-      _host(
-        SizedBox(
-          width: 320,
-          height: 700,
-          child: AgentMenuPanel(
-            key: ValueKey(demo),
-            groups: agentMenuGroups(_catalog),
-            model: 'anthropic/claude-opus-5.5',
-            effort: 'medium',
-            demo: demo,
-            onChanged: (_, _) {},
-            close: () {},
-            onHarnessMode: picks.add,
-          ),
-        ),
-      ),
-    );
-    await show(demo: true);
-    await tester.tap(find.byKey(const ValueKey('agent-menu.harness-mode.bugFix')));
-    await tester.pump();
-    expect(picks, isEmpty);
-    await show();
-    await tester.tap(find.byKey(const ValueKey('agent-menu.harness-mode.bugFix')));
-    await tester.pump();
-    expect(picks, [HarnessMode.bugFix]);
+    expect(find.text(HarnessTier.thorough.description), findsOneWidget);
   });
 
   group('the lead harness', () {
@@ -291,7 +251,7 @@ void main() {
                 effort: '',
                 onChanged: (m, e) => picked.add('$m@$e'),
                 close: () {},
-                onTier: (_) {},
+                onLevel: (_) {},
                 leads: leads,
                 harness: harness,
                 onHarness: (h) => setState(() => harness = h),
@@ -301,7 +261,7 @@ void main() {
           ),
         ),
       );
-      expect(find.text('Tier'), findsOneWidget);
+      expect(find.text('Effort level'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('agent-menu.harness')));
       await tester.pump();
       expect(find.text('Turn on in Settings'), findsOneWidget);
@@ -314,9 +274,8 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('agent-menu.harness.test')));
       await tester.pump();
       expect(harness, 'test');
-      // Back on the root: no tiers or Bug fix for an outside lead, and its own models.
-      expect(find.text('Tier'), findsNothing);
-      expect(find.text('Bug fix comes later for outside agents'), findsOneWidget);
+      // Back on the root: no effort level for an outside lead, and its own models.
+      expect(find.text('Effort level'), findsNothing);
       expect(find.text('Test CLI'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('agent-menu.model')));
       await tester.pump();

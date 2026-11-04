@@ -29,6 +29,7 @@ import 'package:every_ai/features/code/harness/harness.dart' show NativeCommand,
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
+import 'package:every_ai/features/code/workflows/workflow_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -214,6 +215,23 @@ void main() {
     final timeline = await readTimeline(dir);
     expect([for (final s in timeline) (s.harness, s.conversationId)], [('alpha', 'alpha-c1')]);
     expect((await loadHandoffs(dir)).single.kind, HandoffKind.full);
+  });
+
+  test('with Max on, the new lead is told about it with its next message', () async {
+    final info = await start();
+    final c = await open(info.id);
+    c.pickWorkflow(const WorkflowPick.max());
+    await c.send('Use Max');
+    final a = d('alpha').latest!;
+    expect(a.sent.last, contains(maxWorkflowNote(on: true)));
+    await turn(a, 'a1', 'Loaded it.');
+    await c.switchLead('beta', run: false);
+    await handedOff(info.id, 'beta');
+    await c.send('Carry on');
+    expect(d('beta').latest!.sent.last, contains(maxWorkflowNote(on: true)));
+    await turn(d('beta').latest!, 'b1', 'Done.');
+    await c.send('And again');
+    expect(d('beta').latest!.sent.last, isNot(contains('<everyai-workflow')));
   });
 
   test('a handoff asks no model and fetches nothing; the whole conversation waits in a file', () async {
@@ -808,7 +826,7 @@ void main() {
     expect(items.whereType<UserTurn>().last.text, 'Now the docs');
   });
 
-  test('Max on the EveryAI harness becomes Thorough on an outside lead', () async {
+  test('an old Max session keeps Thorough and the Max workflow on an outside lead', () async {
     drivers[everyaiHarnessName]!.conversations['e1'] = FakeLeadSession(id: 'e1', replays: true);
     prefs['code.sessions'] = jsonEncode([
       CodeSessionInfo(
@@ -821,18 +839,16 @@ void main() {
         workingDir: project.path,
         createdAt: DateTime(2026),
         harness: everyaiHarnessName,
-        tier: HarnessTier.max,
-        harnessMode: HarnessMode.bugFix,
-      ).toJson(),
+      ).toJson()..addAll({'tier': 'max', 'harness_mode': 'bugFix'}),
     ]);
     container.dispose();
     container = make();
     final c = await open('s1');
     await c.switchLead('beta', run: false);
     final info = infoOf('s1');
-    expect((info.harness, info.tier, info.harnessMode), ('beta', HarnessTier.thorough, HarnessMode.build));
+    expect((info.harness, info.tier, info.workflow), ('beta', HarnessTier.thorough, 'max'));
     expect(info.leads[everyaiHarnessName]?.model, 'anthropic/claude-sonnet-5.5');
-    expect(d('beta').specs.single.phaseFlow, isNull);
+    expect(d('beta').specs.single.bugCheck, isFalse);
   });
 
   test('leaving the EveryAI harness stops its background forks, once the user agrees', () async {

@@ -29,8 +29,11 @@ final _monoSmall = EveryType.resolve().caption.mono.copyWith(height: 1.45);
 
 /// The user's message, right-aligned like chat.
 class UserTurnView extends StatelessWidget {
-  const UserTurnView({super.key, required this.text, this.mode, this.lead = '', this.onRewind});
+  const UserTurnView({super.key, required this.text, this.mode, this.lead = '', this.workflow = '', this.onRewind});
   final String text;
+
+  /// What its workflow notes said ("Started Bug fix"), '' for none.
+  final String workflow;
 
   /// The harness that got it, shown when the session had more than one ('' hides it).
   final String lead;
@@ -50,11 +53,15 @@ class UserTurnView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          if (mode != null || lead.isNotEmpty)
+          if (mode != null || lead.isNotEmpty || workflow.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 4, right: 4),
               child: Text(
-                [if (lead.isNotEmpty) lead, if (mode != null) '${mode!.label} mode'].join(' · '),
+                [
+                  if (lead.isNotEmpty) lead,
+                  if (mode != null) '${mode!.label} mode',
+                  if (workflow.isNotEmpty) workflow,
+                ].join(' · '),
                 style: theme.type.caption.medium.tint(theme.textMuted),
               ),
             ),

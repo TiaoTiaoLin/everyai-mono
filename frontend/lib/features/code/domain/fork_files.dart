@@ -1,10 +1,8 @@
 import '../harness/events.dart';
 import 'agent_mode.dart';
-import 'phases.dart';
 
 // Files a session's running subagents work on, so the session leaves them
-// alone until they report, and what a phase of the Max/Ultra flow lets the
-// agent change before its plan is approved.
+// alone until they report.
 
 /// The file [call] writes or edits, as the agent gave it; null for any other action.
 /// A patch names its first file here; [writeTargets] has them all.
@@ -113,32 +111,3 @@ String _wait(String file, String title) =>
     'Not run: $file is being changed by the subagent "$title", which is still working. Leave it alone until '
     'its report arrives (its result, or a <task-notification>): work on other files, or end your turn and the '
     'report wakes you. Then read the file again before you change it.';
-
-/// Phases of the Max/Ultra flow in which the project isn't built yet. (Bug
-/// fix's reproduce and triage are gated by the harness itself.)
-bool beforeBuild(Phase? phase) => phase == Phase.research || phase == Phase.questions || phase == Phase.plan;
-
-/// Why [call] is refused in [phase] of [flow], before the plan is approved:
-/// it writes a project file (the agent's own `.everyai/` notes are fine).
-String? refusedBeforeBuild(ActionCall call, Phase? phase, String flow, String dir) {
-  if (!beforeBuild(phase)) return null;
-  // Every file of a patch counts, not just its first.
-  final project = [
-    for (final path in writeTargets(call))
-      if (relativeTo(path, dir) case final rel? when rel != '.everyai' && !rel.startsWith('.everyai/')) rel,
-  ];
-  if (project.isEmpty) return null;
-  return 'Not written: the $flow flow is in its ${phase!.name} phase, and project files change in Build, once '
-      'the plan is approved. Until then write only under .everyai/scratch/ (the plan goes in '
-      '.everyai/scratch/plan.md).';
-}
-
-/// Why a `run_subagent` [task] doesn't start in [phase]: only researchers and
-/// reviewers run before the plan is approved; forks that build wait for Build.
-String? subagentBeforeBuild(String role, Phase? phase, String flow) {
-  if (!beforeBuild(phase) || _lookers.contains(role)) return null;
-  return 'Not started: the $flow flow is in its ${phase!.name} phase. Forks that build start in Build, once the '
-      'plan is approved; until then only "researcher", "explorer" and "reviewer" subagents run.';
-}
-
-const _lookers = {'researcher', 'explorer', 'reviewer'};

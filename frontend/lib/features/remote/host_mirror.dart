@@ -210,7 +210,7 @@ final class HostMirror {
       String text() => args['text'] as String? ?? '';
       switch (m['kind']) {
         case MirrorAction.send:
-          await c.send(text(), files: _files(args['files']));
+          await c.sendTyped(text(), files: _files(args['files']));
         case MirrorAction.steer:
           await c.steer(text(), files: _files(args['files']));
         case MirrorAction.stop:

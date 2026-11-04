@@ -3,7 +3,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import '../../domain/phases.dart' show PhaseFlow;
+import '../../domain/bug_check.dart' show BugCheckState;
 import 'tools_io.dart' show resolvePath;
 
 /// The tests and repro scripts a bug was reproduced with by [command]
@@ -25,7 +25,7 @@ Future<Set<String>> reproPaths(String root, String command, {String output = ''}
           if (line.length > 3) line.substring(3).split(' -> ').last.replaceAll('"', ''),
     };
     if (r.exitCode == 0) {
-      for (final p in const LineSplitter().convert('${r.stdout}').where(PhaseFlow.isReproPath).take(5000)) {
+      for (final p in const LineSplitter().convert('${r.stdout}').where(BugCheckState.isReproPath).take(5000)) {
         if (dirty.contains(p) || (output.isNotEmpty && output.contains(p.split('/').last))) paths.add(p);
       }
     }
@@ -36,7 +36,7 @@ Future<Set<String>> reproPaths(String root, String command, {String output = ''}
   if (scratch.existsSync()) {
     for (final e in scratch.listSync(recursive: true).whereType<File>().take(500)) {
       final rel = e.path.substring(root.length + 1);
-      if (PhaseFlow.isReproPath(rel)) paths.add(rel);
+      if (BugCheckState.isReproPath(rel)) paths.add(rel);
     }
   }
   for (final word in command.split(RegExp(r'\s+'))) {

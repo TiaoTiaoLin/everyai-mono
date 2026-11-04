@@ -3,9 +3,7 @@ import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/features/billing/billing_providers.dart';
 import 'package:every_ai/features/billing/ui/billing_screen.dart';
-import 'package:every_ai/features/code/code_providers.dart' show byokUltraCapped;
 import 'package:every_ai/features/code/gateway_key.dart';
-import 'package:every_ai/features/code/settings/agent_prompt.dart' show HarnessTier;
 import 'package:every_ai/features/usage/ui/usage_meter.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:every_ai/features/settings/byok_keys.dart';
@@ -105,11 +103,7 @@ void main() {
     });
   });
 
-  test('Ultra on an own-key model is capped; spend counts what the key paid', () {
-    const keys = ModelBilling(keys: {'anthropic': 'sk-ant-k'});
-    expect(byokUltraCapped(HarnessTier.ultra, const ModelId('anthropic/claude-opus-5.5'), keys), isTrue);
-    expect(byokUltraCapped(HarnessTier.ultra, const ModelId('openai/gpt-6.1-sol'), keys), isFalse);
-    expect(byokUltraCapped(HarnessTier.max, const ModelId('anthropic/claude-opus-5.5'), keys), isFalse);
+  test('spend counts what the key paid', () {
     final t = UsageTotals.fromJson({'charged_micros': 100, 'byok_cost_micros': 2500});
     expect(t.spentMicros, 2600);
     expect((t + t).ownKeyMicros, 5000);

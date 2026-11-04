@@ -11,7 +11,7 @@ import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/harness/everyai/llm.dart';
 import 'package:every_ai/features/code/harness/everyai/prompt_io.dart';
 import 'package:every_ai/features/code/harness/everyai/shell_io.dart';
-import 'package:every_ai/features/code/domain/phases.dart';
+import 'package:every_ai/features/code/domain/bug_check.dart' show bugReviewSystem;
 import 'package:every_ai/features/code/domain/transcript.dart' show isOutOfCredits, planApprovedReason;
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/everyai/scrub.dart';
@@ -812,120 +812,6 @@ for line in sys.stdin:
     expect(secretPath('/p/.env.example'), isFalse);
   });
 
-  test('a Max session runs research → questions → plan → build → verify, and the gate holds before the plan', () async {
-    gateway
-      ..reply(
-        calls: [
-          ('write', {'file_path': 'main.c', 'content': 'int main(){}'}),
-        ],
-      )
-      ..reply(
-        calls: [
-          ('present_plan', {'plan': 'x'}),
-        ],
-      )
-      ..reply(
-        calls: [
-          ('run_subagent', {'description': 'HTTP servers in C', 'prompt': 'Find the best.', 'role': 'researcher'}),
-        ],
-      )
-      ..reply(
-        calls: [
-          ('ask_user_question', {'questions': []}),
-        ],
-      )
-      ..reply(
-        calls: [
-          ('write', {'file_path': '.everyai/scratch/plan.md', 'content': '# Plan'}),
-        ],
-      )
-      ..reply(
-        calls: [
-          ('present_plan', {'plan': '# Plan'}),
-        ],
-      )
-      ..reply(
-        calls: [
-          ('write', {'file_path': 'main.c', 'content': 'int main(){return 0;}'}),
-        ],
-      )
-      ..reply(text: 'Built.')
-      ..reply(text: 'Verified: it compiles and serves.');
-    final session = await harness.start(
-      SessionSpec(
-        workingDir: work,
-        model: 'anthropic/claude-sonnet-5.5',
-        mode: AgentMode.fullAuto,
-        llmBaseUrl: gateway.baseUrl,
-        llmApiKey: 'sk-test',
-        sessionTag: 'tag-max',
-        initialMessage: 'Build an HTTP server in C',
-        holdClientTools: true,
-        phaseFlow: 'max',
-      ),
-    );
-    final events = await drive(
-      session,
-      answer: (c) => switch (c.toolName) {
-        'run_subagent' => 'Use picohttpparser; avoid fork-per-request.',
-        'ask_user_question' => 'The user answered: picohttpparser, epoll.',
-        'present_plan' => planApprovedReason,
-        _ => null,
-      },
-    );
-    final results = events.whereType<ToolResult>().map((r) => r.text).toList();
-    expect(results.first, contains('nothing in the project changes'));
-    expect(results.any((r) => r.contains('Error (Max flow, research phase): not yet')), isTrue);
-    expect(File('$work/main.c').readAsStringSync(), 'int main(){return 0;}');
-    final notes = [
-      for (final m in events.whereType<ChatMessage>())
-        if (m.fromUser) ?parsePhaseNote(m.text)?.phase,
-    ];
-    expect(notes, [Phase.research, Phase.questions, Phase.plan, Phase.build, Phase.verify, Phase.done]);
-    // The first model call already had the research note after the task.
-    final first = gateway.requests.first['messages']! as List<Object?>;
-    expect((first.last! as Map)['content'], contains('phase="research"'));
-    final dir = '${tmp.path}/data/everyai-sessions/${session.id}';
-    Map<String, Object?> read(String f) => jsonDecode(File('$dir/$f').readAsStringSync()) as Map<String, Object?>;
-    expect(read('state.json')['approved_plan'], isNotEmpty);
-    // A follow-up runs without phases; a new task starts the flow over, and the old plan no longer stands.
-    await session.send('Make the port configurable', run: false);
-    expect(read('phases.json')['phase'], 'done');
-    gateway.decisions['new_task'] = true;
-    final run = read('phases.json')['run'];
-    await session.send('Now write a Python client for it', run: false);
-    expect(read('phases.json')['phase'], 'research');
-    expect(read('phases.json')['run'], isNot(run));
-    expect(read('state.json')['approved_plan'], '');
-    expect(gateway.decided.last['text'], allOf(contains('<finished-task>'), contains('Python client')));
-  });
-
-  test('"just build it" while a Max flow prepares goes straight to build', () async {
-    final session = await harness.start(
-      SessionSpec(
-        workingDir: work,
-        model: 'anthropic/claude-sonnet-5.5',
-        mode: AgentMode.fullAuto,
-        llmBaseUrl: gateway.baseUrl,
-        llmApiKey: 'sk-test',
-        sessionTag: 'tag-now',
-        initialMessage: 'Make a snake game in one HTML file',
-        runInitial: false,
-        holdClientTools: true,
-        phaseFlow: 'max',
-      ),
-    );
-    final dir = '${tmp.path}/data/everyai-sessions/${session.id}';
-    String phase() => (jsonDecode(File('$dir/phases.json').readAsStringSync()) as Map)['phase'] as String;
-    expect(phase(), 'research');
-    await session.send('What will you research?', run: false);
-    expect(phase(), 'research', reason: 'the decider is unsure, so nothing skips');
-    gateway.decisions['build_now'] = true;
-    await session.send('skip all that, just build it', run: false);
-    expect(phase(), 'build');
-    expect(gateway.decided.last['text'], contains('just build it'));
-  });
-
   test('Bug fix: the harness runs the repro itself, refuses a fake fix, and verifies the real one', () async {
     File('$work/calc.sh').writeAsStringSync('echo \$((2 + 2 + 1))\n');
     const repro = 'test "\$(sh calc.sh)" = 4';
@@ -986,7 +872,7 @@ for line in sys.stdin:
         sessionTag: 'tag-bug',
         initialMessage: 'calc.sh prints 5 for 2 + 2',
         holdClientTools: true,
-        phaseFlow: 'bugfix',
+        bugCheck: true,
       ),
     );
     final events = await drive(session, answer: (c) => c.toolName == 'present_plan' ? planApprovedReason : null);
@@ -995,15 +881,14 @@ for line in sys.stdin:
     expect(results[1], startsWith('Reproduced'));
     expect(results.where((r) => r.startsWith('Still failing')), hasLength(1), reason: 'verifying before the fix fails');
     expect(results.last, startsWith('Verified'));
-    final notes = [
-      for (final m in events.whereType<ChatMessage>())
-        if (m.fromUser) ?parsePhaseNote(m.text)?.phase,
-    ];
-    expect(notes, [Phase.reproduce, Phase.triage, Phase.plan, Phase.fix, Phase.verify, Phase.done]);
+    // No phases any more: the harness adds no notes of its own, and remembers the repro for later checks.
+    expect(events.whereType<ChatMessage>().where((m) => m.fromUser), hasLength(1));
+    final dir = '${tmp.path}/data/everyai-sessions/${session.id}';
+    expect(jsonDecode(File('$dir/bug_check.json').readAsStringSync()), containsPair('repro_command', repro));
     final tools = (gateway.requests.first['tools']! as List).map((t) => ((t as Map)['function'] as Map)['name']);
     expect(tools, contains('bug_check'));
     // The approved plan is kept for compaction to re-inject.
-    final state = jsonDecode(File('${tmp.path}/data/everyai-sessions/${session.id}/state.json').readAsStringSync());
+    final state = jsonDecode(File('$dir/state.json').readAsStringSync());
     expect((state as Map)['approved_plan'], startsWith('# '));
   });
 
@@ -1063,7 +948,7 @@ for line in sys.stdin:
         sessionTag: 'tag-bug3',
         initialMessage: 'calc.sh prints 5 for 2 + 2',
         holdClientTools: true,
-        phaseFlow: 'bugfix',
+        bugCheck: true,
         reviewModel: 'openai/gpt-6.1-sol',
       ),
     );
@@ -1141,7 +1026,7 @@ for line in sys.stdin:
         sessionTag: 'tag-bug2',
         initialMessage: 'calc.sh prints 5 for 2 + 2',
         holdClientTools: true,
-        phaseFlow: 'bugfix',
+        bugCheck: true,
       ),
     );
     final events = await drive(session, answer: (c) => c.toolName == 'present_plan' ? planApprovedReason : null);
@@ -1182,17 +1067,51 @@ for line in sys.stdin:
     expect(results.last, startsWith('Not run: this is the 3rd identical read call'));
     final tools = (gateway.requests.first['tools']! as List).map((t) => ((t as Map)['function'] as Map)['name']);
     expect(tools, contains('memory'));
+    expect(tools, isNot(contains('bug_check')), reason: 'only Bug fix agents get it');
   });
 
-  test('repro paths and additive test edits', () {
-    expect(PhaseFlow.isReproPath('test/calc_test.dart'), isTrue);
-    expect(PhaseFlow.isReproPath('src/app.spec.ts'), isTrue);
-    expect(PhaseFlow.isReproPath('tests/test_calc.py'), isTrue);
-    expect(PhaseFlow.isReproPath('.everyai/scratch/repro.sh'), isTrue);
-    expect(PhaseFlow.isReproPath('.everyai/scratch/research/notes.md'), isFalse);
-    expect(PhaseFlow.isReproPath('lib/contest.dart'), isFalse);
-    expect(PhaseFlow.onlyAdded('a\nb\n', 'a\nx\nb\ny\n'), isTrue);
-    expect(PhaseFlow.onlyAdded('a\nb\n', 'a\nc\n'), isFalse);
+  test('a Bug fix session from before workflows keeps bug_check and its repro', () async {
+    File('$work/calc.sh').writeAsStringSync('echo 4\n');
+    const repro = 'test "\$(sh calc.sh)" = 4';
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-old-bug',
+        initialMessage: 'calc.sh prints 5 for 2 + 2',
+        runInitial: false,
+        holdClientTools: true,
+      ),
+    );
+    final dir = '${tmp.path}/data/everyai-sessions/${session.id}';
+    final specFile = File('$dir/spec.json');
+    final old = jsonDecode(specFile.readAsStringSync()) as Map<String, Object?>;
+    expect(old.containsKey('bug_check'), isFalse);
+    specFile.writeAsStringSync(jsonEncode({...old, 'phase_flow': 'bugfix'}));
+    File('$dir/phases.json')
+        .writeAsStringSync(jsonEncode({'bugfix': true, 'phase': 'fix', 'repro_command': repro, 'reviews': 1}));
+    await session.close();
+    gateway
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'verify'}),
+        ],
+      )
+      ..reply(text: 'Fixed.');
+    final reopened = await EveryAIHarness(
+      dataDir: () async => '${tmp.path}/data',
+      gatewayKey: () async => 'sk-test',
+    ).attach(session.id);
+    final driving = drive(reopened);
+    await reopened.send('Check the fix');
+    final events = await driving;
+    final tools = (gateway.requests.first['tools']! as List).map((t) => ((t as Map)['function'] as Map)['name']);
+    expect(tools, contains('bug_check'));
+    expect(events.whereType<ToolResult>().single.text, startsWith('Verified'));
+    expect(jsonDecode(File('$dir/bug_check.json').readAsStringSync()), containsPair('repro_command', repro));
   });
 
   group('per-call approvals', () {

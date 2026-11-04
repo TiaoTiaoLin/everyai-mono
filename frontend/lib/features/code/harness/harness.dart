@@ -56,7 +56,7 @@ final class SessionSpec {
     this.autoCompactAt = 0.6,
     this.pathMap = const {},
     this.researchSites,
-    this.phaseFlow,
+    this.bugCheck = false,
     this.script,
     this.reviewModel,
     this.briefing,
@@ -67,9 +67,8 @@ final class SessionSpec {
   /// harness, which has them built in.
   final DriverBriefing? briefing;
 
-  /// 'max' or 'ultra': the session runs the phase flow (research → questions
-  /// → plan → build → verify) the harness enforces. Null: it doesn't.
-  final String? phaseFlow;
+  /// The agent has bug_check, to prove a reproduction and a fix (Bug fix).
+  final bool bugCheck;
 
   /// A research job's sandbox: no shell, MCP or writes outside its scratch
   /// folder, no secret files, and the web only on these sites. Null: not one.
@@ -161,7 +160,7 @@ final class SessionSpec {
   /// `scriptCapsFor`); null: the EveryAI harness offers no run_script.
   final ScriptCaps? script;
 
-  /// Bug fix mode: the model that reviews a step the harness's own check
+  /// Bug fix: the model that reviews a step the harness's own check
   /// refused (`bug_check review`): another vendor's when the user has one,
   /// so it isn't the same model marking its own work. Null: the session's.
   final String? reviewModel;
@@ -264,15 +263,6 @@ abstract interface class HarnessSession {
 /// goal check reads the session with the cached prefix instead of a summary.
 abstract interface class AsksAside {
   Future<String> askAside(String question, {int maxTokens = 800});
-}
-
-/// A session running the Max or Ultra phase flow (the EveryAI harness).
-abstract interface class PhasedSession {
-  /// Moves the flow past the phase it is stuck in.
-  Future<void> skipPhase();
-
-  /// Starts ('max' or 'ultra', at research) or stops (null) the flow.
-  Future<void> setPhaseFlow(String? flow);
 }
 
 /// A session that takes one answer per pending call (the EveryAI harness):

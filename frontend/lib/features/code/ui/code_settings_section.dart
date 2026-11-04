@@ -859,7 +859,7 @@ class _FullPromptState extends ConsumerState<_FullPrompt> {
 
   Future<String> _load() async {
     final s = ref.read(codeSettingsProvider);
-    final p = await files.agentPromptFor(widget.projectDir, tier: s.tier, harnessMode: s.harnessMode);
+    final p = await files.agentPromptFor(widget.projectDir, tier: s.tier);
     final suffix = withSystemPrompts(p.suffix, global: s.globalPrompt, project: s.promptFor(widget.projectId));
     return '${p.persona}\n\n$suffix'.trim();
   }

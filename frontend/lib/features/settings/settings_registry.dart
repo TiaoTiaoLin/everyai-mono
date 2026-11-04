@@ -105,7 +105,12 @@ const settingsEntries = <SettingsEntry>[
   ),
   SettingsEntry(SettingsSection.code, 'Auto-compact', anchor: 'autoCompact', keywords: ['context', 'compaction']),
   SettingsEntry(SettingsSection.code, 'Forks', anchor: 'forks', keywords: ['worktree', 'isolated']),
-  SettingsEntry(SettingsSection.code, 'Harness tier', anchor: 'tier', keywords: ['efficient', 'quality', 'max']),
+  SettingsEntry(
+    SettingsSection.code,
+    'Effort level',
+    anchor: 'tier',
+    keywords: ['efficient', 'thorough', 'quality', 'tier'],
+  ),
   SettingsEntry(SettingsSection.code, 'Research sites', anchor: 'researchSites', keywords: ['web', 'domains']),
   SettingsEntry(SettingsSection.code, 'Commit style', anchor: 'commitStyle', keywords: ['git', 'conventional']),
   SettingsEntry(SettingsSection.code, 'Attribution', anchor: 'attribution', keywords: ['git', 'co-authored']),

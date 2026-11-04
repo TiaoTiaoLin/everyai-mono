@@ -6,6 +6,7 @@ import '../domain/phases.dart' show bugCheckTool;
 import '../harness/events.dart';
 import '../harness/harness.dart';
 import '../host/host.dart' show savedPlansTool;
+import '../host/host_prompts.dart' show runWorkflowTool;
 import 'briefing/briefing_types.dart' show everyaiServerName;
 import 'driver.dart';
 import 'driver_process.dart' show noAnswerProblem, notBuiltProblem;
@@ -80,6 +81,7 @@ const hostToolNames = {
   'memory',
   savedPlansTool,
   bugCheckTool,
+  runWorkflowTool,
   'check',
   'diff_stats',
   'goal_check',
