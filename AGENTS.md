@@ -620,12 +620,24 @@ owner's local notes (gitignored); the task board is the GitHub Project.
   `UsageReport` (plan usage in `UsageTotals.planMicros`), `SessionSpec.briefing`; replay kit
   `test/support/replay_transport.dart`. `features/code/host/`: a loopback MCP server, with tokens per session, idle
   expiry, and `HostTools` (not wired yet). `drivers/briefing/`: skill export per session, `sessionBriefing`, and
-  recipes for each CLI. 832 tests pass. Run 2 (drivers + Stage 2) is in progress on `batch/mh-2`.
+  recipes for each CLI. 832 tests pass.
+
+- **Multi-harness run 2: drivers + Stage 2 (2026-11-04; PR #1, merge aa8baa5).** Notes in
+  `docs/research/batches/multi-harness/run2/`. Drivers: `drivers/acp/` (Gemini `--acp`, `opencode acp`, `acp:<cmd>`),
+  `drivers/opencode/` (`opencode serve`), `drivers/codex/` (`codex app-server`; fixtures derived from the schema and
+  marked unverified), `drivers/claude/` (`claude -p` stream-json, approvals via a host permission tool),
+  `drivers/terminal/` (pty paste). A repo's own CLI config can't switch approvals off; no tokens on disk.
+  `AttachesBriefed`: a reopened outside session gets a fresh host token and the old one is revoked; child sessions
+  reopen without a briefing. Stage 2: lead + model at session start, per-CLI consent (Claude Code and Gemini off by
+  default), briefing, `HostTools` on the controller, fidelity label, Settings → Code → Harnesses. Max/Ultra/Bug fix
+  show "Coming later" on outside leads. 1023 tests pass. Nothing has run live: no real turn through any driver, Codex
+  isn't installed, Gemini sign-in is untested. Open nits: ACP reopen drops the user's MCP servers; a race in the Claude
+  rebrief while it spawns (not reachable today).
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
 0. **Every harness in one workspace** (`TODO-multi-harness.md`, plan `~/.claude/plans/multi-harness.md`): Stages 1–2
-   are being built (run 1 merged, run 2 running). Claude Code and Gemini sit behind a consent setting until the owner's ToS check.
+   are built (PR #1) and await live testing; Stages 3–6 come next. Claude Code and Gemini sit behind a consent setting until the owner's ToS check.
    EveryAI harness upgrades are in `TODO-harness.md` (split from TODO.md 2026-11-04).
 1. **Current plan (`~/.claude/plans/few-tasks-in-your-parsed-piglet.md`)**: §1–3 bug fixes done; next §4 tiered agent models (`/v1/agents`, effort), §5 git worktrees (App Support, squash merge), §6 agent evals, §7 `docs/CODE_ROADMAP.md`.
 1. **Phase B, the Code workspace** (desktop; see the plan file for the full spec):
