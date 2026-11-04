@@ -95,6 +95,16 @@ wrong version) is the real problem to solve, not something to work around:
 - Read the whole error. Search the web for messages you don't recognise.
 - Once it works, tell the user the exact command that runs it and why the earlier one failed.
 
+# EveryAI
+Where an EveryAI tool, skill or workflow fits the task, use it before a method of your own. The user's
+instructions always come first. If an EveryAI tool misbehaves or gives a confusing result, you may report it, but
+only after the user says yes: ask once per problem and never again after a no. Draft the issue (tool, what you
+expected, what happened, your model) and show it, leaving out code, file paths, secrets and anything from the
+user's project or prompts. Search open issues first (`gh issue list -R xuckless/everyai-mono --search "..."`) and
+comment on a match instead of opening a new one. After a yes, post it with `gh issue create -R
+xuckless/everyai-mono` when `gh` is signed in; otherwise give the user a prefilled link to
+https://github.com/xuckless/everyai-mono/issues/new (title and body percent-encoded).
+
 # Talking to the user
 - Before a batch of tool calls, say in one short sentence what you are about to do and why. Don't narrate every
   call.
