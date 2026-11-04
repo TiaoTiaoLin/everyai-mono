@@ -16,10 +16,12 @@ import 'driver.dart';
 import 'driver_process.dart' show loadShellEnv, noAnswerProblem, reloadShellEnv;
 import 'everyai_driver.dart';
 import 'opencode/opencode_driver.dart';
+import 'registry_install/installed_agents.dart' show installedDrivers, readInstalledAgents;
 import 'terminal/terminal_driver.dart';
 
 /// Every harness the app knows, by the name stored with its sessions: the
-/// [fixed] ones, plus `acp:<command>` and `terminal:<command>` made on
+/// [fixed] ones, the agents added from the ACP registry ([installed],
+/// `registry:<id>`), plus `acp:<command>` and `terminal:<command>` made on
 /// demand.
 final class DriverRegistry {
   DriverRegistry(
@@ -34,9 +36,27 @@ final class DriverRegistry {
   final HarnessDriver Function(String command) _terminal;
   final _made = <String, HarnessDriver>{};
 
+  /// The agents added from the ACP registry, by id; see [setInstalled].
+  Map<String, HarnessDriver> get installed => Map.unmodifiable(_installed);
+  var _installed = <String, HarnessDriver>{};
+  var _installedKeys = <String, Object>{};
+
+  /// Replaces [installed] with [drivers], each with a [key] for what it was
+  /// made from. One whose key didn't change keeps its old instance, so its
+  /// open sessions stay where they are.
+  void setInstalled(Map<String, ({Object key, HarnessDriver Function() make})> drivers) {
+    final next = <String, HarnessDriver>{};
+    for (final MapEntry(key: id, value: (:key, :make)) in drivers.entries) {
+      next[id] = _installedKeys[id] == key ? _installed[id]! : make();
+    }
+    _installed = next;
+    _installedKeys = {for (final e in drivers.entries) e.key: e.value.key};
+  }
+
   /// The driver stored as [id], or null when this app doesn't have it.
   HarnessDriver? resolve(String id) {
     if (fixed[id] case final d?) return d;
+    if (_installed[id] case final d?) return d;
     for (final (prefix, make) in [('acp:', _acp), ('terminal:', _terminal)]) {
       if (id.startsWith(prefix) && id.length > prefix.length) {
         return _made[id] ??= make(id.substring(prefix.length));
@@ -58,13 +78,13 @@ final class DriverRegistry {
   }
 
   /// The ones offered when a session starts.
-  Iterable<HarnessDriver> get listed => fixed.values;
+  Iterable<HarnessDriver> get listed => [...fixed.values, ..._installed.values];
 }
 
 /// Every planned driver. All but the EveryAI harness are stubs until their
 /// own files are built.
-final driverRegistryProvider = Provider<DriverRegistry>(
-  (ref) => DriverRegistry({
+final driverRegistryProvider = Provider<DriverRegistry>((ref) {
+  final registry = DriverRegistry({
     everyaiHarnessName: EveryAIDriver(ref.read(everyaiHarnessProvider)),
     'claude-code': ClaudeDriver(),
     'codex': CodexDriver(),
@@ -74,8 +94,10 @@ final driverRegistryProvider = Provider<DriverRegistry>(
     // Whether one needs the user's consent comes from its profile.
     for (final (id, label, command, hint) in _acpAgents)
       id: AcpDriver(id: id, label: label, command: command, installHint: hint),
-  }),
-);
+  });
+  // Read here, so the first check and its kept copy already list them.
+  return registry..setInstalled(installedDrivers(readInstalledAgents(ref.read(preferencesProvider)), registry.fixed));
+});
 
 /// The ACP agents listed by default: id, label, command, install hint. Each
 /// command's profile (`acp/acp_agents.dart`) pins its ACP arguments.
@@ -135,7 +157,7 @@ final class DriverStatuses extends AsyncNotifier<Map<String, DriverStatus>> {
   @override
   FutureOr<Map<String, DriverStatus>> build() {
     final cached = _readCache();
-    if (cached == null) return _scan(reloadShell: false);
+    if (cached == null) return _scan(reloadShell: false).then((_) => _last);
     Future.microtask(() {
       if (ref.mounted) unawaited(refresh());
     });
@@ -147,9 +169,27 @@ final class DriverStatuses extends AsyncNotifier<Map<String, DriverStatus>> {
   /// a second call shares it, unless it asks for a reload the running one
   /// didn't do: then it runs one more check after it.
   Future<Map<String, DriverStatus>> refresh({bool reloadShell = false}) async {
-    final found = await _scan(reloadShell: reloadShell);
-    if (ref.mounted) state = AsyncData(found);
-    return found;
+    await _scan(reloadShell: reloadShell);
+    // [_last], not the scan's own result: a [recheck] may have finished since.
+    if (ref.mounted) state = AsyncData(_last);
+    return _last;
+  }
+
+  /// Checks [id] alone and merges it in (an agent was just added, updated or
+  /// removed), so it needn't wait for a whole check. A check already running
+  /// keeps it: it merges what [recheck] found for drivers it didn't list.
+  Future<void> recheck(String id) async {
+    final d = ref.read(driverRegistryProvider).listed.where((d) => d.info.id == id).firstOrNull;
+    final DriverStatus? s = d == null
+        ? null
+        : await _detect(d)
+              .then<DriverStatus>((s) => s, onError: (Object e) => DriverStatus(problem: "Couldn't check: $e"))
+              .timeout(timeout, onTimeout: () => _noAnswer);
+    if (!ref.mounted) return;
+    _last = s == null ? ({..._last}..remove(id)) : {..._last, id: s};
+    // Before the first check ends there is nothing to show yet; it merges this.
+    if (state.hasValue) state = AsyncData(_last);
+    if (_checkedAt != null) _save();
   }
 
   /// [refresh] when the last check is older than [age] (the app came back
@@ -196,18 +236,27 @@ final class DriverStatuses extends AsyncNotifier<Map<String, DriverStatus>> {
 
     unawaited(Future.wait([for (var w = 0; w < concurrency && w < drivers.length; w++) worker()]));
     final results = await Future.wait([for (final f in found) f.future]);
-    final out = {for (final (i, d) in drivers.indexed) d.info.id: results[i]};
+    if (!ref.mounted) return {for (final (i, d) in drivers.indexed) d.info.id: results[i]};
+    // Drivers added or removed while this ran ([recheck] has the added ones).
+    final now = {for (final d in ref.read(driverRegistryProvider).listed) d.info.id};
+    final checked = {for (final d in drivers) d.info.id};
+    final out = {
+      for (final (i, d) in drivers.indexed)
+        if (now.contains(d.info.id)) d.info.id: results[i],
+      for (final e in _last.entries)
+        if (now.contains(e.key) && !checked.contains(e.key)) e.key: e.value,
+    };
     _last = out;
     _checkedAt = DateTime.now();
-    if (ref.mounted) {
-      ref.read(preferencesProvider)[harnessStatusesKey] = jsonEncode({
-        'v': 1,
-        'checkedAt': _checkedAt!.toIso8601String(),
-        'statuses': {for (final e in out.entries) e.key: e.value.toJson()},
-      });
-    }
+    _save();
     return out;
   }
+
+  void _save() => ref.read(preferencesProvider)[harnessStatusesKey] = jsonEncode({
+    'v': 1,
+    'checkedAt': _checkedAt!.toIso8601String(),
+    'statuses': {for (final e in _last.entries) e.key: e.value.toJson()},
+  });
 
   static const _noAnswer = DriverStatus(problem: noAnswerProblem);
 

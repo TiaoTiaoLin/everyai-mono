@@ -207,6 +207,70 @@ void main() {
     });
   });
 
+  group('one driver again', () {
+    void add(ProviderContainer c, Map<String, HarnessDriver> drivers) => c.read(driverRegistryProvider).setInstalled({
+      for (final e in drivers.entries) e.key: (key: e.key, make: () => e.value),
+    });
+
+    test('an agent added while a check runs keeps its status when the check ends', () async {
+      var gate = Completer<DriverStatus>()..complete(const DriverStatus(installed: true));
+      final a = _Fake('a', () => gate.future);
+      final prefs = Preferences.inMemory();
+      final c = _container({'a': a}, prefs: prefs);
+      await c.read(driverStatusesProvider.future);
+      gate = Completer<DriverStatus>();
+      final n = c.read(driverStatusesProvider.notifier);
+      final running = n.refresh();
+      await pumpEventQueue();
+      final b = _Fake('b', () async => const DriverStatus(installed: true, version: '2'));
+      add(c, {'b': b});
+      await n.recheck('b');
+      expect(c.read(driverStatusesProvider).value!['b']!.version, '2');
+      gate.complete(const DriverStatus(installed: true));
+      final s = await running;
+      expect(s.keys, unorderedEquals(['a', 'b']));
+      expect(c.read(driverStatusesProvider).value!.keys, unorderedEquals(['a', 'b']));
+      expect(((jsonDecode(prefs[harnessStatusesKey]!) as Map)['statuses'] as Map).keys, unorderedEquals(['a', 'b']));
+      expect((a.detects, b.detects), (2, 1));
+    });
+
+    test('a recheck that ends after a running check still lands', () async {
+      var gate = Completer<DriverStatus>()..complete(const DriverStatus(installed: true));
+      final a = _Fake('a', () => gate.future);
+      final c = _container({'a': a});
+      await c.read(driverStatusesProvider.future);
+      gate = Completer<DriverStatus>();
+      final n = c.read(driverStatusesProvider.notifier);
+      final running = n.refresh();
+      await pumpEventQueue();
+      final bGate = Completer<DriverStatus>();
+      add(c, {'b': _Fake('b', () => bGate.future)});
+      final one = n.recheck('b');
+      gate.complete(const DriverStatus(installed: true));
+      await running;
+      bGate.complete(const DriverStatus(installed: true));
+      await one;
+      expect(c.read(driverStatusesProvider).value!.keys, unorderedEquals(['a', 'b']));
+    });
+
+    test('a removed agent is dropped, also by a check that was running', () async {
+      var gate = Completer<DriverStatus>()..complete(const DriverStatus(installed: true));
+      final c = _container({'a': _Fake('a', () async => const DriverStatus(installed: true))});
+      add(c, {'b': _Fake('b', () => gate.future)});
+      await c.read(driverStatusesProvider.future);
+      expect(c.read(driverStatusesProvider).value!.keys, unorderedEquals(['a', 'b']));
+      gate = Completer<DriverStatus>();
+      final n = c.read(driverStatusesProvider.notifier);
+      final running = n.refresh();
+      await pumpEventQueue();
+      add(c, const {});
+      await n.recheck('b');
+      expect(c.read(driverStatusesProvider).value!.keys, ['a']);
+      gate.complete(const DriverStatus(installed: true));
+      expect((await running).keys, ['a']);
+    });
+  });
+
   group('the kept check', () {
     test('a status survives JSON', () {
       const s = DriverStatus(installed: true, path: '/x', version: '2', signedIn: false, problem: 'p');

@@ -123,7 +123,7 @@ final class AcpProfile {
 
   /// Its environment on top of [delivery]'s: OpenCode gets [openCodePermissions].
   Map<String, String> env(Delivery? delivery) => switch (agent) {
-    AcpAgent.openCode => withOpenCodePermissions(delivery?.env ?? const {}),
+    AcpAgent.openCode => withOpenCodePermissions({...extraEnv, ...?delivery?.env}),
     _ => {...extraEnv, ...?delivery?.env},
   };
 
@@ -140,6 +140,36 @@ final class AcpProfile {
     AcpAgent.cursor => cursorWorkspaceProblem(cwd),
     _ => Future.value(),
   };
+
+  /// This profile with [env] (an ACP registry entry's) under its own
+  /// [extraEnv]: on a clash the profile's value wins, so a registry entry
+  /// can't undo a pin that keeps the agent asking.
+  AcpProfile withEnv(Map<String, String> env) => env.isEmpty
+      ? this
+      : AcpProfile._(
+          agent: agent,
+          pinned: pinned,
+          caps: caps,
+          signIn: signIn,
+          dropped: dropped,
+          droppedWithValue: droppedWithValue,
+          extraEnv: {...env, ...extraEnv},
+          askMode: askMode,
+          planMode: planMode,
+          lateReplay: lateReplay,
+          minVersion: minVersion,
+          keyEnv: keyEnv,
+          needsConsent: needsConsent,
+          configPins: configPins,
+          notThis: notThis,
+          alsoNamed: alsoNamed,
+          ttyFallback: ttyFallback,
+          initializeMeta: initializeMeta,
+          cancelMeta: cancelMeta,
+        );
+
+  /// Whether this is one of the profiles above (not [generic]'s).
+  bool get known => !identical(this, _generic);
 
   /// Whether it is signed in, without a model call; null when it can't tell.
   /// [env] replaces the login environment (tests).
@@ -510,8 +540,11 @@ typedef AcpCommand = ({String executable, List<String> args, AcpProfile profile}
 
 /// [command] and [args] as the driver runs them. Without [args], a command
 /// with spaces is split into words, one literal argument each, without a
-/// shell (`acp:dsh --profile acp`). The profile's pinned arguments come first.
-AcpCommand acpCommand(String command, List<String> args) {
+/// shell (`acp:dsh --profile acp`). The profile's pinned arguments come first,
+/// after [prefix] (a runner's own arguments: `npx -y <package>`). [profile]
+/// replaces the one picked by the executable's name (an ACP registry agent
+/// run through `npx` keeps its own).
+AcpCommand acpCommand(String command, List<String> args, {AcpProfile? profile, List<String> prefix = const []}) {
   var exe = command.trim();
   var own = args;
   if (own.isEmpty && exe.contains(RegExp(r'\s'))) {
@@ -519,9 +552,12 @@ AcpCommand acpCommand(String command, List<String> args) {
     exe = words.first;
     own = words.sublist(1);
   }
-  final profile = acpProfileOf(exe);
-  return (executable: exe, args: _pin(own, profile), profile: profile);
+  final p = profile ?? acpProfileOf(exe);
+  return (executable: exe, args: [...prefix, ..._pin(own, p)], profile: p);
 }
+
+/// ACP registry ids whose agent is listed here under another id.
+const registryAliases = {'grok-build': 'grok'};
 
 List<String> _pin(List<String> own, AcpProfile profile) {
   final flags = {for (final g in profile.pinned) g.first, ...profile.dropped, ...profile.droppedWithValue};

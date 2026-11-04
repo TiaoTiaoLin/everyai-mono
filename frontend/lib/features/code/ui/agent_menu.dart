@@ -40,7 +40,7 @@ List<LeadOption> leadOptions(
     if (offeredAsLead(info, statuses?[info.id], current: current))
       (
         info: info,
-        blocked: leadFix(info, statuses?[info.id], consented: ownClis.contains(info.id)),
+        blocked: leadFix(info, statuses?[info.id], consented: ownClis.contains(info.consentId)),
         detail: statuses?[info.id]?.version ?? '',
       ),
 ];

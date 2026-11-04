@@ -143,7 +143,7 @@ List<DriverInfo> readyLeads(
 }) => [
   for (final d in listed)
     if (d.info.id != current &&
-        leadBlocked(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.id)) == null)
+        leadBlocked(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.consentId)) == null)
       d.info,
 ];
 
