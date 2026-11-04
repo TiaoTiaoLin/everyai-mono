@@ -164,6 +164,25 @@ abstract interface class ChecksResume {
   Future<String?> resumeProblem(String conversationId);
 }
 
+/// A driver that can take over a conversation its CLI already keeps (one started in the CLI on its own, or in
+/// an earlier EveryAI session it no longer has a record of), so `attach` reopens it on the CLI's resume path.
+abstract interface class AdoptsNativeSession {
+  /// Records what `attach` needs for the CLI's session [nativeId] in [cwd]; returns the conversation id to
+  /// store for it (the native id, unless the driver keys sessions by its own id).
+  Future<String> adoptNative(
+    String nativeId, {
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+  });
+
+  /// Whether `attach` shows the conversation's earlier turns from the CLI itself (otherwise the app shows the
+  /// history it read from the CLI's files).
+  bool get replaysNativeHistory;
+}
+
 /// A driver whose session starts in one of its own modes, under the app's
 /// policy for it, for some of our modes. The first message of a session
 /// started in such a mode goes without the `<everyai-mode>` note (the

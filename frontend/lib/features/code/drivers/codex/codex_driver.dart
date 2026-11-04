@@ -35,7 +35,7 @@ typedef CodexSpawn = Future<LineChannel> Function({
 /// It keeps `<data>/drivers/codex/`: `threads/<id>.json` (what [attach]
 /// needs to start it again), `journal/<id>.jsonl` (the transcript) and
 /// `logs/<session>.log` (stderr).
-final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
+final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode, AdoptsNativeSession {
   CodexDriver({this.which, this.spawn, this.dataDir});
 
   /// Replaces the PATH lookup in [detect] (tests).
@@ -207,6 +207,26 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativ
       await session.close();
     }
   }
+
+  @override
+  Future<String> adoptNative(
+    String nativeId, {
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+  }) async {
+    await writeText(
+      _metaPath(await _data(), nativeId),
+      jsonEncode({'cwd': cwd, 'sessionTag': sessionTag, 'model': model, 'effort': effort, 'mode': mode.name}),
+    );
+    return nativeId;
+  }
+
+  /// A reopen replays only our journal, which an adopted thread doesn't have.
+  @override
+  bool get replaysNativeHistory => false;
 
   /// Starts Codex again on the thread and replays our journal. The EveryAI
   /// MCP server isn't there until a briefing is handed over again (its token

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../resume/resume_providers.dart' show resumeUnsupportedProvider;
 import '../../../core/theme/every_theme.dart';
 import '../../../core/ui/adaptive.dart';
 import '../../../core/ui/anchored_popover.dart';
@@ -562,6 +563,7 @@ class HarnessesSetting extends ConsumerWidget {
         if (d.info.needsConsent) d.info.label,
     ];
     final handoff = ref.watch(codeLeadProvider.select((l) => l.handoff));
+    final resumeUnsupported = ref.watch(resumeUnsupportedProvider);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -592,6 +594,13 @@ class HarnessesSetting extends ConsumerWidget {
                             key: ValueKey('code-settings.harness.${d.info.id}.hint'),
                             style: theme.type.caption.mono.tint(theme.textMuted),
                           ),
+                        ),
+                      // A harness whose earlier sessions can't be listed or loaded isn't offered on New session.
+                      if (resumeUnsupported(d.info.id) case final why?)
+                        Text(
+                          'Earlier sessions: not available for ${d.info.label}${why.isEmpty ? '' : ' ($why)'}',
+                          key: ValueKey('code-settings.harness.${d.info.id}.resume'),
+                          style: theme.type.caption.tint(theme.textMuted),
                         ),
                     ],
                   ),
