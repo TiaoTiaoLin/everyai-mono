@@ -98,9 +98,20 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
   HarnessMode _harnessModeFor(CodeProject project) =>
       isDemoPath(project.path) ? HarnessMode.build : ref.read(codeSettingsProvider).harnessMode;
 
+  /// The lead the new session runs on: the pick, except that the scripted demo always runs its own.
+  String _leadFor(CodeProject project) =>
+      isDemoPath(project.path) ? everyaiHarnessName : ref.read(codeLeadProvider).harness;
+
+  /// The model and effort for [harness]: an outside lead's own pick, else the EveryAI harness's.
+  ({String model, String effort}) _modelFor(String harness) => harness == everyaiHarnessName
+      ? (model: ref.read(codeAgentProvider).model, effort: ref.read(codeAgentProvider).effort)
+      : ref.read(codeLeadProvider).of(harness);
+
   Future<void> _start(CodeProject project, String prompt, List<Attachment> files) async {
     final mode = _modeFor(project.id);
     ref.read(preferencesProvider)[lastModeKey(project.id)] = mode.name;
+    final harness = _leadFor(project);
+    final (:model, :effort) = _modelFor(harness);
     setState(() => _starting = true);
     try {
       final info = await ref
@@ -108,13 +119,14 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
           .start(
             project: project,
             prompt: prompt,
-            model: ref.read(codeAgentProvider).model,
-            effort: ref.read(codeAgentProvider).effort,
+            model: model,
+            effort: effort,
             mode: mode,
             files: files,
             isolated: _isolated,
             tier: _tierFor(project),
             harnessMode: _harnessModeFor(project),
+            harness: harness,
           );
       if (_budget case final usd?) ref.read(codeSettingsProvider.notifier).setBudget(info.id, usd);
       if (mounted) context.go(Routes.codeSession(info.id));
@@ -131,6 +143,7 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
     final projects = ref.watch(codeProjectsProvider);
     final project = projects.where((p) => p.id == _projectId).firstOrNull ?? projects.firstOrNull;
     final mode = _modeFor(project?.id);
+    final lead = project == null || isDemoPath(project.path) ? everyaiHarnessName : ref.watch(codeLeadProvider).harness;
     final sessions = ref
         .watch(codeSessionsProvider)
         .where((s) => s.projectId == project?.id && !s.isSubagent)
@@ -189,10 +202,18 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
                     onModeChanged: (m) => _pickMode(m, project.id),
                     onSend: (text, files) => _start(project, text, files),
                     trailing: AgentMenu(
-                      model: ref.watch(codeAgentProvider).model,
-                      effort: ref.watch(codeAgentProvider).effort,
+                      harness: lead,
+                      onHarness: isDemoPath(project.path) ? null : ref.read(codeLeadProvider.notifier).chooseHarness,
+                      model: lead == everyaiHarnessName
+                          ? ref.watch(codeAgentProvider).model
+                          : ref.watch(codeLeadProvider).of(lead).model,
+                      effort: lead == everyaiHarnessName
+                          ? ref.watch(codeAgentProvider).effort
+                          : ref.watch(codeLeadProvider).of(lead).effort,
                       demo: isDemoPath(project.path),
-                      onChanged: ref.read(codeAgentProvider.notifier).chooseModel,
+                      onChanged: lead == everyaiHarnessName
+                          ? ref.read(codeAgentProvider.notifier).chooseModel
+                          : (model, effort) => ref.read(codeLeadProvider.notifier).chooseModel(lead, model, effort),
                       tier: ref.watch(codeSettingsProvider.select((s) => s.tier)),
                       onTier: ref.read(codeSettingsProvider.notifier).setTier,
                       harnessMode: ref.watch(codeSettingsProvider.select((s) => s.harnessMode)),
@@ -561,7 +582,7 @@ class _SessionTileState extends ConsumerState<SessionTile> {
     final selected = widget.selected;
     try {
       if (w == null) {
-        ref.read(codeSessionsProvider.notifier).remove(widget.info.id);
+        await ref.read(codeSessionsProvider.notifier).remove(widget.info.id);
       } else {
         await ref.read(codeGitProvider(widget.info.id).notifier).discard();
       }

@@ -5,8 +5,10 @@ import 'events.dart';
 
 /// How an outside harness reaches EveryAI from inside its session: the MCP
 /// server that offers our tools ([mcpUrl], with [mcpToken] as its bearer
-/// token), the folder our skills are written to ([skillDir]) and the name of
-/// the skill that explains the session ([sessionSkill]).
+/// token), the folder our skills are written to ([skillDir]) and the
+/// session text that explains the session ([sessionSkill]: the Markdown from
+/// `sessionBriefing(...)`, also saved as `session.md` next to the skills; a
+/// driver hands it to the CLI's instructions slot as `BriefingInput.sessionText`).
 @immutable
 final class DriverBriefing {
   const DriverBriefing({required this.mcpUrl, required this.mcpToken, this.skillDir, this.sessionSkill});
@@ -313,6 +315,14 @@ abstract interface class ForksSessions {
   /// A new session that starts from [parentConversationId]'s history up to
   /// now, then [spec]'s initial message as the directive.
   Future<HarnessSession> fork(String parentConversationId, SessionSpec spec);
+}
+
+/// A harness that reopens a session with a fresh [DriverBriefing]: an
+/// outside CLI started again after the app restarts needs a new host token
+/// (the old one died with the app). Without it, a reopened session has no
+/// EveryAI tools.
+abstract interface class AttachesBriefed {
+  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing);
 }
 
 /// Starts and reopens agent sessions.

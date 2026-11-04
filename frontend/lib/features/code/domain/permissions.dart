@@ -2,6 +2,7 @@
 
 import 'package:flutter/foundation.dart';
 
+import '../drivers/driver_policy.dart' show hostToolOf, trustedHostTools;
 import '../harness/events.dart';
 import 'agent_mode.dart';
 import 'shell_readonly.dart';
@@ -88,7 +89,18 @@ final class PermissionRules {
 /// Decides what happens to the agent's actions in one session.
 @immutable
 final class PermissionPolicy {
-  const PermissionPolicy({this.rules = PermissionRules.none, this.session = const {}, this.workingDir});
+  const PermissionPolicy({
+    this.rules = PermissionRules.none,
+    this.session = const {},
+    this.workingDir,
+    this.hostTools = false,
+  });
+
+  /// The session runs on an outside agent, whose MCP calls to the app's own
+  /// host ([trustedHostTools]) run without asking: they only show a card or
+  /// keep the project's notes. Off for the EveryAI harness, where an MCP
+  /// server called "everyai" is the user's own.
+  final bool hostTools;
 
   /// Settings and stored rules (global, then project).
   final PermissionRules rules;
@@ -108,6 +120,9 @@ final class PermissionPolicy {
     }
     if (_matching(call, rules.deny, allowing: false) case final rule?) {
       return Decision(Verdict.deny, DecisionSource.rule, rule: rule);
+    }
+    if (hostTools && trustedHostTools.contains(hostToolOf(call))) {
+      return const Decision(Verdict.allow, DecisionSource.clientTool);
     }
     // MCP tools: never read-only; an allow rule or Full auto runs them, and
     // every other mode (Plan included) asks.

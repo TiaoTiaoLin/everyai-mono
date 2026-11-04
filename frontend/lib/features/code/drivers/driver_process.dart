@@ -45,6 +45,9 @@ Future<DriverStatus> detectCli(
   Future<String?> Function(String command)? which,
 }) => impl.detectCli(command, versionArgs: versionArgs, which: which);
 
+/// The problem a driver whose sessions aren't built yet reports.
+const notBuiltProblem = 'Not built yet.';
+
 /// [detectCli] for a driver whose sessions aren't built yet.
 Future<DriverStatus> notBuiltYet(String command, {Future<String?> Function(String command)? which}) async =>
-    (await detectCli(command, which: which)).withProblem('Not built yet.');
+    (await detectCli(command, which: which)).withProblem(notBuiltProblem);

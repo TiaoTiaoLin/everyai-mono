@@ -12,6 +12,7 @@ import '../core/platform/platform_kind.dart';
 import '../core/preferences.dart';
 import '../core/theme/every_theme.dart';
 import '../core/ui/adaptive.dart' show showAdaptiveToast;
+import '../features/code/code_providers.dart' show driverShutdownProvider;
 import '../features/history/ui/sidebar.dart';
 import '../features/remote/remote_providers.dart' show remoteHostingProvider;
 import '../features/settings/byok_keys.dart' show modelBillingProvider;
@@ -104,6 +105,8 @@ class _AppShellState extends ConsumerState<AppShell> {
     // Hosting for remote devices runs app-wide (when the user turned it on);
     // a device asking to pair is announced wherever the user is.
     if (Host.isDesktop) {
+      // Outside coding CLIs end with the app, whichever way they were started.
+      ref.listen(driverShutdownProvider, (_, _) {});
       ref.listen(remoteHostingProvider.select((s) => s.link.pending.length), (before, now) {
         if (now > (before ?? 0)) {
           showAdaptiveToast(context, 'A device wants to use Code here. Approve it in Settings → Remote.');

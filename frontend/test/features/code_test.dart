@@ -6,6 +6,7 @@ import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/questions.dart';
 import 'package:every_ai/features/code/domain/subagents.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
+import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/fake_harness.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
@@ -522,6 +523,86 @@ void main() {
         expect(CodeSessionInfo.fromJson({...info.toJson()}..remove('hold_client_tools')).holdClientTools, isFalse);
         expect(info.copyWith(title: 'x').holdClientTools, isTrue);
       });
+    });
+  });
+
+  group('an outside agent\'s host calls', () {
+    const questions = {
+      'questions': [
+        {
+          'question': 'Which?',
+          'header': 'Pick',
+          'options': [
+            {'label': 'A', 'description': ''},
+            {'label': 'B', 'description': ''},
+          ],
+        },
+      ],
+    };
+    ActionCall row(String id, String tool, Map<String, Object?> args) =>
+        actionEvent(id: id, toolName: 'mcp__everyai__$tool', kind: 'MCPToolAction', args: args);
+
+    test('a question row is a card, settled by its result', () {
+      final b = TranscriptBuilder()..add(row('a1', askUserQuestionTool, questions));
+      final card = b.snapshot.openQuestion!;
+      expect(card.questions.single.header, 'Pick');
+      final answers = [
+        const QuestionAnswer(selected: {1}),
+      ];
+      b.add(
+        resultEvent(
+          id: 'o1',
+          actionId: 'a1',
+          toolName: 'mcp__everyai__ask_user_question',
+          text: answersReason(card.questions, answers),
+        ),
+      );
+      expect(b.snapshot.openQuestion, isNull);
+      expect(b.snapshot.items.whereType<QuestionItem>().single.answers!.single.selected, {1});
+      // An error result (timed out) closes it unanswered.
+      b
+        ..add(row('a2', askUserQuestionTool, questions))
+        ..add(resultEvent(id: 'o2', actionId: 'a2', toolName: 'x', text: 'timed out', isError: true));
+      expect(b.snapshot.openQuestion, isNull);
+      expect(b.snapshot.items.whereType<QuestionItem>().last.answers, isEmpty);
+    });
+
+    test('a plan row is a plan card: approved by its result, else revised', () {
+      final b = TranscriptBuilder()
+        ..add(
+          row('p1', presentPlanTool, {
+            'title': 'T',
+            'steps': ['x'],
+          }),
+        )
+        ..add(resultEvent(id: 'o1', actionId: 'p1', toolName: 'x', text: planApprovedReason));
+      expect(b.snapshot.items.whereType<PlanProposal>().single.verdict, PlanVerdict.approved);
+      b
+        ..add(
+          row('p2', presentPlanTool, {
+            'title': 'T',
+            'steps': ['x'],
+          }),
+        )
+        ..add(resultEvent(id: 'o2', actionId: 'p2', toolName: 'x', text: 'timed out', isError: true));
+      expect(b.snapshot.items.whereType<PlanProposal>().last.verdict, PlanVerdict.revised);
+      // A local close (the app answered the call) holds when the result arrives.
+      b
+        ..add(
+          row('p3', presentPlanTool, {
+            'title': 'T',
+            'steps': ['x'],
+          }),
+        )
+        ..settlePlan('p3', PlanVerdict.approved)
+        ..add(resultEvent(id: 'o3', actionId: 'p3', toolName: 'x', text: 'whatever'));
+      expect(b.snapshot.items.whereType<PlanProposal>().last.verdict, PlanVerdict.approved);
+    });
+
+    test('another server\'s tool of the same name stays a step', () {
+      final b = TranscriptBuilder()
+        ..add(actionEvent(id: 'a', toolName: 'mcp__other__ask_user_question', kind: 'MCPToolAction', args: questions));
+      expect(b.snapshot.items.single, isA<StepItem>());
     });
   });
 }
