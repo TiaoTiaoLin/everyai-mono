@@ -344,6 +344,9 @@ SubagentReport withMergeNote(SubagentReport report, ({List<String> merged, List<
   return SubagentReport(report.status, '${report.text}$note');
 }
 
+/// The child id in a [backgroundStarted] (or [forkAsks]) report, or null.
+String? backgroundTaskId(String text) => RegExp(r'Started in the background as task ([\w-]+)').firstMatch(text)?[1];
+
 SubagentReport backgroundStarted(String childId, {String? note}) => SubagentReport(
   SubagentStatus.background,
   '${note == null ? '' : '$note\n\n'}Started in the background as task $childId. Carry on with other work; its '

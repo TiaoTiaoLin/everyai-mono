@@ -5,7 +5,8 @@ import 'dart:convert';
 import 'agent_mode.dart' show askUserQuestionTool, presentPlanTool;
 import 'permissions.dart' show cancelledLead;
 import 'shell_readonly.dart';
-import 'subagents.dart' show SubagentReport, SubagentStatus, parseSubagentReports, parseTaskNotification, taskTool;
+import 'subagents.dart'
+    show SubagentReport, SubagentStatus, backgroundTaskId, parseSubagentReports, parseTaskNotification, taskTool;
 import 'transcript.dart' show planApprovedMessage, planApprovedReason;
 
 /// The steps of a Max, Ultra or Bug fix session. The harness enforces
@@ -78,9 +79,11 @@ sealed class TurnEnd {
   const TurnEnd();
 }
 
-/// Let the turn end.
+/// Let the turn end. [finished]: this turn end finished the flow, so its
+/// done note goes in the conversation.
 final class EndTurn extends TurnEnd {
-  const EndTurn();
+  const EndTurn({this.finished = false});
+  final bool finished;
 }
 
 /// Add [note] as a user message and keep going.
@@ -111,7 +114,9 @@ final class PhaseFlow {
     this.failedFixes = 0,
     this.askedUser = false,
     Map<String, String>? reproFiles,
+    Map<String, String>? forks,
   }) : reproFiles = reproFiles ?? {},
+       forks = forks ?? {},
        phase = phase ?? (bugfix ? Phase.reproduce : Phase.research),
        researchers = researchers ?? {};
 
@@ -140,6 +145,11 @@ final class PhaseFlow {
 
   /// Researchers started in the background whose reports haven't come.
   int researchPending;
+
+  /// Forks running in the background (child id → role, '' for a plain fork)
+  /// whose task notification hasn't come: a build that waits for them isn't
+  /// finished.
+  final Map<String, String> forks;
 
   /// The command that showed the bug, and the output that marks it ('' for any failure).
   String reproCommand;
@@ -234,6 +244,7 @@ final class PhaseFlow {
       reproFiles: {
         for (final e in (j['repro_files'] as Map<String, Object?>? ?? const {}).entries) e.key: '${e.value}',
       },
+      forks: {for (final e in (j['forks'] as Map<String, Object?>? ?? const {}).entries) e.key: '${e.value}'},
     );
   }
 
@@ -251,6 +262,7 @@ final class PhaseFlow {
     if (failedFixes > 0) 'failed_fixes': failedFixes,
     if (askedUser) 'asked_user': true,
     if (reproFiles.isNotEmpty) 'repro_files': reproFiles,
+    if (forks.isNotEmpty) 'forks': forks,
   };
 
   /// Why [tool] with [args] may not run now, or null. [inScratch] says
@@ -342,8 +354,11 @@ final class PhaseFlow {
           : 'write the plan to $planFile (the parts, which research each uses, how each is checked), then '
                 'present_plan.',
     Phase.build =>
-      'build the plan: give each independent part to a fork (isolation "worktree") and build the rest yourself, to '
-          'the Thorough standard.',
+      forks.isNotEmpty
+          ? 'forks are still building in the background (${forks.length}): keep to your own part, or end your turn; '
+                'their notifications wake you. Then integrate their work and check the whole.'
+          : 'build the plan: give each independent part to a fork (isolation "worktree") and build the rest yourself, '
+                'to the Thorough standard.',
     Phase.fix =>
       'make the planned change, the smallest that removes the cause, add the regression test, then call bug_check '
           'verify. If it still fails, do not try variations: rethink the cause.',
@@ -353,7 +368,9 @@ final class PhaseFlow {
                 'the evidence.'
           : 'verify the whole as the user will use it (run it, click through it, screenshots), fix what is wrong, '
                 'then give your final report.',
-    Phase.done => 'nothing: the flow is done.',
+    Phase.done =>
+      'nothing: the flow is done. Follow-ups (tweaks, fixes, questions about this work) run without phases; a new '
+          'task starts the flow again, and a phase note says so.',
   };
 
   /// The note that opens [phase], kept in the conversation.
@@ -375,6 +392,7 @@ final class PhaseFlow {
   /// when the phase moved.
   bool onAnswer(String tool, Map<String, Object?> args, String reason, {String? callId}) {
     if (reason.contains('<fork-question')) forkAsking = true;
+    if (tool == taskTool) _trackFork(args, reason, callId);
     switch (tool) {
       case taskTool when (args['role'] ?? args['agent']) == 'researcher':
         // This call's own report when several came back together.
@@ -398,6 +416,17 @@ final class PhaseFlow {
     return false;
   }
 
+  /// Remembers a fork that went on in the background (started there, moved
+  /// there, or paused to ask), so a turn end while it runs is a wait.
+  void _trackFork(Map<String, Object?> args, String reason, String? callId) {
+    final mine = callId == null ? null : parseSubagentReports(reason)[callId];
+    final text = mine?.text ?? reason;
+    if (mine != null && mine.status != SubagentStatus.background) return;
+    final id = backgroundTaskId(text);
+    if (id == null) return;
+    forks[id] = '${args['role'] ?? args['agent'] ?? ''}';
+  }
+
   /// A user message arrived: a researcher's background report, or the
   /// research workflow's reports, move research on; the plan approval sent as
   /// a message moves plan on.
@@ -411,6 +440,7 @@ final class PhaseFlow {
       return _advanceFrom(Phase.research);
     }
     final n = parseTaskNotification(text);
+    if (n != null) forks.remove(n.childId);
     if (n == null || !researchers.contains(n.title.trim().toLowerCase())) return false;
     if (researchPending > 0) researchPending--;
     researchReports++;
@@ -472,13 +502,17 @@ final class PhaseFlow {
       case Phase.research when researchPending > 0 || ultra:
         // Waiting for background researchers (or the workflow) is right.
         return const EndTurn();
+      case Phase.build when forks.isNotEmpty:
+        // Forks still build in the background: their notifications wake the
+        // agent, and the build is over once it has integrated them.
+        return const EndTurn();
       case Phase.build:
         phase = Phase.verify;
         nudges = 0;
         return Nudge(note());
       case Phase.verify:
         phase = Phase.done;
-        return const EndTurn();
+        return const EndTurn(finished: true);
       case Phase.reproduce || Phase.triage || Phase.research || Phase.questions || Phase.plan || Phase.fix:
         if (nudges >= maxNudges) return Stuck(note(stuck: true));
         nudges++;

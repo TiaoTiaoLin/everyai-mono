@@ -811,7 +811,7 @@ for line in sys.stdin:
       for (final m in events.whereType<ChatMessage>())
         if (m.fromUser) ?parsePhaseNote(m.text)?.phase,
     ];
-    expect(notes, [Phase.research, Phase.questions, Phase.plan, Phase.build, Phase.verify]);
+    expect(notes, [Phase.research, Phase.questions, Phase.plan, Phase.build, Phase.verify, Phase.done]);
     // The first model call already had the research note after the task.
     final first = gateway.requests.first['messages']! as List<Object?>;
     expect((first.last! as Map)['content'], contains('phase="research"'));
@@ -890,7 +890,7 @@ for line in sys.stdin:
       for (final m in events.whereType<ChatMessage>())
         if (m.fromUser) ?parsePhaseNote(m.text)?.phase,
     ];
-    expect(notes, [Phase.reproduce, Phase.triage, Phase.plan, Phase.fix, Phase.verify]);
+    expect(notes, [Phase.reproduce, Phase.triage, Phase.plan, Phase.fix, Phase.verify, Phase.done]);
     final tools = (gateway.requests.first['tools']! as List).map((t) => ((t as Map)['function'] as Map)['name']);
     expect(tools, contains('bug_check'));
     // The approved plan is kept for compaction to re-inject.

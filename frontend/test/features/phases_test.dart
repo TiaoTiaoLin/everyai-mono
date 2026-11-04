@@ -45,6 +45,23 @@ void main() {
     expect(f.phase, Phase.done);
   });
 
+  test('a build waits for its background forks before verify, and done is a turn end that finishes', () {
+    final f = PhaseFlow()..phase = Phase.build;
+    final args = {'isolation': 'worktree', 'description': 'API'};
+    f.onAnswer(taskTool, args, subagentReason({'act-1': backgroundStarted('kid-1')}), callId: 'act-1');
+    expect(f.forks, {'kid-1': ''});
+    expect(f.onTurnEnd(), isA<EndTurn>(), reason: 'waiting for a fork is not the end of the build');
+    expect(f.phase, Phase.build);
+    expect(PhaseFlow.fromJson(f.toJson()).forks, {'kid-1': ''});
+    f.onMessage(taskNotification('kid-1', 'API', const SubagentReport(SubagentStatus.completed, 'ok')));
+    expect(f.forks, isEmpty);
+    expect(f.onTurnEnd(), isA<Nudge>());
+    expect(f.phase, Phase.verify);
+    final end = f.onTurnEnd();
+    expect(end, isA<EndTurn>().having((e) => e.finished, 'finished', isTrue));
+    expect(parsePhaseNote(f.note())?.phase, Phase.done);
+  });
+
   test('an approval sent as a message opens the plan gate too; a revision does not', () {
     final f = PhaseFlow()..phase = Phase.plan;
     expect(f.onAnswer('present_plan', {}, '$planRevisionLead see their next message.'), isFalse);

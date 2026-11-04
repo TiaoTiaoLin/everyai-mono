@@ -1004,8 +1004,9 @@ final class EveryAISession
                 _notePhase(stuck: true);
                 _setStatus(ExecutionStatus.paused);
                 return;
-              case EndTurn():
-                _saveFlow();
+              case EndTurn(:final finished):
+                // The done note closes the phase strip and tells the model follow-ups run free.
+                finished ? _notePhase() : _saveFlow();
             }
           }
           _setStatus(ExecutionStatus.finished);
