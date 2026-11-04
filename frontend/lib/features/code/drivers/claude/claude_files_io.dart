@@ -41,15 +41,29 @@ Future<String?> runQuiet(String executable, List<String> args) async {
 }
 
 Future<bool> claudeSessionExists(String cwd, String id, {String? configDir}) async {
-  final env = Platform.environment;
-  final home = env['HOME'] ?? env['USERPROFILE'] ?? '';
-  final root = configDir ?? env['CLAUDE_CONFIG_DIR'] ?? (home.isEmpty ? '' : '$home/.claude');
+  var root = configDir;
+  if (root == null) {
+    // The CLI runs in the login shell's environment, which the app itself may not share.
+    Map<String, String> env;
+    try {
+      env = (await ShellEnv.load()).env;
+    } on Object {
+      env = Platform.environment;
+    }
+    final home = env['HOME'] ?? env['USERPROFILE'] ?? '';
+    root = env['CLAUDE_CONFIG_DIR'] ?? (home.isEmpty ? '' : '$home/.claude');
+  }
   // Unreadable settings: let the resume try.
   if (root.isEmpty) return true;
-  // The CLI names a folder's store after its path with every other character a dash.
-  final folder = cwd.replaceAll(RegExp(r'[^A-Za-z0-9]'), '-');
   try {
-    return await File('$root/projects/$folder/$id.jsonl').exists();
+    final projects = Directory('$root/projects');
+    // No store to look in: can't tell, let the resume try.
+    if (!await projects.exists()) return true;
+    // The id is a UUID, so any project folder will do: the CLI names the folder after the resolved path.
+    await for (final dir in projects.list(followLinks: false)) {
+      if (dir is Directory && await File('${dir.path}/$id.jsonl').exists()) return true;
+    }
+    return false;
   } on FileSystemException {
     return true;
   }

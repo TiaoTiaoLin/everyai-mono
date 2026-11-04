@@ -321,6 +321,19 @@ void main() {
     expect(texts, ['Added the toggle.', 'Wrote the tests.', 'Fixed the tests.']);
   });
 
+  test('switching back and forth keeps every transcript row key unique', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    await c.switchLead('alpha', run: true);
+    await turn(d('alpha').latest!, 'a3', 'Fixed the tests.');
+    await c.switchLead('beta', run: true);
+    await c.switchLead('alpha', run: true);
+    await pumpEventQueue();
+    final keys = [for (final i in transcriptOf(info.id).items) i.key];
+    expect(keys.toSet(), hasLength(keys.length));
+  });
+
   test("a conversation that can't be reopened is copied into its format when it can be", () async {
     importerFor = (h) => h == 'alpha'
         ? _FakeImporter('alpha', (_) {

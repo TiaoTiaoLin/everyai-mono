@@ -2735,7 +2735,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
             );
           }
         } on Object catch (e) {
-          why = e is HarnessError ? e.message : '$e';
+          why = e is HarnessError ? e.message : "its earlier conversation couldn't be opened";
         }
         // Its conversation can't be reopened: the copy or a new one, with everything.
         if (live == null) resumable = false;
@@ -2858,7 +2858,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         ? LeadPath.imported
         : LeadPath.fresh;
     final pathText = leadPathNote(target.info.label, path, why);
-    final pathNote = pathText == null ? null : NoticeItem('lead-path-${live.id}', pathText);
+    final pathNote = pathText == null ? null : NoticeItem('lead-path-${_timeline.length}-${live.id}', pathText);
     final importNote = imported == null
         ? null
         : NoticeItem(
