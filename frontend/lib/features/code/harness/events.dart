@@ -184,6 +184,12 @@ final class ActionCall extends HarnessEvent {
   final String risk;
 
   String get actionKind => action['kind'] as String? ?? '';
+
+  /// An outside harness's call (Claude Code, Codex, ...), which keeps its own tool name.
+  bool get native => raw['native'] == true;
+
+  /// The tool's name as the harness sent it (without the ACP driver's `acp:` prefix), or '' for our own calls.
+  String get nativeName => native ? (toolName.startsWith('acp:') ? toolName.substring(4) : toolName) : '';
   String str(String key) => action[key] as String? ?? '';
 }
 

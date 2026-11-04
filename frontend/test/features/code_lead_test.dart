@@ -565,7 +565,11 @@ void main() {
     final c = await open(info.id);
     host.touchOk = false;
     await c.send('go on');
-    expect(stateOf(info.id).transcript.items.whereType<NoticeItem>().single.message, hostToolsExpired);
+    final notices = stateOf(info.id).transcript.items.whereType<NoticeItem>().toList();
+    // The briefing row comes first, with the text the agent was sent.
+    expect(notices.first.message, briefingNotice);
+    expect(notices.first.detail, isNotEmpty);
+    expect(notices.last.message, hostToolsExpired);
   });
 
   test('deleting the session ends its token and its briefing', () async {
@@ -600,6 +604,10 @@ void main() {
     expect(host.revoked, isNot(contains('tok2')));
     expect(host.live[info.id], {'tok2'});
     expect(drivers['test']!.specs.single.briefing!.mcpToken, 'tok1');
+    // A fresh container (an app restart) still shows the briefing row, with the text just sent.
+    final notice = stateOf(info.id).transcript.items.whereType<NoticeItem>().first;
+    expect(notice.message, briefingNotice);
+    expect(notice.detail, again.sessionSkill);
   });
 
   test('a reopened session passes the approved MCP servers, minus one named like the app host', () async {

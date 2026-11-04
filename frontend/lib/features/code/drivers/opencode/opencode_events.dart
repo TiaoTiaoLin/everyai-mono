@@ -413,11 +413,29 @@ final class OpenCodeMapper {
       // through the backend's safe fetch, so only the user answers it.
       'webfetch' => ('OpenCodeWebFetch', input),
       'websearch' => ('WebSearchAction', input),
-      'todowrite' => ('TaskTrackerAction', input),
+      'todowrite' => ('TaskTrackerAction', _todos(input)),
       _ when name.startsWith('everyai_') => ('MCPToolAction', input),
       _ => ('OpenCodeAction', input),
     };
   }
+
+  /// OpenCode's `{todos: [{content, status, priority}]}` as the tracker's task list.
+  Map<String, Object?> _todos(Map<String, Object?> input) => {
+    'command': 'plan',
+    'task_list': [
+      for (final t in (input['todos'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>())
+        {
+          'title': '${t['content'] ?? ''}',
+          'status': switch (t['status']) {
+            'completed' || 'cancelled' => 'done',
+            'in_progress' => 'in_progress',
+            _ => 'todo',
+          },
+          if (t['status'] == 'cancelled') 'notes': 'cancelled',
+          if (t['priority'] is String) 'priority': t['priority'],
+        },
+    ],
+  };
 
   List<String> _patchPaths(List<String> resources, Map<String, Object?>? req) {
     final files = [

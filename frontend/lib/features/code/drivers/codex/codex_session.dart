@@ -672,6 +672,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
 
   void _itemCompleted(Map<String, Object?> item) {
     if (item['id'] case final String id) _streamed.remove(id);
+    if (item['type'] == 'plan' && item['text'] is String && (item['text'] as String).isNotEmpty) {
+      final (call, result) = planTextEvents('${item['id']}', toolName: 'plan', body: item['text'] as String);
+      _call(call);
+      _result(result);
+      return;
+    }
     if (messageOf(item) case final message?) {
       _emit(message);
       return;

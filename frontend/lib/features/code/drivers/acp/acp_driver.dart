@@ -102,6 +102,17 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeM
   /// run starts it under one.
   var _tty = false;
 
+  /// The briefing text this agent is sent (the session text, and for agents
+  /// without a skill route the list of skills after it), for the transcript's row.
+  Future<String?> briefingText(DriverBriefing b) async {
+    final dir = b.skillDir;
+    final text = b.sessionSkill;
+    if (dir == null || text == null) return null;
+    final input = (mcpUrl: Uri.parse(b.mcpUrl), mcpToken: b.mcpToken, skillDir: dir, sessionText: text);
+    final sent = resolved.profile.deliver(input, await listSkills(dir));
+    return sent.instructions ?? sent.firstPrompt ?? text;
+  }
+
   /// What runs: the executable, its arguments and its profile.
   late final AcpCommand resolved = acpCommand(command, args, profile: profile, prefix: prefix);
 

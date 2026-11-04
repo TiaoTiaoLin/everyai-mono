@@ -93,12 +93,18 @@ final class PlanItem extends TranscriptItem {
 
 @immutable
 final class PlanTask {
-  const PlanTask(this.title, this.status, [this.notes = '']);
+  const PlanTask(this.title, this.status, [this.notes = '', this.priority = '', this.active = '']);
   final String title;
 
   /// todo, in_progress or done.
   final String status;
   final String notes;
+
+  /// The harness's own priority (`high`, `medium`, `low`), or ''.
+  final String priority;
+
+  /// What it is doing while in progress, in its own words (Claude's `activeForm`), or ''.
+  final String active;
 }
 
 /// An `ask_user_question` card. [answers] is null until answered; empty when
@@ -141,6 +147,9 @@ final class PlanProposal extends TranscriptItem {
   final ActionCall call;
   final PlanVerdict? verdict;
 
+  /// The harness's own plan (no approval here): never waits for the user.
+  bool get shown => call.actionKind == 'ProposedPlanAction';
+
   String get title => call.str('title');
   String get summary => call.str('summary');
   String get verification => call.str('verification');
@@ -162,7 +171,7 @@ final class PlanProposal extends TranscriptItem {
 
   /// The plan as Markdown, for copying.
   String get markdown => [
-    '# $title',
+    if (title.isNotEmpty || !shown) '# $title',
     if (summary.isNotEmpty) '\n$summary',
     if (body.trim().isNotEmpty) '\n${body.trim()}',
     '',
@@ -196,6 +205,9 @@ const planApprovedReason =
 /// Opens the result of a held `present_plan` call when the user wants changes.
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';
 
+/// The title of the row that holds the text an outside agent was briefed with.
+const briefingNotice = 'EveryAI briefing';
+
 /// The kind of a note the app adds on a lead switch (see [leadNoticeEvent]).
 const leadNoticeKind = 'EveryAILeadNotice';
 
@@ -206,6 +218,7 @@ HarnessEvent leadNoticeEvent(NoticeItem notice) => HarnessEvent.decode({
   'kind': leadNoticeKind,
   'key': notice.key,
   'message': notice.message,
+  if (notice.detail.isNotEmpty) 'detail': notice.detail,
   if (notice.handedOffFrom.isNotEmpty) 'handed_off_from': notice.handedOffFrom,
 });
 
@@ -302,7 +315,7 @@ final class Transcript {
   PlanProposal? get openPlan {
     for (final item in items.reversed) {
       if (item is UserTurn) return null;
-      if (item is PlanProposal && item.verdict == null) return item;
+      if (item is PlanProposal && item.verdict == null && !item.shown) return item;
     }
     return null;
   }
@@ -406,7 +419,11 @@ final class TranscriptBuilder {
       // What streamed before the failure is void (cleared above); the reply comes again.
       case RetryState():
         _retry = e;
-      case ChatMessage(fromUser: true, text: final raw):
+      case ChatMessage(fromUser: true, text: final all):
+        // The briefing is never something the user typed: it is its own row.
+        final (briefed, raw) = splitSessionBlock(all);
+        if (briefed != null) _items.add(NoticeItem('${e.id}-briefing', briefingNotice, detail: briefed));
+        if (briefed != null && raw.isEmpty) return;
         final (mode, noted) = splitModeNote(raw);
         var (_, text) = splitContextNotes(noted);
         final changed = mode != null && mode != _notedMode;
@@ -465,6 +482,7 @@ final class TranscriptBuilder {
           NoticeItem(
             raw['key'] as String? ?? '',
             raw['message'] as String? ?? '',
+            detail: raw['detail'] as String? ?? '',
             handedOffFrom: raw['handed_off_from'] as String? ?? '',
           ),
         );
@@ -537,11 +555,20 @@ final class TranscriptBuilder {
       return;
     }
     switch (call.actionKind) {
+      // The harness's plan text (Claude's ExitPlanMode, a Codex plan item), shown as a card.
+      case 'ProposedPlanAction':
+        _push(call.id, PlanProposal(call));
       case 'TaskTrackerAction':
         final tasks = [
           for (final t in (call.action['task_list'] as List<Object?>? ?? const []))
             if (t is Map<String, Object?>)
-              PlanTask(t['title'] as String? ?? '', t['status'] as String? ?? 'todo', t['notes'] as String? ?? ''),
+              PlanTask(
+                t['title'] as String? ?? '',
+                t['status'] as String? ?? 'todo',
+                t['notes'] as String? ?? '',
+                t['priority'] as String? ?? '',
+                t['active'] as String? ?? '',
+              ),
         ];
         if (tasks.isEmpty) return;
         _plan = tasks;
@@ -660,7 +687,7 @@ final class TranscriptBuilder {
       // A held card is answered by rejecting the call with the answers as the reason.
       QuestionItem(:final call, :final questions, :final answers) when r.outcome == ToolOutcome.rejected =>
         QuestionItem(call, questions, answers ?? parseAnswers(_reason(r), questions) ?? const []),
-      PlanProposal(:final call, verdict: null) when r.outcome == ToolOutcome.rejected => PlanProposal(
+      PlanProposal(:final call, verdict: null, shown: false) when r.outcome == ToolOutcome.rejected => PlanProposal(
         call,
         verdict: _reason(r).startsWith(planApprovedReason) ? PlanVerdict.approved : PlanVerdict.revised,
       ),
@@ -671,7 +698,7 @@ final class TranscriptBuilder {
         questions,
         r.outcome == ToolOutcome.ok ? parseAnswers(r.text, questions) ?? const [] : const [],
       ),
-      PlanProposal(:final call, verdict: null) when hostToolOf(call) != null => PlanProposal(
+      PlanProposal(:final call, verdict: null, shown: false) when hostToolOf(call) != null => PlanProposal(
         call,
         verdict: r.outcome == ToolOutcome.ok && r.text.trimLeft().startsWith(planApprovedReason)
             ? PlanVerdict.approved
@@ -691,7 +718,7 @@ final class TranscriptBuilder {
       if (item is UserTurn) return;
       if (item is QuestionItem && item.answers == null) {
         _items[i] = QuestionItem(item.call, item.questions, const []);
-      } else if (item is PlanProposal && item.verdict == null) {
+      } else if (item is PlanProposal && item.verdict == null && !item.shown) {
         final approved = text.startsWith(planApprovedMessage);
         _items[i] = PlanProposal(item.call, verdict: approved ? PlanVerdict.approved : PlanVerdict.revised);
       }

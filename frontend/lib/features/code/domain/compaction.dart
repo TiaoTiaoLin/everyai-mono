@@ -120,7 +120,7 @@ String _between(String text, String open, String close) {
 }
 
 /// The user's text of a message: mode and context notes split off.
-String userTextOf(String raw) => splitContextNotes(splitModeNote(raw).$2).$2;
+String userTextOf(String raw) => splitContextNotes(splitModeNote(splitSessionBlock(raw).$2).$2).$2;
 
 String _userText(String raw) => userTextOf(raw);
 
@@ -246,6 +246,8 @@ String _render(HarnessEvent e, {required int outputCap, required int argsCap}) =
 const _noiseArgs = {'kind', 'security_risk', 'summary'};
 
 String _renderCall(ActionCall call, int argsCap) {
+  // The harness's plan is its own text: never cut like arguments.
+  if (call.actionKind == 'ProposedPlanAction') return '[agent]\n${call.str('body').trim()}';
   final args = {
     for (final MapEntry(:key, :value) in call.action.entries)
       if (!(call.actionKind.isNotEmpty && _noiseArgs.contains(key)) && value != null && value != '' && value != false)

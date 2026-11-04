@@ -262,7 +262,7 @@ void main() {
           'ReadFileAction',
           'FileEditorAction',
           'MCPToolAction',
-          'ClaudeToolAction',
+          'ProposedPlanAction',
           'TaskTrackerAction',
         ],
       );
@@ -276,9 +276,9 @@ void main() {
       expect(read.str('path'), '/r/a.dart');
       expect(nb.str('path'), '/r/n.ipynb');
       expect(mcp.toolName, 'mcp__github__create_issue');
-      expect(other.str('plan'), 'p');
+      expect(other.str('body'), 'p');
       expect(todo.action['task_list'], [
-        {'title': 'Fix it', 'status': 'done'},
+        {'title': 'Fix it', 'status': 'done', 'active': 'Fixing it'},
       ]);
       for (final c in [bash, edit, write, read, nb, mcp, todo]) {
         expect(autoDecidable(c), isTrue, reason: c.toolName);

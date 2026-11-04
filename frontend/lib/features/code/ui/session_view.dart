@@ -78,8 +78,8 @@ class CodeSessionScreen extends ConsumerWidget {
         state.mode == AgentMode.plan &&
         !busy &&
         t.openQuestion == null &&
-        t.items.whereType<PlanProposal>().isEmpty &&
-        t.items.lastOrNull is AgentText &&
+        t.items.whereType<PlanProposal>().every((p) => p.shown) &&
+        (t.items.lastOrNull is AgentText || t.items.lastOrNull is PlanProposal) &&
         t.items.whereType<UserTurn>().isNotEmpty;
 
     // The live harness → mode → tier → Model → Effort menu, in the composer.

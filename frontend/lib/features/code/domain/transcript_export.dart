@@ -73,6 +73,8 @@ String transcriptSteps(List<HarnessEvent> events, {int resultCap = 4000}) {
           out.writeln('<details><summary>Thinking</summary>\n\n${reasoning.trim()}\n\n</details>\n');
         }
         if (text.trim().isNotEmpty) out.writeln('${text.trim()}\n');
+      case ActionCall(actionKind: 'ProposedPlanAction', :final action):
+        out.writeln('### Agent$stamp\n\n${'${action['body'] ?? ''}'.trim()}\n');
       case ActionCall(:final toolName, :final action):
         final args = Map.of(action)..remove('kind');
         final command = action['command'];

@@ -165,6 +165,9 @@ final driverDataDirProvider = Provider<Future<String> Function()>((ref) => GitSe
 /// id. Never stored: tokens die with the app.
 final _hostTokensProvider = Provider<Map<String, String>>((ref) => {});
 
+/// The briefing text each outside session's agent was last sent (the transcript's "EveryAI briefing" row).
+final _briefingTextsProvider = Provider<Map<String, String>>((ref) => {});
+
 /// What the session text tells an outside agent about each host tool, in
 /// `hostToolSpecs` order. bug_check is left out until outside agents get Bug
 /// fix mode.
@@ -677,13 +680,16 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         model: model,
       );
       tokens[id] = token.token;
-      return DriverBriefing(
+      final briefing = DriverBriefing(
         mcpUrl: '${token.url}',
         mcpToken: token.token,
         skillDir: export.skillDir,
         sessionSkill: export.text,
         host: forward,
       );
+      ref.read(_briefingTextsProvider)[id] =
+          (driver is AcpDriver ? await driver.briefingText(briefing) : null) ?? export.text;
+      return briefing;
     } on Object {
       await host.revoke(token.token);
       rethrow;
@@ -815,6 +821,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// Ends outside session [id]'s host token and deletes its briefing.
   Future<void> _unbrief(String id) async {
     ref.read(_hostTokensProvider).remove(id);
+    ref.read(_briefingTextsProvider).remove(id);
     try {
       await ref.read(hostServerProvider).revokeSession(id);
       await removeBriefing(await _driverDir(id));
@@ -1728,6 +1735,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       final live = ref.read(_liveProvider);
       final session = _session = live[sessionId] ?? await ref.read(codeSessionsProvider.notifier).attachSession(info);
       live[sessionId] = session;
+      // After attaching: a reopen briefs the agent then, and that is the text to show.
+      _showBriefing();
       await _openContext(info);
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
@@ -1743,6 +1752,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     } on Object catch (e) {
       state = state.copyWith(error: '$e');
     }
+  }
+
+  /// The "EveryAI briefing" row: the exact text an outside lead was sent, opened on click. Kept in [_carried]
+  /// so a refold doesn't drop it. Shown again on every open, since it is taken from the briefing made then.
+  void _showBriefing() {
+    final text = ref.read(_briefingTextsProvider)[sessionId];
+    if (text == null || text.isEmpty) return;
+    _builder.addNotice(NoticeItem('briefing-${_timeline.length}', briefingNotice, detail: text));
+    _carried = _builder.snapshot.items;
+    state = state.copyWith(transcript: _builder.snapshot);
   }
 
   /// Shows what earlier leads did, before the current one's history replays.
@@ -2790,6 +2809,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final host = ref.read(hostServerProvider);
     final tokens = ref.read(_hostTokensProvider);
     final oldToken = tokens[sessionId];
+    final oldBriefing = ref.read(_briefingTextsProvider)[sessionId];
     final ready = Completer<void>();
     HarnessSession? live;
     final Handoff handoff;
@@ -2907,6 +2927,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         tokens.remove(sessionId);
       }
       if (outside) await sessions._restoreBriefing(info);
+      final texts = ref.read(_briefingTextsProvider);
+      if (oldBriefing != null) {
+        texts[sessionId] = oldBriefing;
+      } else {
+        texts.remove(sessionId);
+      }
       if (ref.mounted) sessions.update(sessions.byId(sessionId)?.copyWith(leads: info.leads) ?? info);
       return LeadSwitchOutcome.failed('$e');
     }
@@ -2997,6 +3023,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     for (final n in [?notice, ?importNote, ?pathNote]) {
       _builder.addNotice(n);
     }
+    if (outside) _showBriefing();
     _carried = _builder.snapshot.items;
     _answered = '';
     _doom.reset();

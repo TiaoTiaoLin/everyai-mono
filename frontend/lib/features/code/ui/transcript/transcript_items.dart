@@ -309,6 +309,23 @@ class _ToolView extends StatelessWidget {
 /// A row's title with its path or command colored: "Edited lib/**main.dart**",
 /// "\$ git status".
 TextSpan stepTitleSpan(BuildContext context, ActionCall call, TextStyle base) {
+  final span = _titleSpan(context, call, base);
+  if (!call.native || call.nativeName.isEmpty || span.toPlainText().contains(call.nativeName)) return span;
+  // An outside harness's own word for the tool (Bash, apply_patch), before our title.
+  final theme = EveryTheme.of(context);
+  return TextSpan(
+    style: base,
+    children: [
+      TextSpan(
+        text: '${call.nativeName}  ',
+        style: _mono.copyWith(color: theme.textMuted, fontSize: (base.fontSize ?? 13) - 1),
+      ),
+      span,
+    ],
+  );
+}
+
+TextSpan _titleSpan(BuildContext context, ActionCall call, TextStyle base) {
   final theme = EveryTheme.of(context);
   final title = stepTitle(call);
   if (call.actionKind == 'TerminalAction') {
@@ -650,16 +667,27 @@ class PlanView extends StatelessWidget {
                   Padding(padding: const EdgeInsets.only(top: 2), child: _TaskMark(t.status)),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      t.title,
-                      style: theme.type.callout.copyWith(
-                        color: t.status == 'done' ? theme.textMuted : theme.text,
-                        decoration: t.status == 'done' ? TextDecoration.lineThrough : null,
-                        decorationColor: theme.textMuted,
-                        fontWeight: t.status == 'in_progress' ? FontWeight.w600 : FontWeight.w400,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          // The harness's own wording of what it is doing, while it does it.
+                          t.status == 'in_progress' && t.active.isNotEmpty ? t.active : t.title,
+                          style: theme.type.callout.copyWith(
+                            color: t.status == 'done' ? theme.textMuted : theme.text,
+                            decoration: t.status == 'done' ? TextDecoration.lineThrough : null,
+                            decorationColor: theme.textMuted,
+                            fontWeight: t.status == 'in_progress' ? FontWeight.w600 : FontWeight.w400,
+                          ),
+                        ),
+                        if (t.notes.isNotEmpty) Text(t.notes, style: theme.type.caption.tint(theme.textMuted)),
+                      ],
                     ),
                   ),
+                  if (t.priority.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Text(t.priority, style: theme.type.caption.tint(theme.textMuted)),
+                  ],
                 ],
               ),
             ),
@@ -993,7 +1021,7 @@ String approvalTitle(ActionCall call) => switch (call.actionKind) {
     final n => 'Apply this patch to $n files?',
   },
   'DelegateAction' || 'TaskAction' => 'Start a subagent?',
-  _ => 'Allow ${call.toolName}?',
+  _ => 'Allow ${call.nativeName.isEmpty ? call.toolName : call.nativeName}?',
 };
 
 /// Three or more consecutive finished commands or tool calls, shown as one
