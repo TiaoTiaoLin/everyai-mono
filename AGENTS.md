@@ -78,7 +78,7 @@ owner's local notes (gitignored); the task board is the GitHub Project.
       OpenHands/LiteLLM.
     - `images.zig`: `/v1/images`.
     - `openrouter.zig`: upstream client, stream parsing, Fake.
-    - SSE parsing uses `anole.sse.Parser`; migrations use `anole.db.migrate` with the list in `migrations.zig` (Anole 0.4.1).
+    - SSE parsing uses `anole.sse.Parser`; migrations use `anole.db.migrate` with the list in `migrations.zig` (Anole 0.5.1 since 2026-11-04).
 - `docs/`: `ROADMAP.md` (product and moat) and `CODE_ROADMAP.md` (Code architecture and next steps); keep them current.
 
 ## /v1 contract (backend-exp ⇄ app)
@@ -633,6 +633,22 @@ owner's local notes (gitignored); the task board is the GitHub Project.
   show "Coming later" on outside leads. 1023 tests pass. Nothing has run live: no real turn through any driver, Codex
   isn't installed, Gemini sign-in is untested. Open nits: ACP reopen drops the user's MCP servers; a race in the Claude
   rebrief while it spawns (not reachable today).
+- **Dev deployment 0.1.0-dev-nonsigned (2026-11-04).** Anole 0.5.1. Backend live at
+  `https://everyai.136-108-68-64.sslip.io:8443` on the `ttt-server` VM (GCP `ttt-ultimate-b7097a`, us-east1-b, e2-micro,
+  shared with the owner's ttt stack: never touch its containers or `/opt/ttt` beyond the one Caddy block). Details:
+  `backend-exp/deploy/README.md`; redeploy with `backend-exp/deploy/deploy.sh`.
+  - Dev build: `DEV_AUTH=true` (no sign-in), **no server keys** (BYOK or local models only; the image holds only the
+    binary), SQLite in the `everyai_data` volume. New config: `TLS_CERT_PATH`/`TLS_KEY_PATH` (Anole serves HTTPS
+    itself; SIGHUP reloads) and `RATE_LIMIT_PER_MINUTE` (600 per client address, its own `global_limiter`).
+  - TLS: ttt's Caddy owns 80/443 and only obtains/renews the cert (a site block that serves nothing); the container
+    mounts Caddy's cert folder read-only; `everyai-cert-reload.timer` sends SIGHUP daily. Port 8443 via firewall rule
+    `everyai-api` (network tag `everyai-api`). Caddyfile backup: `/opt/ttt/Caddyfile.bak-everyai`.
+  - App: `ApiClient(waitForServer:)` holds requests until `GET /v1/ping` answers (90 s, backoff), shell banner "Waking
+    up the EveryAI server…" (`serverStatusProvider`). `scripts/launch.sh` runs or builds the app against the server
+    (detects the OS; web, ios-sim, ios, android, `build <target>`); `Launch Flutter (macOS).command` builds and opens
+    the macOS app. Windows/Linux builds: `.github/workflows/dev-builds.yml` (push `builds/*` or run it by hand).
+  - Unsigned macOS Release: `keychain-access-groups` removed from `Release.entitlements` (needs a team); add it back
+    for the signed release. macOS shows the version as 0.1.0 (Flutter drops the pre-release part there).
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).

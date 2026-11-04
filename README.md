@@ -211,12 +211,34 @@ flowchart LR
 | [`backend-exp/`](backend-exp) | The `/v1` API: auth, chat tool loop, gateway, images, billing | ![Zig](https://img.shields.io/badge/-Zig%200.17-F7A41D?logo=zig&logoColor=white&style=flat-square) ![Anole](https://img.shields.io/badge/-Anole-9C85FC?style=flat-square) |
 | [`backend/`](backend) | Legacy FastAPI service, frozen and being replaced | ![Python](https://img.shields.io/badge/-Python-3776AB?logo=python&logoColor=white&style=flat-square) |
 | [`docs/`](docs) | [`ROADMAP.md`](docs/ROADMAP.md), [`CODE_ROADMAP.md`](docs/CODE_ROADMAP.md), [benchmarks](docs/benchmarks/browseros/README.md) | ![Markdown](https://img.shields.io/badge/-Markdown-000000?logo=markdown&logoColor=white&style=flat-square) |
-| [`scripts/`](scripts) | `dev.sh`, the one-command dev runner | ![Shell](https://img.shields.io/badge/-zsh-4EAA25?logo=gnubash&logoColor=white&style=flat-square) |
+| [`scripts/`](scripts) | `dev.sh` (local backend + app) and `launch.sh` (app against the dev server) | ![Shell](https://img.shields.io/badge/-zsh-4EAA25?logo=gnubash&logoColor=white&style=flat-square) |
 
 ## ✦ Quick start
 
+**Version 0.1.0-dev-nonsigned.** Dev builds are unsigned, need no sign-in, and run on your own keys (BYOK) or local
+models. EveryAI holds no provider keys for you.
+
+### Just the app (no backend to run)
+
+A dev backend is deployed at `https://everyai.136-108-68-64.sslip.io:8443` (see
+[`backend-exp/deploy`](backend-exp/deploy/README.md)). You only need Flutter (the script installs it on macOS):
+
+```sh
+scripts/launch.sh               # this computer's app (macOS, Linux, Windows via Git Bash)
+scripts/launch.sh web           # or: ios-sim · ios · android · <device id>
+scripts/launch.sh build macos   # an unsigned release build (also: linux · windows · web · apk)
+```
+
+On a Mac you can also double-click **`Launch Flutter (macOS).command`**: it installs Flutter (Homebrew) and
+CocoaPods if missing, builds the app and opens it. Windows and Linux builds come from the
+[Dev builds](.github/workflows/dev-builds.yml) workflow (push a `builds/*` branch or run it from the Actions tab;
+download from the run's Artifacts). The app waits for the server while it wakes up ("Waking up the EveryAI
+server…"). Then add a key in **Settings → API keys**.
+
+### Everything locally (backend + app)
+
 > [!NOTE]
-> You need **Flutter 3.47** and **Zig 0.17**. [Anole](https://github.com/xuckless/anole) 0.4.1 is fetched by `zig build` from its release tag. Code needs Google Chrome (or Chromium/Edge/Brave) for the agent's browser tool.
+> You need **Flutter 3.47** and **Zig 0.17**. [Anole](https://github.com/xuckless/anole) 0.5.1 is fetched by `zig build` from its release tag. Code needs Google Chrome (or Chromium/Edge/Brave) for the agent's browser tool.
 
 ```sh
 scripts/dev.sh macos            # or: web · ios-sim · ios · <device id>
@@ -255,6 +277,9 @@ flutter test
   makes a random one per run.
 - **`DEV_AUTH=true`:** anonymous requests act as a dev user on the Pro plan, with $20 of credit when the server has
   its own key.
+- **`RATE_LIMIT_PER_MINUTE`** (600): requests per minute per client address across the API (0 turns it off).
+- **`TLS_CERT_PATH` / `TLS_KEY_PATH`:** serve HTTPS on `PORT` from PEM files (reloaded on SIGHUP), as the dev
+  deployment does.
 - **Claude routing:** Settings → Developer chooses whether `anthropic/*` models go through OpenRouter or the native Anthropic API.
 - **Your own keys:** Settings → API keys takes an OpenRouter or Anthropic key (stored in the keychain, sent per request, never billed). Ultra on your own key has a spend cap you set.
 - **Firebase / Google Sign-In files** (`GoogleService-Info.plist`, `google-services.json`) are gitignored. Put them in the platform folders locally.
@@ -268,7 +293,7 @@ flutter test
 | **Chat, artifacts, shop, billing** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Code workspace** | ✅ | remote control | remote control | desktop build | desktop build | remote control |
 | **Inline web artifacts (HTML, Mermaid)** | ✅ | ✅ | ✅ | ✅ | open in browser | ✅ |
-| **Verified so far** | ✅ daily driver | simulator | — | untested (needs CI) | untested (needs CI) | ✅ |
+| **Verified so far** | ✅ daily driver | simulator | — | CI build (Dev builds workflow) | CI build (Dev builds workflow) | ✅ |
 
 ## ✦ Roadmap
 
