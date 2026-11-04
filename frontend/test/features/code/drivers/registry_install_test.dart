@@ -6,7 +6,7 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:every_ai/core/preferences.dart';
-import 'package:every_ai/features/code/code_providers.dart' show harnessProvider, readyLeads;
+import 'package:every_ai/features/code/code_providers.dart' show harnessProvider, handoffChoices;
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
@@ -649,11 +649,21 @@ void main() {
       const status = {'registry:gemini': DriverStatus(installed: true, signedIn: true)};
       expect(
         [
-          for (final l in readyLeads([d], status, {'gemini'}, current: 'everyai')) l.id,
+          for (final l in handoffChoices([d], status, {'gemini'}, current: 'everyai', ranOut: ''))
+            if (l.blocked == null) l.info.id,
         ],
         ['registry:gemini'],
       );
-      expect(readyLeads([d], status, {'registry:gemini'}, current: 'everyai'), isEmpty);
+      expect(
+        handoffChoices(
+          [d],
+          status,
+          {'registry:gemini'},
+          current: 'everyai',
+          ranOut: '',
+        ).where((l) => l.blocked == null),
+        isEmpty,
+      );
       expect(
         [
           for (final o in leadOptions([d.info], status, {'gemini'}, current: 'everyai')) o.blocked,
