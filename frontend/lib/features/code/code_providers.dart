@@ -1525,11 +1525,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         s.close();
       }
     });
-    listenSelf((prev, next) {
-      if (prev?.status == next.status) return;
-      final title = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.title ?? 'Code session';
-      notifyStatusChange(ref, prev?.status, next.status, title);
-    });
+    // Subagents and forks don't notify: an approval they wait on shows on the
+    // parent (subagentNeedsInput), and their questions are the orchestrator's.
+    if (info?.parentId == null) {
+      final alerts = StatusAlerts(
+        ref,
+        () => ref.read(codeSessionsProvider.notifier).byId(sessionId)?.title ?? 'Code session',
+      );
+      ref.onDispose(alerts.dispose);
+      listenSelf((prev, next) => alerts.onChange(prev?.status, next.status));
+    }
     // The budget holds whether or not the session is on screen: every new
     // reading (and a lowered budget) is checked here.
     if (info != null) {
