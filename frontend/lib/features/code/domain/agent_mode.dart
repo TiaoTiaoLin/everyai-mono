@@ -41,7 +41,12 @@ enum AgentMode {
 
   /// Plan mode refuses anything that changes the workspace.
   /// MCP tools are not refused: they ask, like in Ask mode (see `PermissionPolicy`).
-  bool rejects(ActionCall call) => this == plan && !isReadOnly(call) && !_isClientTool(call) && !isMcpTool(call);
+  bool rejects(ActionCall call) =>
+      this == plan && !isReadOnly(call) && !_isClientTool(call) && !isMcpTool(call) && !_isLookup(call);
+
+  /// A command that looks things up without changing the project (`isPlanningShell`).
+  static bool _isLookup(ActionCall call) =>
+      call.actionKind == 'TerminalAction' && call.action['is_input'] != true && isPlanningShell(call.str('command'));
 
   static bool _isClientTool(ActionCall call) => isClientTool(call);
 
@@ -74,8 +79,9 @@ enum AgentMode {
   /// instead of concluding its tools are broken.
   static const planRefusal =
       'Not run: Plan mode is read-only. Viewing files and read-only commands (cat, ls, rg, grep, find, sed -n, '
-      'git status/log/diff/show) still run without approval, so keep exploring with those. When you know what to '
-      'change, call present_plan and stop.';
+      'git status/log/diff/show, gh issue/pr view) still run without approval, so keep exploring with those. Looking '
+      'things up (git fetch, git pull --ff-only, curl or wget to stdout, npm view, brew info, --help) runs once the '
+      'user approves it. When you know what to change, call present_plan and stop.';
 
   /// One line sent with every message in this mode, so the mode survives the
   /// agent's context being condensed.

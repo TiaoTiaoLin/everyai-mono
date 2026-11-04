@@ -285,6 +285,7 @@ bool _segmentReadOnly(List<String> words) {
     'timeout' => args.length >= 2 && _segmentReadOnly(args.sublist(1)),
     'env' => args.every((a) => a.startsWith('-') && a != '-S' && a != '--split-string'),
     'git' => _gitReadOnly(args),
+    'gh' => _ghReadOnly(args),
     'dart' || 'flutter' => args.length >= 2 && args[0] == 'pub' && (args[1] == 'deps' || args[1] == 'outdated'),
     'npm' || 'pnpm' => args.isNotEmpty && const {'ls', 'list', 'view', 'outdated', 'why', 'explain'}.contains(args[0]),
     'yarn' => args.isNotEmpty && const {'list', 'info', 'why', 'outdated'}.contains(args[0]),
@@ -369,7 +370,219 @@ bool _gitReadOnly(List<String> args) {
     'stash' => positionals.isNotEmpty && const {'list', 'show'}.contains(positionals.first),
     'worktree' => positionals.isNotEmpty && positionals.first == 'list',
     'reflog' => positionals.isEmpty || positionals.first == 'show',
+    // Lists a remote's refs; --upload-pack would run a program.
+    'ls-remote' => !has({'--upload-pack', '-u'}),
     'config' => has({'--get', '--get-all', '--get-regexp', '--list', '-l', '--show-origin'}),
     _ => false,
   };
+}
+
+/// `gh` commands that only read from GitHub: viewing and listing issues,
+/// pull requests, runs, releases and repositories, searching, and `gh api`
+/// GET requests. Anything that opens a browser, checks out, downloads or
+/// sends data is not.
+bool _ghReadOnly(List<String> args) {
+  if (args.isEmpty) return false;
+  final sub = args[0];
+  final rest = args.sublist(1);
+  final positionals = rest.where((a) => !a.startsWith('-')).toList();
+  final verb = positionals.firstOrNull ?? '';
+  bool has(Set<String> flags) => rest.any((a) => flags.any((f) => a == f || a.startsWith('$f=')));
+  if (has({'--web', '-w'})) return false;
+  return switch (sub) {
+    'issue' => const {'view', 'list', 'status'}.contains(verb),
+    'pr' => const {'view', 'list', 'diff', 'checks', 'status'}.contains(verb),
+    'repo' || 'release' || 'gist' || 'workflow' => const {'view', 'list'}.contains(verb),
+    'run' => const {'view', 'list'}.contains(verb),
+    'label' || 'ruleset' || 'cache' || 'variable' => verb == 'list',
+    'search' => const {'repos', 'issues', 'prs', 'code', 'commits'}.contains(verb),
+    'auth' => verb == 'status',
+    'status' => true,
+    'api' => _ghApiGet(rest),
+    _ => false,
+  };
+}
+
+/// `gh api` that stays a GET: no method other than GET/HEAD, no fields or
+/// input (which make it a POST), and not GraphQL (which can mutate).
+bool _ghApiGet(List<String> args) {
+  for (var i = 0; i < args.length; i++) {
+    final a = args[i];
+    if (a == 'graphql' || a.contains('/graphql')) return false;
+    if (const {'-f', '-F', '--field', '--raw-field', '--input'}.any((f) => a == f || a.startsWith('$f='))) {
+      return false;
+    }
+    if (a == '-X' || a == '--method') {
+      final m = i + 1 < args.length ? args[i + 1].toUpperCase() : '';
+      if (m != 'GET' && m != 'HEAD') return false;
+      i++;
+    } else if (a.startsWith('--method=') || (a.startsWith('-X') && a.length > 2)) {
+      final m = (a.startsWith('--method=') ? a.substring(9) : a.substring(2)).toUpperCase();
+      if (m != 'GET' && m != 'HEAD') return false;
+    }
+  }
+  return true;
+}
+
+/// Whether [command] is fit for planning: [isReadOnlyShell], or it looks
+/// things up without changing the project: `git fetch` and `git pull
+/// --ff-only` (getting main up to date), `curl`/`wget` printing a page,
+/// and inspecting packages and tools (`npm search`, `brew info`, `docker
+/// ps`, `--help`). Max/Ultra phases before the plan, and Plan mode (where
+/// what isn't read-only still asks), allow these.
+bool isPlanningShell(String command) {
+  if (command.trim().isEmpty) return false;
+  final segments = _parse(command);
+  if (segments == null || segments.isEmpty) return false;
+  return segments.every((w) => _segmentReadOnly(w) || _segmentPlanning(w));
+}
+
+/// Tools whose `--help`, `-h` or `help` (with a subcommand) is harmless.
+const _helped = {
+  ..._versioned, 'docker', 'kubectl', 'brew', 'curl', 'wget', 'xcodebuild', 'xcrun', 'adb', 'terraform', 'gradle', //
+  'mvn', 'poetry', 'gem', 'bundle', 'composer', 'rustup', 'pod', 'helm', 'aws', 'gcloud', 'az', 'vercel', 'netlify',
+};
+
+bool _segmentPlanning(List<String> words) {
+  var w = words;
+  while (w.isNotEmpty && RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=').hasMatch(w.first)) {
+    if (!_safeAssignment(w.first)) return false;
+    w = w.sublist(1);
+  }
+  if (w.isEmpty) return true;
+  final cmd = w.first;
+  final args = w.sublist(1);
+  final verb = args.where((a) => !a.startsWith('-')).firstOrNull ?? '';
+  // `tool --help`, `tool sub --help`, `tool help sub`.
+  if (_helped.contains(cmd) &&
+      args.isNotEmpty &&
+      (const {'--help', '-h'}.contains(args.last) || args.first == 'help') &&
+      args.length <= 3) {
+    return true;
+  }
+  return switch (cmd) {
+    'git' => _gitPlanning(args),
+    'curl' => _curlPrints(args),
+    'wget' => _wgetPrints(args),
+    'npm' || 'pnpm' =>
+      const {'search', 'info', 'view', 'ping'}.contains(verb) ||
+          (verb == 'config' && args.length >= 2 && const {'get', 'list', 'ls'}.contains(args[1])),
+    'yarn' => const {'info', 'npm'}.contains(verb) && !args.contains('publish'),
+    'pip' || 'pip3' => verb == 'index' || verb == 'search',
+    'uv' => args.length >= 2 && args[0] == 'pip' && const {'list', 'show', 'tree'}.contains(args[1]) || verb == 'tree',
+    'poetry' => const {'show', 'check'}.contains(verb),
+    'cargo' => const {'search', 'info', 'tree', 'metadata'}.contains(verb),
+    'gem' => const {'list', 'info', 'search', 'specification'}.contains(verb),
+    'bundle' => const {'list', 'info', 'outdated'}.contains(verb),
+    'composer' => const {'show', 'outdated', 'depends', 'why'}.contains(verb),
+    'brew' => const {'info', 'list', 'search', 'deps', 'uses', 'outdated', 'config', 'desc', 'leaves'}.contains(verb),
+    'docker' =>
+      const {'ps', 'images', 'inspect', 'logs', 'version', 'info', 'top', 'port'}.contains(verb) ||
+          (verb == 'compose' && args.length >= 2 && const {'ps', 'config', 'logs', 'ls', 'images'}.contains(args[1])),
+    'kubectl' => const {'get', 'describe', 'logs', 'version', 'explain', 'api-resources', 'top'}.contains(verb),
+    'flutter' => const {'doctor', 'devices', 'emulators'}.contains(verb),
+    'xcodebuild' => args.isNotEmpty && args.every((a) => const {'-list', '-version', '-showsdks', '-json'}.contains(a)),
+    'xcrun' => args.length >= 2 && args[0] == 'simctl' && args[1] == 'list',
+    'adb' => verb == 'devices',
+    'rustup' => const {'show', 'toolchain'}.contains(verb) && !args.contains('install'),
+    'ps' || 'lsof' || 'netstat' || 'man' || 'tldr' || 'apropos' || 'sw_vers' || 'nproc' || 'uptime' => true,
+    'dig' || 'nslookup' || 'host' => !args.contains('-f'),
+    _ => false,
+  };
+}
+
+/// `git fetch` (any remote or refspec, e.g. `git fetch origin main:main`),
+/// `git remote update`, and `git pull --ff-only` (a fast-forward of upstream
+/// work only). `--upload-pack` would run a program.
+bool _gitPlanning(List<String> args) {
+  var i = 0;
+  while (i < args.length && args[i].startsWith('-')) {
+    if (args[i] == '-C') {
+      i += 2;
+    } else if (args[i] == '--no-pager') {
+      i++;
+    } else {
+      return false;
+    }
+  }
+  if (i >= args.length) return false;
+  final sub = args[i];
+  final rest = args.sublist(i + 1);
+  if (rest.any((a) => a.startsWith('--upload-pack') || a == '-u' || a.startsWith('--exec'))) return false;
+  return switch (sub) {
+    'fetch' => true,
+    'remote' => rest.isNotEmpty && rest.first == 'update',
+    'pull' => rest.contains('--ff-only') && !rest.any((a) => a == '--rebase' || a.startsWith('--rebase=') || a == '-r'),
+    _ => false,
+  };
+}
+
+/// `curl` that only prints what it gets: no output files, uploads, data,
+/// forms, config files, cookie jars, or methods other than GET/HEAD.
+bool _curlPrints(List<String> args) {
+  const longBad = {
+    '--output', '--remote-name', '--remote-name-all', '--upload-file', '--data', '--data-raw', '--data-binary', //
+    '--data-urlencode', '--data-ascii', '--form', '--form-string', '--json', '--config', '--cookie-jar',
+    '--output-dir', '--create-dirs', '--trace', '--trace-ascii', '--libcurl', '--etag-save', '--hsts', '--alt-svc',
+  };
+  for (var i = 0; i < args.length; i++) {
+    final a = args[i];
+    if (a.startsWith('--')) {
+      final name = a.split('=').first;
+      if (longBad.contains(name)) return false;
+      if (name == '--request') {
+        final m = (a.contains('=') ? a.split('=')[1] : (i + 1 < args.length ? args[++i] : '')).toUpperCase();
+        if (m != 'GET' && m != 'HEAD') return false;
+      }
+      if (name == '--dump-header' &&
+          (a.contains('=') ? a.split('=')[1] : (i + 1 < args.length ? args[i + 1] : '')) != '-') {
+        return false;
+      }
+      continue;
+    }
+    if (a.startsWith('-') && a.length > 1) {
+      final flags = a.substring(1);
+      // -o, -O, -T, -d, -F, -K, -c write or send something.
+      if (RegExp('[oOTdFKc]').hasMatch(flags)) return false;
+      if (flags.contains('X')) {
+        final after = flags.substring(flags.indexOf('X') + 1);
+        final m = (after.isNotEmpty ? after : (i + 1 < args.length ? args[++i] : '')).toUpperCase();
+        if (m != 'GET' && m != 'HEAD') return false;
+      }
+      if (flags.endsWith('D') && (i + 1 >= args.length || args[i + 1] != '-')) return false;
+    }
+  }
+  return true;
+}
+
+/// `wget` writing the page to stdout (`-O -`, `-qO-`, `--output-document=-`)
+/// and nothing else to disk.
+bool _wgetPrints(List<String> args) {
+  var toStdout = false;
+  for (var i = 0; i < args.length; i++) {
+    final a = args[i];
+    if (a == '--output-document=-' || a == '-O-' || RegExp(r'^-[a-zA-Z]*O-$').hasMatch(a)) {
+      toStdout = true;
+    } else if ((a == '-O' || RegExp(r'^-[a-zA-Z]*O$').hasMatch(a)) && i + 1 < args.length && args[i + 1] == '-') {
+      toStdout = true;
+      i++;
+    } else if (a.startsWith('--post') ||
+        a.startsWith('--body') ||
+        a == '-i' ||
+        a.startsWith('--input-file') ||
+        a.startsWith('-r') ||
+        a.startsWith('--recursive') ||
+        a.startsWith('-m') ||
+        a.startsWith('--mirror') ||
+        a.startsWith('-o') ||
+        a.startsWith('-a') ||
+        a.startsWith('--method') ||
+        a.startsWith('-P') ||
+        a.startsWith('--directory-prefix') ||
+        a.startsWith('-x') ||
+        a.startsWith('--save-')) {
+      return false;
+    }
+  }
+  return toStdout;
 }

@@ -13,10 +13,12 @@ void main() {
     expect(f.gate('write', {'file_path': 'main.c'}, inScratch: scratch), contains('nothing in the project changes'));
     expect(f.gate('write', {'file_path': '.everyai/scratch/notes.md'}, inScratch: scratch), isNull);
     expect(f.gate('bash', {'command': 'ls -la'}, inScratch: scratch), isNull);
-    expect(f.gate('bash', {'command': 'gcc main.c'}, inScratch: scratch), contains('read-only'));
+    expect(f.gate('bash', {'command': 'gcc main.c'}, inScratch: scratch), contains('look things up'));
+    expect(f.gate('bash', {'command': 'git fetch origin main:main'}, inScratch: scratch), isNull);
+    expect(f.gate('bash', {'command': 'gh issue view 7 --comments'}, inScratch: scratch), isNull);
     expect(f.gate('bash', {'command': 'mkdir -p .everyai/scratch'}, inScratch: scratch), isNull);
     expect(f.gate('bash', {'command': 'mkdir -p .everyai/scratch/a .everyai/scratch/b/'}, inScratch: scratch), isNull);
-    expect(f.gate('bash', {'command': 'mkdir -p src'}, inScratch: scratch), contains('read-only'));
+    expect(f.gate('bash', {'command': 'mkdir -p src'}, inScratch: scratch), contains('look things up'));
     expect(f.gate('bash', {'command': 'mkdir -p .everyai/scratch && rm -rf src'}, inScratch: scratch), isNotNull);
     expect(f.gate('ask_user_question', {}, inScratch: scratch), contains('once research has reported'));
     expect(f.gate('present_plan', {}, inScratch: scratch), contains('Next: start one or more forks'));

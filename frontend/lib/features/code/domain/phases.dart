@@ -357,10 +357,12 @@ final class PhaseFlow {
         // Reproducing a bug means building and running things.
         if (bugfix) return null;
         final command = args['command'] as String? ?? '';
-        if (args['run_in_background'] != true && isReadOnlyShell(command)) return null;
+        if (args['run_in_background'] != true && isPlanningShell(command)) return null;
         if (_scratchMkdir(command, inScratch)) return null;
-        return 'Error ($where): only read-only commands run before the plan is approved (write makes the folders '
-            'it needs under .everyai/scratch/). Next: ${next()}';
+        return 'Error ($where): before the plan is approved only commands that look things up run: read-only ones, '
+            'gh reads (issues, PRs, runs, gh api GET), git fetch or git pull --ff-only, curl or wget printing a page, '
+            'and package or tool inspection (npm view, brew info, docker ps, --help). Write makes the folders it '
+            'needs under .everyai/scratch/. Next: ${next()}';
       case askUserQuestionTool:
         // A fork's question may need the user now, research or not.
         if (phase == Phase.research && !bugfix && !forkAsking) {

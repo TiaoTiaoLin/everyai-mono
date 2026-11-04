@@ -120,7 +120,9 @@ final class PermissionPolicy {
     // A bug_check without a command records a step, or re-runs the repro already approved.
     if (call.toolName == 'bug_check' && command == null) return const Decision(Verdict.allow, DecisionSource.readOnly);
     final readOnly = AgentMode.isReadOnly(call);
-    if (mode == AgentMode.plan && !readOnly) return const Decision(Verdict.deny, DecisionSource.plan);
+    // Plan mode refuses changes; looking things up (gh reads, git fetch, curl to stdout) asks like Ask mode.
+    final lookup = command != null && call.action['is_input'] != true && isPlanningShell(command);
+    if (mode == AgentMode.plan && !readOnly && !lookup) return const Decision(Verdict.deny, DecisionSource.plan);
     if (readOnly) return const Decision(Verdict.allow, DecisionSource.readOnly);
     final edits = _editPaths(call);
     final danger = command != null

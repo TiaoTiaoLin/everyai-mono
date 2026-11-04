@@ -299,6 +299,9 @@ void main() {
       expect(policy.decideAll([_sh('ls')], AgentMode.ask)!.accept, isTrue);
       expect(policy.decideAll([_sh('make')], AgentMode.ask), isNull);
       expect(policy.decideAll([_sh('make')], AgentMode.plan)!.reason, AgentMode.planRefusal);
+      // Looking things up isn't refused in Plan mode; it asks.
+      expect(policy.decideAll([_sh('git fetch origin')], AgentMode.plan), isNull);
+      expect(policy.decideAll([_sh('gh pr view 3')], AgentMode.plan)!.accept, isTrue);
     });
   });
 
