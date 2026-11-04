@@ -34,6 +34,7 @@ final class SessionSpec {
     this.researchSites,
     this.phaseFlow,
     this.script,
+    this.reviewModel,
   });
 
   /// 'max' or 'ultra': the session runs the phase flow (research → questions
@@ -129,6 +130,11 @@ final class SessionSpec {
   /// What `run_script` programs may spend (the tier's defaults, see
   /// `scriptCapsFor`); null: the EveryAI harness offers no run_script.
   final ScriptCaps? script;
+
+  /// Bug fix mode: the model that reviews a step the harness's own check
+  /// refused (`bug_check review`): another vendor's when the user has one,
+  /// so it isn't the same model marking its own work. Null: the session's.
+  final String? reviewModel;
 }
 
 /// The session's model helpers: whether it offers `run_script` at all

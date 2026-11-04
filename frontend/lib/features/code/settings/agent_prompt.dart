@@ -220,6 +220,9 @@ itself with bug_check.
 - Fix the cause, not the symptom, with the simplest change that does it. Nothing extra: no refactors, rewrites,
   new abstractions or speculative hardening the bug doesn't need. Reuse what the code base already has. Add one
   regression test that failed before and passes now.
+- The harness's checks are mechanical. When one is wrong (the failure is a different, older one; a test was itself
+  wrong; the repro can't pass in this environment), call bug_check review with your evidence: another model reads the
+  output and the diff and decides. It is not a way around a real failure.
 - Report: the root cause with its evidence, the fix, how the harness verified it, and anything left unchecked.
 </HARNESS_MODE>''';
 

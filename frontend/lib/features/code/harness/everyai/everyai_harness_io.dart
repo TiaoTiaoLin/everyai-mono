@@ -519,6 +519,7 @@ final class EveryAISession
     'research_sites': ?s.researchSites,
     'phase_flow': ?s.phaseFlow,
     'script': ?s.script?.toJson(),
+    'review_model': ?s.reviewModel,
   };
 
   void _writeForkTools() {
@@ -545,6 +546,7 @@ final class EveryAISession
     researchSites: (j['research_sites'] as List<Object?>?)?.cast<String>(),
     phaseFlow: j['phase_flow'] as String?,
     script: ScriptCaps.fromJson(j['script']),
+    reviewModel: j['review_model'] as String?,
   );
 
   Future<String> _systemPrompt() async {
@@ -922,6 +924,7 @@ final class EveryAISession
       researchSites: s.researchSites,
       phaseFlow: phaseFlow == null ? s.phaseFlow : (phaseFlow.isEmpty ? null : phaseFlow),
       script: script ?? s.script,
+      reviewModel: s.reviewModel,
     );
   }
 
@@ -1608,7 +1611,8 @@ final class EveryAISession
           return ToolOutput(
             'Not reproduced: the command fails, but its output reads as a different failure than the bug described '
             '(a build or setup error, say). Make the repro fail on exactly this bug, or pass `expect` with the text '
-            'in the output that shows it.\n${tail(r.out)}',
+            'in the output that shows it. If you are sure this output is the bug, call bug_check review (claim '
+            '"reproduced", the command, and your evidence): another model checks it.\n${tail(r.out)}',
             isError: true,
             observation: const {'repro_match': 'other'},
           );
@@ -1616,7 +1620,7 @@ final class EveryAISession
         if (f.reproduced(command, expect, shown: shown)) {
           f.reproFiles
             ..clear()
-            ..addAll(await _reproSnapshot(command));
+            ..addAll(await _reproSnapshot(command, output: r.out));
           result = ToolOutput(
             'Reproduced: the harness ran it and saw the bug.\n${tail(r.out)}',
             observation: {'repro_match': match},
@@ -1670,7 +1674,8 @@ final class EveryAISession
             return ToolOutput(
               'Not verified: the fix changed what reproduces the bug (${changed.take(8).join(', ')}). The original '
               'repro has to pass unchanged. Restore those files; if a test itself was wrong, ask the user '
-              '(ask_user_question) whether to change it, then call verify again.',
+              '(ask_user_question) whether to change it, then call verify again, or call bug_check review (claim '
+              '"fixed", with why the change is right): another model reads the diff and decides.',
               isError: true,
             );
           }
@@ -1680,10 +1685,27 @@ final class EveryAISession
             ..addAll(await _reproSnapshot(f.reproCommand));
         }
         final r = await run(f.reproCommand);
-        final gone = r.exit == 0 && (f.reproExpect.isEmpty || !r.out.contains(f.reproExpect));
+        // Gone: the marker is gone (with `expect`), or the command passes. A
+        // command that still fails, but on something else (a test that was
+        // already broken, a flaky step), counts too once the decider reads it
+        // as another failure; the agent is told what still fails.
+        final marked = f.reproExpect.isNotEmpty;
+        final clean = marked ? !r.out.contains(f.reproExpect) : r.exit == 0;
+        final other = !clean && !marked && await _reproMatch(f.reproCommand, r.out, afterFix: true) == 'other';
+        final gone = clean || other;
         final moved = f.verified(gone: gone);
         if (gone) {
-          result = ToolOutput('Verified: the harness ran the repro again and the bug is gone.\n${tail(r.out)}');
+          final caveat = r.exit == 0
+              ? ''
+              : other
+              ? ' The command still fails, but no longer on this bug (another model read the output): check '
+                    'whether that failure is older than your change and say so in your report.'
+              : ' The command still exits ${r.exit}, though without the bug\'s output: say what still fails in your '
+                    'report.';
+          result = ToolOutput(
+            'Verified: the harness ran the repro again and the bug is gone.$caveat\n${tail(r.out)}',
+            observation: {'repro_exit': r.exit},
+          );
         } else {
           result = ToolOutput(
             moved
@@ -1691,11 +1713,59 @@ final class EveryAISession
                       'understood yet. The flow goes back to research: find how others fixed this, then plan again.'
                       '\n${tail(r.out)}'
                 : 'Still failing: the harness ran the repro and the bug is still there. Do not try another variation; '
-                      'rethink the cause from the evidence.\n${tail(r.out)}',
+                      'rethink the cause from the evidence. If you are sure the check is wrong (the failure is not this '
+                      'bug, or the repro cannot pass here), call bug_check review (claim "fixed", your evidence).'
+                      '\n${tail(r.out)}',
             isError: true,
           );
         }
         if (moved) _notePhaseAfter = true;
+      case 'review':
+        final claim = args['claim'] as String? ?? '';
+        final evidence = (args['evidence'] as String? ?? args['why'] as String? ?? '').trim();
+        if (claim != 'reproduced' && claim != 'fixed') {
+          return const ToolOutput('Error: review needs claim "reproduced" or "fixed".', isError: true);
+        }
+        if (evidence.isEmpty) {
+          return const ToolOutput('Error: give your evidence: why the harness\'s check is wrong here.', isError: true);
+        }
+        if (f.reviews >= PhaseFlow.maxReviews) {
+          return const ToolOutput(
+            'Not reviewed: this step was reviewed ${PhaseFlow.maxReviews} times already. Ask the user '
+            '(ask_user_question) how to go on, or rethink the cause.',
+            isError: true,
+          );
+        }
+        final command = claim == 'reproduced' ? (args['command'] as String? ?? '').trim() : f.reproCommand;
+        if (claim == 'reproduced' && command.isEmpty) {
+          return const ToolOutput('Error: give the command that shows the bug.', isError: true);
+        }
+        f.reviews++;
+        final r = command.isEmpty ? null : await run(command);
+        final diff = claim == 'fixed' ? await _workingDiff() : '';
+        final verdict = await _review(claim: claim, command: command, run: r, evidence: evidence, diff: diff);
+        if (!verdict.accept) {
+          result = ToolOutput(
+            'Not accepted: ${verdict.model} reviewed it and said: ${verdict.reason}',
+            isError: true,
+            observation: {'reviewer': verdict.model},
+          );
+          break;
+        }
+        if (claim == 'reproduced') {
+          f.reproduced(command, '', shown: true);
+          f.reproFiles
+            ..clear()
+            ..addAll(await _reproSnapshot(command, output: r?.out ?? ''));
+        } else {
+          f.askedUser = false;
+          f.verified(gone: true);
+        }
+        result = ToolOutput(
+          'Accepted by review (${verdict.model}): ${verdict.reason}',
+          observation: {'reviewer': verdict.model},
+        );
+        _notePhaseAfter = true;
       default:
         return ToolOutput('Error: unknown bug_check action "$action".', isError: true);
     }
@@ -1706,7 +1776,7 @@ final class EveryAISession
   /// Whether a failing repro's output shows the bug the user described
   /// ('bug'), another failure ('other'), or the decider can't tell
   /// ('unsure', which counts as shown).
-  Future<String> _reproMatch(String command, String output) async {
+  Future<String> _reproMatch(String command, String output, {bool afterFix = false}) async {
     final task = _messages.firstWhere((m) => m['role'] == 'user', orElse: () => const {})['content'];
     final report = switch (task) {
       final String t => t,
@@ -1721,13 +1791,16 @@ final class EveryAISession
       final a = await _gateway.decide(
         '<bug-report>\n${report.length > 4000 ? report.substring(0, 4000) : report}\n</bug-report>\n'
         '<command>$command</command>\n<output>\n${cut(output, 6000)}\n</output>',
-        const [
+        [
           {
             'id': 'shows',
             'kind': 'choice',
-            'prompt':
-                'Does this failing output show the bug in the report ("bug"), or a different failure such as a '
-                'build, setup or unrelated error ("other")?',
+            'prompt': afterFix
+                ? 'A fix for the bug in the report was just made, and this command still fails. Does the output '
+                      'still show that same bug ("bug"), or only a different failure such as an unrelated test, a '
+                      'build or setup error ("other")?'
+                : 'Does this failing output show the bug in the report ("bug"), or a different failure such as a '
+                      'build, setup or unrelated error ("other")?',
             'choices': ['bug', 'other'],
           },
         ],
@@ -1747,13 +1820,24 @@ final class EveryAISession
   /// The tests and repro scripts the bug was reproduced with (path →
   /// digest): tracked or new test files, `.everyai/scratch/` scripts, and
   /// files the command names.
-  Future<Map<String, String>> _reproSnapshot(String command) async {
+  Future<Map<String, String>> _reproSnapshot(String command, {String output = ''}) async {
     final root = _spec.workingDir;
     final paths = <String>{};
+    // Tracked tests count when the repro touches them: changed or new ones
+    // (written to reproduce it) and ones its output names. A test elsewhere
+    // in the repository isn't part of the repro, so editing it is fine.
     try {
       final r = await Process.run('git', ['ls-files', '-co', '--exclude-standard'], workingDirectory: root);
+      final st = await Process.run('git', ['status', '--porcelain', '--untracked-files=all'], workingDirectory: root);
+      final dirty = {
+        if (st.exitCode == 0)
+          for (final line in const LineSplitter().convert('${st.stdout}'))
+            if (line.length > 3) line.substring(3).split(' -> ').last.replaceAll('"', ''),
+      };
       if (r.exitCode == 0) {
-        paths.addAll(const LineSplitter().convert('${r.stdout}').where(PhaseFlow.isReproPath).take(3000));
+        for (final p in const LineSplitter().convert('${r.stdout}').where(PhaseFlow.isReproPath).take(5000)) {
+          if (dirty.contains(p) || (output.isNotEmpty && output.contains(p.split('/').last))) paths.add(p);
+        }
       }
     } on Object {
       // Not git: the scratch scripts and named files still count.
@@ -1782,6 +1866,82 @@ final class EveryAISession
         ..writeAsBytesSync(f.readAsBytesSync());
     }
     return _digests(paths);
+  }
+
+  /// The worktree's changes against HEAD (new files listed), cut to fit a
+  /// review.
+  Future<String> _workingDiff() async {
+    try {
+      final d = await Process.run('git', [
+        'diff',
+        'HEAD',
+        '--no-color',
+        '--stat',
+        '-p',
+      ], workingDirectory: _spec.workingDir);
+      final n = await Process.run('git', [
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+      ], workingDirectory: _spec.workingDir);
+      final text = '${d.stdout}${'${n.stdout}'.trim().isEmpty ? '' : '\nNew files:\n${n.stdout}'}';
+      return text.length > 16000 ? '${text.substring(0, 16000)}\n[…cut]' : text;
+    } on Object {
+      return '(no git diff available)';
+    }
+  }
+
+  /// Another model's verdict on a Bug fix step the harness's own check
+  /// refused: the review model (another vendor's, when the user has one),
+  /// else the session's own. Unreadable or unreachable is a refusal.
+  Future<({bool accept, String reason, String model})> _review({
+    required String claim,
+    required String command,
+    required ({int exit, String out})? run,
+    required String evidence,
+    required String diff,
+  }) async {
+    String cut(String s, int n) => s.length > n ? '…${s.substring(s.length - n)}' : s;
+    final report = _firstTask();
+    final user = StringBuffer()
+      ..writeln('<bug-report>\n${report.length > 4000 ? report.substring(0, 4000) : report}\n</bug-report>')
+      ..writeln('<claim>$claim</claim>')
+      ..writeln('<agent-evidence>\n$evidence\n</agent-evidence>');
+    if (run != null) {
+      user.writeln('<command exit="${run.exit}">$command</command>\n<output>\n${cut(run.out, 6000)}\n</output>');
+    }
+    if (diff.isNotEmpty) user.writeln('<diff>\n$diff\n</diff>');
+    final messages = [
+      {'role': 'system', 'content': bugReviewSystem},
+      {'role': 'user', 'content': user.toString()},
+    ];
+    final models = {?_spec.reviewModel, _spec.model};
+    for (final model in models) {
+      try {
+        final reply = await _gateway.raw(
+          {'model': model, 'messages': messages, 'max_tokens': 2000},
+          sessionTag: _spec.sessionTag,
+          retry: retryPolicy,
+          cancel: _cancel?.future,
+        );
+        final text = switch (reply['choices']) {
+          [{'message': {'content': final String c}}, ...] => c,
+          _ => '',
+        };
+        final m = RegExp(r'\{[\s\S]*\}').firstMatch(text);
+        final v = m == null ? null : jsonDecode(m[0]!);
+        if (v case {'verdict': final String verdict}) {
+          final reason = '${v['reason'] ?? ''}'.trim();
+          return (accept: verdict == 'accept', reason: reason.isEmpty ? verdict : reason, model: model);
+        }
+        return (accept: false, reason: 'its reply could not be read.', model: model);
+      } on LlmCancelled {
+        rethrow;
+      } on Object {
+        // The next model (the session's own) tries.
+      }
+    }
+    return (accept: false, reason: 'no reviewer could be reached; ask the user instead.', model: 'the reviewer');
   }
 
   static String? _readOr(String path) {

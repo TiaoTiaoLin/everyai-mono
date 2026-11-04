@@ -353,6 +353,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           : tier.phased
           ? tier.name
           : null,
+      // Bug fix's second opinion (the mode can be switched on later, so every main session gets one).
+      reviewModel: subagent ? null : bugReviewModel(model, ref.read(libraryProvider).value ?? const []),
       clientTools: clientTools,
       autoCompactAt: ref.read(codeSettingsProvider).autoCompactPercent / 100,
       // run_script and the decider: the tier's limits, or the user's level.
@@ -2549,6 +2551,19 @@ Future<Map<String, SessionStatus>> sessionStatusesNow(Ref ref, List<CodeSessionI
 /// orchestrator), as far as [usage] has read them.
 /// Whether a session runs under the own-key Ultra cap: the Ultra tier on a
 /// model billed to one of the user's keys.
+/// The model that reviews a Bug fix step the harness refused: one of the
+/// user's models from another vendor than [model] (a featured one first),
+/// so the session's model doesn't mark its own work; null when there is
+/// none (the session's own model then reviews, with a fresh context).
+String? bugReviewModel(String model, Iterable<ModelSpec> library) {
+  String vendor(String id) => id.split('/').first;
+  final others = [
+    for (final m in library)
+      if (m.tools && !m.free && m.id.value != 'everyai/auto' && vendor(m.id.value) != vendor(model)) m,
+  ];
+  return (others.where((m) => m.featured).firstOrNull ?? others.firstOrNull)?.id.value;
+}
+
 /// How the orchestrator sees a model it may give a researcher: its name and
 /// price, so it can weigh cost against depth.
 String researchModelLine(ModelSpec m) {

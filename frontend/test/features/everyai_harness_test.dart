@@ -34,6 +34,9 @@ final class FakeGateway {
   /// How long a streamed reply takes to start (a slow model call).
   var delay = Duration.zero;
 
+  /// What a plain (not streamed) call answers; null: a compaction summary.
+  String? plain;
+
   /// What `/aux/decide` answers, by question id ("unsure" for the rest).
   final decisions = <String, Object?>{};
 
@@ -76,8 +79,9 @@ final class FakeGateway {
             {
               'message': {
                 'content':
+                    plain ??
                     '## Objective\nMake hello.py\n## Important details\nnone\n## Work state\nwrote it\n'
-                    '## Next move\n1. Run it\n## Relevant files\n- hello.py',
+                        '## Next move\n1. Run it\n## Relevant files\n- hello.py',
               },
             },
           ],
@@ -955,6 +959,75 @@ for line in sys.stdin:
     // The approved plan is kept for compaction to re-inject.
     final state = jsonDecode(File('${tmp.path}/data/everyai-sessions/${session.id}/state.json').readAsStringSync());
     expect((state as Map)['approved_plan'], startsWith('# '));
+  });
+
+  test('Bug fix: a repro refused as another failure goes to a second model; one that only fails on '
+      'something else after the fix verifies', () async {
+    File('$work/calc.sh').writeAsStringSync('echo \$((2 + 2 + 1))\n');
+    File('$work/check.sh').writeAsStringSync('test "\$(sh calc.sh)" = 4 || exit 1\ntest -f setup.done\n');
+    gateway.decisions['shows'] = 'other';
+    gateway.plain = '{"verdict": "accept", "reason": "The output is the wrong sum the report describes."}';
+    gateway
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'reproduced', 'command': 'sh check.sh'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          (
+            'bug_check',
+            {
+              'action': 'review',
+              'claim': 'reproduced',
+              'command': 'sh check.sh',
+              'evidence': 'It exits 1 on the sum check, the bug.',
+            },
+          ),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'triage', 'kind': 'simple', 'why': 'Off by one.'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('present_plan', {'plan': '# Remove the + 1'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('write', {'file_path': 'calc.sh', 'content': 'echo \$((2 + 2))\n'}),
+        ],
+      )
+      ..reply(
+        calls: [
+          ('bug_check', {'action': 'verify'}),
+        ],
+      )
+      ..reply(text: 'Fixed; setup.done is missing here, an older failure.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-bug3',
+        initialMessage: 'calc.sh prints 5 for 2 + 2',
+        holdClientTools: true,
+        phaseFlow: 'bugfix',
+        reviewModel: 'openai/gpt-6.1-sol',
+      ),
+    );
+    final events = await drive(session, answer: (c) => c.toolName == 'present_plan' ? planApprovedReason : null);
+    final results = events.whereType<ToolResult>().map((r) => r.text).toList();
+    expect(results[0], allOf(startsWith('Not reproduced'), contains('bug_check review')));
+    expect(results[1], startsWith('Accepted by review (openai/gpt-6.1-sol)'));
+    expect(results.last, allOf(startsWith('Verified'), contains('no longer on this bug')));
+    final review = gateway.requests.firstWhere((r) => r['stream'] != true && r['model'] == 'openai/gpt-6.1-sol');
+    expect(((review['messages']! as List).first as Map)['content'], bugReviewSystem);
   });
 
   test('Bug fix: a fix that edits the repro test is refused; adding a test beside it is fine', () async {
