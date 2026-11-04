@@ -51,7 +51,15 @@ String? relativeTo(String path, String dir) {
 /// its own copy of the parent's, or the parent's itself). A call that was
 /// refused or failed wrote nothing, so it claims nothing; one still running
 /// does.
-Set<String> filesWritten(Iterable<HarnessEvent> events, String dir) {
+Set<String> filesWritten(Iterable<HarnessEvent> events, String dir) => _written(_landed(events), dir);
+
+/// Up to [max] files [events] wrote or edited, the most recent first, by the
+/// same rules as [filesWritten].
+List<String> recentWrites(Iterable<HarnessEvent> events, String dir, {int max = 5}) =>
+    _written(_landed(events).toList().reversed, dir).take(max).toList();
+
+/// [events] without the calls that were refused or failed.
+Iterable<HarnessEvent> _landed(Iterable<HarnessEvent> events) {
   final list = events.toList(growable: false);
   final failed = <String>{
     for (final e in list)
@@ -60,10 +68,7 @@ Set<String> filesWritten(Iterable<HarnessEvent> events, String dir) {
         if (e.toolCallId.isNotEmpty) e.toolCallId,
       ],
   };
-  return _written(
-    list.where((e) => e is! ActionCall || !(failed.contains(e.id) || failed.contains(e.toolCallId))),
-    dir,
-  );
+  return list.where((e) => e is! ActionCall || !(failed.contains(e.id) || failed.contains(e.toolCallId)));
 }
 
 Set<String> _written(Iterable<HarnessEvent> events, String dir) => {

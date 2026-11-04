@@ -11,7 +11,7 @@ import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/core/platform/platform_kind.dart';
-import 'package:every_ai/features/code/ui/code_top_bar.dart' show SessionMeter;
+import 'package:every_ai/features/code/ui/code_top_bar.dart' show SessionMeter, harnessUsageLine;
 import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/ui/usage_meter.dart' show UsageBreakdown;
@@ -138,6 +138,34 @@ void main() {
           .read(codeUsageProvider('s1').notifier)
           .report(UsageReport.of(id: 't2', input: 130000, output: 200, contextTokens: 65000));
       expect(container.read(codeUsageProvider('s1')).requireValue.contextTokens, 65000);
+    });
+
+    test('a session that changed leads keeps what each harness used, and the ring starts empty', () async {
+      await container.read(codeUsageProvider('s1').future);
+      final meter = container.read(codeUsageProvider('s1').notifier);
+      meter.report(UsageReport.of(id: 'u1', input: 1000, output: 100, contextTokens: 900, onPlan: true));
+      final sessions = container.read(codeSessionsProvider.notifier);
+      sessions.update(sessions.byId('s1')!.copyWith(harness: 'codex'));
+      meter.leadChanged();
+      expect(container.read(codeUsageProvider('s1')).requireValue.contextTokens, 0);
+      meter.report(UsageReport.of(id: 'u2', input: 2000, output: 200, contextTokens: 2100, onPlan: true));
+      expect(container.read(codeUsageProvider('s1')).requireValue.contextTokens, 2100);
+      final by = meter.byHarness;
+      // The backend's ledger counts as EveryAI's.
+      expect(by.keys, unorderedEquals([everyaiHarnessName, 'codex']));
+      expect(by['codex']!.promptTokens, 2000);
+      expect(by[everyaiHarnessName]!.promptTokens, 1500);
+      expect(harnessUsageLine(by['codex']!), '2.2K tokens · on your plan');
+    });
+
+    test('kept reports from before the split by harness still load', () async {
+      container.read(preferencesProvider)['${codeUsageReportsPrefix}s1'] = jsonEncode({
+        'totals': const UsageTotals(calls: 1, promptTokens: 10, ownKeyMicros: 7).toJson(),
+        'ids': ['u1'],
+      });
+      final u = await container.read(codeUsageProvider('s1').future);
+      expect(u.ownKeyMicros, 7);
+      expect(container.read(codeUsageProvider('s1').notifier).byHarness.keys, [everyaiHarnessName]);
     });
 
     test('reported spend outlives a restart, even when the conversation changed', () async {

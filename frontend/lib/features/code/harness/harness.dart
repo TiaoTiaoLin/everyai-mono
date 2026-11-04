@@ -320,9 +320,14 @@ abstract interface class ForksSessions {
 /// A harness that reopens a session with a fresh [DriverBriefing]: an
 /// outside CLI started again after the app restarts needs a new host token
 /// (the old one died with the app). Without it, a reopened session has no
-/// EveryAI tools.
+/// EveryAI tools. [mcpConfig] is the user's approved MCP servers; a driver that
+/// can deliver them on reopen does, the others ignore it.
 abstract interface class AttachesBriefed {
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing);
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  });
 }
 
 /// Starts and reopens agent sessions.

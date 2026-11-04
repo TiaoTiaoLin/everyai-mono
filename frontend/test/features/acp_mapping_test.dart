@@ -1,6 +1,7 @@
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/json_rpc.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -260,6 +261,56 @@ void main() {
       );
       expect((result.actionId, result.outcome), ('p1', ToolOutcome.ok));
       expect(autoDecidable(call), isTrue);
+    });
+  });
+
+  group('usage limits', () {
+    final now = DateTime.utc(2026, 11, 4, 12);
+    DateTime? resets(JsonRpcError e) => acpUsageLimit(e, now: now)!.resetsAt;
+
+    test("Gemini's quota messages are limits, with the reset it names", () {
+      // Messages from gemini-cli 0.33.2's googleQuotaErrors (test l.599) and classifier.
+      const capacity = JsonRpcError(
+        500,
+        'You have exhausted your capacity on this model. Your quota will reset after 19h14m47s.',
+      );
+      expect(resets(capacity), now.add(const Duration(hours: 19, minutes: 14, seconds: 47)));
+      expect(resets(const JsonRpcError(500, 'You have exhausted your daily quota on this model.')), isNull);
+      expect(
+        acpUsageLimit(const JsonRpcError(500, 'Your quota will reset after 2h.'), now: now)!.resetsAt,
+        now.add(const Duration(hours: 2)),
+      );
+    });
+
+    test("Gemini's capacity text with a short reset is the retried throttle, not a limit", () {
+      // Google sends the same text for RATE_LIMIT_EXCEEDED (googleQuotaErrors.test.js l.231, l.258).
+      for (final e in const [
+        JsonRpcError(500, 'You have exhausted your capacity on this model. Your quota will reset after 0s.'),
+        JsonRpcError(500, 'You have exhausted your capacity on this model. Your quota will reset after 5m.'),
+        JsonRpcError(500, 'You have exhausted your capacity on this model.'),
+      ]) {
+        expect(acpUsageLimit(e, now: now), isNull, reason: e.message);
+      }
+    });
+
+    test("Gemini's rate limits and other errors are not limits", () {
+      for (final e in const [
+        JsonRpcError(429, 'Rate limit exceeded. Try again later.'),
+        JsonRpcError(500, 'Resource exhausted.\nSuggested retry after 60s.'),
+        JsonRpcError(-32603, 'Internal error'),
+      ]) {
+        expect(acpUsageLimit(e, now: now), isNull, reason: e.message);
+      }
+    });
+
+    test("opencode acp's error name decides", () {
+      JsonRpcError named(String name) =>
+          JsonRpcError(-32603, 'Quota exceeded.', data: {'service': 'session', 'errorName': name});
+      expect(resets(named('provider.quota')), isNull);
+      expect(acpUsageLimit(named('provider.free-limit'), now: now), isNotNull);
+      expect(acpUsageLimit(named('provider.rate-limit'), now: now), isNull);
+      // The name wins over the words.
+      expect(acpUsageLimit(named('provider.internal'), now: now), isNull);
     });
   });
 

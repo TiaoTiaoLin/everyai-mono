@@ -1,8 +1,12 @@
-// The Codex driver against hand-built `codex app-server` transcripts.
+// The Codex driver against `codex app-server` transcripts.
 //
-// UNVERIFIED: every fixture in test/fixtures/drivers/codex/ is hand-built from the generated schema in
-// github.com/openai/codex codex-rs/app-server-protocol at 3a2788e6 (Codex isn't installed here, by the owner's
-// choice). Replace them with a live recording when one can be made; real traffic may differ in order and nulls.
+// RECORDED from codex-cli 0.166.0. Signed out: probe, models, start, interrupt_early, turn_failed. Signed in with
+// ChatGPT (2026-11-04): probe_signed_in, turn, steer, approve_command, decline_command, file_change, interrupt,
+// interrupt_streaming, resume. Only our own out lines were edited to the tests' specs (each file says how).
+// UNVERIFIED, hand-built in the 0.166.0 shapes: turn_extras (picture, reasoning summary, plan),
+// file_change_refused, server_requests, usage_limit and models_paged. The recording tools and steps are described
+// in docs/research/batches/multi-harness/run3/x2.md.
+import 'dart:async';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
@@ -12,6 +16,7 @@ import 'package:every_ai/features/code/drivers/codex/codex_mapping.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/json_rpc.dart';
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,7 +33,13 @@ String _upTo(String name, String until) {
   return lines.take(lines.indexWhere((l) => l.contains(until)) + 1).join('\n');
 }
 
-/// thr_1 started, with turn_1 ("Run the tests") running (approve_command.jsonl).
+/// The prompt of approve_command.jsonl (and the first turn of decline_command.jsonl).
+const _lsPrompt = 'Run the shell command `ls` exactly once with your shell tool, then reply DONE.';
+
+/// The story prompt of steer.jsonl and interrupt_streaming.jsonl.
+const _storyPrompt = 'Write a 400-word story about a lighthouse. No tools.';
+
+/// thr_1 started, with turn_1 ([_lsPrompt]) running (approve_command.jsonl).
 String _running() => _upTo('approve_command', '"method":"turn/started"');
 
 /// The text of each turn/start sent so far.
@@ -36,6 +47,45 @@ List<String> _turnStarts(ReplayChannel c) => [
   for (final m in c.sent)
     if (m['method'] == 'turn/start') (((m['params']! as Map)['input'] as List).first as Map)['text'] as String,
 ];
+
+/// [inner]'s lines, with the one [held] matches handed on together with the
+/// line after it, as Codex writes a reply and the notice after it in one read.
+final class _Burst implements LineChannel {
+  _Burst(this.inner, this.held) {
+    inner.lines.listen(
+      (line) {
+        if (_waiting case final w?) {
+          _waiting = null;
+          _out
+            ..add(w)
+            ..add(line);
+        } else if (held(line)) {
+          _waiting = line;
+        } else {
+          _out.add(line);
+        }
+      },
+      onDone: () {
+        if (_waiting case final w?) _out.add(w);
+        _out.close();
+      },
+    );
+  }
+
+  final ReplayChannel inner;
+  final bool Function(String line) held;
+  final _out = StreamController<String>(sync: true);
+  String? _waiting;
+
+  @override
+  Stream<String> get lines => _out.stream;
+  @override
+  void send(String line) => inner.send(line);
+  @override
+  String get lastError => inner.lastError;
+  @override
+  Future<void> close() => inner.close();
+}
 
 typedef _Spawned = ({List<String> args, String cwd, Map<String, String> env, String sessionTag});
 
@@ -51,9 +101,14 @@ CodexDriver _driver(String data, List<LineChannel> channels, [List<_Spawned>? sp
   },
 );
 
-SessionSpec _spec(String dir, {AgentMode mode = AgentMode.ask, DriverBriefing? briefing}) => SessionSpec(
+SessionSpec _spec(
+  String dir, {
+  AgentMode mode = AgentMode.ask,
+  String model = 'gpt-5.5-codex',
+  DriverBriefing? briefing,
+}) => SessionSpec(
   workingDir: dir,
-  model: 'gpt-5.5-codex',
+  model: model,
   mode: mode,
   llmBaseUrl: '',
   llmApiKey: '',
@@ -89,19 +144,49 @@ void main() {
 
   group('mapping', () {
     test('every mode lets Codex ask and the app answer; no sandbox outside Plan, Plan read-only with network', () {
-      List<Object?> flat(CodexPolicy p) => [p.approvalPolicy, p.sandbox, p.sandboxPolicy];
+      List<Object?> flat(CodexPolicy p) => [p.approvalPolicy, p.approvalsReviewer, p.sandbox, p.sandboxPolicy];
       expect(flat(codexPolicy(AgentMode.plan)), [
         'untrusted',
+        'user',
         'read-only',
         {'type': 'readOnly', 'networkAccess': true},
       ]);
+      // The thread is read-only in every mode (a writable thread/start marks the
+      // project trusted in the user's Codex config); the turn carries the sandbox.
       for (final m in [AgentMode.ask, AgentMode.autoEdit, AgentMode.fullAuto]) {
         expect(flat(codexPolicy(m)), [
           'untrusted',
-          'danger-full-access',
+          'user',
+          'read-only',
           {'type': 'dangerFullAccess'},
         ], reason: m.name);
       }
+    });
+
+    test('usage counts on a plan for the auth modes Codex serves itself, not for API keys or signed out', () {
+      for (final m in ['chatgpt', 'chatgptAuthTokens', 'headers', 'agentIdentity', 'personalAccessToken']) {
+        expect(codexAuthOnPlan(m), isTrue, reason: m);
+      }
+      for (final m in ['apikey', 'apiKey', 'bedrockApiKey', 'bedrockAccessKeys', null, 42]) {
+        expect(codexAuthOnPlan(m), isFalse, reason: '$m');
+      }
+    });
+
+    test('usage-limit reset time: the limit updated last, else the latest used-up one of the others', () {
+      Map<String, Object?> snap(String id, int used, int at) => {
+        'limitId': id,
+        'primary': {'usedPercent': used, 'resetsAt': at},
+      };
+      final a = snap('codex', 100, 1000);
+      final b = snap('codex_other', 10, 5000);
+      final at = codexLimitResetsAtOf({'codex': a, 'codex_other': b}, 'codex_other');
+      expect(at, DateTime.fromMillisecondsSinceEpoch(1000 * 1000, isUtc: true));
+      expect(
+        codexLimitResetsAtOf({'codex': a, 'codex_other': snap('codex_other', 100, 3000)}, 'codex_other'),
+        DateTime.fromMillisecondsSinceEpoch(3000 * 1000, isUtc: true),
+      );
+      expect(codexLimitResetsAtOf({'codex': snap('codex', 5, 1000)}, 'codex'), isNull);
+      expect(codexLimitResetsAtOf({}, null), isNull);
     });
 
     test('commands run through a shell are unwrapped; anything else is left alone', () {
@@ -126,10 +211,54 @@ void main() {
       expect((r.input, r.output), (10, 5));
       expect(usageDelta(t2, t2, last2, turnId: 't', onPlan: false), isNull);
     });
+
+    test('usage limits: only usageLimitExceeded; the latest reset of the used-up windows', () {
+      expect(codexUsageLimit('usageLimitExceeded'), isTrue);
+      for (final other in [
+        'rateLimitExceeded',
+        'sessionBudgetExceeded',
+        null,
+        const {'httpConnectionFailed': <String, Object?>{}},
+      ]) {
+        expect(codexUsageLimit(other), isFalse, reason: '$other');
+      }
+      DateTime at(int s) => DateTime.fromMillisecondsSinceEpoch(s * 1000, isUtc: true);
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 100, 'resetsAt': 1000},
+          'secondary': {'usedPercent': 100, 'resetsAt': 3000},
+          'individualLimit': {'remainingPercent': 10, 'resetsAt': 9000},
+        }),
+        at(3000),
+      );
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 100, 'resetsAt': 1000},
+          'secondary': {'usedPercent': 40, 'resetsAt': 9000},
+          'individualLimit': {'remainingPercent': 0, 'resetsAt': 2000},
+        }),
+        at(2000),
+      );
+      // A used-up window without a time may last longer: no time at all.
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 100, 'resetsAt': null},
+          'secondary': {'usedPercent': 100, 'resetsAt': 1500},
+        }),
+        isNull,
+      );
+      expect(
+        codexLimitResetsAt({
+          'primary': {'usedPercent': 99, 'resetsAt': 1000},
+        }),
+        isNull,
+      );
+      expect(codexLimitResetsAt(null), isNull);
+    });
   });
 
   group('start', () {
-    test('with a briefing: handshake, skill root, developer instructions; the token only in env', () async {
+    test('with a briefing (recorded): handshake, skill root, developer instructions; the token only in env', () async {
       final skills = '${tmp.path}/session/briefing/skills';
       Directory(skills).createSync(recursive: true);
       File('${tmp.path}/session/briefing/session.md').writeAsStringSync('You are in an EveryAI session.');
@@ -139,15 +268,23 @@ void main() {
       final s = await driver.start(
         _spec(
           work,
+          mode: AgentMode.plan,
+          model: '',
           briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:4567/mcp', mcpToken: 'tok-secret', skillDir: skills),
         ),
       );
+      final events = _listen(s);
+      await pumpEventQueue();
       channel.expectFinished();
       expect(s.id, 'thr_1');
       expect(channel.sent.first.containsKey('jsonrpc'), isFalse);
       expect(channel.sent[3]['params'], {
         'extraRoots': [skills],
       });
+      // Codex's own reviewer never answers for the app.
+      expect((channel.sent[4]['params']! as Map)['approvalsReviewer'], 'user');
+      // thread/started, skills/changed, mcpServer/startupStatus/updated, remoteControl/status/changed.
+      expect(events, isEmpty);
       final launch = spawned.single;
       expect((launch.cwd, launch.sessionTag), (work, 'tag-1'));
       expect(launch.args, [
@@ -181,9 +318,9 @@ void main() {
   });
 
   test(
-    'a turn: user message at once, reasoning, plan, steer, streamed text, usage, then the next turn in Plan',
+    'a turn (hand-built): a picture, reasoning, plan, steer, streamed text, usage, then the next turn in Plan',
     () async {
-      final channel = _fixture('turn');
+      final channel = _fixture('turn_extras');
       final s = await _driver(data, [channel]).start(_spec(work));
       final events = _listen(s);
       await s.send('Fix the failing test', images: ['data:image/png;base64,iVBORw0KGgo=']);
@@ -229,17 +366,136 @@ void main() {
     },
   );
 
+  test('a switch to an API key or a sign-out mid-session: the next usage is billed per token', () async {
+    for (final mode in ['"apikey"', 'null']) {
+      final lines = File('$_fixtures/turn.jsonl').readAsLinesSync();
+      final at = lines.indexWhere((l) => l.contains('"method":"thread/tokenUsage/updated"'));
+      final channel = ReplayChannel(
+        [
+          ...lines.take(at),
+          '{"dir":"in","msg":{"method":"account/updated","params":{"authMode":$mode,"planType":null}}}',
+          ...lines.skip(at),
+        ].join('\n'),
+      );
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final events = _listen(s);
+      await s.send('reply OK');
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      final usage = events.whereType<UsageReport>().single;
+      expect((usage.input, usage.onPlan), (12910, false), reason: mode);
+      await s.close();
+    }
+  });
+
+  test('a turn (recorded): streamed text, the answer, usage on the ChatGPT plan, finished', () async {
+    final channel = _fixture('turn');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send('reply OK');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(
+      [for (final m in events.whereType<ChatMessage>()) (m.fromUser, m.text)],
+      [(true, 'reply OK'), (false, 'OK')],
+    );
+    expect(events.whereType<StreamDelta>().map((d) => d.content).join(), 'OK');
+    final usage = events.whereType<UsageReport>().single;
+    expect(
+      (usage.id, usage.input, usage.cached, usage.output, usage.contextTokens, usage.onPlan),
+      ('usage-turn_1-12915', 12910, 9728, 5, 12915, true),
+    );
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.finished]);
+    await s.close();
+  });
+
+  test('a steer mid-turn (recorded): sent with the turn id; Codex finishes the answer, then takes it', () async {
+    final channel = _fixture('steer');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send(_storyPrompt);
+    await pumpEventQueue();
+    await (s as SteersRuns).steer('Stop the story. Reply only STEERED.');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    final messages = events.whereType<ChatMessage>().toList();
+    expect([for (final m in messages) m.fromUser], [true, true, false, false]);
+    expect(messages[2].text, startsWith('Every evening, Mara climbed'));
+    expect(messages[3].text, 'STEERED');
+    expect(_turnStarts(channel), [_storyPrompt]);
+    // Two model calls in the turn, each a usage report.
+    expect([for (final u in events.whereType<UsageReport>()) u.output], [559, 7]);
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.finished]);
+    await s.close();
+  });
+
+  test('a command declined by name (recorded): decline, the item comes back declined, the turn goes on', () async {
+    final channel = _fixture('decline_command');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send(_lsPrompt);
+    await pumpEventQueue();
+    await s.respond(accept: true, callIds: ['call_1']);
+    await pumpEventQueue();
+    await s.send(
+      'Run the shell command `ls` exactly once more with your shell tool. If it is refused, reply REFUSED and stop.',
+    );
+    await pumpEventQueue();
+    expect(events.whereType<ActionCall>().map((c) => c.id), ['call_1', 'call_2']);
+    await s.respond(accept: false, callIds: ['call_2']);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(
+      [for (final r in events.whereType<ToolResult>()) (r.actionId, r.outcome)],
+      [('call_1', ToolOutcome.ok), ('call_2', ToolOutcome.rejected)],
+    );
+    // No reason, so no steer; the model answers on its own.
+    expect(channel.sent.where((m) => m['method'] == 'turn/steer'), isEmpty);
+    expect(events.whereType<ChatMessage>().last.text, 'REFUSED');
+    expect(_states(events).last, ExecutionStatus.finished);
+    await s.close();
+  });
+
+  test('an edit (recorded): the fileChange item waits, accept applies it', () async {
+    final channel = _fixture('file_change');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send(
+      'Edit notes.txt with your apply_patch tool so it has a second line `world`. Do not run shell commands. Then reply DONE.',
+    );
+    await pumpEventQueue();
+    final edit = events.whereType<ActionCall>().single;
+    expect((edit.id, edit.actionKind), ('call_1', 'ApplyPatchAction'));
+    expect(edit.action['files'], [
+      {'path': '/work/repo/notes.txt', 'op': 'update'},
+    ]);
+    expect(edit.action['patch'], '@@ -1 +1,2 @@\n hello\n+world\n');
+    expect(_states(events).last, ExecutionStatus.waitingForConfirmation);
+    await s.respond(accept: true, callIds: ['call_1']);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    final result = events.whereType<ToolResult>().single;
+    expect((result.actionId, result.outcome, result.text), ('call_1', ToolOutcome.ok, 'Applied.'));
+    expect([for (final m in events.whereType<ChatMessage>()) m.text].skip(1), [
+      'I’m adding the requested second line to `notes.txt` using `apply_patch`.',
+      'DONE',
+    ]);
+    await s.close();
+  });
+
   test('a command approval: the unwrapped command waits, accept goes back once, never for the session', () async {
     final channel = _fixture('approve_command');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final call = events.whereType<ActionCall>().single;
-    expect(
-      (call.id, call.actionKind, call.str('command'), call.str('cwd')),
-      ('call_1', 'TerminalAction', 'npm test', work),
-    );
+    expect((call.id, call.actionKind, call.str('command'), call.str('cwd')), ('call_1', 'TerminalAction', 'ls', work));
     expect(autoDecidable(call), isTrue);
     expect(_states(events).last, ExecutionStatus.waitingForConfirmation);
     await s.respond(accept: true, callIds: ['call_1']);
@@ -247,7 +503,12 @@ void main() {
     await pumpEventQueue();
     channel.expectFinished();
     final result = events.whereType<ToolResult>().single;
-    expect((result.actionId, result.outcome, result.text), ('call_1', ToolOutcome.ok, '3 passing\nExit code 0'));
+    expect(
+      (result.actionId, result.outcome, result.text),
+      ('call_1', ToolOutcome.ok, 'README.md\nnotes.txt\nExit code 0'),
+    );
+    // The empty commentary message Codex completes before the call isn't shown.
+    expect([for (final m in events.whereType<ChatMessage>()) m.text], [_lsPrompt, 'DONE']);
     expect(_states(events), [
       ExecutionStatus.running,
       ExecutionStatus.waitingForConfirmation,
@@ -259,7 +520,7 @@ void main() {
   });
 
   test('file changes: decline by name with the reason as a steer; refusing them all cancels each', () async {
-    final channel = _fixture('file_change');
+    final channel = _fixture('file_change_refused');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
     await s.send('Rename the helper');
@@ -296,22 +557,43 @@ void main() {
     await s.close();
   });
 
-  test('interrupt: turn/interrupt, the dropped approval is cancelled and a later answer sends nothing', () async {
-    final channel = _fixture('interrupt');
+  test(
+    'interrupt (recorded): turn/interrupt, the dropped approval is cancelled and a later answer sends nothing',
+    () async {
+      final channel = _fixture('interrupt');
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final events = _listen(s);
+      await s.send('Run the shell command `ls` with your shell tool.');
+      await pumpEventQueue();
+      await s.interrupt();
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      final sent = channel.sent.length;
+      await s.respond(accept: true);
+      expect(channel.sent, hasLength(sent));
+      final result = events.whereType<ToolResult>().single;
+      expect((result.actionId, result.outcome), ('call_1', ToolOutcome.rejected));
+      expect(_states(events).last, ExecutionStatus.paused);
+      await s.close();
+    },
+  );
+
+  test('Stop while the answer streams (recorded): the cut-off text stays as a message', () async {
+    final channel = _fixture('interrupt_streaming');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Clean up');
+    await s.send(_storyPrompt);
     await pumpEventQueue();
     await s.interrupt();
     await channel.finished;
     await pumpEventQueue();
     channel.expectFinished();
-    final sent = channel.sent.length;
-    await s.respond(accept: true);
-    expect(channel.sent, hasLength(sent));
-    final result = events.whereType<ToolResult>().single;
-    expect((result.actionId, result.outcome), ('call_9', ToolOutcome.rejected));
-    expect(_states(events).last, ExecutionStatus.paused);
+    expect(
+      [for (final m in events.whereType<ChatMessage>()) (m.fromUser, m.text)],
+      [(true, _storyPrompt), (false, 'Every')],
+    );
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.paused]);
     await s.close();
   });
 
@@ -322,7 +604,7 @@ void main() {
     final channel = ReplayChannel([...lines.take(cut + 1), '{"dir":"eof"}'].join('\n'));
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final result = events.whereType<ToolResult>().single;
     expect((result.actionId, result.outcome), ('call_1', ToolOutcome.rejected));
@@ -345,13 +627,19 @@ void main() {
     await pumpEventQueue();
     channel.expectFinished();
     expect(events.whereType<ToolResult>().single.outcome, ToolOutcome.ok);
+    // ReviewDecision::Denied is a struct variant.
+    expect(channel.sent.lastWhere((m) => m['id'] == 15)['result'], {
+      'decision': {
+        'denied': {'rejection': 'Not supported by this client'},
+      },
+    });
     await s.close();
   });
 
   test('attach: thread/resume without turns, the journal replayed, open calls closed, then live', () async {
     final first = _fixture('approve_command');
     final a = await _driver(data, [first]).start(_spec(work));
-    await a.send('Run the tests');
+    await a.send(_lsPrompt);
     await pumpEventQueue();
     await a.close();
 
@@ -375,15 +663,16 @@ void main() {
     // The saved count Codex replays on resume isn't counted again.
     expect(events.whereType<UsageReport>(), isEmpty);
 
-    await s.send('Carry on');
+    await s.send('reply OK again');
     await channel.finished;
     await pumpEventQueue();
     channel.expectFinished();
     final usage = events.whereType<UsageReport>().single;
     expect(
       (usage.id, usage.input, usage.cached, usage.output, usage.contextTokens, usage.onPlan),
-      ('usage-turn_2-7900', 2500, 2000, 100, 2600, false),
+      ('usage-turn_2-25844', 12924, 9728, 5, 12929, true),
     );
+    expect(events.whereType<ChatMessage>().last.text, 'OK');
     final later = _listen(s);
     await pumpEventQueue();
     expect(later.where((e) => e is! StreamDelta).length, events.where((e) => e is! StreamDelta).length);
@@ -401,7 +690,7 @@ ${_running()}
 ''');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final calls = events.whereType<ActionCall>().toList();
     expect(
@@ -437,7 +726,7 @@ ${_running()}
 ''');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final net = events.whereType<ActionCall>().last;
     expect(
@@ -459,13 +748,13 @@ ${_running()}
   test('two sends close together: the second turn/start waits for the first turn', () async {
     final channel = ReplayChannel('''
 ${_upTo('approve_command', '"id":3,"result"')}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
 {"dir":"out","msg":{"id":5,"method":"turn/interrupt","params":{"threadId":"thr_1","turnId":"turn_1"}}}
 {"dir":"in","msg":{"id":5,"result":{}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"interrupted","items":[]}}}}
-{"dir":"out","msg":{"id":6,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"second"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":6,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"second"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
 {"dir":"in","msg":{"id":6,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
 ''');
@@ -483,7 +772,7 @@ ${_upTo('approve_command', '"id":3,"result"')}
     await s.close();
   });
 
-  test('a mode, model or effort changed after start is what a reopened session runs with', () async {
+  test('a mode, model or effort changed after start is what a reopened session runs with; effort as given', () async {
     final s = await _driver(data, [_fixture('approve_command')]).start(_spec(work));
     await s.switchLlm(
       const SessionSpec(
@@ -501,9 +790,9 @@ ${_upTo('approve_command', '"id":3,"result"')}
 
     final channel = ReplayChannel('''
 ${_upTo('resume', '"id":2,"result"')}
-{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"read-only"}}}
+{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}}
 {"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Carry on"}],"model":"gpt-5.4-mini","effort":"xhigh","approvalPolicy":"untrusted","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Carry on"}],"model":"gpt-5.4-mini","effort":"max","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
 ''');
@@ -519,24 +808,19 @@ ${_upTo('resume', '"id":2,"result"')}
     final lines = File('$_fixtures/approve_command.jsonl').readAsLinesSync();
     final cut = lines.indexWhere((l) => l.contains('requestApproval'));
     final dead = ReplayChannel([...lines.take(cut + 1), '{"dir":"eof"}'].join('\n'));
-    final channel = ReplayChannel('''
-${_upTo('resume', '"id":2,"result"')}
-{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
-{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Try again"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
-{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
-{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
-{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
-''');
+    // The recorded reopen: the saved count for turn_1 right after the
+    // resume reply is a baseline, though this session had seen a turn.
+    final channel = _fixture('resume');
     final spawned = <_Spawned>[];
-    final driver = _driver(data, [dead, channel], spawned);
+    final burst = _Burst(channel, (l) => l.contains('"id":3,"result"'));
+    final driver = _driver(data, [dead, burst], spawned);
     final s = await driver.start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     expect(_states(events).last, ExecutionStatus.error);
     expect(await driver.attach('thr_1'), same(s));
-    await s.send('Try again');
+    await s.send('reply OK again');
     await channel.finished;
     await pumpEventQueue();
     channel.expectFinished();
@@ -549,6 +833,11 @@ ${_upTo('resume', '"id":2,"result"')}
       ExecutionStatus.running,
       ExecutionStatus.finished,
     ]);
+    final usage = events.whereType<UsageReport>().single;
+    expect(
+      (usage.id, usage.input, usage.cached, usage.output, usage.contextTokens, usage.onPlan),
+      ('usage-turn_2-25844', 12924, 9728, 5, 12929, true),
+    );
     await s.close();
   });
 
@@ -561,6 +850,8 @@ ${_upTo('resume', '"id":2,"result"')}
     final a = await _driver(data, [first], spawned).start(
       _spec(
         work,
+        mode: AgentMode.plan,
+        model: '',
         briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:4567/mcp', mcpToken: 'tok-old', skillDir: skills),
       ),
     );
@@ -572,7 +863,7 @@ ${_upTo('resume', '"id":2,"result"')}
 ${_upTo('resume', '"id":2,"result"')}
 {"dir":"out","msg":{"id":3,"method":"skills/extraRoots/set","params":{"extraRoots":["$skills"]}}}
 {"dir":"in","msg":{"id":3,"result":{}}}
-{"dir":"out","msg":{"id":4,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"out","msg":{"id":4,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"read-only"}}}
 {"dir":"in","msg":{"id":4,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
 ${dies ? '{"dir":"eof"}' : ''}
 ''';
@@ -625,14 +916,10 @@ ${dies ? '{"dir":"eof"}' : ''}
       );
     });
 
-    test('signed in with ChatGPT, not signed in, or the probe failing', () async {
-      final chatgpt = ReplayChannel(
-        File('$_fixtures/probe.jsonl').readAsStringSync().replaceFirst(
-          '"account":null',
-          '"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"}',
-        ),
-      );
+    test('signed in with ChatGPT or not (both recorded), or the probe failing', () async {
+      final chatgpt = _fixture('probe_signed_in');
       final ok = await _driver(data, [chatgpt]).detect();
+      chatgpt.expectFinished();
       expect((ok.installed, ok.path, ok.signedIn, ok.problem), (true, '/bin/echo', true, null));
       final channel = _fixture('probe');
       final out = await _driver(data, [channel]).detect();
@@ -647,8 +934,35 @@ ${dies ? '{"dir":"eof"}' : ''}
       expect(failed.problem, contains("Couldn't ask Codex"));
     });
 
-    test('models: two pages, hidden ones dropped, efforts kept', () async {
+    test('models (recorded): the visible ones in order, the default marked, efforts up to max and ultra', () async {
       final channel = _fixture('models');
+      final models = await _driver(data, [channel]).models();
+      channel.expectFinished();
+      expect(models.map((m) => m.id), [
+        'gpt-6.1-sol',
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-6-luna',
+        'gpt-5.6-sol',
+        'gpt-6.1-terra',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+        'gpt-5.5',
+      ]);
+      expect(
+        [
+          for (final m in models)
+            if (m.isDefault) m.id,
+        ],
+        ['gpt-6.1-sol'],
+      );
+      expect(models.first.label, 'GPT-6.1-Sol');
+      expect(models.first.efforts, ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+      expect(models.last.efforts, ['low', 'medium', 'high', 'xhigh']);
+    });
+
+    test('models: two pages, hidden ones dropped, efforts kept', () async {
+      final channel = _fixture('models_paged');
       final models = await _driver(data, [channel]).models();
       channel.expectFinished();
       expect(
@@ -670,6 +984,151 @@ ${dies ? '{"dir":"eof"}' : ''}
           ],
         ],
       );
+    });
+  });
+
+  test(
+    'Stop right after Send (recorded): the interrupt Codex refuses before turn/started goes again after it',
+    () async {
+      final channel = _fixture('interrupt_early');
+      final s = await _driver(data, [channel]).start(_spec(work, mode: AgentMode.plan, model: ''));
+      final events = _listen(s);
+      await s.send('reply OK');
+      await s.interrupt();
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      expect(channel.sent.where((m) => m['method'] == 'turn/interrupt'), hasLength(2));
+      expect(_states(events).last, ExecutionStatus.paused);
+      expect(events.whereType<ConversationFailure>(), isEmpty);
+      await s.close();
+    },
+  );
+
+  test('Stop before the turn/start reply: kept, and sent once the turn has started', () async {
+    // interrupt_early without its first, refused interrupt.
+    final lines = File('$_fixtures/interrupt_early.jsonl').readAsLinesSync();
+    final channel = ReplayChannel(
+      [
+        for (final l in lines)
+          if (!l.contains('"id":5')) l,
+      ].join('\n'),
+    );
+    final s = await _driver(data, [channel]).start(_spec(work, mode: AgentMode.plan, model: ''));
+    final events = _listen(s);
+    final sending = s.send('reply OK');
+    await s.interrupt(); // turn/start isn't even out yet.
+    await sending;
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(channel.sent.where((m) => m['method'] == 'turn/interrupt'), hasLength(1));
+    expect(_states(events).last, ExecutionStatus.paused);
+    await s.close();
+  });
+
+  test('a steer Codex refuses before turn/started goes again after it, in the same turn', () async {
+    final channel = ReplayChannel('''
+${_upTo('approve_command', '"id":3,"result"')}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"out","msg":{"id":5,"method":"turn/steer","params":{"threadId":"thr_1","input":[{"type":"text","text":"also this"}],"expectedTurnId":"turn_1"}}}
+{"dir":"in","msg":{"error":{"code":-32600,"message":"no active turn to steer"},"id":5}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"out","msg":{"id":6,"method":"turn/steer","params":{"threadId":"thr_1","input":[{"type":"text","text":"also this"}],"expectedTurnId":"turn_1"}}}
+{"dir":"in","msg":{"id":6,"result":{"turnId":"turn_1"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}}}}
+''');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    await s.send('first');
+    await (s as SteersRuns).steer('also this');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(_turnStarts(channel), ['first']);
+    await s.close();
+  });
+
+  test('a failed turn (recorded 401): retries add nothing, then one plain failure', () async {
+    final skills = '${tmp.path}/session/briefing/skills';
+    Directory(skills).createSync(recursive: true);
+    File('${tmp.path}/session/briefing/session.md').writeAsStringSync('You are in an EveryAI session.');
+    final channel = _fixture('turn_failed');
+    final s = await _driver(data, [channel]).start(
+      _spec(
+        work,
+        mode: AgentMode.plan,
+        model: '',
+        briefing: DriverBriefing(mcpUrl: 'http://127.0.0.1:9/mcp', mcpToken: 'tok', skillDir: skills),
+      ),
+    );
+    final events = _listen(s);
+    await s.send('reply OK');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    final failure = events.whereType<ConversationFailure>().single;
+    expect(failure.message, startsWith('unexpected status 401 Unauthorized: Missing bearer'));
+    expect(usageLimitOf(failure), isNull);
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.error]);
+    await s.close();
+  });
+
+  group('usage limit', () {
+    const message =
+        "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit "
+        'https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 3:15 PM.';
+
+    Future<List<HarnessEvent>> run(String script) async {
+      final channel = ReplayChannel(script);
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final events = _listen(s);
+      await s.send('Run the tests');
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      await s.close();
+      return events;
+    }
+
+    test("Codex's words, and when the used-up window resets from the snapshot before the error", () async {
+      final events = await run(File('$_fixtures/usage_limit.jsonl').readAsStringSync());
+      final failure = events.whereType<ConversationFailure>().single;
+      final limit = usageLimitOf(failure)!;
+      expect(limit.message, message);
+      expect(limit.resetsAt, DateTime.fromMillisecondsSinceEpoch(1793800000 * 1000, isUtc: true));
+      expect(_states(events).last, ExecutionStatus.error);
+    });
+
+    test('another limit updated after the used-up one: the reset time is still the used-up one', () async {
+      final lines = File('$_fixtures/usage_limit.jsonl').readAsLinesSync();
+      final at = lines.indexWhere((l) => l.contains('"method":"account/rateLimits/updated"')) + 1;
+      final events = await run(
+        [
+          ...lines.take(at),
+          '{"dir":"in","msg":{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex_other",'
+              '"primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1793900000},"secondary":null}}}}',
+          ...lines.skip(at),
+        ].join('\n'),
+      );
+      final limit = usageLimitOf(events.whereType<ConversationFailure>().single)!;
+      expect(limit.resetsAt, DateTime.fromMillisecondsSinceEpoch(1793800000 * 1000, isUtc: true));
+    });
+
+    test('without a snapshot: still a usage limit, with no reset time', () async {
+      final lines = File('$_fixtures/usage_limit.jsonl').readAsLinesSync();
+      final events = await run(lines.where((l) => !l.contains('account/rateLimits/updated')).join('\n'));
+      expect(usageLimitOf(events.whereType<ConversationFailure>().single)!.resetsAt, isNull);
+    });
+
+    test('a rate limit Codex retries, then the turn completes: no failure', () async {
+      final events = await run('''
+${_upTo('usage_limit', '"method":"turn/started"')}
+{"dir":"in","msg":{"method":"error","params":{"error":{"message":"Rate limit reached","codexErrorInfo":"rateLimitExceeded","additionalDetails":null},"willRetry":true,"threadId":"thr_1","turnId":"turn_1"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[],"error":null}}}}
+''');
+      expect(events.whereType<ConversationFailure>(), isEmpty);
+      expect(_states(events).last, ExecutionStatus.finished);
     });
   });
 

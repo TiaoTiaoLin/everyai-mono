@@ -27,8 +27,9 @@ typedef CodexSpawn = Future<LineChannel> Function({
 /// on stdio), on the user's ChatGPT plan or API key. One process per
 /// session, so the briefing's token, `-c` overrides and skill roots stay
 /// its own. Built from the published protocol (github.com/openai/codex
-/// `codex-rs/app-server-protocol` at 3a2788e6) without a live Codex to try
-/// it on: see the fixtures' notes.
+/// `codex-rs/app-server-protocol` at 3a2788e6) and checked against
+/// codex-cli 0.166.0, signed out and signed in with ChatGPT: see the
+/// fixtures' notes.
 ///
 /// It keeps `<data>/drivers/codex/`: `threads/<id>.json` (what [attach]
 /// needs to start it again), `journal/<id>.jsonl` (the transcript) and
@@ -170,8 +171,11 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
   /// thread/start (`developerInstructions`), so it isn't sent again here. A
   /// session still open here is returned as it is.
   @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
-      _attach(conversationId, briefing);
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) => _attach(conversationId, briefing);
 
   Future<HarnessSession> _attach(String conversationId, DriverBriefing? briefing) async {
     if (_live[conversationId] case final s?) return s;

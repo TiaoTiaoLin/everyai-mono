@@ -8,12 +8,20 @@ import '../driver_events.dart';
 // Codex app-server shapes ↔ the app's events, as pure functions. Field names
 // come from the generated schema in github.com/openai/codex
 // `codex-rs/app-server-protocol/schema/json/` at 3a2788e6 (ThreadItem,
-// ThreadTokenUsage, AskForApproval, SandboxMode, SandboxPolicy).
+// ThreadTokenUsage, AskForApproval, SandboxMode, SandboxPolicy), checked
+// against `codex app-server generate-json-schema` of codex-cli 0.166.0.
 
-/// What Codex is told for a mode: its approval policy, the thread's
-/// `sandbox` (a `SandboxMode` string) and the turn's `sandboxPolicy` (the
-/// same as a tagged object).
-typedef CodexPolicy = ({String approvalPolicy, String sandbox, Map<String, Object?> sandboxPolicy});
+/// What Codex is told for a mode: its approval policy, who answers its
+/// approvals (`approvalsReviewer`), the thread's `sandbox` (a `SandboxMode`
+/// string, for thread/start and thread/resume) and the turn's
+/// `sandboxPolicy` (a tagged object, which holds for that turn and the ones
+/// after it).
+typedef CodexPolicy = ({
+  String approvalPolicy,
+  String approvalsReviewer,
+  String sandbox,
+  Map<String, Object?> sandboxPolicy,
+});
 
 /// The policy for [mode]. Codex always asks ("untrusted": every patch and
 /// every command outside its known-safe reads, `core/src/safety.rs`) and
@@ -32,16 +40,94 @@ typedef CodexPolicy = ({String approvalPolicy, String sandbox, Map<String, Objec
 /// just fails). Plan keeps a read-only sandbox with the network on, for the
 /// fetches planning may approve; it isn't a backstop, since an approved
 /// call that the sandbox blocks runs again without it.
-CodexPolicy codexPolicy(AgentMode mode) => mode == AgentMode.plan
-    ? (
-        approvalPolicy: 'untrusted',
-        sandbox: 'read-only',
-        sandboxPolicy: const {'type': 'readOnly', 'networkAccess': true},
-      )
-    : (approvalPolicy: 'untrusted', sandbox: 'danger-full-access', sandboxPolicy: const {'type': 'dangerFullAccess'});
+///
+/// The thread itself always starts and resumes read-only, in every mode,
+/// and each turn/start carries the mode's sandbox. A thread/start with a cwd
+/// and a writable sandbox makes app-server write `[projects."<cwd>"]
+/// trust_level = "trusted"` into the user's own `~/.codex/config.toml` for a
+/// git checkout or project root (app-server README, "Project trust"; seen in
+/// the 2026-11-04 recordings). Codex loads a trusted project's own `.codex/`
+/// config and hooks, so any repo opened here (a cloned one too) would get to
+/// run them in later Codex sessions without the app's consent. Checked live
+/// with codex-cli 0.166.0 (2026-11-04, signed in): a read-only thread/start
+/// left config.toml as it was, the thread reply said `readOnly`, and a
+/// turn/start with `dangerFullAccess` ran an approved write outside the
+/// repo once, with one approval (the rollout's turn context recorded
+/// `danger-full-access`); thread/resume read-only also wrote nothing.
+///
+/// The reviewer is always the user (here: the app). A user's
+/// `approvals_reviewer = "auto_review"` in their Codex config would
+/// otherwise let Codex's own reviewer answer calls the app must judge.
+CodexPolicy codexPolicy(AgentMode mode) => (
+  approvalPolicy: 'untrusted',
+  approvalsReviewer: 'user',
+  sandbox: 'read-only',
+  sandboxPolicy: mode == AgentMode.plan
+      ? const {'type': 'readOnly', 'networkAccess': true}
+      : const {'type': 'dangerFullAccess'},
+);
 
-/// Codex's reasoning effort for ours: it has no `max`, its top is `xhigh`.
-String? codexEffort(String? effort) => effort == 'max' ? 'xhigh' : effort;
+/// Whether usage under an `account/updated` `authMode` is on a plan rather
+/// than billed per token: the modes Codex serves from its own backend
+/// (`AuthMode::uses_codex_backend`, `app-server-protocol/src/protocol/
+/// common.rs` @ rust-v0.166.0: ChatGPT, host-supplied ChatGPT tokens,
+/// headers, agent identity, personal access token). An API key or Bedrock
+/// is billed per token, and no mode (null: signed out) has no plan.
+bool codexAuthOnPlan(Object? authMode) =>
+    const {'chatgpt', 'chatgptAuthTokens', 'headers', 'agentIdentity', 'personalAccessToken'}.contains(authMode);
+
+/// Whether a turn's `codexErrorInfo` says the account ran out: Codex folds
+/// its plan's usage limit, an API key's quota or credits, a plan without
+/// Codex and a workspace's credit or spend cap into `usageLimitExceeded`
+/// (`CodexErr::to_codex_protocol_error`, `codex-rs/protocol/src/error.rs`
+/// lines 500-541 @ rust-v0.166.0). `rateLimitExceeded` is a burst Codex
+/// retries itself, and `sessionBudgetExceeded` is Codex's own budget, so
+/// neither counts.
+bool codexUsageLimit(Object? codexErrorInfo) => codexErrorInfo == 'usageLimitExceeded';
+
+/// When the used-up windows of a rate-limit snapshot
+/// (`account/rateLimits/updated`'s `RateLimitSnapshot`) have all reset: the
+/// latest `resetsAt` (epoch seconds) of `primary`, `secondary` and
+/// `individualLimit` among those used up (`usedPercent` 100, or no
+/// `remainingPercent` left). Null when none is used up, or when a used-up
+/// window has no time (it may last longer than the others; T3's
+/// `codexUsageLimitResetAt` makes the same call).
+DateTime? codexLimitResetsAt(Map<String, Object?>? snapshot) {
+  bool usedUp(Object? window) => switch (window) {
+    {'usedPercent': final num used} => used >= 100,
+    {'remainingPercent': final num left} => left <= 0,
+    _ => false,
+  };
+  final times = <int>[];
+  for (final w in [snapshot?['primary'], snapshot?['secondary'], snapshot?['individualLimit']]) {
+    if (!usedUp(w)) continue;
+    if (w case {'resetsAt': final int at}) {
+      times.add(at);
+    } else {
+      return null;
+    }
+  }
+  if (times.isEmpty) return null;
+  return DateTime.fromMillisecondsSinceEpoch(times.reduce((a, b) => a > b ? a : b) * 1000, isUtc: true);
+}
+
+/// When a usage limit lifts, from the rate-limit snapshots by `limitId`
+/// ([byLimit]; recorded snapshots all had `limitId: "codex"`, and
+/// `account/rateLimits/read` has `rateLimitsByLimitId`, so a plan may have
+/// more than one; unverified until a paid-plan recording shows it). The
+/// snapshot updated last ([last]) wins: core sends the one that ran out
+/// just before the error. When it has no used-up window, the latest reset
+/// among the other limits that ran out.
+DateTime? codexLimitResetsAtOf(Map<String, Map<String, Object?>> byLimit, String? last) {
+  if (codexLimitResetsAt(byLimit[last]) case final at?) return at;
+  DateTime? latest;
+  for (final e in byLimit.entries) {
+    if (e.key == last) continue;
+    final at = codexLimitResetsAt(e.value);
+    if (at != null && (latest == null || at.isAfter(latest))) latest = at;
+  }
+  return latest;
+}
 
 /// The script inside `bash -lc '<script>'` (Codex runs commands through
 /// the user's shell), so the permission rules read the command itself.
@@ -163,7 +249,9 @@ ToolResult rejectedResult(ActionCall call, String reason) => HarnessEvent.decode
 }) as ToolResult;
 
 /// The agent's text a completed item carries: its messages, reasoning
-/// summaries, proposed plans and compaction notes; null for anything else.
+/// summaries, proposed plans and compaction notes; null for anything else,
+/// and for a message with no text (Codex completes empty `commentary`
+/// messages before a tool call: recorded with 0.166.0).
 ChatMessage? messageOf(Map<String, Object?> item) {
   final id = item['id'] as String? ?? '';
   String joined(Object? parts) => [
@@ -171,7 +259,10 @@ ChatMessage? messageOf(Map<String, Object?> item) {
       if (p is String && p.isNotEmpty) p,
   ].join('\n\n');
   return switch (item['type']) {
-    'agentMessage' || 'plan' => agentMessage(id, item['text'] as String? ?? ''),
+    'agentMessage' || 'plan' => switch (item['text']) {
+      final String t when t.isNotEmpty => agentMessage(id, t),
+      _ => null,
+    },
     'reasoning' => switch (joined(item['summary'])) {
       '' => switch (joined(item['content'])) {
         '' => null,

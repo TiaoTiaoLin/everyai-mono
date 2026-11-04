@@ -11,12 +11,14 @@ import '../briefing/briefing_types.dart' show RpcCall;
 import '../driver_events.dart';
 import '../event_journal.dart';
 import '../json_rpc.dart';
+import '../usage_limit.dart';
 import 'codex_mapping.dart';
 
 // One Codex thread over `codex app-server` (JSON-RPC on stdio, without the
 // `"jsonrpc"` field: `codex-rs/app-server-protocol/src/rpc.rs`). Message
 // order follows the app-server guide (README at b04ed4c50c5c, removed from
-// main in d3ee328ee6); field names follow the schema at 3a2788e6.
+// main in d3ee328ee6); field names follow the schema at 3a2788e6. Checked
+// against codex-cli 0.166.0 (its generated schema and recorded traffic).
 
 /// Sent as `clientInfo` (it shows in OpenAI's logs, so it stays stable).
 const codexClientInfo = {'name': 'everyai', 'title': 'EveryAI', 'version': '0.1.0'};
@@ -57,7 +59,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   CodexSession(LineChannel channel, {required this.cwd, required AgentMode mode, String? model, String? effort})
     : _currentMode = mode,
       _model = model == null || model.isEmpty ? null : model,
-      _effort = codexEffort(effort) {
+      _effort = effort == null || effort.isEmpty ? null : effort {
     _bind(channel);
   }
 
@@ -81,11 +83,27 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   final _held = <String>[];
   final _heldImages = <String>[];
 
+  /// What each agent message has streamed so far, until its item completes.
+  final _streamed = <String, StringBuffer>{};
+
   String? _turnId;
   Completer<void>? _turnDone;
   var _turnsSeen = false;
   var _plans = 0;
   String? _lastError;
+  Object? _lastErrorInfo;
+  String? _startedTurn;
+  String? _interruptOnStart;
+
+  /// Sends between their call and the turn/start reply, and whether a Stop
+  /// came meanwhile (it goes to the turn they start).
+  var _starting = 0;
+  var _stopAsked = false;
+  Completer<void>? _started;
+
+  /// The rate-limit snapshots by `limitId`, and the one updated last.
+  final _rateLimits = <String, Map<String, Object?>>{};
+  String? _lastLimit;
   CodexTokens? _total;
   var _status = ExecutionStatus.idle;
   var _closing = false;
@@ -117,10 +135,17 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   Future<void> open({List<RpcCall> initRequests = const []}) async {
     _initRequests = initRequests;
     final reply = await codexHandshake(_peer);
-    _onPlan = switch (reply['account']) {
-      {'type': 'chatgpt'} => true,
-      _ => false,
-    };
+    // Recorded signed in with ChatGPT: `{type: chatgpt, email, planType,
+    // workspaceName}` (a free plan too: its use isn't billed per token).
+    // The other account types are billed per token; with no account the
+    // account/updated notice that came first (recorded) has the say, as
+    // the auth modes with no account type (headers, ...) only show there.
+    switch (reply['account']) {
+      case {'type': 'chatgpt'}:
+        _onPlan = true;
+      case {'type': String()}:
+        _onPlan = false;
+    }
     for (final r in initRequests) {
       try {
         await _peer.request(r.method, r.params, codexSetupTimeout);
@@ -136,6 +161,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       'cwd': cwd,
       'model': ?_model,
       'approvalPolicy': p.approvalPolicy,
+      'approvalsReviewer': p.approvalsReviewer,
       'sandbox': p.sandbox,
       if (instructions != null && instructions.isNotEmpty) 'developerInstructions': instructions,
     }, codexSetupTimeout);
@@ -154,6 +180,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       'cwd': cwd,
       'excludeTurns': true,
       'approvalPolicy': p.approvalPolicy,
+      'approvalsReviewer': p.approvalsReviewer,
       'sandbox': p.sandbox,
     }, codexSetupTimeout);
     _threadId = threadId;
@@ -177,6 +204,9 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   Future<void> _revive(Future<LineChannel> Function() again) async {
+    // The saved count Codex sends right after the resume reply (recorded) is
+    // only a baseline, so it must find no turn seen.
+    _turnsSeen = false;
     try {
       _bind(await again());
       await open(initRequests: _initRequests);
@@ -185,8 +215,6 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       if (!_peer.isClosed) await _peer.close();
       throw HarnessError("Codex didn't start again: $e");
     }
-    // The saved count Codex sends after resuming is only a baseline.
-    _turnsSeen = false;
     _state(ExecutionStatus.idle);
   }
 
@@ -267,16 +295,34 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
 
   @override
   Future<void> send(String text, {bool run = true, List<String> images = const []}) async {
-    if (run) await _ensureRunning();
-    _emit(userMessage('u-${_newId()}', text));
-    _held.add(text);
-    _heldImages.addAll(images);
-    if (!run) return;
-    final all = _held.join('\n\n');
-    final pictures = [..._heldImages];
-    _held.clear();
-    _heldImages.clear();
-    await _startTurn(all, pictures);
+    if (!run) {
+      _emit(userMessage('u-${_newId()}', text));
+      _held.add(text);
+      _heldImages.addAll(images);
+      return;
+    }
+    await _starts(() async {
+      await _ensureRunning();
+      _emit(userMessage('u-${_newId()}', text));
+      _held.add(text);
+      _heldImages.addAll(images);
+      final all = _held.join('\n\n');
+      final pictures = [..._heldImages];
+      _held.clear();
+      _heldImages.clear();
+      await _startTurn(all, pictures);
+    });
+  }
+
+  /// Runs [body], which starts a turn, so a Stop before the turn/start
+  /// reply isn't lost; one asked after every start is in is forgotten.
+  Future<void> _starts(Future<void> Function() body) async {
+    _starting++;
+    try {
+      await body();
+    } finally {
+      if (--_starting == 0) _stopAsked = false;
+    }
   }
 
   Future<void> _startTurn(String text, List<String> images) async {
@@ -301,6 +347,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
         'model': ?_model,
         'effort': ?_effort,
         'approvalPolicy': p.approvalPolicy,
+        'approvalsReviewer': p.approvalsReviewer,
         'sandboxPolicy': p.sandboxPolicy,
       });
     } on Object {
@@ -313,6 +360,14 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     };
     if (turn != null) _begin(turn);
     if (turn == null ? _turnId == null : _ended.contains(turn)) release();
+    if (turn != null && _stopAsked && !_ended.contains(turn)) {
+      _stopAsked = false;
+      if (_startedTurn == turn) {
+        unawaited(_interruptAgain(turn));
+      } else {
+        _interruptOnStart = turn;
+      }
+    }
   }
 
   static List<Map<String, Object?>> _input(String text, List<String> images) => [
@@ -327,10 +382,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _turnsSeen = true;
     _plans = 0;
     _lastError = null;
+    _lastErrorInfo = null;
   }
 
   void _end(String turn) {
     _ended.add(turn);
+    if (_interruptOnStart == turn) _interruptOnStart = null;
     if (_turnId != turn) return;
     _turnId = null;
     final done = _turnDone;
@@ -343,22 +400,54 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     final turn = _turnId;
     if (turn == null || _peer.isClosed) return send(text, images: images);
     _emit(userMessage('u-${_newId()}', text));
+    if (await _steer(turn, text, images)) return;
+    // Before turn/started Codex has no turn to steer ("no active turn to
+    // steer", seen live with 0.166.0): the steer goes again once it starts.
+    if (_turnId == turn && !_ended.contains(turn) && _startedTurn != turn) {
+      final started = _started ??= Completer<void>();
+      await Future.any([started.future, ?_turnDone?.future, _peer.done]);
+      if (_turnId == turn && !_ended.contains(turn) && await _steer(turn, text, images)) return;
+    }
+    // The turn ended meanwhile: the message starts the next one.
+    await _starts(() => _startTurn(text, images));
+  }
+
+  Future<bool> _steer(String turn, String text, List<String> images) async {
     try {
       await _peer.request('turn/steer', {'threadId': _threadId, 'input': _input(text, images), 'expectedTurnId': turn});
+      return true;
     } on JsonRpcError {
-      // The turn ended meanwhile: the message starts the next one.
-      await _startTurn(text, images);
+      return false;
     }
   }
 
+  /// Codex answers turn/start before the turn has started, and an interrupt
+  /// in between finds no turn ("no active turn to interrupt", seen live
+  /// with 0.166.0): it is sent again once the turn starts.
   @override
   Future<void> interrupt() async {
     final turn = _turnId;
-    if (turn == null) return;
+    if (turn == null) {
+      if (_starting > 0) _stopAsked = true;
+      return;
+    }
     try {
       await _peer.request('turn/interrupt', {'threadId': _threadId, 'turnId': turn});
     } on JsonRpcError {
-      // Already over.
+      if (_turnId != turn || _ended.contains(turn)) return; // Already over.
+      if (_startedTurn == turn) {
+        unawaited(_interruptAgain(turn));
+      } else {
+        _interruptOnStart = turn;
+      }
+    }
+  }
+
+  Future<void> _interruptAgain(String turn) async {
+    try {
+      await _peer.request('turn/interrupt', {'threadId': _threadId, 'turnId': turn});
+    } on JsonRpcError {
+      // Over meanwhile.
     }
   }
 
@@ -386,7 +475,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> switchLlm(SessionSpec spec) async {
     if (spec.model.isNotEmpty) _model = spec.model;
-    _effort = codexEffort(spec.effort);
+    _effort = spec.effort == null || spec.effort!.isEmpty ? null : spec.effort;
     await onChanged?.call();
   }
 
@@ -418,6 +507,8 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _turnDone?.complete();
     _turnDone = null;
     _turnId = null;
+    if (!_closing) _keepStreamed();
+    _streamed.clear();
     if (!_closing) {
       for (final p in open) {
         _result(rejectedResult(p.call, 'Codex stopped before it was answered.'));
@@ -438,12 +529,21 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       case 'turn/started':
         if (params['turn'] case {'id': final String turn}) {
           _begin(turn);
+          _startedTurn = turn;
           _state(ExecutionStatus.running);
+          _started?.complete();
+          _started = null;
+          if (_interruptOnStart == turn) {
+            _interruptOnStart = null;
+            unawaited(_interruptAgain(turn));
+          }
         }
       case 'turn/completed':
         _turnCompleted(params['turn'] as Map<String, Object?>? ?? const {});
       case 'item/agentMessage/delta':
-        _emit(StreamDelta(raw: const {}, content: params['delta'] as String? ?? '', reasoning: ''));
+        final delta = params['delta'] as String? ?? '';
+        if (params['itemId'] case final String item) (_streamed[item] ??= StringBuffer()).write(delta);
+        _emit(StreamDelta(raw: const {}, content: delta, reasoning: ''));
       case 'item/reasoning/summaryTextDelta':
         _emit(StreamDelta(raw: const {}, content: '', reasoning: params['delta'] as String? ?? ''));
       case 'item/started':
@@ -461,21 +561,47 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
         );
       case 'thread/tokenUsage/updated':
         _usage(params);
+      case 'account/updated':
+        // Sent before the account/read reply too (recorded); a sign-in,
+        // a switch to an API key or a sign-out (authMode null) later
+        // changes how usage counts.
+        _onPlan = codexAuthOnPlan(params['authMode']);
+      case 'account/rateLimits/updated':
+        // Sparse: a field left out keeps what came before. Core sends one
+        // just before a usage-limit error (core/src/session/turn.rs lines
+        // 1846-1851, app-server/src/bespoke_event_handling.rs lines
+        // 1637-1645 @ rust-v0.166.0).
+        // Each snapshot is one limit's (`limitId`, "codex" in every
+        // recording), so limits are kept apart.
+        if (params['rateLimits'] case final Map<String, Object?> update) {
+          final id = update['limitId'] as String? ?? 'codex';
+          _rateLimits[id] = {
+            ...?_rateLimits[id],
+            for (final e in update.entries)
+              if (e.value != null) e.key: e.value,
+          };
+          _lastLimit = id;
+        }
       case 'error':
+        // Retries (willRetry: true, "Reconnecting... n/5") aren't shown.
         if (params['willRetry'] == true) return;
-        final message = switch (params['error']) {
+        final error = params['error'];
+        final message = switch (error) {
           {'message': final String m} => m,
           _ => 'Codex failed.',
         };
+        final info = error is Map<String, Object?> ? error['codexErrorInfo'] : null;
         if (_turnId != null) {
           _lastError = message;
+          _lastErrorInfo = info;
         } else {
-          _emit(_failure(message));
+          _emit(_failureOf(message, info));
         }
     }
   }
 
   void _itemCompleted(Map<String, Object?> item) {
+    if (item['id'] case final String id) _streamed.remove(id);
     if (messageOf(item) case final message?) {
       _emit(message);
       return;
@@ -496,25 +622,47 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       p.answer.complete(_Decision.cancel);
       _result(rejectedResult(p.call, 'Stopped before it was answered.'));
     }
+    _keepStreamed();
     final status = turn['status'] as String? ?? 'completed';
     final error = switch (turn['error']) {
       {'message': final String m} => m,
       _ => _lastError,
+    };
+    final info = switch (turn['error']) {
+      {'codexErrorInfo': final Object info} => info,
+      _ => _lastErrorInfo,
     };
     _end(id);
     switch (status) {
       case 'interrupted':
         _state(ExecutionStatus.paused);
       case 'failed':
-        _emit(_failure(error ?? 'The turn failed.'));
+        _emit(_failureOf(error ?? 'The turn failed.', info));
         _state(ExecutionStatus.error);
       default:
         _state(ExecutionStatus.finished);
     }
   }
 
+  /// A message cut off by Stop never completes (recorded with 0.166.0: the
+  /// interrupted turn's items are empty), so what it streamed is kept as
+  /// the user saw it.
+  void _keepStreamed() {
+    for (final e in _streamed.entries) {
+      final text = e.value.toString();
+      if (text.trim().isNotEmpty) _emit(agentMessage(e.key, text));
+    }
+    _streamed.clear();
+  }
+
   HarnessEvent _failure(String message) =>
       HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': _newId(), 'detail': message});
+
+  /// A usage limit (with when it lifts, from the last rate-limit snapshot)
+  /// or a plain failure, by Codex's `codexErrorInfo`.
+  HarnessEvent _failureOf(String message, Object? info) => codexUsageLimit(info)
+      ? usageLimitEvent(_newId(), message, resetsAt: codexLimitResetsAtOf(_rateLimits, _lastLimit))
+      : _failure(message);
 
   void _usage(Map<String, Object?> params) {
     final usage = params['tokenUsage'] as Map<String, Object?>? ?? const {};
@@ -557,7 +705,13 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       case 'item/permissions/requestApproval':
         return {'permissions': const <String, Object?>{}};
       case 'execCommandApproval' || 'applyPatchApproval':
-        return {'decision': 'denied'};
+        // v1 requests, which a v2 thread shouldn't send. `denied` is a struct
+        // variant of ReviewDecision (protocol/src/protocol.rs @ rust-v0.166.0).
+        return {
+          'decision': {
+            'denied': {'rejection': 'Not supported by this client'},
+          },
+        };
     }
     throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');
   }

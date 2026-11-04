@@ -82,9 +82,24 @@ final class LlmToolCall {
 }
 
 final class LlmError implements Exception {
-  const LlmError(this.message, {this.status, this.retryable = false, this.retryAfter, this.afterToolCall = false});
+  const LlmError(
+    this.message, {
+    this.status,
+    this.retryable = false,
+    this.retryAfter,
+    this.afterToolCall = false,
+    this.usageLimit = false,
+    this.resetsAt,
+  });
   final String message;
   final int? status;
+
+  /// The account or key ran out (credits, a spent budget): neither waiting
+  /// a moment nor sending again helps, another harness or model might.
+  final bool usageLimit;
+
+  /// When a [usageLimit] lifts, if the server said.
+  final DateTime? resetsAt;
 
   /// A transient failure (overloaded, rate-limited, a dropped connection):
   /// the same request may succeed if sent again.
@@ -100,6 +115,35 @@ final class LlmError implements Exception {
   @override
   String toString() => message;
 }
+
+/// Whether a gateway [error] body (`{message, code, metadata?}`) with HTTP
+/// [status] says the account or key ran out, with when it resets if said:
+/// - our 402 `out_of_credits`, and any 402 from OpenRouter (credits on the
+///   account or key) except `limit_source: openrouter_in_flight_budget`,
+///   which clears in seconds;
+/// - OpenRouter's 403 for a spent guardrail, workspace or key budget, with
+///   `metadata.resets_at` (openrouter.ai/docs/api-reference/errors);
+/// - Anthropic's 400 "Your credit balance is too low" on a BYOK key.
+/// A 429 is a rate limit, retried as before; never a usage limit.
+({DateTime? resetsAt})? usageLimitOfError(Map<String, Object?> error, int? status) {
+  final meta = error['metadata'] is Map<String, Object?>
+      ? error['metadata'] as Map<String, Object?>
+      : const <String, Object?>{};
+  final source = meta['limit_source'];
+  final resets = switch (meta['resets_at']) {
+    final String s => DateTime.tryParse(s)?.toUtc(),
+    final num n => DateTime.fromMillisecondsSinceEpoch((n * 1000).round(), isUtc: true),
+    _ => null,
+  };
+  if (error['code'] == 'out_of_credits' || (status == 402 && source != 'openrouter_in_flight_budget')) {
+    return (resetsAt: resets);
+  }
+  if (status == 403 && _spentBudgets.contains(source)) return (resetsAt: resets);
+  if ('${error['message'] ?? ''}'.toLowerCase().contains('credit balance is too low')) return (resetsAt: null);
+  return null;
+}
+
+const _spentBudgets = {'openrouter_guardrail_budget', 'openrouter_workspace_budget', 'openrouter_key_limit'};
 
 /// HTTP statuses worth another try: timeouts, conflicts, rate limits,
 /// server errors and Anthropic's 529 (overloaded).
@@ -355,12 +399,16 @@ final class GatewayClient {
         if (json['error'] case final Map<String, Object?> e) {
           if (!done.isCompleted) {
             final code = e['code'];
+            final status = code is num ? code.toInt() : int.tryParse('${code ?? ''}');
+            final limit = usageLimitOfError(e, status);
             done.completeError(
               LlmError(
                 '${e['message'] ?? e}',
-                status: code is num ? code.toInt() : int.tryParse('${code ?? ''}'),
+                status: status,
                 retryable: retryableStreamError(e),
                 afterToolCall: toolStarted,
+                usageLimit: limit != null,
+                resetsAt: limit?.resetsAt,
               ),
             );
           }
@@ -617,12 +665,23 @@ final class GatewayClient {
     return _retrying(once, policy: retry, onRetry: onRetry, wait: wait, cancel: cancel);
   }
 
-  static LlmError _statusError(String body, int status, Map<String, String> headers) => LlmError(
-    _errorText(body, status),
-    status: status,
-    retryable: retryableStatuses.contains(status),
-    retryAfter: parseRetryAfter(headers),
-  );
+  static LlmError _statusError(String body, int status, Map<String, String> headers) {
+    Object? error;
+    try {
+      error = (jsonDecode(body) as Map<String, Object?>?)?['error'];
+    } on Object {
+      // Not JSON: only the status speaks.
+    }
+    final limit = usageLimitOfError(error is Map<String, Object?> ? error : const {}, status);
+    return LlmError(
+      _errorText(body, status),
+      status: status,
+      retryable: retryableStatuses.contains(status),
+      retryAfter: parseRetryAfter(headers),
+      usageLimit: limit != null,
+      resetsAt: limit?.resetsAt,
+    );
+  }
 
   static String _errorText(String body, int status) {
     try {

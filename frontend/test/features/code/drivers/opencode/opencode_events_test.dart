@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/opencode/opencode_driver.dart';
 import 'package:every_ai/features/code/drivers/opencode/opencode_events.dart';
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -165,6 +166,46 @@ void main() {
     final failure = events.whereType<ConversationFailure>().single;
     expect(failure.message, startsWith('This API key has expired.'));
     expect(events.last, isA<StateChange>().having((s) => s.executionStatus, 'status', ExecutionStatus.error));
+  });
+
+  test('a spent quota is a usage limit, dated only when live; a rate limit is a plain failure', () {
+    final now = DateTime.utc(2026, 11, 4, 12);
+    Map<String, Object?> failedRun(Map<String, Object?> error) => {
+      'type': 'session.execution.failed',
+      'data': {'sessionID': 's', 'error': error},
+    };
+    final live = OpenCodeMapper(workingDir: _cwd, now: () => now);
+    live.live({
+      'type': 'session.step.started',
+      'data': {'sessionID': 's', 'assistantMessageID': 'msg_1'},
+    });
+    final quota = {'type': 'provider.quota', 'message': 'Quota exceeded for this plan.', 'retryAfterMs': 3600000};
+    final limit = live.live(failedRun(quota)).map(usageLimitOf).nonNulls.single;
+    expect(limit.message, 'Quota exceeded for this plan.');
+    expect(limit.resetsAt, now.add(const Duration(hours: 1)));
+    // The same run read back from history isn't shown twice.
+    final messages = [
+      {'id': 'msg_1', 'type': 'assistant', 'content': <Object?>[]},
+      {'id': 'i1', 'type': 'idle', 'outcome': 'failed', 'error': quota},
+    ];
+    expect(live.history(messages).whereType<ConversationFailure>(), isEmpty);
+
+    final reopened = OpenCodeMapper(workingDir: _cwd, now: () => now).history([
+      {'id': 'msg_2', 'type': 'assistant', 'content': <Object?>[]},
+      {
+        'id': 'i2',
+        'type': 'idle',
+        'outcome': 'failed',
+        'error': {'type': 'provider.free-limit', 'message': 'Free usage used up.', 'retryAfterMs': 60000},
+      },
+    ]);
+    final free = reopened.map(usageLimitOf).nonNulls.single;
+    expect((free.message, free.resetsAt), ('Free usage used up.', null));
+
+    final rate = OpenCodeMapper(workingDir: _cwd)
+        .live(failedRun({'type': 'provider.rate-limit', 'message': 'Rate limited.', 'retryAfterMs': 5000}));
+    expect(rate.whereType<ConversationFailure>().single.message, 'Rate limited.');
+    expect(rate.map(usageLimitOf).nonNulls, isEmpty);
   });
 
   test('history gives the same ids as the live stream, and nothing twice when both are read', () {

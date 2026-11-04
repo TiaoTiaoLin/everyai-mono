@@ -47,14 +47,18 @@ class AgentMenu extends ConsumerWidget {
     this.onBudget,
     this.harness = everyaiHarnessName,
     this.onHarness,
+    this.switchesLive = false,
   });
 
   /// The lead harness (a driver id).
   final String harness;
 
-  /// Picks the lead (a new session); null shows it without a choice (an open
-  /// session can't switch yet).
+  /// Picks the lead; null shows it without a choice (a subagent, the demo).
   final ValueChanged<String>? onHarness;
+
+  /// An open session: picking a harness closes the menu and moves the
+  /// session to it (which may ask first).
+  final bool switchesLive;
 
   /// Picks Build or Bug fix; null shows the mode without a choice.
   final ValueChanged<HarnessMode>? onHarnessMode;
@@ -93,7 +97,7 @@ class AgentMenu extends ConsumerWidget {
     final registry = ref.watch(driverRegistryProvider);
     final lead = registry.resolve(harness)?.info ?? DriverInfo(id: harness, label: harness);
     final outside = harness != everyaiHarnessName;
-    // A new session lists every harness with what is in its way; an open one only its own.
+    // Every harness with what is in its way, when the lead can be picked; else only its own.
     final List<LeadOption> leads;
     if (onHarness == null) {
       leads = [(info: lead, blocked: null, detail: '')];
@@ -143,7 +147,12 @@ class AgentMenu extends ConsumerWidget {
         onBudget: onBudget,
         leads: leads,
         harness: harness,
-        onHarness: onHarness,
+        onHarness: onHarness == null || !switchesLive
+            ? onHarness
+            : (h) {
+                close();
+                onHarness!(h);
+              },
         driverModels: driverModels,
       ),
       child: Semantics(

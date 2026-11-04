@@ -29,8 +29,11 @@ final _monoSmall = EveryType.resolve().caption.mono.copyWith(height: 1.45);
 
 /// The user's message, right-aligned like chat.
 class UserTurnView extends StatelessWidget {
-  const UserTurnView({super.key, required this.text, this.mode, this.onRewind});
+  const UserTurnView({super.key, required this.text, this.mode, this.lead = '', this.onRewind});
   final String text;
+
+  /// The harness that got it, shown when the session had more than one ('' hides it).
+  final String lead;
 
   /// Restores the files to before this message.
   final VoidCallback? onRewind;
@@ -47,10 +50,13 @@ class UserTurnView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          if (mode case final mode?)
+          if (mode != null || lead.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 4, right: 4),
-              child: Text('${mode.label} mode', style: theme.type.caption.medium.tint(theme.textMuted)),
+              child: Text(
+                [if (lead.isNotEmpty) lead, if (mode != null) '${mode!.label} mode'].join(' · '),
+                style: theme.type.caption.medium.tint(theme.textMuted),
+              ),
             ),
           if (files.isNotEmpty)
             Padding(
@@ -704,41 +710,75 @@ class _TaskMark extends StatelessWidget {
   }
 }
 
-class NoticeView extends StatelessWidget {
+class NoticeView extends StatefulWidget {
   const NoticeView({super.key, required this.item, this.onRetry});
   final NoticeItem item;
   final VoidCallback? onRetry;
 
   @override
+  State<NoticeView> createState() => _NoticeViewState();
+}
+
+class _NoticeViewState extends State<NoticeView> {
+  /// The detail (a compaction's summary, a handoff's facts) is shown.
+  bool _open = false;
+
+  @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
+    final item = widget.item;
     final color = item.error ? theme.danger : theme.textMuted;
+    final detail = item.detail.trim();
     return Container(
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(color: color.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8)),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (!item.error) ...[const BrandAvatar(size: 18), const SizedBox(width: 8)],
-          Expanded(child: Text(item.message, style: theme.type.callout.tint(color))),
-          // Out of credits: the two ways on, then Retry (or a new message) resumes.
-          if (item.error && isOutOfCredits(item.message)) ...[
-            const SizedBox(width: 8),
-            AdaptiveButton(
-              label: 'Top up',
-              emphasis: ButtonEmphasis.secondary,
-              onPressed: () => showSettings(context, section: SettingsSection.billing),
+          Row(
+            children: [
+              if (!item.error) ...[const BrandAvatar(size: 18), const SizedBox(width: 8)],
+              Expanded(child: Text(item.message, style: theme.type.callout.tint(color))),
+              if (detail.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                AdaptiveButton(
+                  key: const ValueKey('notice.detail'),
+                  label: _open ? 'Hide' : 'Show',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: () => setState(() => _open = !_open),
+                ),
+              ],
+              // Out of credits: the two ways on, then Retry (or a new message) resumes.
+              if (item.error && isOutOfCredits(item.message)) ...[
+                const SizedBox(width: 8),
+                AdaptiveButton(
+                  label: 'Top up',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: () => showSettings(context, section: SettingsSection.billing),
+                ),
+                const SizedBox(width: 6),
+                AdaptiveButton(
+                  label: 'Use my own key',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: () => showSettings(context, section: SettingsSection.apiKeys),
+                ),
+              ],
+              if (widget.onRetry != null) ...[
+                const SizedBox(width: 8),
+                AdaptiveButton(label: 'Retry', emphasis: ButtonEmphasis.secondary, onPressed: widget.onRetry),
+              ],
+            ],
+          ),
+          if (_open && detail.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 360),
+                child: SingleChildScrollView(
+                  child: Text(detail, style: _monoSmall.copyWith(color: theme.text)),
+                ),
+              ),
             ),
-            const SizedBox(width: 6),
-            AdaptiveButton(
-              label: 'Use my own key',
-              emphasis: ButtonEmphasis.secondary,
-              onPressed: () => showSettings(context, section: SettingsSection.apiKeys),
-            ),
-          ],
-          if (onRetry != null) ...[
-            const SizedBox(width: 8),
-            AdaptiveButton(label: 'Retry', emphasis: ButtonEmphasis.secondary, onPressed: onRetry),
-          ],
         ],
       ),
     );

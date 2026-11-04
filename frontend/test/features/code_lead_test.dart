@@ -4,154 +4,38 @@ import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:every_ai/core/db/app_database.dart';
+import 'package:every_ai/core/net/api_client.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/git_commands.dart' show plainPrBody;
+import 'package:every_ai/features/code/domain/no_spend.dart';
+import 'package:every_ai/features/code/domain/permissions.dart' show DenialKind, denialMessage;
 import 'package:every_ai/features/code/domain/questions.dart';
+import 'package:every_ai/features/code/domain/session_commands.dart' show AsideKind;
+import 'package:every_ai/features/code/git/git_models.dart' show SessionWorktree;
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent, userMessageEvent;
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/gateway_key.dart';
+import 'package:every_ai/features/code/mcp_providers.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
-import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
-class _FixedCatalog extends CatalogController {
-  @override
-  ModelCatalog build() => builtInCatalog;
-}
-
-/// The first value of [p] that meets [cond], now or when it changes.
-Future<T> _when<T>(ProviderContainer c, ProviderListenable<T> p, bool Function(T) cond) {
-  final done = Completer<T>();
-  final sub = c.listen<T>(p, (_, v) {
-    if (cond(v) && !done.isCompleted) done.complete(v);
-  }, fireImmediately: true);
-  return done.future.whenComplete(sub.close);
-}
-
-/// An outside agent's session: the test plays its events and reads what it was sent and answered.
-final class _Session implements HarnessSession, SteersRuns {
-  final _events = StreamController<HarnessEvent>.broadcast();
-  final answers = <({bool accept, String? reason})>[];
-  final sent = <String>[];
-  final steered = <String>[];
-
-  @override
-  String get id => 'c1';
-  @override
-  Stream<HarnessEvent> get events => _events.stream;
-
-  void add(HarnessEvent e) => _events.add(e);
-
-  @override
-  Future<void> respond({required bool accept, String? reason, List<String>? callIds}) async =>
-      answers.add((accept: accept, reason: reason));
-  @override
-  Future<void> send(String text, {bool run = true, List<String> images = const []}) async => sent.add(text);
-  @override
-  Future<void> steer(String text, {List<String> images = const []}) async => steered.add(text);
-  @override
-  Future<void> interrupt() async {}
-  @override
-  Future<void> pause() async {}
-  @override
-  Future<void> resume() async {}
-  @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {}
-  @override
-  Future<void> switchLlm(SessionSpec spec) async {}
-  @override
-  Future<void> rewindTo(String? head) async {}
-  @override
-  Future<void> close() async {}
-}
-
-final class _Driver implements HarnessDriver, AttachesBriefed {
-  _Driver(this.id, this.session, {this.needsConsent = false, this.caps = const {DriverCap.approvals}});
-  final String id;
-  final _Session session;
-  final bool needsConsent;
-  @override
-  final Set<DriverCap> caps;
-  final specs = <SessionSpec>[];
-  final reopened = <DriverBriefing>[];
-
-  @override
-  DriverInfo get info => DriverInfo(id: id, label: 'Test CLI', needsConsent: needsConsent);
-  @override
-  Future<DriverStatus> detect() async => const DriverStatus(installed: true);
-  @override
-  Future<List<DriverModel>> models() async => const [];
-  @override
-  Future<HarnessSession> start(SessionSpec spec) async {
-    specs.add(spec);
-    return session;
-  }
-
-  @override
-  Future<HarnessSession> attach(String conversationId) async => session;
-  @override
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) async {
-    reopened.add(briefing);
-    return session;
-  }
-
-  @override
-  Future<Map<String, ExecutionStatus>> statuses(List<String> conversationIds) async => const {};
-}
-
-/// The MCP host: records tokens and hands the test each session's tools.
-final class _Host implements HostServer {
-  final minted = <String>[];
-  final revoked = <String>[];
-  final revokedSessions = <String>[];
-  final tools = <String, HostTools>{};
-
-  /// Live tokens by session; a revoked one leaves.
-  final live = <String, Set<String>>{};
-  var touchOk = true;
-  var _n = 0;
-
-  @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
-    minted.add(sessionId);
-    this.tools[sessionId] = tools;
-    final token = 'tok${++_n}';
-    (live[sessionId] ??= {}).add(token);
-    return (url: Uri.parse('http://127.0.0.1:9/mcp'), token: token);
-  }
-
-  @override
-  bool touch(String token) => touchOk;
-  @override
-  Future<void> revoke(String token) async {
-    revoked.add(token);
-    for (final t in live.values) {
-      t.remove(token);
-    }
-  }
-
-  @override
-  Future<void> revokeSession(String sessionId) async {
-    revokedSessions.add(sessionId);
-    revoked.addAll(live.remove(sessionId) ?? const {});
-  }
-
-  @override
-  Future<void> stop() async {}
-}
+import '../support/fake_leads.dart';
 
 const _questions = {
   'questions': [
@@ -179,23 +63,40 @@ void main() {
   late AppDatabase db;
   late Directory tmp;
   late Directory project;
-  late _Session session;
-  late _Host host;
+  late FakeLeadSession session;
+  late FakeHost host;
   late ProviderContainer container;
-  late Map<String, _Driver> drivers;
+  late Map<String, FakeLeadDriver> drivers;
   var calls = 0;
+  final reached = <String>[];
+  // A test that wants the real key flow (minting recorded in [reached]) sets this.
+  GatewayKeys? keys;
 
   ProviderContainer make(Preferences prefs) => ProviderContainer(
     overrides: [
       databaseProvider.overrideWithValue(db),
       preferencesProvider.overrideWithValue(prefs),
-      modelCatalogProvider.overrideWith(_FixedCatalog.new),
+      modelCatalogProvider.overrideWith(FixedCatalog.new),
       codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
       driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
       hostServerProvider.overrideWithValue(host),
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       // An outside CLI runs on the user's own account: no EveryAI key is minted for it.
-      gatewayKeysProvider.overrideWith((ref) => throw StateError('no gateway key for outside agents')),
+      gatewayKeysProvider.overrideWith((ref) => keys ?? (throw StateError('no gateway key for outside agents'))),
+      // Nothing an outside lead does reaches the backend or a side model (checked after each test).
+      apiClientProvider.overrideWithValue(
+        ApiClient(
+          baseUrl: Uri.parse('http://backend/'),
+          client: MockClient((req) async {
+            reached.add('${req.method} ${req.url}');
+            return http.Response('no network in this test', 599);
+          }),
+        ),
+      ),
+      codeSideModelProvider.overrideWithValue((messages) async {
+        reached.add('side model');
+        return '';
+      }),
     ],
   );
 
@@ -212,7 +113,7 @@ void main() {
   /// The session's controller, connected.
   Future<CodeSessionController> open(String id) async {
     container.listen(codeSessionProvider(id), (_, _) {});
-    await _when(container, codeSessionProvider(id).select((s) => s.connected), (bool c) => c);
+    await whenValue(container, codeSessionProvider(id).select((s) => s.connected), (bool c) => c);
     return container.read(codeSessionProvider(id).notifier);
   }
 
@@ -236,13 +137,13 @@ void main() {
     db = AppDatabase(NativeDatabase.memory());
     tmp = await Directory.systemTemp.createTemp('code-lead');
     project = await Directory('${tmp.path}/project').create();
-    session = _Session();
-    host = _Host();
+    session = FakeLeadSession();
+    host = FakeHost();
     drivers = {
-      everyaiHarnessName: _Driver(everyaiHarnessName, session),
-      'test': _Driver('test', session),
-      'cli': _Driver('cli', session, needsConsent: true),
-      'steers': _Driver('steers', session, caps: const {DriverCap.approvals, DriverCap.steer}),
+      everyaiHarnessName: FakeLeadDriver(everyaiHarnessName, session: session),
+      'test': FakeLeadDriver('test', session: session),
+      'cli': FakeLeadDriver('cli', session: session, needsConsent: true),
+      'steers': FakeLeadDriver('steers', session: session, caps: const {DriverCap.approvals, DriverCap.steer}),
     };
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
@@ -250,6 +151,11 @@ void main() {
   });
 
   tearDown(() async {
+    keys = null;
+    CodeSessionController.liveAfter = const Duration(milliseconds: 1500);
+    final sent = [...reached];
+    reached.clear();
+    expect(sent, isEmpty, reason: 'an outside lead reached the network or a side model');
     container.dispose();
     await db.close();
     await tmp.delete(recursive: true);
@@ -394,10 +300,24 @@ void main() {
     final info = await start();
     final c = await open(info.id);
     row('a1', askUserQuestionTool, _questions);
-    final call = hostCall(info.id, askUserQuestionTool, _questions);
-    await pumpEventQueue();
+    // The card is up once the agent's row is folded.
+    await whenValue(
+      container,
+      codeSessionProvider(info.id).select((s) => s.transcript.openQuestion?.call.id),
+      (String? id) => id == 'a1',
+    );
+    // Straight to the controller (no hop through the host's ready gate), so the call is waiting when Stop runs.
+    final result = c.call(
+      HostCall(
+        id: 'h1',
+        sessionId: info.id,
+        name: askUserQuestionTool,
+        args: _questions,
+        ended: Completer<HostEnd>().future,
+      ),
+    );
     await c.stop();
-    expect((await call.result).isError, isTrue);
+    expect(await result, (text: denialMessage(DenialKind.cancelled), isError: true));
   });
 
   test('a card left open by an earlier run never takes a new call', () async {
@@ -459,6 +379,114 @@ void main() {
     await c.steer('Skip the database, use files');
     expect((await call.result).text, repliedInChat);
     expect(session.steered.single, endsWith('Skip the database, use files'));
+  });
+
+  group('EveryAI spends nothing on an outside lead', () {
+    test('/btw is off, with the reason', () async {
+      final info = await start();
+      final c = await open(info.id);
+      await c.askAside('Why SQLite?', summarizer: (_) async => fail('no model for /btw on an outside lead'));
+      final aside = stateOf(info.id).asides.single;
+      expect(aside.error, btwOff('Test CLI'));
+    });
+
+    test('/goal is refused, with the reason', () async {
+      final info = await start();
+      final c = await open(info.id);
+      expect(await c.setGoal('The tests pass'), goalOff('Test CLI'));
+      expect(stateOf(info.id).goal, isNull);
+      expect(session.sent.where((m) => m.contains('The tests pass')), isEmpty);
+    });
+
+    test('/learn writes no skill from the session or a page', () async {
+      final info = await start();
+      final c = await open(info.id);
+      session
+        ..add(userMessageEvent('u1', 'Add dark mode'))
+        ..add(agentMessageEvent('a1', 'Done.'));
+      await whenValue(container, codeSessionProvider(info.id).select((s) => s.transcript.items.length), (n) => n > 1);
+      await c.learn('');
+      await c.learn('https://example.com/guide');
+      expect([for (final a in stateOf(info.id).asides) a.error], [learnOff('Test CLI'), learnOff('Test CLI')]);
+    });
+
+    test('a commit message is the session title, with no side model', () async {
+      Future<String> git(List<String> args) async {
+        final r = await Process.run('git', ['-C', project.path, ...args]);
+        if (r.exitCode != 0) fail('git ${args.join(' ')}: ${r.stderr}');
+        return '${r.stdout}'.trim();
+      }
+
+      await git(['init', '-q', '-b', 'main']);
+      await git(['config', 'user.name', 'Dev']);
+      await git(['config', 'user.email', 'dev@example.com']);
+      File('${project.path}/a.txt').writeAsStringSync('one\n');
+      await git(['add', '-A']);
+      await git(['commit', '-q', '-m', 'Initial']);
+      final head = await git(['rev-parse', 'HEAD']);
+      File('${project.path}/a.txt').writeAsStringSync('two\n');
+      final prefs = container.read(preferencesProvider);
+      prefs['code.sessions'] = jsonEncode([
+        CodeSessionInfo(
+          id: 's1',
+          projectId: 'p1',
+          title: 'Dark mode',
+          conversationId: 'c1',
+          model: '',
+          mode: AgentMode.ask,
+          workingDir: project.path,
+          createdAt: DateTime(2026),
+          harness: 'test',
+          branch: 'main',
+          worktree: SessionWorktree(
+            repoRoot: project.path,
+            path: project.path,
+            branch: 'main',
+            baseBranch: 'main',
+            baseCommit: head,
+          ),
+        ).toJson(),
+      ]);
+      container.dispose();
+      container = make(prefs);
+      final c = await open('s1');
+      await c.draftCommit('');
+      final aside = stateOf('s1').asides.single;
+      expect((aside.kind, aside.answer, aside.error), (AsideKind.commit, 'Dark mode', null));
+      expect(plainPrBody(['Add the toggle', 'Add colours']), '- Add the toggle\n- Add colours');
+    });
+
+    test("an outside lead's own login error mints no gateway key and runs nothing again", () async {
+      keys = GatewayKeys(
+        store: _MemoryStore(),
+        mint: () async {
+          reached.add('POST v1/keys');
+          return 'sk-eai-new';
+        },
+      );
+      CodeSessionController.liveAfter = Duration.zero;
+      final info = await start();
+      await open(info.id);
+      // Past the replay window: events are live.
+      await pumpEventQueue();
+      session
+        ..add(const ConversationFailure(id: 'e1', raw: {}, message: 'Invalid API key · Please run /login'))
+        ..add(const ConversationFailure(id: 'e2', raw: {}, message: 'unexpected status 401 Unauthorized'));
+      await whenValue(
+        container,
+        codeSessionProvider(info.id).select((s) => s.transcript.items.whereType<NoticeItem>().length),
+        (n) => n >= 2,
+      );
+      await pumpEventQueue();
+      expect((session.resumes, session.llmSwitches), (0, 0));
+    });
+
+    test('approval cards ask the decider for no risk label', () async {
+      final info = await start();
+      expect(riskLabelDir(info), isNull);
+      final own = CodeSessionInfo.fromJson({...info.toJson(), 'harness': everyaiHarnessName});
+      expect(riskLabelDir(own), project.path);
+    });
   });
 
   test('/compact leaves an outside session to its own CLI', () async {
@@ -560,6 +588,20 @@ void main() {
     expect(drivers['test']!.specs.single.briefing!.mcpToken, 'tok1');
   });
 
+  test('a reopened session passes the approved MCP servers, minus one named like the app host', () async {
+    final info = await start();
+    final mcp = container.read(codeMcpServersProvider.notifier);
+    mcp.put(
+      const McpServer(name: 'charts', command: 'npx', args: ['-y', 'chart-mcp'], env: {'KEY': 'secret'}).approve(),
+    );
+    mcp.put(const McpServer(name: 'everyai', command: 'node', args: ['x.js']).approve());
+    final prefs = container.read(preferencesProvider);
+    container.dispose();
+    container = make(prefs);
+    await open(info.id);
+    expect(drivers['test']!.reopenedMcp.single.keys, ['charts']);
+  });
+
   test('a reopened child of an outside session gets no briefing, as it started', () async {
     final parent = await start();
     final child = await container
@@ -584,7 +626,7 @@ void main() {
       overrides: [
         databaseProvider.overrideWithValue(db),
         preferencesProvider.overrideWithValue(prefs),
-        modelCatalogProvider.overrideWith(_FixedCatalog.new),
+        modelCatalogProvider.overrideWith(FixedCatalog.new),
         driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
         hostServerProvider.overrideWithValue(host),
         gatewayKeysProvider.overrideWith((ref) => throw StateError('no key in tests')),
@@ -593,4 +635,14 @@ void main() {
     await expectLater(start(harness: everyaiHarnessName), throwsA(anything));
     expect(host.minted, isEmpty);
   });
+}
+
+final class _MemoryStore implements SecretStore {
+  final values = <String, String>{};
+  @override
+  Future<String?> read(String key) async => values[key];
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
+  @override
+  Future<void> delete(String key) async => values.remove(key);
 }

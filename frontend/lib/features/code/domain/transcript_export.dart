@@ -40,9 +40,23 @@ String transcriptMarkdown(CodeSessionInfo info, List<HarnessEvent> events, {Usag
   out.writeln(
     '- Tool calls: ${calls.length}${byTool.isEmpty ? '' : ' (${(byTool.entries.toList()..sort((a, b) => b.value - a.value)).map((e) => '${e.key} ${e.value}').join(', ')})'}',
   );
-  out.writeln();
+  out
+    ..writeln()
+    ..write(transcriptSteps(events, resultCap: resultCap));
+  return out.toString();
+}
 
-  final callsById = {for (final c in calls) c.id: c};
+/// [events] as Markdown, oldest first: each message, tool call and result
+/// (results cut to [resultCap] characters), stamped with the time since the
+/// first event when the events carry timestamps.
+String transcriptSteps(List<HarnessEvent> events, {int resultCap = 4000}) {
+  final out = StringBuffer();
+  DateTime? first;
+  for (final e in events) {
+    first = _time(e);
+    if (first != null) break;
+  }
+  final callsById = {for (final c in events.whereType<ActionCall>()) c.id: c};
   for (final e in events) {
     final at = _time(e);
     final stamp = at == null || first == null ? '' : ' _(+${_duration(at.difference(first))})_';
