@@ -36,7 +36,6 @@ import 'domain/spill.dart';
 import 'domain/phases.dart'
     show
         Phase,
-        bugCheckTool,
         flowLabel,
         isResearchWorker,
         maxResearchAtOnce,
@@ -76,7 +75,9 @@ import 'harness/harness.dart';
 import 'harness/session_processes.dart';
 import 'harness/summarizer.dart';
 import 'host/host.dart';
+import 'host/host_checks.dart';
 import 'host/host_notes.dart';
+import 'host/host_output.dart';
 import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
@@ -163,10 +164,14 @@ final driverDataDirProvider = Provider<Future<String> Function()>((ref) => GitSe
 /// id. Never stored: tokens die with the app.
 final _hostTokensProvider = Provider<Map<String, String>>((ref) => {});
 
-/// What the session text tells an outside agent about each host tool, in
-/// `hostToolSpecs` order. bug_check is left out until outside agents get Bug
-/// fix mode.
-const _hostToolInfos = <HostToolInfo>[
+/// What the session text tells an outside agent about each host tool it is
+/// offered, in `hostToolSpecs` order.
+List<HostToolInfo> get _hostToolInfos => [
+  for (final t in [..._baseToolInfos, ...checkToolInfos])
+    if (hostToolSpecs.any((s) => s['name'] == t.name)) t,
+];
+
+const _baseToolInfos = <HostToolInfo>[
   (
     name: askUserQuestionTool,
     when:
@@ -1514,8 +1519,25 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return hostMemory(dir, call.args);
       case savedPlansTool:
         return hostSavedPlans(dir, call.args);
-      case bugCheckTool:
-        return (text: "Error: bug_check is for Bug fix mode, which this session isn't in.", isError: true);
+      case final name when checkToolNames.contains(name):
+        final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        final context = HostCheckContext(
+          sessionId: sessionId,
+          workingDir: dir,
+          stateDir: await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId),
+          worktree: info?.worktree,
+          goal: state.goal,
+          refusal: (command) => hostRunRefusal(
+            policy: policy,
+            mode: state.mode,
+            tool: name,
+            args: call.args,
+            command: command,
+            transcript: state.transcript,
+            decided: _decided,
+          ),
+        );
+        return hostFit(dir, 'host-${DateTime.now().millisecondsSinceEpoch}-$name', await hostCheckTool(call, context));
       default:
         return (text: 'Error: there is no EveryAI tool called ${call.name}.', isError: true);
     }

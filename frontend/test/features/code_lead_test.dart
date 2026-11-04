@@ -28,6 +28,7 @@ import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
+import 'package:every_ai/features/code/host/host_script.dart' show hostScriptsAvailable;
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -171,7 +172,9 @@ void main() {
     expect(File('$root/session.md').readAsStringSync(), b.sessionSkill);
     expect(b.sessionSkill, contains('# EveryAI session'));
     expect(b.sessionSkill, contains('`ask_user_question`'));
-    expect(b.sessionSkill, isNot(contains('bug_check')));
+    for (final tool in ['bug_check', 'check', 'diff_stats', 'goal_check']) {
+      expect(b.sessionSkill, contains('`$tool`'));
+    }
     expect(spec.llmApiKey, isEmpty);
     expect(spec.phaseFlow, isNull);
     expect(spec.initialMessage, startsWith('<everyai-mode name="ask">'));
@@ -404,12 +407,20 @@ void main() {
       expect(aside.error, btwOff('Test CLI'));
     });
 
-    test('/goal is refused, with the reason', () async {
+    test('/goal is kept for goal_check, with no judge model', () async {
       final info = await start();
       final c = await open(info.id);
-      expect(await c.setGoal('The tests pass'), goalOff('Test CLI'));
-      expect(stateOf(info.id).goal, isNull);
-      expect(session.sent.where((m) => m.contains('The tests pass')), isEmpty);
+      session.add(stateEvent('r0', ExecutionStatus.finished));
+      await pumpEventQueue();
+      expect(await c.setGoal('The tests pass'), isNull);
+      expect(stateOf(info.id).goal?.note, goalByLeadNote);
+      expect(session.sent.last, endsWith(goalLeadMessage('The tests pass')));
+      // A finished turn asks no judge (the tearDown fails on a side-model call).
+      session.add(agentMessageEvent('a1', 'Done.'));
+      session.add(stateEvent('r1', ExecutionStatus.finished));
+      await pumpEventQueue();
+      final check = await hostCall(info.id, 'goal_check', const {}).result;
+      expect(check.text, allOf(startsWith('Goal: The tests pass'), contains('<goal-check>'), contains('sub-agent')));
     });
 
     test('/learn writes no skill from the session or a page', () async {
@@ -543,7 +554,7 @@ void main() {
     expect((await hostCall(info.id, savedPlansTool, {'name': 'notes.txt'}).result).isError, isTrue);
   });
 
-  test('memory and saved plans run in the session folder; bug_check is for Bug fix', () async {
+  test('memory and saved plans run in the session folder; bug_check checks its action', () async {
     final info = await start();
     await open(info.id);
     final added = await hostCall(info.id, 'memory', {'action': 'add', 'text': '- Run make test', 'reason': 'r'}).result;
@@ -557,7 +568,32 @@ void main() {
     expect((await hostCall(info.id, savedPlansTool, {'name': '../memory.md'}).result).isError, isTrue);
     final bug = await hostCall(info.id, 'bug_check', const {}).result;
     expect(bug.isError, isTrue);
-    expect(bug.text, contains('Bug fix'));
+    expect(bug.text, contains('reproduced, verify or status'));
+  });
+
+  test('the checks answer an outside lead without a model, and run no command it has no approval for', () async {
+    final info = await start();
+    await open(info.id);
+    expect((await hostCall(info.id, 'diff_stats', const {}).result).text, contains('git diff --stat'));
+    expect((await hostCall(info.id, 'goal_check', const {}).result).text, contains('No goal is set'));
+    final check = await hostCall(info.id, 'check', {
+      'files': ['notes.txt'],
+    }).result;
+    expect(check.isError, true);
+    expect(check.text, contains('No test found for: notes.txt'));
+    // Ask mode and no approved row of the agent's: whoever holds the token can't run a command through the app.
+    final bug = await hostCall(info.id, 'bug_check', {'action': 'reproduced', 'command': 'touch ran'}).result;
+    expect(bug.isError, true);
+    expect(bug.text, contains('approval'));
+    expect(File('${project.path}/ran').existsSync(), isFalse);
+    final floor = await hostCall(info.id, 'bug_check', {'action': 'reproduced', 'command': 'rm -rf ~'}).result;
+    expect(floor.text, contains('EveryAI never runs this'));
+    if (hostScriptsAvailable) {
+      final script = await hostCall(info.id, 'run_script', {
+        'code': 'console.log(await decide("x", []).catch(e => e.message))',
+      }).result;
+      expect(script.text, contains('decide is off here'));
+    }
   });
 
   test('an expired token gets a note at the next turn', () async {

@@ -232,8 +232,8 @@ String relativeTo(String path, String? dir) {
 /// The shell command of a terminal action (not keystrokes to a running process).
 String? _command(ActionCall call) => call.actionKind == 'TerminalAction' && call.action['is_input'] != true
     ? call.str('command')
-    // Bug fix mode's repro runs a command too, checked the same way.
-    : call.toolName == 'bug_check' && call.str('command').isNotEmpty
+    // Bug fix mode's repro runs a command too (the host's for an outside agent), checked the same way.
+    : (call.toolName == 'bug_check' || hostToolOf(call) == 'bug_check') && call.str('command').isNotEmpty
     ? call.str('command')
     : null;
 

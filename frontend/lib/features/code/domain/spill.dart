@@ -25,8 +25,10 @@ final class Spill {
 }
 
 /// The result's text when it is over the limits, else null.
-Spill? spillOf(ToolResult r) {
-  final text = r.text;
+Spill? spillOf(ToolResult r) => spillText(r.text);
+
+/// [text] when it is over the limits, else null.
+Spill? spillText(String text) {
   final bytes = utf8.encode(text).length;
   final lines = '\n'.allMatches(text).length + 1;
   if (lines <= spillMaxLines && bytes <= spillMaxBytes) return null;

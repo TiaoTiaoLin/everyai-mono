@@ -127,13 +127,20 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
   // -------------------------------------------------------------------- /goal
 
   /// Sets a standing objective: after each turn a cheap judge checks it and,
-  /// while it isn't met and turns remain, sends the agent back to work.
-  /// Returns why it can't be set (an outside lead: the judge is an EveryAI
-  /// model), else null.
+  /// while it isn't met and turns remain, sends the agent back to work. On an
+  /// outside lead no EveryAI model judges: the goal is kept for its
+  /// goal_check tool, and the start message tells the lead to use it.
+  /// Returns why it can't be set, else null.
   Future<String?> setGoal(String objective, {int budget = defaultGoalTurns}) async {
-    if (_info case final info? when _outside(info)) return goalOff(_leadLabel(info.harness));
-    final goal = Goal(objective: objective.trim(), budget: budget);
+    final info = _info;
+    final outside = info != null && _outside(info);
+    final goal = Goal(objective: objective.trim(), budget: budget, note: outside ? goalByLeadNote : '');
     state = state.copyWith(goal: goal);
+    // The lead hears it now, or after its turn (a message sent while it works waits in the queue).
+    if (outside) {
+      await send(goalLeadMessage(goal.objective));
+      return null;
+    }
     final moment = goalMoment(state.transcript, queued: state.queued.isNotEmpty);
     if (moment == GoalMoment.user) {
       state = state.copyWith(
@@ -159,6 +166,8 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
   void _goalTick({required bool turnEnded}) {
     final goal = state.goal;
     if (goal == null || goal.status.settled || _judging) return;
+    // An outside lead judges its goal itself (goal_check).
+    if (_info case final info? when _outside(info)) return;
     final t = state.transcript;
     if (t.running) {
       if (goal.status == GoalStatus.waiting) state = state.copyWith(goal: goal.copyWith(status: GoalStatus.active));

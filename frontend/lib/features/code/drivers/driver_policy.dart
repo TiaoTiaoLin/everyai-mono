@@ -74,12 +74,35 @@ const _knownKinds = {
 };
 
 /// The tools the app's MCP host offers an outside agent (`host/host.dart`).
-const hostToolNames = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool, bugCheckTool};
+const hostToolNames = {
+  askUserQuestionTool,
+  presentPlanTool,
+  'memory',
+  savedPlansTool,
+  bugCheckTool,
+  'check',
+  'diff_stats',
+  'goal_check',
+  'run_script',
+};
 
 /// The host tools the policy lets run without asking: they only show the
-/// user a card or read and write the project's notes. bug_check runs a
-/// command, so it goes through the mode like any other.
-const trustedHostTools = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool};
+/// user a card, read and write the project's notes, or read the session
+/// (diff_stats, goal_check, run_script's sandboxed reads). bug_check and
+/// check run a command, so they go through the mode like any other.
+const trustedHostTools = {
+  askUserQuestionTool,
+  presentPlanTool,
+  'memory',
+  savedPlansTool,
+  'diff_stats',
+  'goal_check',
+  'run_script',
+};
+
+/// The host tools that run a command in the app: an outside agent's own
+/// permission flow must ask the session about them.
+const hostRunTools = {bugCheckTool, 'check'};
 
 /// The host tool an outside agent's [call] is (`ask_user_question`, …), or
 /// null when it calls another MCP server. CLIs name MCP tools their own

@@ -8,8 +8,9 @@ import 'host_server_stub.dart' if (dart.library.io) 'host_server_io.dart' as imp
 // EveryAI as an MCP server for the agents it drives (Claude Code, Codex, …):
 // a loopback-only endpoint at `http://127.0.0.1:<port>/mcp` that gives a
 // session's agent our own tools (question cards, plan approval, project
-// memory, saved plans, bug_check). Each session gets its own bearer token,
-// which its briefing hands to the agent; the token dies with the session.
+// memory, saved plans, checks, run_script). Each session gets its own
+// bearer token, which its briefing hands to the agent; the token dies with
+// the session.
 
 /// Why a pending call was given up before [HostTools] answered it. The
 /// implementation withdraws its card then; a later answer is ignored.
@@ -34,9 +35,9 @@ typedef HostResult = ({String text, bool isError});
 
 /// What a session offers through the server; the session controller
 /// implements it and dispatches by [HostCall.name] (one of [hostToolSpecs]).
-/// The server checks only the token: a call that runs something (bug_check's
-/// `command`) must pass the session's own permission decision first, as the
-/// EveryAI harness does, since it runs in the app outside the agent's sandbox.
+/// The server checks only the token: a call that runs something (bug_check,
+/// check) must pass the session's own permission decision first
+/// (`hostRunRefusal`), since it runs in the app outside the agent's sandbox.
 abstract interface class HostTools {
   Future<HostResult> call(HostCall call);
 }
@@ -51,8 +52,8 @@ typedef HostTimer = Timer Function(Duration after, void Function() fire);
 /// The app's one MCP host. It listens only while a token is live.
 abstract interface class HostServer {
   /// A new token for [sessionId], whose calls go to [tools]. Binds the
-  /// server on first use. bug_check is listed only when [bugFix].
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false});
+  /// server on first use.
+  Future<HostToken> mint(String sessionId, HostTools tools);
 
   /// Marks [token] as used now, so it doesn't expire while the session idles
   /// (call it at each turn). False when it already expired: the agent then
@@ -82,8 +83,7 @@ HostServer createHostServer({
 }) => impl.createHostServer(idleLimit: idleLimit, heldLimit: heldLimit, keepAlive: keepAlive, now: now, timer: timer);
 
 /// The tools a session token sees, MCP-shaped, in a fixed order (an agent's
-/// prompt cache keeps them); bug_check only for Bug fix sessions. Empty where
-/// the server can't run.
+/// prompt cache keeps them). Empty where the server can't run.
 List<Map<String, Object?>> get hostToolSpecs => impl.hostToolSpecs;
 
 /// The calls that wait for the user, so they get [createHostServer]'s

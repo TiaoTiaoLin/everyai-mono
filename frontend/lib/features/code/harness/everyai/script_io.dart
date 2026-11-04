@@ -244,6 +244,7 @@ final class ScriptRunner {
     required this.gateway,
     required this.sessionTag,
     this.pathMap = const {},
+    this.offline = false,
   });
 
   final String deno;
@@ -255,6 +256,10 @@ final class ScriptRunner {
   final ToolRunner tools;
   final GatewayClient gateway;
   final String sessionTag;
+
+  /// For a session EveryAI doesn't lead (the MCP host's run_script): only
+  /// readFile, grep and glob work, so nothing reaches a model or the web.
+  final bool offline;
 
   var _runs = 0;
 
@@ -421,6 +426,12 @@ final class ScriptRunner {
       return out.text;
     }
 
+    if (offline && _spends.contains(fn)) {
+      throw Exception(
+        '$fn is off here: EveryAI spends nothing while another harness leads this session, so scripts get '
+        'readFile, grep and glob only',
+      );
+    }
     String? path() => switch (args['path']) {
       final String p when p.trim().isNotEmpty => _inside(p),
       _ => null,
@@ -492,6 +503,9 @@ final class ScriptRunner {
         throw Exception('there is no function $fn');
     }
   }
+
+  /// The bridge functions that reach a model or the web.
+  static const _spends = {'decide', 'llmQuery', 'webFetch', 'webSearch'};
 
   static const _queryRules =
       'You answer one sub-question for a coding agent that called you from a script. Answer only from the text '

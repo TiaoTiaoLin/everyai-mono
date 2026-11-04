@@ -115,7 +115,7 @@ final class _Host implements HostServer {
   var _n = 0;
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async =>
+  Future<HostToken> mint(String sessionId, HostTools tools) async =>
       (url: Uri.parse('http://127.0.0.1:9/mcp'), token: 'tok${++_n}');
   @override
   bool touch(String token) => true;
