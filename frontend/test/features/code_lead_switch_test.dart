@@ -25,6 +25,7 @@ import 'package:every_ai/features/code/handoff/handoff_store.dart';
 import 'package:every_ai/features/code/handoff/lead_timeline.dart';
 import 'package:every_ai/features/code/handoff/native_import.dart';
 import 'package:every_ai/features/code/harness/events.dart';
+import 'package:every_ai/features/code/harness/harness.dart' show NativeCommand, NativeMode, HarnessError;
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
@@ -79,11 +80,11 @@ void main() {
   CodeSessionInfo infoOf(String id) => sessions().byId(id)!;
   Transcript transcriptOf(String id) => container.read(codeSessionProvider(id)).transcript;
 
-  Future<CodeSessionInfo> start({String harness = 'alpha'}) => sessions().start(
+  Future<CodeSessionInfo> start({String harness = 'alpha', AgentMode mode = AgentMode.ask}) => sessions().start(
     project: container.read(codeProjectsProvider).single,
     prompt: 'Add dark mode',
     model: '',
-    mode: AgentMode.ask,
+    mode: mode,
     harness: harness,
   );
 
@@ -582,6 +583,206 @@ void main() {
     expect(outcome.failed || outcome.busy, isFalse);
     expect(a.interrupts, 1);
     expect(infoOf(info.id).harness, 'beta');
+  });
+
+  test("an outside lead's / command goes through as is: no mode note, no handoff; refused while busy", () async {
+    final info = await start();
+    final c = await open(info.id);
+    final a = d('alpha').latest!;
+    await turn(a, 'a1', 'Added the toggle.');
+    sessions().update(infoOf(info.id).copyWith(pendingHandoff: '<everyai-handoff>…</everyai-handoff>'));
+    final sentBefore = [...a.sent];
+    expect(await c.runNativeCommand('review', 'x'), isNull);
+    expect(a.ran, ['review|x']);
+    expect(a.sent, sentBefore);
+    expect(infoOf(info.id).pendingHandoff, isNotEmpty);
+
+    a.add(stateEvent('a2-s', ExecutionStatus.running));
+    await pumpEventQueue();
+    expect(await c.runNativeCommand('init', ''), contains('working'));
+    expect(a.ran, ['review|x']);
+  });
+
+  group('native modes', () {
+    const modes = [
+      NativeMode(id: 'careful', label: 'Careful', policy: AgentMode.ask),
+      NativeMode(id: 'planner', label: 'Planner', policy: AgentMode.plan),
+      NativeMode(id: 'wild', label: 'Wild', policy: AgentMode.fullAuto, blocked: 'Not offered.'),
+    ];
+
+    Future<(CodeSessionInfo, CodeSessionController, FakeLeadSession)> withModes() async {
+      final info = await start();
+      final c = await open(info.id);
+      final a = d('alpha').latest!;
+      await turn(a, 'a1', 'Added the toggle.');
+      a.modeFeed.set(modes: modes, current: 'careful');
+      await pumpEventQueue();
+      return (info, c, a);
+    }
+
+    test('a pick by name sets its policy, is kept with the session, and no EveryAI mode note goes out', () async {
+      final (info, c, a) = await withModes();
+      final state = container.read(codeSessionProvider(info.id));
+      expect(state.nativeModes, modes);
+      expect(state.nativeMode, 'careful');
+      expect(await c.setNativeMode('planner'), isNull);
+      expect(a.picked, ['planner']);
+      expect(container.read(codeSessionProvider(info.id)).mode, AgentMode.plan);
+      expect((infoOf(info.id).mode, infoOf(info.id).nativeMode), (AgentMode.plan, 'planner'));
+      await c.send('Now plan the settings page.');
+      expect(a.sent.last, 'Now plan the settings page.');
+      expect(a.modes, isEmpty);
+    });
+
+    test('a greyed or refused pick changes nothing', () async {
+      final (info, c, a) = await withModes();
+      expect(await c.setNativeMode('wild'), 'Not offered.');
+      a.pickFails = const HarnessError('No.');
+      expect(await c.setNativeMode('planner'), 'No.');
+      expect(a.picked, isEmpty);
+      final state = container.read(codeSessionProvider(info.id));
+      expect((state.mode, state.nativeMode, infoOf(info.id).nativeMode), (AgentMode.ask, 'careful', 'careful'));
+    });
+
+    test('our modes map to its own: the nearest that asks as much, else a notice and no change', () async {
+      final (info, c, a) = await withModes();
+      await c.setMode(AgentMode.autoEdit);
+      expect(a.picked, ['careful']);
+      a.modeFeed.set(modes: [modes.first, modes.last]);
+      await pumpEventQueue();
+      await c.setMode(AgentMode.plan);
+      expect(a.picked, ['careful']);
+      expect(container.read(codeSessionProvider(info.id)).mode, AgentMode.ask);
+      expect(transcriptOf(info.id).items.whereType<NoticeItem>().last.message, 'Alpha has no Plan mode.');
+    });
+
+    test('a mode change the harness makes itself moves the policy', () async {
+      final (info, _, a) = await withModes();
+      a.modeFeed.set(current: 'planner');
+      await pumpEventQueue();
+      expect(container.read(codeSessionProvider(info.id)).mode, AgentMode.plan);
+      expect(infoOf(info.id).nativeMode, 'planner');
+    });
+
+    /// A session started in [mode] whose lead then lists [list], now in [current].
+    Future<(CodeSessionInfo, CodeSessionController, FakeLeadSession)> startedIn(
+      AgentMode mode, {
+      List<NativeMode> list = modes,
+      String current = 'careful',
+    }) async {
+      final info = await start(mode: mode);
+      final c = await open(info.id);
+      final a = d('alpha').latest!;
+      await turn(a, 'a1', 'Looked around.');
+      a.modeFeed.set(modes: list, current: current);
+      await pumpEventQueue();
+      return (info, c, a);
+    }
+
+    test('started in Full auto, the lead lists only asking modes: the policy follows the one it runs in', () async {
+      final (info, _, a) = await startedIn(AgentMode.fullAuto);
+      final state = container.read(codeSessionProvider(info.id));
+      // Before the fix the picker showed Careful while Full auto approved every call.
+      expect((state.mode, state.nativeMode, state.inNativeMode), (AgentMode.ask, 'careful', true));
+      expect((infoOf(info.id).mode, infoOf(info.id).nativeMode), (AgentMode.ask, 'careful'));
+      expect(a.picked, isEmpty);
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().last.message,
+        'Alpha has no Full auto mode; it runs in Careful.',
+      );
+    });
+
+    test('started in Plan while the lead runs its default: it moves to its own plan mode', () async {
+      final (info, c, a) = await startedIn(AgentMode.plan);
+      expect(a.picked, ['planner']);
+      final state = container.read(codeSessionProvider(info.id));
+      expect((state.mode, state.nativeMode, state.inNativeMode), (AgentMode.plan, 'planner', true));
+      await c.send('Go on.');
+      expect(a.sent.last, 'Go on.');
+    });
+
+    test('started in Plan on a lead with no plan mode: our Plan, its note and our picker stay', () async {
+      final (info, c, a) = await startedIn(AgentMode.plan, list: [modes.first, modes.last]);
+      expect(a.picked, isEmpty);
+      final state = container.read(codeSessionProvider(info.id));
+      expect((state.mode, state.inNativeMode), (AgentMode.plan, false));
+      await c.send('Go on.');
+      expect(a.sent.last, startsWith('<everyai-mode name="plan"'));
+    });
+
+    test('a reopen before the list loads: no mode note when the session was last in a native mode', () async {
+      final (info, _, _) = await withModes();
+      expect(infoOf(info.id).nativeMode, 'careful');
+      container.dispose();
+      container = make();
+      final c = await open(info.id);
+      final again = d('alpha').latest!;
+      await c.send('Carry on.');
+      expect(again.sent.last, 'Carry on.');
+    });
+
+    test("in its own plan mode, the lead's plan exit (ExitPlanMode) asks the user instead of being refused", () async {
+      final (info, c, a) = await withModes();
+      expect(await c.setNativeMode('planner'), isNull);
+      a
+        ..add(actionEvent(id: 'x1', toolName: 'ExitPlanMode', kind: 'ClaudeToolAction', args: {'plan': '1. Do it'}))
+        ..add(stateEvent('x1-s', ExecutionStatus.waitingForConfirmation));
+      await pumpEventQueue();
+      expect(a.answers, isEmpty);
+      expect(transcriptOf(info.id).pending.map((p) => p.id), ['x1']);
+    });
+
+    test('without its own modes the session keeps ours and the mode note', () async {
+      final info = await start();
+      final c = await open(info.id);
+      final a = d('alpha').latest!;
+      await turn(a, 'a1', 'Added the toggle.');
+      expect(container.read(codeSessionProvider(info.id)).nativeModes, isEmpty);
+      await c.setMode(AgentMode.plan);
+      expect(a.modes, [AgentMode.plan]);
+      await c.send('Plan it.');
+      expect(a.sent.last, contains('<everyai-mode'));
+    });
+  });
+
+  test("a / command the driver's transport rejects comes back as a message, not an uncaught error", () async {
+    final info = await start();
+    final c = await open(info.id);
+    final a = d('alpha').latest!;
+    await turn(a, 'a1', 'Added the toggle.');
+    a.runFails = const FormatException('400 Bad Request');
+    expect(await c.runNativeCommand('review', 'security'), contains("didn't run"));
+  });
+
+  test("an outside lead's menu is empty, not EveryAI's, until it lists its commands", () async {
+    final info = await start();
+    await open(info.id);
+    container.listen(nativeSlashMenuProvider(info.id), (_, _) {});
+    expect(container.read(nativeSlashMenuProvider(info.id)), isEmpty);
+    d('alpha').latest!.nativeCommands.set(const [NativeCommand(name: 'alpha-cmd')]);
+    await pumpEventQueue();
+    final menu = container.read(nativeSlashMenuProvider(info.id))!;
+    expect(menu.single.name, 'alpha-cmd');
+    // The mapped list is kept until the commands change, so the open menu isn't rebuilt per streamed token.
+    await turn(d('alpha').latest!, 'a2', 'More text.');
+    expect(identical(container.read(nativeSlashMenuProvider(info.id)), menu), isTrue);
+  });
+
+  test('the / menu follows the lead: the new one\'s commands after a switch', () async {
+    final info = await start();
+    final c = await open(info.id);
+    await turn(d('alpha').latest!, 'a1', 'Added the toggle.');
+    d('alpha').latest!.nativeCommands.set(const [NativeCommand(name: 'alpha-cmd')]);
+    final seen = <List<NativeCommand>?>[];
+    container.listen(nativeCommandsProvider(info.id), (_, v) {
+      if (v case AsyncData(:final value)) seen.add(value);
+    }, fireImmediately: true);
+    await pumpEventQueue();
+    expect(seen.last?.single.name, 'alpha-cmd');
+    await c.switchLead('beta', run: false);
+    d('beta').latest!.nativeCommands.set(const [NativeCommand(name: 'beta-cmd')]);
+    await pumpEventQueue();
+    expect(seen.last?.single.name, 'beta-cmd');
   });
 
   test('switching from the menu sends the handoff with the next message', () async {

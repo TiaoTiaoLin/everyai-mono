@@ -48,6 +48,10 @@ enum DriverCap {
 
   /// Takes a reasoning effort.
   effort,
+
+  /// Has modes of its own (`NativeModes`): the picker shows them, and no
+  /// EveryAI mode note goes with its messages.
+  nativeModes,
 }
 
 /// Who a driver is: [id] is the name stored with its sessions
@@ -159,6 +163,21 @@ abstract interface class ChecksResume {
   /// Why [conversationId] can't be resumed, or null when it can (or can't be told).
   Future<String?> resumeProblem(String conversationId);
 }
+
+/// A driver whose session starts in one of its own modes, under the app's
+/// policy for it, for some of our modes. The first message of a session
+/// started in such a mode goes without the `<everyai-mode>` note (the
+/// harness has its own instructions for it); any other start gets the note,
+/// and the session moves to a native mode once it lists them.
+abstract interface class StartsInNativeMode {
+  /// Whether a session started in [mode] runs in a native mode whose policy
+  /// is [mode] from its first message.
+  bool startsNatively(AgentMode mode);
+}
+
+/// [StartsInNativeMode.startsNatively] for [driver]; false without it.
+bool startsNatively(HarnessDriver? driver, AgentMode mode) =>
+    driver is StartsInNativeMode && (driver as StartsInNativeMode).startsNatively(mode);
 
 /// A driver that says how it holds each mode (its sandbox, its own approval
 /// modes), for the session's fidelity line. Optional: without it the line

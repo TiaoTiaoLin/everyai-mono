@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import '../../domain/agent_mode.dart';
 import '../../harness/events.dart';
+import '../../harness/harness.dart' show NativeMode;
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart';
 import '../driver.dart';
@@ -45,6 +46,57 @@ String permissionModeFor(AgentMode mode) => switch (mode) {
   AgentMode.autoEdit => 'acceptEdits',
   AgentMode.ask || AgentMode.fullAuto => 'default',
 };
+
+/// Claude Code's own permission modes for the picker, each under the app's
+/// policy for it (our hook still decides every call). `auto` only when the
+/// session's model supports it ([claudeAutoMode]); `bypassPermissions` is
+/// listed greyed, never offered; `dontAsk` and `manual` are left out (our
+/// hook's answers would undo `dontAsk`).
+List<NativeMode> claudeModes({required bool autoMode}) => [
+  const NativeMode(
+    id: 'default',
+    label: 'Default',
+    description: 'Asks before edits and commands',
+    policy: AgentMode.ask,
+  ),
+  const NativeMode(
+    id: 'acceptEdits',
+    label: 'Accept edits',
+    description: 'Edits files without asking; commands still ask',
+    policy: AgentMode.autoEdit,
+  ),
+  const NativeMode(
+    id: 'plan',
+    label: 'Plan mode',
+    description: 'Reads and plans; changes nothing until you approve the plan',
+    policy: AgentMode.plan,
+  ),
+  if (autoMode)
+    const NativeMode(
+      id: 'auto',
+      label: 'Auto mode',
+      description: "Works without asking; EveryAI's safety check still runs before each call",
+      policy: AgentMode.fullAuto,
+    ),
+  const NativeMode(
+    id: 'bypassPermissions',
+    label: 'Bypass permissions',
+    policy: AgentMode.fullAuto,
+    blocked: 'Not offered: it would skip the check EveryAI runs before each call.',
+  ),
+];
+
+/// Whether [model] (the session's, as the app names it) supports Claude's
+/// `auto` mode, from the `initialize` reply's `models` (`supportsAutoMode`).
+bool claudeAutoMode(Map<String, Object?> initReply, String model) {
+  final want = claudeModelArg(model) ?? 'default';
+  for (final m in initReply['models'] as List<Object?>? ?? const []) {
+    if (m case {'value': final String v} when v == want || m['resolvedModel'] == want) {
+      return m['supportsAutoMode'] == true;
+    }
+  }
+  return false;
+}
 
 /// The `--model` value for [model], or null for Claude's own default. Takes
 /// Claude's aliases and ids as they are, and an OpenRouter id
@@ -95,6 +147,7 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
   required String sessionId,
   required bool resume,
   required AgentMode mode,
+  String? nativeMode,
   String model = '',
   String? effort,
   Delivery? briefing,
@@ -113,7 +166,7 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
       '--permission-prompt-tool',
       'stdio',
       '--permission-mode',
-      permissionModeFor(mode),
+      nativeMode ?? permissionModeFor(mode),
       ..._userSettingsOnly,
       ...resume ? ['--resume', sessionId] : ['--session-id', sessionId],
       if (m != null) ...['--model', m],

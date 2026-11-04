@@ -2,6 +2,9 @@ import 'package:every_ai/core/platform/platform_kind.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/ui/code_composer.dart';
+import 'package:every_ai/features/code/harness/harness.dart';
+import 'package:every_ai/features/slash/code_commands.dart';
+import 'package:every_ai/features/slash/native_commands.dart';
 import 'package:every_ai/features/slash/slash_command.dart';
 import 'package:every_ai/features/slash/slash_registry.dart';
 import 'package:flutter/services.dart';
@@ -105,8 +108,13 @@ void main() {
     final sent = <String>[];
     AgentMode? mode;
 
-    Widget host() => ProviderScope(
-      overrides: [slashCommandsProvider.overrideWithValue(commands)],
+    Widget host({
+      List<SlashCommand>? native,
+      CodeSlashHost? slashHost,
+      List<SlashCommand>? everyai,
+      Future<String?> Function(String name, String args)? unlisted,
+    }) => ProviderScope(
+      overrides: [slashCommandsProvider.overrideWithValue(everyai ?? commands)],
       child: m.MaterialApp(
         home: m.Material(
           child: EveryThemeScope(
@@ -118,6 +126,9 @@ void main() {
                 mode: AgentMode.ask,
                 onModeChanged: (m) => mode = m,
                 onSend: (text, _) => sent.add(text),
+                commands: native,
+                slashHost: slashHost,
+                onUnlistedCommand: unlisted,
               ),
             ),
           ),
@@ -211,6 +222,130 @@ void main() {
       await tester.tap(row('compact'));
       await tester.pump();
       expect(ran, ['compact|']);
+    });
+
+    group('an outside harness', () {
+      final nativeRan = <String>[];
+      final native = nativeSlashCommands(
+        const [
+          NativeCommand(name: 'review', description: 'Review changes'),
+          NativeCommand(name: 'web', description: 'Search the web', argsHint: '<query>'),
+        ],
+        (name, args) async {
+          nativeRan.add('$name|$args');
+          return null;
+        },
+      );
+      final calls = <String>[];
+      final slashHost = CodeSlashHost(
+        setMode: (_) {},
+        rewind: (a) => calls.add('rewind|$a'),
+        commit: (a) => calls.add('commit|$a'),
+        pr: (a) => calls.add('pr|$a'),
+        cost: () => calls.add('cost'),
+        morning: () => calls.add('morning'),
+      );
+      setUp(() {
+        nativeRan.clear();
+        calls.clear();
+      });
+
+      desktop("the menu lists only the harness's commands; one runs natively, an unlisted one is a message", (
+        tester,
+      ) async {
+        await tester.pumpWidget(host(native: native, slashHost: slashHost));
+        await type(tester, '/');
+        expect(row('review'), findsOneWidget);
+        expect(row('web'), findsOneWidget);
+        for (final n in ['compact', 'plan', 'stop', 'pdf-tools']) {
+          expect(row(n), findsNothing);
+        }
+        expect(find.text('Commands'), findsOneWidget);
+        expect(find.text('Built-in'), findsNothing);
+
+        await type(tester, '/review x');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(nativeRan, ['review|x']);
+        expect(sent, isEmpty);
+
+        await type(tester, '/plan now');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, ['/plan now']);
+        expect(ran, isEmpty);
+      });
+
+      desktop('before the harness lists its commands, a typed /name still goes to it as a command', (tester) async {
+        final typed = <String>[];
+        await tester.pumpWidget(
+          host(
+            native: const [],
+            slashHost: slashHost,
+            unlisted: (name, args) async {
+              typed.add('$name|$args');
+              return null;
+            },
+          ),
+        );
+        await type(tester, '/compress now');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(typed, ['compress|now']);
+        expect(sent, isEmpty);
+
+        await type(tester, '/usr/bin is slow');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, ['/usr/bin is slow']);
+      });
+
+      desktop('a command refused while the agent works goes back in the box', (tester) async {
+        final busy = nativeSlashCommands(const [
+          NativeCommand(name: 'review'),
+        ], (_, _) async => 'The agent is working.');
+        await tester.pumpWidget(host(native: busy, slashHost: slashHost));
+        await type(tester, '/review the auth changes');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(find.text('/review the auth changes'), findsOneWidget);
+        expect(find.text('The agent is working.'), findsOneWidget);
+        await tester.pumpAndSettle(const Duration(seconds: 10));
+      });
+
+      desktop('the app actions are a menu whose rows call what their / commands call', (tester) async {
+        await tester.pumpWidget(host(native: native, slashHost: slashHost));
+        for (final (label, call) in [
+          ('Rewind last turn', 'rewind|'),
+          ('Commit…', 'commit|'),
+          ('Pull request…', 'pr|'),
+          ('Cost', 'cost'),
+          ('Morning brief', 'morning'),
+        ]) {
+          await tester.tap(find.byType(SessionActionsButton));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(label));
+          await tester.pumpAndSettle();
+          expect(calls.last, call);
+        }
+        expect(calls, hasLength(5));
+      });
+
+      desktop('an EveryAI session has no actions menu', (tester) async {
+        await tester.pumpWidget(host(slashHost: slashHost));
+        expect(find.byType(SessionActionsButton), findsNothing);
+      });
+
+      desktop('in an EveryAI session the / commands make the same calls as those rows', (tester) async {
+        await tester.pumpWidget(host(slashHost: slashHost, everyai: codeBuiltIns));
+        // A space after the name shuts the menu, so Enter runs the line (/rewind takes arguments).
+        for (final name in ['rewind', 'commit', 'pr', 'cost', 'morning']) {
+          await type(tester, '/$name ');
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+        }
+        expect(calls, ['rewind|', 'commit|', 'pr|', 'cost', 'morning']);
+      });
     });
 
     desktop('unknown commands and paths are sent as messages', (tester) async {

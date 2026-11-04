@@ -26,7 +26,7 @@ export 'acp_session.dart' show AcpConnect;
 /// agent's session id, the folder, the session tag; nothing secret), the
 /// event journal and the agent's stderr. Models come from the last session
 /// the agent started (no session is started just to ask).
-final class AcpDriver implements HarnessDriver, AttachesBriefed {
+final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
   AcpDriver({
     required this.id,
     required this.label,
@@ -169,8 +169,20 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   );
 
   /// No steering (ACP has none) and no fork or rewind yet.
+  /// The session pins the profile's ask mode, or its plan mode in Plan.
   @override
-  Set<DriverCap> get caps => resolved.profile.caps;
+  bool startsNatively(AgentMode mode) => switch (mode) {
+    AgentMode.ask => resolved.profile.askMode != null,
+    AgentMode.plan => resolved.profile.planMode != null,
+    _ => false,
+  };
+
+  @override
+  Set<DriverCap> get caps {
+    final p = resolved.profile;
+    final modes = p.askMode != null || p.planMode != null || p.modePolicy.isNotEmpty;
+    return modes ? {...p.caps, DriverCap.nativeModes} : p.caps;
+  }
 
   @override
   Future<DriverStatus> detect() async {
@@ -332,12 +344,14 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       sessionTag: '${meta['sessionTag']}',
       launcher: _launcher,
       mode: AgentMode.values.where((m) => m.name == meta['mode']).firstOrNull ?? AgentMode.ask,
+      nativeMode: meta['nativeMode'] as String?,
       briefing: briefing,
       mcpConfig: mcpConfig ?? const {},
       mcpGiven: mcpConfig != null,
       rememberedMcp: [...?(meta['mcpServers'] as List<Object?>?)?.whereType<String>()],
       acpSessionId: meta['acpSessionId'] as String?,
       history: history,
+      commands: [...?(meta['commands'] as List<Object?>?)?.map(NativeCommand.fromJson).nonNulls],
     )..reopened();
     _live[conversationId] = session;
     return session;

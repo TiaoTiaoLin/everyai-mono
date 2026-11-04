@@ -41,10 +41,43 @@ Map<String, Object?>? openCodeModelRef(String model, String? effort) {
 
 const _info = DriverInfo(id: 'opencode', label: 'OpenCode');
 
+/// `compact` plus the commands in `GET /api/command`'s `data:[{name, description}]`.
+List<NativeCommand> openCodeCommands(Object? data) {
+  final out = [const NativeCommand(name: 'compact', description: 'Summarize the conversation to free up context')];
+  final names = {'compact'};
+  if (data is List<Object?>) {
+    for (final c in data) {
+      if (c case {'name': final String name} when name.isNotEmpty && names.add(name)) {
+        out.add(NativeCommand(name: name, description: c['description'] as String? ?? ''));
+      }
+    }
+  }
+  return out;
+}
+
+/// OpenCode's primary agents (`GET /api/agent`'s `data`; hidden ones and
+/// subagents left out) as modes: `plan` under the app's Plan, every other
+/// one (`build`, the user's own) under Ask. The session's rules (`*: ask`,
+/// last match wins) keep every agent asking, whatever its own permissions say.
+List<NativeMode> openCodeModes(Object? data) => [
+  if (data is List<Object?>)
+    for (final a in data)
+      if (a case {'id': final String id} when id.isNotEmpty && a['hidden'] != true && a['mode'] != 'subagent')
+        NativeMode(
+          id: id,
+          label: switch (a['name']) {
+            final String n when n.isNotEmpty => n,
+            _ => id,
+          },
+          description: a['description'] as String? ?? '',
+          policy: id == 'plan' ? AgentMode.plan : AgentMode.ask,
+        ),
+];
+
 /// One OpenCode session on its own server: events from the server's stream
 /// (only this session's), history from its message list, answers through
 /// its permission replies.
-final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprovals {
+final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprovals, HasNativeCommands, NativeModes {
   OpenCodeSession(
     this._server, {
     required String workingDir,
@@ -130,6 +163,79 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
     await _server.call('POST', '/api/session/$_id/prompt', body: {'text': all});
   }
 
+  /// OpenCode's `/` commands (`GET /api/command`), read when the menu first
+  /// asks and again on `command.updated`. `compact` is a session route of
+  /// its own, not a listed command. The event name and the command route's
+  /// body come from OpenCode 2.1.3's binary and T3 Code, not from docs.
+  /// `compact` is offered before the list loads, and a failed load is tried
+  /// again by the menu's next listen.
+  final _commands = NativeCommandList(openCodeCommands(null));
+  var _commandsWanted = false;
+
+  @override
+  Stream<List<NativeCommand>> get commands {
+    if (!_commandsWanted) {
+      _commandsWanted = true;
+      unawaited(_loadCommands());
+    }
+    return _commands.stream;
+  }
+
+  Future<void> _loadCommands() async {
+    try {
+      final res = await _server.call('GET', '/api/command');
+      _commands.set(openCodeCommands(res is Map ? res['data'] : null));
+    } on Object {
+      // The menu keeps what it had; the next listen tries again.
+      _commandsWanted = false;
+    }
+  }
+
+  @override
+  Future<void> runCommand(String name, String args) async {
+    if (name == 'compact') {
+      await _server.call('POST', '/api/session/$_id/compact', body: const <String, Object?>{});
+      return;
+    }
+    await _server.call('POST', '/api/session/$_id/command', body: {'name': name, 'text': args});
+  }
+
+  /// The agents as modes ([openCodeModes]), read when the picker first asks.
+  /// A session starts on `build`; [setNativeMode] switches the agent for the
+  /// turns after (`POST /api/session/:id/agent`, OpenAPI 2.1.3).
+  final _modes = NativeModeFeed();
+  var _modesWanted = false;
+
+  @override
+  Stream<NativeModeSet> get nativeModes {
+    if (!_modesWanted) {
+      _modesWanted = true;
+      unawaited(_loadModes());
+    }
+    return _modes.stream;
+  }
+
+  Future<void> _loadModes() async {
+    try {
+      final res = await _server.call('GET', '/api/agent');
+      final modes = openCodeModes(res is Map ? res['data'] : null);
+      _modes.set(
+        modes: modes,
+        current: _modes.latest.current ?? (nativeModeOf(modes, 'build') ?? modes.firstOrNull)?.id,
+      );
+    } on Object {
+      // The picker stays empty; the next listen tries again.
+      _modesWanted = false;
+    }
+  }
+
+  @override
+  Future<void> setNativeMode(String id) async {
+    offeredMode(_modes.latest.modes, id, 'OpenCode');
+    await _server.call('POST', '/api/session/$_id/agent', body: {'agent': id});
+    _modes.set(current: id);
+  }
+
   @override
   Future<void> steer(String text, {List<String> images = const []}) =>
       _server.call('POST', '/api/session/$_id/prompt', body: {'text': text, 'delivery': 'steer'});
@@ -200,6 +306,8 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
     for (final l in _listeners.toList()) {
       await l.close();
     }
+    _commands.close();
+    _modes.close();
     onClose?.call();
   }
 
@@ -213,6 +321,10 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
     if (frame is! Map<String, Object?>) return;
     if (frame['type'] == 'server.connected') {
       if (_connected case final c? when !c.isCompleted) c.complete();
+      return;
+    }
+    if (frame['type'] == 'command.updated') {
+      if (_commandsWanted) unawaited(_loadCommands());
       return;
     }
     if (_ready) {

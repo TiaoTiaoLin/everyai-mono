@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../domain/agent_mode.dart';
@@ -313,6 +315,179 @@ abstract interface class HasBackgroundShells {
 /// sent the message (see `steerOrResend`).
 abstract interface class SteersRuns {
   Future<void> steer(String text, {List<String> images = const []});
+}
+
+/// One of a harness's own `/` commands, as the harness lists it.
+final class NativeCommand {
+  const NativeCommand({required this.name, this.description = '', this.argsHint});
+  final String name;
+  final String description;
+
+  /// What to type after the name, when the harness says (shown as a hint).
+  final String? argsHint;
+
+  Map<String, Object?> toJson() => {
+    'name': name,
+    if (description.isNotEmpty) 'description': description,
+    if (argsHint != null) 'args_hint': argsHint,
+  };
+
+  static NativeCommand? fromJson(Object? json) {
+    if (json is! Map || json['name'] is! String) return null;
+    return NativeCommand(
+      name: json['name'] as String,
+      description: json['description'] as String? ?? '',
+      argsHint: json['args_hint'] as String?,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is NativeCommand && other.name == name && other.description == description && other.argsHint == argsHint;
+
+  @override
+  int get hashCode => Object.hash(name, description, argsHint);
+
+  @override
+  String toString() => '/$name';
+}
+
+/// A session led by an outside CLI that has `/` commands of its own. The `/`
+/// menu shows these instead of EveryAI's; sessions without it have none.
+abstract interface class HasNativeCommands {
+  /// The latest list, then each change; a new listener gets the latest first.
+  Stream<List<NativeCommand>> get commands;
+
+  /// Runs `/name args` as the harness expects, with nothing put in front of it
+  /// (no mode note, briefing or held text; those wait for the next message).
+  Future<void> runCommand(String name, String args);
+}
+
+/// The cached command list a [HasNativeCommands] session keeps: [stream]
+/// gives the latest list first, then each change. An empty update keeps the
+/// previous list (a harness that hasn't listed yet has said nothing).
+final class NativeCommandList {
+  NativeCommandList([List<NativeCommand> initial = const []]) : _latest = initial;
+
+  List<NativeCommand> _latest;
+  final _changes = StreamController<List<NativeCommand>>.broadcast();
+
+  List<NativeCommand> get latest => _latest;
+
+  void set(List<NativeCommand> commands) {
+    if (commands.isEmpty || listEquals(commands, _latest)) return;
+    _latest = List.unmodifiable(commands);
+    if (!_changes.isClosed) _changes.add(_latest);
+  }
+
+  Stream<List<NativeCommand>> get stream async* {
+    yield _latest;
+    yield* _changes.stream;
+  }
+
+  void close() => _changes.close();
+}
+
+/// One of a harness's own modes, under its own name ([id] is what the harness
+/// takes). [policy]: the app's permission rules it runs under (our floor and
+/// rules still judge every call). [blocked]: why it isn't offered (shown
+/// greyed), or null.
+@immutable
+final class NativeMode {
+  const NativeMode({required this.id, required this.label, this.description = '', required this.policy, this.blocked});
+  final String id;
+  final String label;
+  final String description;
+  final AgentMode policy;
+  final String? blocked;
+
+  @override
+  bool operator ==(Object other) =>
+      other is NativeMode &&
+      other.id == id &&
+      other.label == label &&
+      other.description == description &&
+      other.policy == policy &&
+      other.blocked == blocked;
+
+  @override
+  int get hashCode => Object.hash(id, label, description, policy, blocked);
+
+  @override
+  String toString() => 'NativeMode($id)';
+}
+
+/// A harness's mode list and the one it is in ([current], null until it says).
+typedef NativeModeSet = ({List<NativeMode> modes, String? current});
+
+/// The entry of [modes] with [id], or null.
+NativeMode? nativeModeOf(List<NativeMode> modes, String? id) => modes.where((m) => m.id == id).firstOrNull;
+
+/// The offered entry of [modes] for the app's [mode]: one with that policy,
+/// else the most permissive one below it (Plan < Ask < Auto-edit < Full auto;
+/// Start building on a lead without an edit mode lands in its asking mode).
+/// Null when none is that careful (a Plan the harness has no mode for).
+NativeMode? nativeModeFor(List<NativeMode> modes, AgentMode mode) {
+  int rank(AgentMode m) => switch (m) {
+    AgentMode.plan => 0,
+    AgentMode.ask => 1,
+    AgentMode.autoEdit => 2,
+    AgentMode.fullAuto => 3,
+  };
+  NativeMode? best;
+  for (final m in modes) {
+    if (m.blocked != null || rank(m.policy) > rank(mode)) continue;
+    if (best == null || rank(m.policy) > rank(best.policy)) best = m;
+  }
+  return best;
+}
+
+/// A session whose mode picker shows the harness's own modes instead of
+/// Ask / Auto-edit / Plan / Full auto. Sessions without it keep ours.
+abstract interface class NativeModes {
+  /// The latest list and current mode, then each change (also a change the
+  /// harness made itself); a new listener gets the latest first.
+  Stream<NativeModeSet> get nativeModes;
+
+  /// Moves the harness to its mode [id]; a [HarnessError] for an unknown or
+  /// blocked one.
+  Future<void> setNativeMode(String id);
+}
+
+/// The cached [NativeModeSet] a [NativeModes] session keeps: [stream] gives
+/// the latest first, then each change.
+final class NativeModeFeed {
+  NativeModeFeed([this._latest = (modes: const [], current: null)]);
+
+  NativeModeSet _latest;
+  final _changes = StreamController<NativeModeSet>.broadcast();
+
+  NativeModeSet get latest => _latest;
+
+  void set({List<NativeMode>? modes, String? current}) {
+    final next = (
+      modes: modes == null ? _latest.modes : List<NativeMode>.unmodifiable(modes),
+      current: current ?? _latest.current,
+    );
+    if (next.current == _latest.current && listEquals(next.modes, _latest.modes)) return;
+    _latest = next;
+    if (!_changes.isClosed) _changes.add(next);
+  }
+
+  Stream<NativeModeSet> get stream async* {
+    yield _latest;
+    yield* _changes.stream;
+  }
+
+  void close() => _changes.close();
+}
+
+/// The entry for [id], checked: a [HarnessError] for one [label] doesn't list or that is greyed.
+NativeMode offeredMode(List<NativeMode> modes, String id, String label) {
+  final m = nativeModeOf(modes, id);
+  if (m == null) throw HarnessError("$label has no mode '$id'.");
+  if (m.blocked case final why?) throw HarnessError(why);
+  return m;
 }
 
 /// A harness that can start a session from another one's history (the

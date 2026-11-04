@@ -19,6 +19,8 @@ import '../skills/data/skill_import.dart' show findImportCandidates;
 import '../skills/data/skill_store.dart' show folderFiles;
 import '../skills/domain/skill_catalog.dart' show InstalledSkill;
 import '../skills/skills_providers.dart' show codeInstalledSkillsFor, codeSkillsFor, installedSkillsProvider;
+import '../slash/native_commands.dart';
+import '../slash/slash_command.dart' show SlashCommand;
 import '../slash/skills/learn.dart';
 import '../slash/skills/learn_sources.dart';
 import '../slash/skills/skill_draft.dart' show skillDrafterProvider;
@@ -486,7 +488,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             mode: mode,
             effort: effort,
             holdClientTools: hold,
-            initialMessage: modeNote(mode, first.text),
+            initialMessage: startsNatively(driver, mode) ? first.text : modeNote(mode, first.text),
             initialImages: first.images,
             isolated: worktree != null,
             tier: tier,
@@ -1199,9 +1201,28 @@ final class CodeSessionState {
     this.switching = false,
     this.handoffProblem = '',
     this.changing,
+    this.nativeModes = const [],
+    this.nativeMode,
   });
 
   final Transcript transcript;
+
+  /// The lead's own modes (`NativeModes`), which the picker shows instead of
+  /// ours; empty for the EveryAI harness and leads without them. [mode] is
+  /// the policy the current one runs under.
+  final List<NativeMode> nativeModes;
+
+  /// The lead's current mode among [nativeModes], or null.
+  final String? nativeMode;
+
+  /// The lead runs in one of its own modes whose policy is [mode]: the
+  /// picker shows its modes and no mode note or fidelity line is needed.
+  /// Off when no native mode carries [mode] (Plan on Codex or Gemini), which
+  /// keeps our picker, the note and the line.
+  bool get inNativeMode => switch (nativeModeOf(nativeModes, nativeMode)) {
+    final m? => m.blocked == null && m.policy == mode,
+    null => false,
+  };
 
   /// The session is moving to another lead harness; messages wait for the new one.
   final bool switching;
@@ -1267,7 +1288,12 @@ final class CodeSessionState {
     String? handoffProblem,
     LimitPick? changing,
     bool clearChanging = false,
+    List<NativeMode>? nativeModes,
+    String? nativeMode,
+    bool clearNativeMode = false,
   }) => CodeSessionState(
+    nativeModes: nativeModes ?? this.nativeModes,
+    nativeMode: clearNativeMode ? null : nativeMode ?? this.nativeMode,
     switching: switching ?? this.switching,
     handoffProblem: handoffProblem ?? this.handoffProblem,
     changing: clearChanging ? null : changing ?? this.changing,
@@ -1401,6 +1427,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   @override
   HarnessSession? get _harnessSession => _session;
   StreamSubscription<HarnessEvent>? _sub;
+  StreamSubscription<NativeModeSet>? _modesSub;
+
+  /// The lead has said which of its own modes it is in since [_watchModes].
+  var _modesSeen = false;
   var _builder = TranscriptBuilder();
 
   /// What earlier conversations showed (before a compaction): kept on screen
@@ -1582,6 +1612,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     ref.onDispose(() {
       _sub?.cancel();
+      _modesSub?.cancel();
       unawaited(_mirror.close());
       _gitTimer?.cancel();
       _disposeBuiltins();
@@ -1701,6 +1732,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
       _sub = session.events.listen(_onEvent);
+      _watchModes(session);
       Timer(liveAfter, () {
         _live = true;
         // Calls still waiting after the history replayed (an app restart).
@@ -2208,6 +2240,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
     final full = told != state.mode || _freshLead;
     _freshLead = false;
+    // A lead in one of its own modes has its own instructions for it; ours would contradict them.
+    // Before its list loads (a reopen), the mode it was last seen in tells.
+    final native = state.nativeModes.isNotEmpty
+        ? state.inNativeMode
+        : _session is NativeModes &&
+              (ref.read(codeSessionsProvider.notifier).byId(sessionId)?.nativeMode.isNotEmpty ?? false);
+    if (native) return body;
     return modeNote(state.mode, body, full: full, from: told, subagent: subagent);
   }
 
@@ -2240,6 +2279,40 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
     await _checkpoint();
     await _sendNow(out);
+  }
+
+  /// Runs one of an outside harness's own `/` commands ([HasNativeCommands]),
+  /// as the harness expects it: no mode note and no pending handoff go with it
+  /// (they wait for the next message). Null once sent, else why it wasn't.
+  Future<String?> runNativeCommand(String name, String args) async {
+    final session = _session;
+    if (session == null) return 'The agent is still starting. Try again in a moment.';
+    if (session is! HasNativeCommands) return 'This agent has no / commands of its own.';
+    if (_busy || _switching) return 'The agent is working. Run the command when it stops.';
+    if (!_withinBudget()) return null;
+    _touchHost();
+    await _checkpoint();
+    try {
+      await (session as HasNativeCommands).runCommand(name, args);
+    } on HarnessError catch (e) {
+      return e.message;
+    } on Object catch (e) {
+      // A transport error of the driver's own (JSON-RPC, HTTP): shown, not thrown past the menu.
+      return "/$name didn't run: $e";
+    }
+    return null;
+  }
+
+  /// A typed `/name args` the harness hasn't listed (its list isn't known
+  /// yet, as after a restart): a command for a harness that has its own,
+  /// else an ordinary message (a terminal lead gets the line as typed).
+  Future<String?> runTypedCommand(String name, String args) async {
+    final session = _session;
+    if (session != null && session is! HasNativeCommands) {
+      await send('/$name $args'.trim());
+      return null;
+    }
+    return runNativeCommand(name, args);
   }
 
   /// Sends [out]. A card or plan still held for the user is closed first: the
@@ -2395,6 +2468,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // Nested instruction files were in the old context; they go out again when touched.
       await _openContext(info);
       _sub = live.events.listen(_onEvent);
+      _watchModes(live);
       return CompactOutcome.compacted(summary);
     } on Object catch (e) {
       return CompactOutcome.failed('$e');
@@ -2815,7 +2889,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         tier: tier,
         harnessMode: harnessMode,
         initialMessage: run
-            ? modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn')
+            ? (outside && startsNatively(target, state.mode)
+                  ? '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn'
+                  : modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn'))
             : null,
         ready: ready.future,
       );
@@ -2937,6 +3013,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _importReplay = imported != null;
     _importedNow.clear();
     _sub = live.events.listen(_onEvent);
+    _watchModes(live);
     ready.complete();
     if (imported != null) {
       // Every driver replays the history it has at once when listened to:
@@ -3922,10 +3999,114 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   Future<void> setMode(AgentMode mode) async {
+    // A lead with its own modes moves to the one that maps to [mode] (`/plan`, Start building, a handoff).
+    if (_session is NativeModes && state.nativeModes.isNotEmpty) {
+      final to = nativeModeFor(state.nativeModes, mode);
+      if (to == null) {
+        _builder.addNotice(
+          NoticeItem('mode-${_events.length}-${mode.name}', '${_driver.info.label} has no ${mode.label} mode.'),
+        );
+        state = state.copyWith(transcript: _builder.snapshot);
+        return;
+      }
+      await setNativeMode(to.id);
+      return;
+    }
     state = state.copyWith(mode: mode);
     final sessions = ref.read(codeSessionsProvider.notifier);
     if (sessions.byId(sessionId) case final info?) sessions.update(info.copyWith(mode: mode));
     await _session?.setMode(mode, holdClientTools: _holds);
+    _answered = '';
+    _autoRespond(state.transcript);
+  }
+
+  /// Moves the lead to its own mode [id] ([NativeModes]): the policy is that
+  /// mode's, kept with the session. Null once moved, else why not (the mode
+  /// is greyed, or the harness refused; nothing changes then).
+  Future<String?> setNativeMode(String id) async {
+    final session = _session;
+    if (session is! NativeModes) return 'This agent has no modes of its own.';
+    final m = nativeModeOf(state.nativeModes, id);
+    if (m == null) return "${_driver.info.label} has no mode '$id'.";
+    if (m.blocked case final why?) return why;
+    final before = (mode: state.mode, native: state.nativeMode);
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    state = state.copyWith(mode: m.policy, nativeMode: id);
+    if (info != null) sessions.update(info.copyWith(mode: m.policy, nativeMode: id));
+    try {
+      await (session as NativeModes).setNativeMode(id);
+    } on Object catch (e) {
+      state = state.copyWith(mode: before.mode, nativeMode: before.native, clearNativeMode: before.native == null);
+      if (sessions.byId(sessionId) case final i?) {
+        sessions.update(i.copyWith(mode: before.mode, nativeMode: info?.nativeMode ?? ''));
+      }
+      return e is HarnessError ? e.message : "${_driver.info.label} didn't switch to ${m.label}: $e";
+    }
+    _answered = '';
+    _autoRespond(state.transcript);
+    return null;
+  }
+
+  /// Follows [session]'s own modes ([NativeModes]), or clears them for a lead without.
+  void _watchModes(HarnessSession session) {
+    unawaited(_modesSub?.cancel());
+    _modesSub = null;
+    _modesSeen = false;
+    if (session is! NativeModes) {
+      state = state.copyWith(nativeModes: const [], clearNativeMode: true);
+      return;
+    }
+    _modesSub = (session as NativeModes).nativeModes.listen(_onNativeModes);
+  }
+
+  /// The lead's list or current mode changed. The first word after it opens
+  /// brings the harness and our policy together: back to a mode the user
+  /// picked by name earlier (a reopen), else the current one when its policy
+  /// is the session's, else the nearest native mode that asks as much
+  /// ([nativeModeFor]; a lead started in Full auto, Codex's or OpenCode's
+  /// default, an earlier conversation reopened in its own last mode). With
+  /// none (Plan on Codex) the session keeps our mode, note and fidelity line.
+  /// Later, a move the harness made itself (Claude leaving plan, an ACP
+  /// agent's own command) takes that mode's policy.
+  void _onNativeModes(NativeModeSet set) {
+    final before = state.nativeMode;
+    state = state.copyWith(nativeModes: set.modes, nativeMode: set.current, clearNativeMode: set.current == null);
+    if (set.modes.isEmpty || set.current == null) return;
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (!_modesSeen) {
+      _modesSeen = true;
+      final now = nativeModeOf(set.modes, set.current);
+      final saved = nativeModeOf(set.modes, info?.nativeMode);
+      final target = saved != null && saved.blocked == null
+          ? saved
+          : now != null && now.blocked == null && now.policy == state.mode
+          ? now
+          : nativeModeFor(set.modes, state.mode);
+      if (target == null) return;
+      if (target.policy != state.mode && saved == null) {
+        _builder.addNotice(
+          NoticeItem(
+            'mode-${_events.length}-${target.id}',
+            '${_driver.info.label} has no ${state.mode.label} mode; it runs in ${target.label}.',
+          ),
+        );
+        state = state.copyWith(transcript: _builder.snapshot);
+      }
+      if (target.id != set.current) {
+        unawaited(setNativeMode(target.id));
+        return;
+      }
+      // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
+      state = state.copyWith(mode: target.policy);
+      if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
+      return;
+    }
+    final now = nativeModeOf(set.modes, set.current);
+    if (now == null || now.blocked != null || set.current == before) return;
+    state = state.copyWith(mode: now.policy);
+    if (info != null) sessions.update(info.copyWith(mode: now.policy, nativeMode: now.id));
     _answered = '';
     _autoRespond(state.transcript);
   }
@@ -4334,3 +4515,33 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
 }
 
 String checkpointRef(SessionWorktree w, int turn) => 'refs/everyai/${w.slug}/turn-$turn';
+
+/// An outside-led session's own `/` commands (latest first, then changes);
+/// null for a session without them (the EveryAI harness, a terminal CLI).
+/// Follows the session across lead switches and conversation swaps.
+final nativeCommandsProvider = StreamProvider.autoDispose.family<List<NativeCommand>?, String>((ref, sessionId) {
+  ref.watch(
+    codeSessionsProvider.select((all) {
+      final info = all.where((s) => s.id == sessionId).firstOrNull;
+      return (info?.harness, info?.conversationId);
+    }),
+  );
+  ref.watch(codeSessionProvider(sessionId).select((s) => s.connected));
+  final live = ref.read(_liveProvider)[sessionId];
+  return live is HasNativeCommands ? (live as HasNativeCommands).commands : Stream.value(null);
+});
+
+/// The composer's `/` menu for [sessionId]: an outside lead's own commands
+/// (empty until it lists them, so EveryAI's never show there), null for the
+/// EveryAI harness (its own menu). Mapped once per list, not per rebuild.
+final nativeSlashMenuProvider = Provider.autoDispose.family<List<SlashCommand>?, String>((ref, sessionId) {
+  final outside = ref.watch(
+    codeSessionsProvider.select((all) {
+      final info = all.where((s) => s.id == sessionId).firstOrNull;
+      return info != null && isOutsideLead(info.harness, info.workingDir);
+    }),
+  );
+  if (!outside) return null;
+  final list = ref.watch(nativeCommandsProvider(sessionId)).value ?? const <NativeCommand>[];
+  return nativeSlashCommands(list, ref.read(codeSessionProvider(sessionId).notifier).runNativeCommand);
+});

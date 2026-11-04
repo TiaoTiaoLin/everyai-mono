@@ -34,7 +34,7 @@ typedef CodexSpawn = Future<LineChannel> Function({
 /// It keeps `<data>/drivers/codex/`: `threads/<id>.json` (what [attach]
 /// needs to start it again), `journal/<id>.jsonl` (the transcript) and
 /// `logs/<session>.log` (stderr).
-final class CodexDriver implements HarnessDriver, AttachesBriefed {
+final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
   CodexDriver({this.which, this.spawn, this.dataDir});
 
   /// Replaces the PATH lookup in [detect] (tests).
@@ -53,6 +53,10 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
 
   /// Not fork or rewind (Codex has thread forks and rollbacks; not wired
   /// yet), not subagents (its own aren't mapped; ours stand in).
+  /// [codexModeFor]: Read Only for Ask, Default for Auto-edit; no preset runs Plan or Full auto.
+  @override
+  bool startsNatively(AgentMode mode) => mode == AgentMode.ask || mode == AgentMode.autoEdit;
+
   @override
   Set<DriverCap> get caps => const {
     DriverCap.steer,
@@ -65,6 +69,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
     DriverCap.images,
     DriverCap.switchModel,
     DriverCap.effort,
+    DriverCap.nativeModes,
   };
 
   static const _notInstalled = HarnessError(
@@ -238,6 +243,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
       await respawn(),
       cwd: cwd,
       mode: AgentMode.values.asNameMap()[meta['mode']] ?? AgentMode.ask,
+      native: meta['native_mode'] as String?,
       model: meta['model'] as String?,
       effort: meta['effort'] as String?,
     );
@@ -307,6 +313,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
       'model': session.model,
       'effort': session.effort,
       'mode': session.mode.name,
+      'native_mode': ?session.native,
       if (instruct) 'instruct': true,
     }),
   );

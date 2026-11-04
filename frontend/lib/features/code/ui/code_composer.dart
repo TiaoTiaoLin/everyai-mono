@@ -12,10 +12,12 @@ import '../../attachments/attachment.dart';
 import '../../attachments/attachment_input.dart';
 import '../../attachments/ui/attachment_tray.dart';
 import '../../models/domain/model_catalog.dart';
+import '../../slash/native_commands.dart';
 import '../../slash/slash_command.dart';
 import '../../slash/slash_registry.dart';
 import '../../slash/ui/slash_menu.dart';
 import '../domain/agent_mode.dart';
+import '../harness/harness.dart' show NativeCommand, NativeMode, nativeModeOf;
 import '../uploads/uploads.dart';
 
 /// The Code composer. Enter sends (or queues while the agent works),
@@ -42,6 +44,12 @@ class CodeComposer extends ConsumerStatefulWidget {
     this.slashHost,
     this.project,
     this.attachKinds,
+    this.commands,
+    this.onUnlistedCommand,
+    this.nativeModes,
+    this.nativeMode,
+    this.onNativeModeChanged,
+    this.harnessLabel = '',
   });
 
   final bool busy;
@@ -77,6 +85,26 @@ class CodeComposer extends ConsumerStatefulWidget {
   /// scaled down before they travel.
   final Set<AttachmentKind>? attachKinds;
 
+  /// An outside harness's own `/` commands, which replace EveryAI's in the
+  /// menu; the app actions they push out ([CodeSlashHost]'s rewind, commit,
+  /// PR, cost and brief) move to the [SessionActionsButton]. Null: EveryAI's
+  /// menu (the EveryAI harness).
+  final List<SlashCommand>? commands;
+
+  /// A typed `/name args` that isn't in an empty [commands] list (the harness
+  /// hasn't listed them yet): it still goes to the harness as a command, not
+  /// as a message with EveryAI's notes in front.
+  final Future<String?> Function(String name, String args)? onUnlistedCommand;
+
+  /// An outside harness's own modes ([NativeModeMenu]), which replace
+  /// Ask / Auto-edit / Plan / Full auto in the picker; null or empty: ours.
+  final List<NativeMode>? nativeModes;
+  final String? nativeMode;
+  final ValueChanged<String>? onNativeModeChanged;
+
+  /// The harness's name, the native picker's header.
+  final String harnessLabel;
+
   @override
   ConsumerState<CodeComposer> createState() => _CodeComposerState();
 }
@@ -92,15 +120,19 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
     super.initState();
     _slash.project = widget.project;
     _controller.addListener(() {
-      _slash.update(_controller.value, ref.read(slashCommandsProvider));
+      _slash.update(_controller.value, _commands);
       setState(() {});
     });
   }
+
+  List<SlashCommand> get _commands => widget.commands ?? ref.read(slashCommandsProvider);
 
   @override
   void didUpdateWidget(CodeComposer old) {
     super.didUpdateWidget(old);
     _slash.project = widget.project;
+    // The harness listed its commands again while the menu may be open.
+    if (!identical(old.commands, widget.commands)) _slash.update(_controller.value, _commands);
   }
 
   @override
@@ -132,17 +164,28 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
     _focus.requestFocus();
   }
 
+  /// `/name` then optional arguments; a path such as `/usr/bin is slow` isn't one.
+  static final _commandLine = RegExp(r'^/([A-Za-z][\w:.-]*)(?:\s+([\s\S]*))?$');
+
   bool get _hasText => _controller.text.trim().isNotEmpty || _files.isNotEmpty;
 
   void _submit({bool steer = false}) {
     if (!_hasText) return;
     final text = _controller.text;
     if (_files.isEmpty) {
-      if (parseSlashLine(text, ref.read(slashCommandsProvider), SlashScope.code, project: widget.project)
-          case final line?) {
+      if (parseSlashLine(text, _commands, SlashScope.code, project: widget.project) case final line?) {
         runSlash(line.command, line.args, _slashContext, complete: false);
         _focus.requestFocus();
         return;
+      }
+      final unlisted = widget.onUnlistedCommand;
+      if (unlisted != null && widget.commands?.isEmpty == true) {
+        if (_commandLine.firstMatch(text.trim()) case final m?) {
+          final command = nativeSlashCommands([NativeCommand(name: m[1]!)], unlisted).single;
+          runSlash(command, m[2]?.trim() ?? '', _slashContext, complete: false);
+          _focus.requestFocus();
+          return;
+        }
       }
     }
     (steer && widget.busy && widget.onSteer != null ? widget.onSteer! : widget.onSend)(text, List.unmodifiable(_files));
@@ -260,7 +303,19 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
                       color: theme.textMuted,
                       onPressed: () async => _add(await pickAttachmentFiles(allowed: widget.attachKinds)),
                     ),
-                    ModeMenu(mode: widget.mode, onChanged: widget.onModeChanged),
+                    if (widget.nativeModes case final modes?
+                        when modes.isNotEmpty && widget.onNativeModeChanged != null)
+                      NativeModeMenu(
+                        harness: widget.harnessLabel,
+                        modes: modes,
+                        current: widget.nativeMode,
+                        policy: widget.mode,
+                        onChanged: widget.onNativeModeChanged!,
+                      )
+                    else
+                      ModeMenu(mode: widget.mode, onChanged: widget.onModeChanged),
+                    if (widget.slashHost case final host? when widget.commands != null)
+                      SessionActionsButton(host: host),
                     // Both sides shrink on narrow composers (project first, it is
                     // capped); the model sits at the right, next to send.
                     if (widget.leading != null) ...[
@@ -296,6 +351,37 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
   }
 }
 
+/// The app's session actions as a menu, for sessions whose `/` menu is the
+/// harness's own: each row calls what its `/` command calls in an EveryAI
+/// session. Model, Stop and the meter have controls of their own already.
+class SessionActionsButton extends StatelessWidget {
+  const SessionActionsButton({super.key, required this.host});
+
+  final CodeSlashHost host;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    return AdaptiveMenuButton(
+      tooltip: 'Session actions',
+      width: 220,
+      actions: [
+        if (host.rewind case final f?)
+          MenuAction(label: 'Rewind last turn', icon: EveryIcon.retry, onSelected: () => f('')),
+        if (host.commit case final f?) MenuAction(label: 'Commit…', icon: EveryIcon.check, onSelected: () => f('')),
+        if (host.pr case final f?)
+          MenuAction(label: 'Pull request…', icon: EveryIcon.external, onSelected: () => f('')),
+        if (host.cost case final f?) MenuAction(label: 'Cost', icon: EveryIcon.usage, onSelected: f),
+        if (host.morning case final f?) MenuAction(label: 'Morning brief', icon: EveryIcon.sun, onSelected: f),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+        child: AdaptiveIcon(EveryIcon.more, size: 16, color: theme.textMuted),
+      ),
+    );
+  }
+}
+
 /// Ask · Auto-edit · Plan · Full auto.
 class ModeMenu extends StatelessWidget {
   const ModeMenu({super.key, required this.mode, required this.onChanged});
@@ -306,11 +392,6 @@ class ModeMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
-    final color = switch (mode) {
-      AgentMode.fullAuto => theme.danger,
-      AgentMode.plan => theme.accent,
-      _ => theme.textMuted,
-    };
     return AnchoredPopover(
       width: 280,
       builder: (context, close) => Padding(
@@ -334,23 +415,95 @@ class ModeMenu extends StatelessWidget {
           ],
         ),
       ),
-      child: Semantics(
-        button: true,
-        label: 'Mode: ${mode.label}',
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-          decoration: BoxDecoration(
-            border: Border.all(color: color.withValues(alpha: 0.4)),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(mode.label, style: theme.type.callout.medium.tint(color)),
-              const SizedBox(width: 4),
-              AdaptiveIcon(EveryIcon.chevronDown, size: 11, color: color),
-            ],
-          ),
+      child: _ModeChip(label: mode.label, policy: mode),
+    );
+  }
+}
+
+/// An outside harness's own modes under its names (Claude Code's Default ·
+/// Accept edits · Plan mode, Codex's presets, OpenCode's agents, an ACP
+/// agent's modes). A greyed one can't be picked and says why. The chip's
+/// colour comes from the [policy] the current one runs under.
+class NativeModeMenu extends StatelessWidget {
+  const NativeModeMenu({
+    super.key,
+    required this.harness,
+    required this.modes,
+    required this.current,
+    required this.policy,
+    required this.onChanged,
+  });
+
+  final String harness;
+  final List<NativeMode> modes;
+  final String? current;
+  final AgentMode policy;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    final label = nativeModeOf(modes, current)?.label ?? current ?? policy.label;
+    return AnchoredPopover(
+      width: 300,
+      // An agent may list many modes: the list scrolls rather than overflow.
+      builder: (context, close) => SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PopoverHeader(harness.isEmpty ? 'Modes' : '$harness modes'),
+            for (final m in modes)
+              PopoverRow(
+                title: m.label,
+                subtitle: m.blocked ?? (m.description.isEmpty ? null : m.description),
+                selected: m.id == current,
+                trailing: m.id == current ? AdaptiveIcon(EveryIcon.check, size: 14, color: theme.accent) : null,
+                onTap: m.blocked != null
+                    ? null
+                    : () {
+                        close();
+                        onChanged(m.id);
+                      },
+              ),
+          ],
+        ),
+      ),
+      child: _ModeChip(label: label, policy: policy),
+    );
+  }
+}
+
+class _ModeChip extends StatelessWidget {
+  const _ModeChip({required this.label, required this.policy});
+  final String label;
+  final AgentMode policy;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    final color = switch (policy) {
+      AgentMode.fullAuto => theme.danger,
+      AgentMode.plan => theme.accent,
+      _ => theme.textMuted,
+    };
+    return Semantics(
+      button: true,
+      label: 'Mode: $label',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(label, style: theme.type.callout.medium.tint(color)),
+            const SizedBox(width: 4),
+            AdaptiveIcon(EveryIcon.chevronDown, size: 11, color: color),
+          ],
         ),
       ),
     );

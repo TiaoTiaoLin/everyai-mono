@@ -235,6 +235,12 @@ void main() {
         'sessionTag': 's1',
         'mode': 'plan',
         'mcpServers': <Object?>[],
+        // The recorded available_commands_update, kept for a reopen.
+        'commands': [
+          {'name': 'init', 'description': 'guided AGENTS.md setup'},
+          {'name': 'review', 'description': 'review changes [commit|branch|pr], defaults to uncommitted'},
+          {'name': 'compact', 'description': 'Compact the session'},
+        ],
       });
       final models = await d.models();
       expect(models, hasLength(4));
@@ -1665,6 +1671,141 @@ void main() {
       );
       await expectLater(d.start(r.spec()), throwsA(isA<HarnessError>()));
       expect(ttys, 0);
+    });
+  });
+
+  group('native commands', () {
+    test("OpenCode's recorded available_commands_update becomes the session's command list", () async {
+      final r = rig(['opencode/handshake.jsonl']);
+      final s = await r.driver('acp:opencode', 'opencode').start(r.spec(mode: AgentMode.plan));
+      await r.channels.single.finished;
+      await pumpEventQueue();
+      final list = await (s as HasNativeCommands).commands.first;
+      expect([for (final c in list) c.name], ['init', 'review', 'compact']);
+      expect(list.first.description, 'guided AGENTS.md setup');
+      await s.close();
+
+      // After an app restart the reopened session has its menu before the agent starts again.
+      await pumpEventQueue();
+      final two = await r.driver('acp:opencode', 'opencode').attach(s.id);
+      final cached = await (two as HasNativeCommands).commands.first;
+      expect([for (final c in cached) c.name], ['init', 'review', 'compact']);
+      expect(r.channels, hasLength(1));
+      await two.close();
+    });
+
+    test('a reopened session gets its list again once it loads', () async {
+      final r = rig(['opencode/load_then_plan.jsonl']);
+      _stored(r, 'conv-2', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE');
+      final s = await r.driver('acp:opencode', 'opencode').attach('conv-2');
+      final seen = _Seen(s);
+      await s.setMode(AgentMode.plan);
+      await s.send('Plan it.');
+      await seen.untilStatus(ExecutionStatus.error);
+      final list = await (s as HasNativeCommands).commands.first;
+      expect([for (final c in list) c.name], containsAll(['init', 'review', 'compact']));
+      await s.close();
+    });
+
+    test('a command is a bare prompt; the briefing waits for the next message; updates replace the list', () async {
+      final r = rig(['acp/native_commands.jsonl']);
+      final s = await r
+          .driver('acp:dsh', 'dsh')
+          .start(
+            r.spec(
+              briefing: DriverBriefing(
+                mcpUrl: 'http://127.0.0.1:7777/mcp',
+                mcpToken: 't',
+                skillDir: '${tmp.path}/none',
+                sessionSkill: 'Session text.',
+              ),
+            ),
+          );
+      final seen = _Seen(s);
+      final lists = <List<NativeCommand>>[];
+      final native = s as HasNativeCommands;
+      native.commands.listen(lists.add);
+      await native.runCommand('init', '');
+      await seen.untilStatus(ExecutionStatus.finished);
+      await s.send('Hi');
+      await seen.until(() => _prompts(r.channels.single).length == 2 && seen.status == ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(_prompts(r.channels.single), ['/init', '<everyai-session>\nSession text.\n</everyai-session>\n\nHi']);
+      expect(seen.messages.first.text, '/init');
+      expect(lists.last, [const NativeCommand(name: 'init', description: 'Write AGENTS.md')]);
+      expect(
+        lists.firstWhere((l) => l.length == 2).last,
+        const NativeCommand(name: 'web', description: 'Search the web', argsHint: 'query to search for'),
+      );
+      await s.close();
+    });
+  });
+
+  group('native modes', () {
+    Future<NativeModeSet> modesOf(HarnessSession s) async {
+      await pumpEventQueue();
+      return (s as NativeModes).nativeModes.first;
+    }
+
+    test("Gemini's own modes: Default offered, Auto Edit and YOLO greyed", () async {
+      final r = rig(['gemini/turn.jsonl']);
+      final s = await r.driver('gemini', 'gemini', args: const ['--acp']).start(r.spec(model: 'gemini-2.5-flash'));
+      final set = await modesOf(s);
+      expect(
+        [for (final m in set.modes) (m.id, m.label, m.blocked == null)],
+        [('default', 'Default', true), ('autoEdit', 'Auto Edit', false), ('yolo', 'YOLO', false)],
+      );
+      expect(set.current, 'default');
+      expect(nativeModeOf(set.modes, 'default')!.policy, AgentMode.ask);
+      await expectLater((s as NativeModes).setNativeMode('yolo'), throwsA(isA<HarnessError>()));
+      await s.close();
+    });
+
+    test("Cursor's modes all ask or only read; Kiro's come from its mode config option", () async {
+      final c = rig(['cursor/handshake.jsonl']);
+      final cursor = await c
+          .driver('cursor', 'cursor-agent')
+          .start(c.spec(mode: AgentMode.plan, briefing: _cursorBrief(_Host())));
+      final cs = await modesOf(cursor);
+      expect(
+        [for (final m in cs.modes) (m.id, m.policy, m.blocked)],
+        [('agent', AgentMode.ask, null), ('plan', AgentMode.plan, null), ('ask', AgentMode.plan, null)],
+      );
+      expect(cs.current, 'plan');
+      await cursor.close();
+
+      final k = rig(['acp/kiro_autopilot.jsonl']);
+      final kiro = await k.driver('kiro', 'kiro-cli').start(k.spec());
+      final ks = await modesOf(kiro);
+      expect(
+        [for (final m in ks.modes) (m.id, m.label, m.policy)],
+        [('vibe', 'Default', AgentMode.ask), ('plan', 'Plan', AgentMode.plan)],
+      );
+      expect(ks.current, 'vibe');
+      await kiro.close();
+    });
+
+    test('a pick is session/set_mode; the agent moving itself to a mode that never asks is set back', () async {
+      final r = rig(['acp/goose_native_mode.jsonl']);
+      final s = await r.driver('goose', 'goose').start(r.spec());
+      final seen = _Seen(s);
+      final set = await modesOf(s);
+      expect(
+        [
+          for (final m in set.modes)
+            if (m.blocked == null) m.id,
+        ],
+        ['approve', 'chat'],
+      );
+      expect(set.current, 'approve');
+      await (s as NativeModes).setNativeMode('chat');
+      await seen.until(() => seen.notices.isNotEmpty);
+      expect(seen.notices.single, contains('set back to Chat'));
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect((await modesOf(s)).current, 'chat');
+      await s.close();
     });
   });
 }

@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../domain/agent_mode.dart';
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart' as recipes;
 import '../driver.dart';
@@ -32,6 +33,7 @@ final class AcpProfile {
     this.extraEnv = const {},
     this.askMode,
     this.planMode,
+    this.modePolicy = const {},
     this.lateReplay = false,
     this.minVersion,
     this.keyEnv = const [],
@@ -66,6 +68,11 @@ final class AcpProfile {
 
   /// Its read-only mode, for Plan (when it has one).
   final String? planMode;
+
+  /// The app's policy for its other modes that still ask before acting (the
+  /// picker offers them under their own names). [askMode] and [planMode]
+  /// need no entry; a mode in neither is listed greyed (`acpModes`).
+  final Map<String, AgentMode> modePolicy;
 
   /// What the user does to sign in, as an instruction.
   final String signIn;
@@ -156,6 +163,7 @@ final class AcpProfile {
           extraEnv: {...env, ...extraEnv},
           askMode: askMode,
           planMode: planMode,
+          modePolicy: modePolicy,
           lateReplay: lateReplay,
           minVersion: minVersion,
           keyEnv: keyEnv,
@@ -343,6 +351,8 @@ const _kiro = AcpProfile._(
   // confirmation"); off, every tool comes as a permission request. T3 Code's
   // `kiroAutopilotValue` turns it on only for full-access threads.
   configPins: {'autopilot': 'off'},
+  // Its `mode` option; with Autopilot off both ask before acting.
+  modePolicy: {'vibe': AgentMode.ask, 'plan': AgentMode.plan},
 );
 
 // Kimi Code CLI (MoonshotAI/kimi-code docs/en/reference/kimi-acp.md). Its
@@ -406,6 +416,7 @@ const _goose = AcpProfile._(
   extraEnv: {'GOOSE_MODE': 'approve'},
   caps: {..._shared, DriverCap.mcp},
   askMode: 'approve',
+  modePolicy: {'chat': AgentMode.plan},
   signIn: 'Run `goose configure` in a terminal',
   // pressly's database-migration tool is also `goose` ("goose version: v3.26.0").
   notThis: (
@@ -475,6 +486,8 @@ const _cursor = AcpProfile._(
   caps: {..._shared, DriverCap.mcp, DriverCap.switchModel, DriverCap.subagents},
   askMode: 'agent',
   planMode: 'plan',
+  // Its Ask mode answers questions and changes nothing.
+  modePolicy: {'ask': AgentMode.plan},
   signIn: 'Run `agent login` in a terminal',
   keyEnv: ['CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'],
   needsConsent: true,

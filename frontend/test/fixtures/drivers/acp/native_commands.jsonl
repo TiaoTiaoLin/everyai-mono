@@ -1,0 +1,13 @@
+// A made-up generic ACP agent with slash commands, shaped by the ACP spec
+// (agentclientprotocol.com/protocol/slash-commands); derived, not recorded.
+// The command runs as a bare prompt; the briefing waits for the next one.
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"}}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{}},"authMethods":[]}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/new","id":2,"params":{"cwd":"{{cwd}}","mcpServers":[]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"dsh-1"}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"dsh-1","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"init","description":"Write AGENTS.md"},{"name":"web","description":"Search the web","input":{"hint":"query to search for"}}]}}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/prompt","id":3,"params":{"sessionId":"dsh-1","prompt":["{{any}}"]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"dsh-1","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"init","description":"Write AGENTS.md"}]}}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/prompt","id":4,"params":{"sessionId":"dsh-1","prompt":["{{any}}"]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}}

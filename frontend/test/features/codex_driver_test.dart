@@ -7,6 +7,7 @@
 // file_change_refused, server_requests, usage_limit and models_paged. The recording tools and steps are described
 // in docs/research/batches/multi-harness/run3/x2.md.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
@@ -387,6 +388,109 @@ void main() {
       expect((usage.input, usage.onPlan), (12910, false), reason: mode);
       await s.close();
     }
+  });
+
+  test('/ commands: a fixed set (Codex lists none); compact and review go to their own methods', () async {
+    // The two methods are from the codex-cli 0.166.0 app-server schema; the replies are derived, not recorded.
+    String out(int id, String method, Map<String, Object?> params) => jsonEncode({
+      'dir': 'out',
+      'msg': {'id': id, 'method': method, 'params': params},
+    });
+    String reply(int id, Object result) => jsonEncode({
+      'dir': 'in',
+      'msg': {'id': id, 'result': result},
+    });
+    final channel = ReplayChannel(
+      [
+        _upTo('turn', '"result":{"thread"'),
+        out(10, 'thread/compact/start', {'threadId': 'thr_1'}),
+        reply(10, <String, Object?>{}),
+        out(11, 'review/start', {
+          'threadId': 'thr_1',
+          'target': {'type': 'uncommittedChanges'},
+        }),
+        reply(11, {
+          'reviewThreadId': 'thr_1',
+          'turn': {'id': 'turn_r1'},
+        }),
+        out(12, 'review/start', {
+          'threadId': 'thr_1',
+          'target': {'type': 'baseBranch', 'branch': 'main'},
+        }),
+        reply(12, {
+          'reviewThreadId': 'thr_1',
+          'turn': {'id': 'turn_r2'},
+        }),
+      ].join('\n'),
+    );
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    final native = s as HasNativeCommands;
+    expect([for (final c in await native.commands.first) c.name], ['compact', 'review']);
+    await native.runCommand('compact', '');
+    await native.runCommand('review', '');
+    await native.runCommand('review', 'main');
+    await expectLater(native.runCommand('goal', ''), throwsA(isA<HarnessError>()));
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect([for (final m in events.whereType<ChatMessage>()) m.text], ['/compact', '/review', '/review main', '/goal']);
+    await s.close();
+  });
+
+  test('Stop before the review/start reply: the review is interrupted once it has started', () async {
+    // turn/started and turn/completed are interrupt_early's; the review/start reply is derived from the schema.
+    final early = File('$_fixtures/interrupt_early.jsonl').readAsLinesSync();
+    String line(String method) => early.firstWhere((l) => l.contains('"method":"$method"'));
+    final channel = ReplayChannel(
+      [
+        _upTo('turn', '"result":{"thread"'),
+        jsonEncode({
+          'dir': 'out',
+          'msg': {
+            'id': 10,
+            'method': 'review/start',
+            'params': {
+              'threadId': 'thr_1',
+              'target': {'type': 'uncommittedChanges'},
+            },
+          },
+        }),
+        jsonEncode({
+          'dir': 'in',
+          'msg': {
+            'id': 10,
+            'result': {
+              'reviewThreadId': 'thr_1',
+              'turn': {'id': 'turn_1'},
+            },
+          },
+        }),
+        line('turn/started'),
+        jsonEncode({
+          'dir': 'out',
+          'msg': {
+            'id': 11,
+            'method': 'turn/interrupt',
+            'params': {'threadId': 'thr_1', 'turnId': 'turn_1'},
+          },
+        }),
+        jsonEncode({
+          'dir': 'in',
+          'msg': {'id': 11, 'result': <String, Object?>{}},
+        }),
+        line('turn/completed'),
+      ].join('\n'),
+    );
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    final running = (s as HasNativeCommands).runCommand('review', '');
+    await s.interrupt(); // review/start isn't even out yet.
+    await running;
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(_states(events).last, ExecutionStatus.paused);
+    await s.close();
   });
 
   test('a turn (recorded): streamed text, the answer, usage on the ChatGPT plan, finished', () async {
@@ -1142,5 +1246,47 @@ ${_upTo('usage_limit', '"method":"turn/started"')}
     expect(d.caps.intersection({DriverCap.fork, DriverCap.rewind, DriverCap.subagents}), isEmpty);
     await expectLater(s.rewindTo(null), throwsA(isA<HarnessError>()));
     await s.close();
+  });
+
+  group('native modes', () {
+    test("Codex's presets: Read Only asks, Default edits, neither sandboxed; Full Access greyed", () {
+      expect([for (final m in codexModes) m.id], ['read-only', 'default', 'full-access']);
+      expect([for (final m in codexModes) m.policy], [AgentMode.ask, AgentMode.autoEdit, AgentMode.fullAuto]);
+      expect(nativeModeOf(codexModes, 'full-access')!.blocked, contains('Not offered'));
+      // What the picker shows is what runs: the preset only picks the mode (no read-only sandbox claimed for Ask).
+      for (final m in codexModes) {
+        final p = codexPolicy(m.policy);
+        expect((p.approvalPolicy, p.approvalsReviewer, p.sandbox), ('untrusted', 'user', 'read-only'), reason: m.id);
+        expect(p.sandboxPolicy, {'type': 'dangerFullAccess'}, reason: m.id);
+        if (m.blocked == null) expect(m.description, contains('outside'), reason: m.id);
+      }
+      // No Plan preset: the app's Plan stays read-only as before.
+      expect(nativeModeFor(codexModes, AgentMode.plan), isNull);
+      expect(nativeModeFor(codexModes, AgentMode.fullAuto)!.id, 'default');
+    });
+
+    test('a preset picked by name goes with the next turn/start, and a reopen keeps it', () async {
+      final channel = ReplayChannel('''
+${_upTo('approve_command', '"id":3,"result"')}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}}}}
+''');
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final native = s as NativeModes;
+      expect((await native.nativeModes.first).current, 'read-only');
+      await expectLater(native.setNativeMode('full-access'), throwsA(isA<HarnessError>()));
+      await native.setNativeMode('default');
+      await native.setNativeMode('read-only');
+      await s.send('first');
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      await s.close();
+
+      final again = await _driver(data, [_fixture('resume')]).attach(s.id);
+      expect((await (again as NativeModes).nativeModes.first).current, 'read-only');
+      await again.close();
+    });
   });
 }
