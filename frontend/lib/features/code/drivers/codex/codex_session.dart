@@ -345,7 +345,10 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       }),
       _ => throw HarnessError('Codex has no /$name command here.'),
     };
-    if (res case {'turn': {'id': final String t}}) _begin(t);
+    if (res case {'turn': {'id': final String t}}) {
+      _begin(t);
+      _stopIfAsked(t);
+    }
   });
 
   /// Runs [body], which starts a turn, so a Stop before the turn/start
@@ -394,13 +397,18 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     };
     if (turn != null) _begin(turn);
     if (turn == null ? _turnId == null : _ended.contains(turn)) release();
-    if (turn != null && _stopAsked && !_ended.contains(turn)) {
-      _stopAsked = false;
-      if (_startedTurn == turn) {
-        unawaited(_interruptAgain(turn));
-      } else {
-        _interruptOnStart = turn;
-      }
+    if (turn != null) _stopIfAsked(turn);
+  }
+
+  /// A Stop pressed while [turn]'s start was in flight (no turn id yet)
+  /// interrupts it now, or as soon as Codex says it started.
+  void _stopIfAsked(String turn) {
+    if (!_stopAsked || _ended.contains(turn)) return;
+    _stopAsked = false;
+    if (_startedTurn == turn) {
+      unawaited(_interruptAgain(turn));
+    } else {
+      _interruptOnStart = turn;
     }
   }
 

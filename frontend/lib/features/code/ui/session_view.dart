@@ -27,7 +27,6 @@ import '../domain/transcript.dart';
 import '../code_settings_providers.dart' show codeSettingsProvider;
 import '../drivers/driver_policy.dart' show fidelityNote;
 import '../../settings/byok_keys.dart' show modelBillingProvider;
-import '../../slash/native_commands.dart';
 import '../drivers/driver_registry.dart';
 import '../harness/events.dart' show ExecutionStatus;
 import 'agent_menu.dart';
@@ -327,12 +326,9 @@ class CodeSessionScreen extends ConsumerWidget {
                               trailing: agentMenu(),
                               model: ref.watch(modelCatalogProvider)[ModelId(info.model)],
                               meter: SessionMeter(sessionId: sessionId, model: info.model),
-                              commands: switch (ref.watch(nativeCommandsProvider(sessionId))) {
-                                AsyncData(value: final list?) => nativeSlashCommands(list, controller.runNativeCommand),
-                                // Until an outside harness lists its commands, the menu is empty, not ours.
-                                AsyncLoading() when isOutsideLead(info.harness, info.workingDir) => const [],
-                                _ => null,
-                              },
+                              // An outside lead's own commands (empty until listed, never ours); null: EveryAI's.
+                              commands: ref.watch(nativeSlashMenuProvider(sessionId)),
+                              onUnlistedCommand: controller.runTypedCommand,
                             ),
                           ],
                         ),

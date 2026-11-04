@@ -235,6 +235,12 @@ void main() {
         'sessionTag': 's1',
         'mode': 'plan',
         'mcpServers': <Object?>[],
+        // The recorded available_commands_update, kept for a reopen.
+        'commands': [
+          {'name': 'init', 'description': 'guided AGENTS.md setup'},
+          {'name': 'review', 'description': 'review changes [commit|branch|pr], defaults to uncommitted'},
+          {'name': 'compact', 'description': 'Compact the session'},
+        ],
       });
       final models = await d.models();
       expect(models, hasLength(4));
@@ -1678,6 +1684,14 @@ void main() {
       expect([for (final c in list) c.name], ['init', 'review', 'compact']);
       expect(list.first.description, 'guided AGENTS.md setup');
       await s.close();
+
+      // After an app restart the reopened session has its menu before the agent starts again.
+      await pumpEventQueue();
+      final two = await r.driver('acp:opencode', 'opencode').attach(s.id);
+      final cached = await (two as HasNativeCommands).commands.first;
+      expect([for (final c in cached) c.name], ['init', 'review', 'compact']);
+      expect(r.channels, hasLength(1));
+      await two.close();
     });
 
     test('a reopened session gets its list again once it loads', () async {

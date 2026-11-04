@@ -108,7 +108,12 @@ void main() {
     final sent = <String>[];
     AgentMode? mode;
 
-    Widget host({List<SlashCommand>? native, CodeSlashHost? slashHost, List<SlashCommand>? everyai}) => ProviderScope(
+    Widget host({
+      List<SlashCommand>? native,
+      CodeSlashHost? slashHost,
+      List<SlashCommand>? everyai,
+      Future<String?> Function(String name, String args)? unlisted,
+    }) => ProviderScope(
       overrides: [slashCommandsProvider.overrideWithValue(everyai ?? commands)],
       child: m.MaterialApp(
         home: m.Material(
@@ -123,6 +128,7 @@ void main() {
                 onSend: (text, _) => sent.add(text),
                 commands: native,
                 slashHost: slashHost,
+                onUnlistedCommand: unlisted,
               ),
             ),
           ),
@@ -268,6 +274,43 @@ void main() {
         await tester.pump();
         expect(sent, ['/plan now']);
         expect(ran, isEmpty);
+      });
+
+      desktop('before the harness lists its commands, a typed /name still goes to it as a command', (tester) async {
+        final typed = <String>[];
+        await tester.pumpWidget(
+          host(
+            native: const [],
+            slashHost: slashHost,
+            unlisted: (name, args) async {
+              typed.add('$name|$args');
+              return null;
+            },
+          ),
+        );
+        await type(tester, '/compress now');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(typed, ['compress|now']);
+        expect(sent, isEmpty);
+
+        await type(tester, '/usr/bin is slow');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, ['/usr/bin is slow']);
+      });
+
+      desktop('a command refused while the agent works goes back in the box', (tester) async {
+        final busy = nativeSlashCommands(const [
+          NativeCommand(name: 'review'),
+        ], (_, _) async => 'The agent is working.');
+        await tester.pumpWidget(host(native: busy, slashHost: slashHost));
+        await type(tester, '/review the auth changes');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(find.text('/review the auth changes'), findsOneWidget);
+        expect(find.text('The agent is working.'), findsOneWidget);
+        await tester.pumpAndSettle(const Duration(seconds: 10));
       });
 
       desktop('the app actions are a menu whose rows call what their / commands call', (tester) async {

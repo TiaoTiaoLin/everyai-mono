@@ -472,9 +472,13 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
   }
 
   /// Sends [body] as the next turn, starting the CLI when it isn't running.
+  /// The record's held text is cleared only when [_carry] is (in [send]): a
+  /// command or a continue goes without it, and it waits on in the record too.
   Future<void> _turn(String body, {List<String> images = const []}) async {
     final c = await _ensure();
-    if (!_meta.sent || _meta.carry.isNotEmpty) await _save(_meta.copyWith(sent: true, carry: const []));
+    if (!_meta.sent || _meta.carry.length != _carry.length) {
+      await _save(_meta.copyWith(sent: true, carry: List.unmodifiable(_carry)));
+    }
     c.send(jsonEncode(userLine(body, images: images)));
     _running = true;
     _emit(stateEvent(const Uuid().v4(), ExecutionStatus.running));

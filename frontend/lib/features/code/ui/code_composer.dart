@@ -12,10 +12,12 @@ import '../../attachments/attachment.dart';
 import '../../attachments/attachment_input.dart';
 import '../../attachments/ui/attachment_tray.dart';
 import '../../models/domain/model_catalog.dart';
+import '../../slash/native_commands.dart';
 import '../../slash/slash_command.dart';
 import '../../slash/slash_registry.dart';
 import '../../slash/ui/slash_menu.dart';
 import '../domain/agent_mode.dart';
+import '../harness/harness.dart' show NativeCommand;
 import '../uploads/uploads.dart';
 
 /// The Code composer. Enter sends (or queues while the agent works),
@@ -43,6 +45,7 @@ class CodeComposer extends ConsumerStatefulWidget {
     this.project,
     this.attachKinds,
     this.commands,
+    this.onUnlistedCommand,
   });
 
   final bool busy;
@@ -83,6 +86,11 @@ class CodeComposer extends ConsumerStatefulWidget {
   /// PR, cost and brief) move to the [SessionActionsButton]. Null: EveryAI's
   /// menu (the EveryAI harness).
   final List<SlashCommand>? commands;
+
+  /// A typed `/name args` that isn't in an empty [commands] list (the harness
+  /// hasn't listed them yet): it still goes to the harness as a command, not
+  /// as a message with EveryAI's notes in front.
+  final Future<String?> Function(String name, String args)? onUnlistedCommand;
 
   @override
   ConsumerState<CodeComposer> createState() => _CodeComposerState();
@@ -143,6 +151,9 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
     _focus.requestFocus();
   }
 
+  /// `/name` then optional arguments; a path such as `/usr/bin is slow` isn't one.
+  static final _commandLine = RegExp(r'^/([A-Za-z][\w:.-]*)(?:\s+([\s\S]*))?$');
+
   bool get _hasText => _controller.text.trim().isNotEmpty || _files.isNotEmpty;
 
   void _submit({bool steer = false}) {
@@ -153,6 +164,15 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
         runSlash(line.command, line.args, _slashContext, complete: false);
         _focus.requestFocus();
         return;
+      }
+      final unlisted = widget.onUnlistedCommand;
+      if (unlisted != null && widget.commands?.isEmpty == true) {
+        if (_commandLine.firstMatch(text.trim()) case final m?) {
+          final command = nativeSlashCommands([NativeCommand(name: m[1]!)], unlisted).single;
+          runSlash(command, m[2]?.trim() ?? '', _slashContext, complete: false);
+          _focus.requestFocus();
+          return;
+        }
       }
     }
     (steer && widget.busy && widget.onSteer != null ? widget.onSteer! : widget.onSend)(text, List.unmodifiable(_files));

@@ -156,6 +156,41 @@ void main() {
     },
   );
 
+  test('compact is offered before the list loads, and a failed load is tried again by the next listen', () async {
+    final http = ReplayHttpClient.script(
+      [
+        _head('turn_approvals.jsonl', '/prompt'),
+        _line('out', {'id': 3, 'method': 'GET', 'path': '/api/command'}),
+        _line('in', {
+          'id': 3,
+          'status': 503,
+          'body': {'error': 'warming up'},
+        }),
+        _line('out', {'id': 4, 'method': 'GET', 'path': '/api/command'}),
+        _line('in', {
+          'id': 4,
+          'status': 200,
+          'body': {
+            'data': [
+              {'name': 'init', 'description': 'guided AGENTS.md setup'},
+            ],
+          },
+        }),
+      ].join('\n'),
+    );
+    final (:driver, data: _) = _driver(http);
+    final session = await driver.start(_spec(initial: null));
+    final native = session as HasNativeCommands;
+    expect((await native.commands.first).map((c) => c.name), ['compact']);
+    await pumpEventQueue();
+    final lists = <List<NativeCommand>>[];
+    native.commands.listen(lists.add);
+    await pumpEventQueue();
+    expect(lists.last.map((c) => c.name), ['compact', 'init']);
+    http.channel.expectFinished();
+    await session.close();
+  });
+
   test('a session is created with our rules, listens before the first prompt, and answers per call', () async {
     final http = _replay('turn_approvals.jsonl');
     final (:driver, :data) = _driver(http);

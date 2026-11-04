@@ -437,6 +437,62 @@ void main() {
     await s.close();
   });
 
+  test('Stop before the review/start reply: the review is interrupted once it has started', () async {
+    // turn/started and turn/completed are interrupt_early's; the review/start reply is derived from the schema.
+    final early = File('$_fixtures/interrupt_early.jsonl').readAsLinesSync();
+    String line(String method) => early.firstWhere((l) => l.contains('"method":"$method"'));
+    final channel = ReplayChannel(
+      [
+        _upTo('turn', '"result":{"thread"'),
+        jsonEncode({
+          'dir': 'out',
+          'msg': {
+            'id': 10,
+            'method': 'review/start',
+            'params': {
+              'threadId': 'thr_1',
+              'target': {'type': 'uncommittedChanges'},
+            },
+          },
+        }),
+        jsonEncode({
+          'dir': 'in',
+          'msg': {
+            'id': 10,
+            'result': {
+              'reviewThreadId': 'thr_1',
+              'turn': {'id': 'turn_1'},
+            },
+          },
+        }),
+        line('turn/started'),
+        jsonEncode({
+          'dir': 'out',
+          'msg': {
+            'id': 11,
+            'method': 'turn/interrupt',
+            'params': {'threadId': 'thr_1', 'turnId': 'turn_1'},
+          },
+        }),
+        jsonEncode({
+          'dir': 'in',
+          'msg': {'id': 11, 'result': <String, Object?>{}},
+        }),
+        line('turn/completed'),
+      ].join('\n'),
+    );
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    final running = (s as HasNativeCommands).runCommand('review', '');
+    await s.interrupt(); // review/start isn't even out yet.
+    await running;
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(_states(events).last, ExecutionStatus.paused);
+    await s.close();
+  });
+
   test('a turn (recorded): streamed text, the answer, usage on the ChatGPT plan, finished', () async {
     final channel = _fixture('turn');
     final s = await _driver(data, [channel]).start(_spec(work));

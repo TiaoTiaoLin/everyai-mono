@@ -603,6 +603,29 @@ void main() {
     expect(a.ran, ['review|x']);
   });
 
+  test("a / command the driver's transport rejects comes back as a message, not an uncaught error", () async {
+    final info = await start();
+    final c = await open(info.id);
+    final a = d('alpha').latest!;
+    await turn(a, 'a1', 'Added the toggle.');
+    a.runFails = const FormatException('400 Bad Request');
+    expect(await c.runNativeCommand('review', 'security'), contains("didn't run"));
+  });
+
+  test("an outside lead's menu is empty, not EveryAI's, until it lists its commands", () async {
+    final info = await start();
+    await open(info.id);
+    container.listen(nativeSlashMenuProvider(info.id), (_, _) {});
+    expect(container.read(nativeSlashMenuProvider(info.id)), isEmpty);
+    d('alpha').latest!.nativeCommands.set(const [NativeCommand(name: 'alpha-cmd')]);
+    await pumpEventQueue();
+    final menu = container.read(nativeSlashMenuProvider(info.id))!;
+    expect(menu.single.name, 'alpha-cmd');
+    // The mapped list is kept until the commands change, so the open menu isn't rebuilt per streamed token.
+    await turn(d('alpha').latest!, 'a2', 'More text.');
+    expect(identical(container.read(nativeSlashMenuProvider(info.id)), menu), isTrue);
+  });
+
   test('the / menu follows the lead: the new one\'s commands after a switch', () async {
     final info = await start();
     final c = await open(info.id);

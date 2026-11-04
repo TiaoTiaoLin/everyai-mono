@@ -97,7 +97,9 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     this.mcpGiven = false,
     this._acpSessionId,
     List<HarnessEvent> history = const [],
-  }) : _journal = openEventJournal(dir, 'events') {
+    List<NativeCommand> commands = const [],
+  }) : _journal = openEventJournal(dir, 'events'),
+       _commands = NativeCommandList(commands) {
     _history.addAll(history);
   }
 
@@ -496,7 +498,16 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
     });
   }
 
-  Future<void> _saveMeta() => writeJsonFile('$dir/meta.json', {
+  /// Writes `meta.json`, one write at a time so an older state never lands last.
+  Future<void> _saveMeta() {
+    final write = _metaWrites.then((_) => _writeMeta());
+    _metaWrites = write.catchError((Object _) {});
+    return write;
+  }
+
+  Future<void> _metaWrites = Future.value();
+
+  Future<void> _writeMeta() => writeJsonFile('$dir/meta.json', {
     'acpSessionId': _acpSessionId,
     'cwd': cwd,
     'sessionTag': sessionTag,
@@ -505,6 +516,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
       for (final n in mcpGiven || mcpConfig.isNotEmpty ? mcpConfig.keys : rememberedMcp)
         if (n != everyaiServerName) n,
     ],
+    // So a reopened session has its `/` menu before the agent starts again.
+    'commands': [for (final c in _commands.latest) c.toJson()],
   });
 
   void _absorb(Map<String, Object?> reply) {
@@ -652,8 +665,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
   }
 
   /// The agent's `/` commands, from `available_commands_update` (live or
-  /// during a load's replay).
-  final _commands = NativeCommandList();
+  /// during a load's replay), kept in `meta.json` for a reopen.
+  final NativeCommandList _commands;
 
   @override
   Stream<List<NativeCommand>> get commands => _commands.stream;
@@ -1247,7 +1260,9 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
           );
         }
       case 'available_commands_update':
+        final before = _commands.latest;
         _commands.set(acpCommands(u['availableCommands']));
+        if (!identical(before, _commands.latest)) unawaited(_saveMeta().catchError((Object _) {}));
       case 'usage_update' when _replaying:
         _cost = acpUsageTotal(u) ?? _cost;
       case _ when _replaying:

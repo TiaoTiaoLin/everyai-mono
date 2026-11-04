@@ -148,7 +148,9 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
   /// asks and again on `command.updated`. `compact` is a session route of
   /// its own, not a listed command. The event name and the command route's
   /// body come from OpenCode 2.1.3's binary and T3 Code, not from docs.
-  final _commands = NativeCommandList();
+  /// `compact` is offered before the list loads, and a failed load is tried
+  /// again by the menu's next listen.
+  final _commands = NativeCommandList(openCodeCommands(null));
   var _commandsWanted = false;
 
   @override
@@ -165,7 +167,8 @@ final class OpenCodeSession implements HarnessSession, SteersRuns, PerCallApprov
       final res = await _server.call('GET', '/api/command');
       _commands.set(openCodeCommands(res is Map ? res['data'] : null));
     } on Object {
-      // The menu keeps what it had.
+      // The menu keeps what it had; the next listen tries again.
+      _commandsWanted = false;
     }
   }
 

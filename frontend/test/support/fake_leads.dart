@@ -60,7 +60,13 @@ final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeComm
   @override
   Stream<List<NativeCommand>> get commands => nativeCommands.stream;
   @override
-  Future<void> runCommand(String name, String args) async => ran.add('$name|$args');
+  Future<void> runCommand(String name, String args) async {
+    if (runFails case final e?) throw e;
+    ran.add('$name|$args');
+  }
+
+  /// What [runCommand] throws (a transport error of the driver's own).
+  Object? runFails;
 
   @override
   Stream<HarnessEvent> get events {

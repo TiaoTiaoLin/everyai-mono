@@ -978,6 +978,21 @@ void main() {
       },
     );
 
+    test('text held before a command survives a restart in between and goes with the next message', () async {
+      final channel = ReplayChannel(_script([listed, _say('/compact'), _done('r1')]));
+      final one = await driverIn(_Spawner([channel])).start(_spec());
+      await one.send('First, quietly.', run: false);
+      await (one as HasNativeCommands).runCommand('compact', '');
+      await _played(channel);
+      await one.close();
+
+      final again = ReplayChannel(_script([_init, _say('First, quietly.\n\nNow go.'), _done('r2')]));
+      final two = await driverIn(_Spawner([again])).attach(one.id);
+      await two.send('Now go.');
+      await _played(again);
+      await two.close();
+    });
+
     test('without an initialize list, system/init names stand in', () async {
       final channel = ReplayChannel(
         _script([

@@ -338,6 +338,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       rememberedMcp: [...?(meta['mcpServers'] as List<Object?>?)?.whereType<String>()],
       acpSessionId: meta['acpSessionId'] as String?,
       history: history,
+      commands: [...?(meta['commands'] as List<Object?>?)?.map(NativeCommand.fromJson).nonNulls],
     )..reopened();
     _live[conversationId] = session;
     return session;

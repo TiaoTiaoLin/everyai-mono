@@ -19,6 +19,8 @@ import '../skills/data/skill_import.dart' show findImportCandidates;
 import '../skills/data/skill_store.dart' show folderFiles;
 import '../skills/domain/skill_catalog.dart' show InstalledSkill;
 import '../skills/skills_providers.dart' show codeInstalledSkillsFor, codeSkillsFor, installedSkillsProvider;
+import '../slash/native_commands.dart';
+import '../slash/slash_command.dart' show SlashCommand;
 import '../slash/skills/learn.dart';
 import '../slash/skills/learn_sources.dart';
 import '../slash/skills/skill_draft.dart' show skillDrafterProvider;
@@ -2247,6 +2249,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// (they wait for the next message). Null once sent, else why it wasn't.
   Future<String?> runNativeCommand(String name, String args) async {
     final session = _session;
+    if (session == null) return 'The agent is still starting. Try again in a moment.';
     if (session is! HasNativeCommands) return 'This agent has no / commands of its own.';
     if (_busy || _switching) return 'The agent is working. Run the command when it stops.';
     if (!_withinBudget()) return null;
@@ -2256,8 +2259,23 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       await (session as HasNativeCommands).runCommand(name, args);
     } on HarnessError catch (e) {
       return e.message;
+    } on Object catch (e) {
+      // A transport error of the driver's own (JSON-RPC, HTTP): shown, not thrown past the menu.
+      return "/$name didn't run: $e";
     }
     return null;
+  }
+
+  /// A typed `/name args` the harness hasn't listed (its list isn't known
+  /// yet, as after a restart): a command for a harness that has its own,
+  /// else an ordinary message (a terminal lead gets the line as typed).
+  Future<String?> runTypedCommand(String name, String args) async {
+    final session = _session;
+    if (session != null && session is! HasNativeCommands) {
+      await send('/$name $args'.trim());
+      return null;
+    }
+    return runNativeCommand(name, args);
   }
 
   /// Sends [out]. A card or plan still held for the user is closed first: the
@@ -4366,4 +4384,19 @@ final nativeCommandsProvider = StreamProvider.autoDispose.family<List<NativeComm
   ref.watch(codeSessionProvider(sessionId).select((s) => s.connected));
   final live = ref.read(_liveProvider)[sessionId];
   return live is HasNativeCommands ? (live as HasNativeCommands).commands : Stream.value(null);
+});
+
+/// The composer's `/` menu for [sessionId]: an outside lead's own commands
+/// (empty until it lists them, so EveryAI's never show there), null for the
+/// EveryAI harness (its own menu). Mapped once per list, not per rebuild.
+final nativeSlashMenuProvider = Provider.autoDispose.family<List<SlashCommand>?, String>((ref, sessionId) {
+  final outside = ref.watch(
+    codeSessionsProvider.select((all) {
+      final info = all.where((s) => s.id == sessionId).firstOrNull;
+      return info != null && isOutsideLead(info.harness, info.workingDir);
+    }),
+  );
+  if (!outside) return null;
+  final list = ref.watch(nativeCommandsProvider(sessionId)).value ?? const <NativeCommand>[];
+  return nativeSlashCommands(list, ref.read(codeSessionProvider(sessionId).notifier).runNativeCommand);
 });
