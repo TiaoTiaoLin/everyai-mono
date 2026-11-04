@@ -339,10 +339,15 @@ double? acpUsageTotal(Map<String, Object?> update) {
 typedef AcpChoice = ({String value, String name});
 
 /// A session config option (`configOptions`, schema: session config
-/// options) of [category] (`mode`, `model`, `thought_level`), or null.
-({String id, String? current, List<AcpChoice> choices})? acpOption(List<Object?>? options, String category) {
+/// options) of [category] (`mode`, `model`, `thought_level`), or with [id]
+/// when that is given, or null.
+({String id, String? current, List<AcpChoice> choices})? acpOption(
+  List<Object?>? options,
+  String? category, {
+  String? id,
+}) {
   for (final o in (options ?? const []).whereType<Map<String, Object?>>()) {
-    if (o['category'] != category || o['id'] is! String) continue;
+    if ((id != null ? o['id'] != id : o['category'] != category) || o['id'] is! String) continue;
     return (id: o['id']! as String, current: _str(o['currentValue']), choices: _choices(o['options']));
   }
   return null;

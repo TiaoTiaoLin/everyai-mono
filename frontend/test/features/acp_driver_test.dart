@@ -683,6 +683,14 @@ void main() {
     // With a Cloud project it may be a Code Assist licence: unknown.
     expect(await geminiSignedIn(home: home, env: const {'GOOGLE_CLOUD_PROJECT': 'p'}), isNull);
     expect(await geminiSignedIn(home: home, env: const {'GOOGLE_CLOUD_PROJECT_ID': 'p'}), isNull);
+    // Gemini CLI also loads ~/.gemini/.env and ~/.env, as its auth docs suggest.
+    File('$home/.gemini/.env').writeAsStringSync('# licence\nGOOGLE_CLOUD_PROJECT=my-proj\n');
+    expect(await geminiSignedIn(home: home, env: const {}), isNull);
+    File('$home/.gemini/.env').writeAsStringSync('GOOGLE_CLOUD_PROJECT=""\n');
+    expect(await geminiSignedIn(home: home, env: const {}), isFalse);
+    File('$home/.env').writeAsStringSync('export GEMINI_API_KEY=k\n');
+    expect(await geminiSignedIn(home: home, env: const {}), isTrue);
+    File('$home/.env').deleteSync();
     File('$home/.gemini/settings.json').writeAsStringSync('{"security":{"auth":{"selectedType":"vertex-ai"}}}');
     expect(await geminiSignedIn(home: home, env: const {}), isNull);
   });
@@ -701,6 +709,48 @@ void main() {
       final methods = [for (final m in r.channels.single.sent) m['method']];
       expect(methods.indexOf('session/set_mode'), lessThan(methods.indexOf('session/prompt')));
       await s.close();
+    });
+
+    test('Kiro has Autopilot turned off before the first prompt, and again when it turns it back on', () async {
+      final r = rig(['acp/kiro_autopilot.jsonl']);
+      final s = await r.driver('kiro', 'kiro-cli').start(r.spec());
+      final seen = _Seen(s);
+      expect(r.spawns.single.args, ['acp', '--agent-engine=v3', '--auth-method=cli']);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      await seen.until(
+        () => r.channels.single.sent.where((m) => m['method'] == 'session/set_config_option').length == 2,
+      );
+      r.expectPlayed();
+      final methods = [for (final m in r.channels.single.sent) m['method']];
+      expect(methods.indexOf('session/set_config_option'), lessThan(methods.indexOf('session/prompt')));
+      expect(seen.notices, isEmpty);
+      await s.close();
+    });
+
+    test('Kiro refuses a project whose .kiro folder has its own agents or MCP servers', () async {
+      final r = rig(const []);
+      expect(await acpProfileOf('kiro-cli').preflight(r.work), isNull);
+      Directory('${r.work}/.kiro/settings').createSync(recursive: true);
+      File('${r.work}/.kiro/settings/mcp.json').writeAsStringSync('{}');
+      expect(await acpProfileOf('kiro-cli').preflight(r.work), contains('.kiro folder can let Kiro CLI act'));
+      Directory('${r.work}/.kiro/agents').createSync();
+      expect(await acpProfileOf('kiro-cli').preflight(r.work), contains('(agents/, settings/mcp.json)'));
+    });
+
+    test('a same-named program (pressly goose, AWS Copilot) shows as a problem, not a ready agent', () async {
+      final goose = File('${tmp.path}/goose')..writeAsStringSync('#!/bin/sh\necho "goose version: v3.26.0"\n');
+      await Process.run('chmod', ['+x', goose.path]);
+      AcpDriver driver(String cmd) =>
+          AcpDriver(id: cmd, label: cmd, command: cmd, which: (c) async => goose.path, signedIn: () async => null);
+      expect((await driver('goose').detect()).problem, contains("not Block's goose"));
+      expect((await driver('copilot').detect()).problem, contains('not GitHub Copilot CLI'));
+      goose.writeAsStringSync('#!/bin/sh\necho "goose 1.9.3"\n');
+      expect((await driver('goose').detect()).problem, isNull);
+    });
+
+    test("Copilot's allow-all environment variable from the user's shell is turned off", () async {
+      expect(acpProfileOf('copilot').env(null)['COPILOT_ALLOW_ALL'], 'false');
     });
 
     test('an Antigravity CLI before 1.5.0 shows the version problem; it needs consent', () async {

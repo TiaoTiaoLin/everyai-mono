@@ -164,6 +164,16 @@ void main() {
       expect(r.resolve('github-copilot-cli')!.info.installHint, 'npm i -g @github/copilot');
     });
 
+    test("an acp: driver for a listed agent's program runs on that agent's consent switch", () {
+      final r = container.read(driverRegistryProvider);
+      final agy = r.resolve('acp:agy')!;
+      expect((agy.info.needsConsent, agy.info.consentId), (true, 'antigravity'));
+      expect(consentProblem(agy.info, const {'antigravity'}), isNull);
+      expect(consentProblem(agy.info, const {}), contains("Turn on 'Use my own installed CLIs'"));
+      expect(r.resolve('acp:/opt/bin/gemini --sandbox')!.info.consentId, 'gemini');
+      expect(r.resolve('acp:dsh')!.info.consentId, 'acp:dsh');
+    });
+
     test('harnessFor goes through the registry; the demo and removed harnesses are unchanged', () async {
       final ref = container.read(_refProvider);
       expect(await harnessFor(ref, '/p', harness: 'codex'), isA<CodexDriver>());

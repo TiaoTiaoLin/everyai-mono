@@ -36,6 +36,8 @@ final class AcpProfile {
     this.minVersion,
     this.keyEnv = const [],
     this.needsConsent = false,
+    this.configPins = const {},
+    this.notThis,
   });
 
   final AcpAgent agent;
@@ -80,6 +82,14 @@ final class AcpProfile {
   /// vendor's terms leave a third-party client on the user's sign-in open.
   final bool needsConsent;
 
+  /// Session config options set by id whatever the agent starts with, kept
+  /// there when it changes them back (Kiro's `autopilot` runs tools unasked).
+  final Map<String, String> configPins;
+
+  /// A pattern for a `--version` line that shows the command is another
+  /// program of the same name, and what to tell the user then.
+  final ({String line, String problem})? notThis;
+
   /// How the session's briefing reaches it (`drivers/briefing/recipes.dart`).
   Delivery deliver(BriefingInput i, List<({String name, String description})> skills) => switch (agent) {
     AcpAgent.gemini => recipes.gemini(i, skills: skills),
@@ -102,6 +112,7 @@ final class AcpProfile {
   Future<String?> preflight(String cwd) => switch (agent) {
     AcpAgent.gemini => geminiWorkspaceProblem(cwd),
     AcpAgent.qwen => geminiWorkspaceProblem(cwd, folder: '.qwen', label: 'Qwen Code'),
+    AcpAgent.kiro => kiroWorkspaceProblem(cwd),
     _ => Future.value(),
   };
 
@@ -134,6 +145,13 @@ String? acpVersionProblem(AcpProfile p, String label, String? versionLine) {
   }
   return null;
 }
+
+/// Why [versionLine] shows the command isn't the agent of [p] (another
+/// program with the same name), or null.
+String? acpForeignProblem(AcpProfile p, String? versionLine) =>
+    versionLine != null && p.notThis != null && RegExp(p.notThis!.line).hasMatch(versionLine)
+    ? p.notThis!.problem
+    : null;
 
 /// Whether `kiro-cli whoami --format json` exiting with [code] and [stdout]
 /// means signed in: exit 0 is, `{"account":null}` with an error isn't, and
@@ -221,8 +239,13 @@ const _copilot = AcpProfile._(
   ],
   dropped: ['--yolo', '--allow-all', '--allow-all-tools', '--allow-all-paths', '--allow-all-urls'],
   droppedWithValue: ['--allow-tool', '--allow-url'],
+  // The environment twin of --allow-all (docs: cli-programmatic-reference),
+  // which a user's shell profile may set for terminal use.
+  extraEnv: {'COPILOT_ALLOW_ALL': 'false'},
   caps: {..._shared, DriverCap.mcp},
   signIn: 'Run `copilot` in a terminal and use /login',
+  // The AWS Copilot CLI is also `copilot` ("copilot version: v1.34.0").
+  notThis: (line: _otherCli, problem: 'This `copilot` is another program (AWS Copilot?), not GitHub Copilot CLI.'),
 );
 
 // Kiro CLI (kiro.dev/docs/cli/acp/): `--agent-engine` needs 2.36; the v3
@@ -244,6 +267,10 @@ const _kiro = AcpProfile._(
   signIn: 'Run `kiro-cli login` in a terminal',
   minVersion: '2.36.0',
   keyEnv: ['KIRO_API_KEY'],
+  // v3 starts with Autopilot on ("Agent executes tools without
+  // confirmation"); off, every tool comes as a permission request. T3 Code's
+  // `kiroAutopilotValue` turns it on only for full-access threads.
+  configPins: {'autopilot': 'off'},
 );
 
 // Kimi Code CLI (MoonshotAI/kimi-code docs/en/reference/kimi-acp.md). Its
@@ -308,6 +335,11 @@ const _goose = AcpProfile._(
   caps: {..._shared, DriverCap.mcp},
   askMode: 'approve',
   signIn: 'Run `goose configure` in a terminal',
+  // pressly's database-migration tool is also `goose` ("goose version: v3.26.0").
+  notThis: (
+    line: _otherCli,
+    problem: "This `goose` is another program (the database-migration tool?), not Block's goose.",
+  ),
 );
 
 // Mistral Vibe's ACP server, its own binary `vibe-acp`. `ask` asks before
@@ -352,6 +384,10 @@ const _droid = AcpProfile._(
   signIn: 'Run `droid` in a terminal and sign in, or set FACTORY_API_KEY',
   keyEnv: ['FACTORY_API_KEY'],
 );
+
+/// `<name> version: v1.2.3`: how the same-named AWS Copilot CLI and pressly's
+/// goose print their version, unlike the agents.
+const _otherCli = r'^\S+ version: v\d';
 
 const _generic = AcpProfile._(agent: AcpAgent.generic, pinned: [], caps: _shared, signIn: '');
 

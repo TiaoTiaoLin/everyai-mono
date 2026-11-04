@@ -33,6 +33,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     required this.command,
     this.args = const [],
     this.needsConsent = false,
+    this.consentId,
     this.installHint,
     this.which,
     Future<String> Function()? dataDir,
@@ -48,6 +49,10 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   final String command;
   final List<String> args;
   final bool needsConsent;
+
+  /// Whose consent it runs on, when not its own [id]: an `acp:<command>`
+  /// driver shares the listed entry's for the same command.
+  final String? consentId;
 
   /// How to install it, as one line ([DriverInfo.installHint]).
   final String? installHint;
@@ -87,6 +92,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     id: id,
     label: label,
     needsConsent: needsConsent || resolved.profile.needsConsent,
+    consentId: consentId,
     installHint: installHint,
   );
 
@@ -107,6 +113,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       signedIn: signed,
       problem:
           s.problem ??
+          acpForeignProblem(resolved.profile, s.version) ??
           acpVersionProblem(resolved.profile, label, s.version) ??
           (signed == false ? 'Not signed in. $hint.' : null),
     );

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../code_providers.dart' show everyaiHarnessProvider;
 import '../domain/code_session.dart' show everyaiHarnessName;
+import 'acp/acp_agents.dart' show acpCommand;
 import 'acp/acp_driver.dart';
 import 'claude/claude_driver.dart';
 import 'codex/codex_driver.dart';
@@ -20,7 +21,7 @@ final class DriverRegistry {
     this.fixed, {
     HarnessDriver Function(String command)? acp,
     HarnessDriver Function(String command)? terminal,
-  }) : _acp = acp ?? ((c) => AcpDriver(id: 'acp:$c', label: c, command: c)),
+  }) : _acp = acp ?? ((c) => AcpDriver(id: 'acp:$c', label: c, command: c, consentId: _listedFor(fixed, c))),
        _terminal = terminal ?? ((c) => TerminalDriver(id: 'terminal:$c', label: c, command: c));
 
   final Map<String, HarnessDriver> fixed;
@@ -37,6 +38,16 @@ final class DriverRegistry {
       }
     }
     return null;
+  }
+
+  /// The id of the listed ACP driver that runs the same program as
+  /// [command], whose consent an `acp:<command>` shares.
+  static String? _listedFor(Map<String, HarnessDriver> fixed, String command) {
+    final exe = acpCommand(command, const []).executable.split('/').last;
+    return [
+      for (final MapEntry(:key, :value) in fixed.entries)
+        if (value is AcpDriver && value.resolved.executable.split('/').last == exe) key,
+    ].firstOrNull;
   }
 
   /// The ones offered when a session starts.

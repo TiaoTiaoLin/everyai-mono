@@ -24,8 +24,8 @@ Future<bool> envHasAny(List<String> names, {Map<String, String>? env}) async {
   return names.any((n) => (vars[n] ?? '').trim().isNotEmpty);
 }
 
-/// Whether Gemini CLI has credentials: an API key in the login environment,
-/// or a sign-in type in `~/.gemini/settings.json`. A cached personal Google
+/// Whether Gemini CLI has credentials: an API key in the login environment
+/// or in `~/.gemini/.env` / `~/.env` (by name only), or a sign-in type in `~/.gemini/settings.json`. A cached personal Google
 /// sign-in doesn't count (Google stopped serving those on 2026-06-18);
 /// with a Cloud project set it may be a Code Assist licence, so it is
 /// unknown. Reads files only. [home] and [env] replace the user's (tests).
@@ -38,6 +38,11 @@ Future<bool?> openCodeSignedIn(String executable) => impl.openCodeSignedIn(execu
 /// Whether Kiro CLI is signed in (`kiro-cli whoami --format json`, no model
 /// call; read by `kiroSignedInFrom` in `acp_agents.dart`).
 Future<bool?> kiroSignedIn(String executable) => impl.kiroSignedIn(executable);
+
+/// Why Kiro CLI must not start in [cwd], or null: the project's
+/// `.kiro/agents/` (agent configs offered as its modes, which can pre-allow
+/// tools and run hooks) or `.kiro/settings/mcp.json`.
+Future<String?> kiroWorkspaceProblem(String cwd) => impl.kiroWorkspaceProblem(cwd);
 
 /// Why Gemini CLI must not start in [cwd], or null. It counts as headless
 /// under the app, so it trusts the folder and reads its `.gemini/settings.json`

@@ -406,6 +406,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   /// Keeps the agent in its asking mode (or read-only for Plan), so the app's
   /// rules decide every call; never a mode that skips asking.
   Future<void> _pinMode() async {
+    await _pinConfig();
     final targets = [if (_mode == AgentMode.plan) ?_profile.planMode, ?_profile.askMode];
     for (final target in targets) {
       try {
@@ -423,6 +424,31 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       }
     }
   }
+
+  /// Sets the profile's pinned config options ([AcpProfile.configPins])
+  /// where the agent offers them. A refusal is an error: the agent would act
+  /// without asking.
+  Future<void> _pinConfig() async {
+    for (final MapEntry(key: id, :value) in _profile.configPins.entries) {
+      final o = acpOption(_config, null, id: id);
+      if (o == null || o.current == value || !o.choices.any((c) => c.value == value)) continue;
+      _absorb(
+        _map(
+          await _peer!.request('session/set_config_option', {
+            'sessionId': _acpSessionId,
+            'configId': id,
+            'value': value,
+          }),
+        ),
+      );
+    }
+  }
+
+  /// Whether a pinned config option has moved off its value.
+  bool get _pinsMoved => _profile.configPins.entries.any((e) {
+    final o = acpOption(_config, null, id: e.key);
+    return o != null && o.current != e.value && o.choices.any((c) => c.value == e.value);
+  });
 
   /// Moves the agent to [model] and [effort] where it offers them. [strict]:
   /// one it can't take is an error (a switch the user asked for).
@@ -753,6 +779,19 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         _modes?['currentModeId'] = u['currentModeId'];
       case 'config_option_update':
         if (u['configOptions'] case final List<Object?> c) _config = c;
+        // The agent turned a pinned option back (its own command): set it again.
+        if (_pinsMoved && _peer != null) {
+          unawaited(
+            _pinConfig().catchError((Object e) {
+              _emit(
+                acpNotice(
+                  _next('n'),
+                  "$_label changed a setting that keeps it asking, and it couldn't be set back: $e",
+                ),
+              );
+            }),
+          );
+        }
       case 'usage_update' when _replaying:
         _cost = acpUsageTotal(u) ?? _cost;
       case _ when _replaying:

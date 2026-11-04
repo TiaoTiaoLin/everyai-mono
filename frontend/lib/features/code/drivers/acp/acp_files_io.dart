@@ -67,8 +67,17 @@ Future<Map<String, String>> loginEnv() async => (await ShellEnv.load()).env;
 
 Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async {
   final vars = env ?? (await ShellEnv.load()).env;
-  if (['GEMINI_API_KEY', 'GOOGLE_API_KEY'].any((k) => (vars[k] ?? '').isNotEmpty)) return true;
-  final dir = '${home ?? vars['HOME'] ?? Platform.environment['HOME'] ?? ''}/.gemini';
+  final root = home ?? vars['HOME'] ?? Platform.environment['HOME'] ?? '';
+  // Gemini CLI also loads `~/.gemini/.env` and `~/.env` (its auth docs
+  // suggest them for the key and the Cloud project); only names are read.
+  final named = {
+    for (final k in vars.keys)
+      if ((vars[k] ?? '').isNotEmpty) k,
+    ...await _dotEnvNames('$root/.gemini/.env'),
+    ...await _dotEnvNames('$root/.env'),
+  };
+  if (named.contains('GEMINI_API_KEY') || named.contains('GOOGLE_API_KEY')) return true;
+  final dir = '$root/.gemini';
   final settings = await readJsonFile('$dir/settings.json');
   final security = settings?['security'];
   final auth = security is Map<String, Object?> ? security['auth'] : null;
@@ -78,7 +87,7 @@ Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async {
     // be a Code Assist licence, which the files can't tell apart.
     'oauth-personal' =>
       await File('$dir/oauth_creds.json').exists() &&
-              ['GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_PROJECT_ID'].any((k) => (vars[k] ?? '').isNotEmpty)
+              (named.contains('GOOGLE_CLOUD_PROJECT') || named.contains('GOOGLE_CLOUD_PROJECT_ID'))
           ? null
           : false,
     // A key type without the key in the environment.
@@ -89,29 +98,32 @@ Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async {
   };
 }
 
-Future<bool?> openCodeSignedIn(String executable) async {
-  Process? proc;
+/// The names of the variables a `.env` file at [path] sets to something
+/// (`NAME=value`, `export NAME=value`); never the values.
+Future<Set<String>> _dotEnvNames(String path) async {
   try {
-    final shell = await ShellEnv.load();
-    final p = proc = await Process.start(executable, const [
-      'auth',
-      'list',
-      '--standalone',
-      '--format',
-      'json',
-    ], environment: shell.env);
-    unawaited(p.stderr.drain<void>());
-    final out = p.stdout.transform(utf8.decoder).join();
-    // `--standalone` starts a private server: one that hangs is ended, not left behind.
-    final code = await p.exitCode.timeout(const Duration(seconds: 10));
-    if (code != 0) return null;
-    final list = jsonDecode(await out);
+    final f = File(path);
+    if (!await f.exists()) return const {};
+    // A value that is empty (`""`, `''`) or only a comment doesn't count.
+    final assign = RegExp(r'''^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=\s*(?!""|''|#)\S''');
+    return {
+      for (final line in await f.readAsLines())
+        if (assign.firstMatch(line) case final m?) m.group(1)!,
+    };
+  } on Object {
+    return const {};
+  }
+}
+
+Future<bool?> openCodeSignedIn(String executable) async {
+  // `--standalone` starts a private server: one that hangs is ended, not left behind.
+  final out = await _status(executable, const ['auth', 'list', '--standalone', '--format', 'json']);
+  if (out == null || out.code != 0) return null;
+  try {
+    final list = jsonDecode(out.stdout);
     if (list is! List<Object?>) return null;
     return list.any((p) => p is Map<String, Object?> && (p['connections'] as List<Object?>? ?? const []).isNotEmpty);
-  } on TimeoutException {
-    proc?.kill(ProcessSignal.sigkill);
-    return null;
-  } on Object {
+  } on FormatException {
     return null;
   }
 }
@@ -154,6 +166,19 @@ Future<String?> geminiWorkspaceProblem(String cwd, {required String folder, requ
   }
   if (found.isEmpty) return null;
   return "This project's $folder folder can let $label act without asking the app (${found.join(', ')}). "
+      'Remove those, or add MCP servers in Settings → Code → MCP servers instead, then try again.';
+}
+
+/// Why Kiro must not start in [cwd]: the project's own agent configs (which
+/// can pre-allow tools and run hooks) or MCP servers would act without
+/// asking the app. Null when there are none.
+Future<String?> kiroWorkspaceProblem(String cwd) async {
+  final found = [
+    if (await Directory('$cwd/.kiro/agents').exists()) 'agents/',
+    if (await File('$cwd/.kiro/settings/mcp.json').exists()) 'settings/mcp.json',
+  ];
+  if (found.isEmpty) return null;
+  return "This project's .kiro folder can let Kiro CLI act without asking the app (${found.join(', ')}). "
       'Remove those, or add MCP servers in Settings → Code → MCP servers instead, then try again.';
 }
 

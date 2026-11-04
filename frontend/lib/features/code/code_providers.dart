@@ -128,7 +128,7 @@ bool isOutsideLead(String harness, String workingDir) =>
 
 /// Why [info] may not run yet: a subscription CLI needs the user's
 /// "Use my own installed CLIs" for it ([ownClis]). Null when it may.
-String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsent && !ownClis.contains(info.id)
+String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsent && !ownClis.contains(info.consentId)
     ? "Turn on 'Use my own installed CLIs' for ${info.label} in Settings → Code to use it."
     : null;
 
@@ -2443,7 +2443,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return LeadSwitchOutcome.failed('$e');
       }
       final own = ref.read(codeSettingsProvider).ownClis;
-      if (leadBlocked(target.info, statuses[to], consented: own.contains(to)) case final why?) {
+      if (leadBlocked(target.info, statuses[to], consented: own.contains(target.info.consentId)) case final why?) {
         return LeadSwitchOutcome.failed('${target.info.label}: $why');
       }
       if (_busy && (!stopFirst || !await _stopAndSettle())) return const LeadSwitchOutcome.busy();
