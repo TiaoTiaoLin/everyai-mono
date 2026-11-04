@@ -1,5 +1,7 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
+import 'dart:async';
+
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
 import '../../harness/session_processes.dart' show registerDriverRoot;
@@ -21,6 +23,7 @@ final class TerminalDriver implements HarnessDriver {
     this.which,
     this.startPty = startProgram,
     this.readText = text.readSessionText,
+    this.settle,
   });
 
   final String id;
@@ -39,6 +42,9 @@ final class TerminalDriver implements HarnessDriver {
     required String sessionTag,
   })
   startPty;
+
+  /// Replaces the wait before Return (tests).
+  final Future<void> Function()? settle;
 
   /// Replaces the briefing file read (tests).
   final Future<String?> Function(String briefingRoot) readText;
@@ -64,13 +70,17 @@ final class TerminalDriver implements HarnessDriver {
     if (pty == null) throw HarnessError('A terminal session needs a desktop computer.');
     registerDriverRoot(spec.sessionTag, pty.pid);
     final skillDir = spec.briefing?.skillDir;
-    return TerminalSession(
+    final session = TerminalSession(
       id: spec.sessionTag,
       label: label,
       pty: pty,
       sessionTag: spec.sessionTag,
       briefing: skillDir == null ? null : () => readText(briefingRootOf(skillDir)),
+      settle: settle ?? TerminalSession.defaultSettle,
     );
+    // Shown at once; pasted when the CLI has drawn its first screen.
+    if (spec.initialMessage case final text? when text.isNotEmpty && spec.runInitial) unawaited(session.send(text));
+    return session;
   }
 
   @override

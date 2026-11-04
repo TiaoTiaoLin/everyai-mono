@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_pty/flutter_pty.dart';
 
-import '../harness/everyai/shell_io.dart' show ShellEnv;
+import '../harness/everyai/shell_io.dart' show ShellEnv, killTree;
+import '../harness/harness.dart' show HarnessError;
 import '../harness/session_processes.dart' show sessionEnvVar;
 import 'pty.dart';
 
@@ -43,12 +45,14 @@ Future<ShellPty?> startProgram({
   Map<String, String> env = const {},
 }) async {
   if (!shellSupported) return null;
+  // No fallback folder: a coding CLI must not run (and edit files) wherever the app happens to be.
+  if (!Directory(workingDir).existsSync()) throw HarnessError("The session's folder is missing.");
   final shell = await ShellEnv.load();
   return _Pty(
     Pty.start(
       executable,
       arguments: args,
-      workingDirectory: Directory(workingDir).existsSync() ? workingDir : null,
+      workingDirectory: workingDir,
       environment: programEnv(shell.env, env, sessionTag),
       rows: rows,
       columns: columns,
@@ -80,5 +84,9 @@ final class _Pty implements ShellPty {
   @override
   void resize(int rows, int columns) => _pty.resize(rows, columns);
   @override
-  void kill() => _pty.kill(ProcessSignal.sighup);
+  void kill() {
+    // The whole tree, not only the CLI: what it started may have left its process group.
+    unawaited(killTree(pid));
+    _pty.kill(ProcessSignal.sighup);
+  }
 }

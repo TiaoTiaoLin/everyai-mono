@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/drivers/driver_process.dart' show closeAllDriverProcesses;
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/drivers/terminal/terminal_driver.dart';
 import 'package:every_ai/features/code/drivers/terminal/terminal_session.dart';
@@ -36,7 +37,8 @@ final class FakePty implements ShellPty {
   List<String> get texts => [for (final w in writes) utf8.decode(w)];
 }
 
-SessionSpec _spec({DriverBriefing? briefing}) => SessionSpec(
+SessionSpec _spec({DriverBriefing? briefing, String? initial}) => SessionSpec(
+  initialMessage: initial,
   workingDir: '/work',
   model: 'm',
   mode: AgentMode.ask,
@@ -46,23 +48,30 @@ SessionSpec _spec({DriverBriefing? briefing}) => SessionSpec(
   briefing: briefing,
 );
 
-TerminalDriver _driver(FakePty? pty, {List<Map<String, Object?>>? started, Future<String?> Function(String)? read}) =>
-    TerminalDriver(
-      id: 'terminal:aider',
-      label: 'aider',
-      command: 'aider',
-      args: const ['--no-auto-commits'],
-      which: (c) async => c == 'aider' ? '/bin/aider' : null,
-      startPty: ({required executable, required args, required workingDir, required sessionTag}) async {
-        started?.add({'exe': executable, 'args': args, 'cwd': workingDir, 'tag': sessionTag});
-        return pty;
-      },
-      readText: read ?? (_) async => null,
-    );
+TerminalDriver _driver(
+  FakePty? pty, {
+  List<Map<String, Object?>>? started,
+  Future<String?> Function(String)? read,
+  Future<void> Function()? settle,
+}) => TerminalDriver(
+  id: 'terminal:aider',
+  label: 'aider',
+  command: 'aider',
+  args: const ['--no-auto-commits'],
+  which: (c) async => c == 'aider' ? '/bin/aider' : null,
+  startPty: ({required executable, required args, required workingDir, required sessionTag}) async {
+    started?.add({'exe': executable, 'args': args, 'cwd': workingDir, 'tag': sessionTag});
+    return pty;
+  },
+  readText: read ?? (_) async => null,
+  settle: settle ?? () async {},
+);
 
 Future<(TerminalSession, FakePty)> _open({DriverBriefing? briefing, Future<String?> Function(String)? read}) async {
   final pty = FakePty();
   final s = await _driver(pty, read: read).start(_spec(briefing: briefing)) as TerminalSession;
+  pty.emit('> ');
+  await Future<void>.delayed(Duration.zero);
   return (s, pty);
 }
 
@@ -111,10 +120,67 @@ void main() {
   });
 
   group('session', () {
-    test('plain paste folds newlines, then a separate Return', () async {
+    test('plain paste folds newlines, then Return', () async {
       final (s, pty) = await _open();
       await s.send('hi\nthere');
       expect(pty.texts, ['hi there', '\r']);
+    });
+
+    test('Return waits for the settle, not written with the paste', () async {
+      final pty = FakePty();
+      final gate = Completer<void>();
+      final s = await _driver(pty, settle: () => gate.future).start(_spec()) as TerminalSession;
+      pty.emit('> ');
+      await Future<void>.delayed(Duration.zero);
+      final sent = s.send('hi');
+      await Future<void>.delayed(Duration.zero);
+      expect(pty.texts, ['hi']);
+      gate.complete();
+      await sent;
+      expect(pty.texts, ['hi', '\r']);
+    });
+
+    test('the mode and context notes are not typed into the CLI, the transcript keeps them', () async {
+      final (s, pty) = await _open();
+      final noted = modeNote(AgentMode.plan, 'add a README');
+      await s.send(noted);
+      expect(pty.texts, ['add a README', '\r']);
+      await s.close();
+      final user = (await s.events.toList()).whereType<ChatMessage>().firstWhere((m) => m.fromUser);
+      expect(user.text, noted);
+    });
+
+    test('the first prompt is shown at once and pasted after the CLI draws', () async {
+      final pty = FakePty();
+      final s = await _driver(pty).start(_spec(initial: 'fix the test')) as TerminalSession;
+      final seen = <HarnessEvent>[];
+      s.events.listen(seen.add);
+      await Future<void>.delayed(Duration.zero);
+      expect(seen.whereType<ChatMessage>().where((m) => m.fromUser).map((m) => m.text), ['fix the test']);
+      expect(pty.writes, isEmpty);
+      pty.emit('aider> ');
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(pty.texts, ['fix the test', '\r']);
+    });
+
+    test('after the CLI exits a send says so, writes nothing, and close does not kill', () async {
+      final (s, pty) = await _open();
+      pty.exit(0);
+      await Future<void>.delayed(Duration.zero);
+      expect(driverRootsOf('tag-t'), isEmpty);
+      await s.send('more');
+      expect(pty.writes, isEmpty);
+      await s.close();
+      expect(pty.kills, 0);
+      final texts = (await s.events.toList()).whereType<ChatMessage>().where((m) => !m.fromUser).map((m) => m.text);
+      expect(texts.last, contains('has ended'));
+    });
+
+    test('quitting the app closes terminal sessions', () async {
+      final (_, pty) = await _open();
+      await closeAllDriverProcesses();
+      expect(pty.kills, 1);
     });
 
     test('bracketed paste once the CLI asked for it, newlines kept', () async {
