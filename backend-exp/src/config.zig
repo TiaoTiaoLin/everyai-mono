@@ -12,6 +12,15 @@ pub const Config = struct {
     /// Signs access tokens (HS256), 32+ characters. Required in production;
     /// in development a random one is made per run when unset.
     jwt_secret: ?anole.Secret = null,
+    /// PEM files for serving HTTPS on `port` instead of plain HTTP (chain
+    /// leaf first). Both or neither. Reloaded on SIGHUP, so a renewed
+    /// certificate needs no restart.
+    tls_cert_path: ?[]const u8 = null,
+    tls_key_path: ?[]const u8 = null,
+    /// Requests per minute from one client address (IPv6 by /64) across the
+    /// whole API, a token bucket of the same size; 0 turns it off. /v1/auth
+    /// keeps its own tighter limit on top.
+    rate_limit_per_minute: u32 = 600,
     /// Where the SQLite file lives (relative to the working directory).
     database_path: []const u8 = "data/everyai.db",
 
