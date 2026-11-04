@@ -191,6 +191,17 @@ void main() {
       }
     });
 
+    test('floor: false skips only the floor', () {
+      for (final m in AgentMode.values) {
+        expect(policy.decide(_sh('rm -rf ~'), m, floor: false).source, isNot(DecisionSource.floor));
+      }
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.fullAuto, floor: false).verdict, Verdict.allow);
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.ask, floor: false).source, DecisionSource.dangerous);
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.plan, floor: false).source, DecisionSource.plan);
+      const denying = PermissionPolicy(rules: PermissionRules(deny: ['rm *']));
+      expect(denying.decide(_sh('rm -rf ~'), AgentMode.fullAuto, floor: false).source, DecisionSource.rule);
+    });
+
     test('dangerous actions ask even in Auto-edit, but not in Full auto', () {
       expect(policy.decide(_sh('git reset --hard'), AgentMode.autoEdit).source, DecisionSource.dangerous);
       expect(policy.decide(_edit('$_dir/.env'), AgentMode.autoEdit).verdict, Verdict.ask);

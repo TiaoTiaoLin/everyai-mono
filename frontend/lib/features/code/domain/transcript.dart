@@ -8,6 +8,7 @@ import '../settings/context_files.dart' show splitContextNotes;
 import 'agent_mode.dart';
 import 'compaction.dart' show splitCompacted, splitHandoff;
 import 'questions.dart';
+import 'rewind.dart' show splitRewindNote;
 import 'subagents.dart';
 
 /// What the session view shows, folded from harness events by
@@ -425,7 +426,7 @@ final class TranscriptBuilder {
         if (briefed != null) _items.add(NoticeItem('${e.id}-briefing', briefingNotice, detail: briefed));
         if (briefed != null && raw.isEmpty) return;
         final (mode, noted) = splitModeNote(raw);
-        var (_, text) = splitContextNotes(noted);
+        var text = splitRewindNote(splitContextNotes(noted).$2);
         final changed = mode != null && mode != _notedMode;
         if (mode != null) _notedMode = mode;
         // A continuation conversation opens with the summary, not something the user typed.

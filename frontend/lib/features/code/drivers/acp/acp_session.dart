@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:uuid/uuid.dart';
 
 import '../../domain/agent_mode.dart';
+import '../../domain/floor_advice.dart' show floorAdviceLead, floorAdviceSubject;
 import '../../domain/permissions.dart' show typedReason;
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
@@ -1029,6 +1030,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
           if (o['kind'] == kind && o['optionId'] is String) o['optionId']! as String,
       ].firstOrNull;
       if (accept) {
+        // The user allowed what the floor advised against: that advice no longer holds.
+        if (call != null && call.str('command').isNotEmpty) {
+          final quoted = '`${floorAdviceSubject(call)}`';
+          _notes.removeWhere((n) => n.startsWith(floorAdviceLead) && n.contains(quoted));
+        }
         if (option('allow_once') case final id?) {
           a.reply.complete(_selected(id));
           continue;
@@ -1039,9 +1045,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals, HasNativeCom
       final refuse = option('reject_once');
       a.reply.complete(all || refuse == null ? _cancelledOutcome : _selected(refuse));
       final why = reason ?? (accept ? 'Only "always allow" was offered.' : 'Refused.');
-      // The agent already got the refusal; only words the user typed are worth a line in the next prompt.
-      if (typedReason(reason) case final said?) {
-        final note = 'The app refused ${_quoted(title)}: $said';
+      // The agent already got the refusal; only words the user typed, or our floor advice (ACP can't attach a
+      // message to a reject), are worth a line in the next prompt.
+      final advice = reason != null && reason.startsWith(floorAdviceLead) ? reason : null;
+      if (advice ?? typedReason(reason) case final said?) {
+        final note = advice ?? 'The app refused ${_quoted(title)}: $said';
         if (_notes.length < 5 && !_notes.contains(note)) _notes.add(note);
       }
       _done.add(a.callId);

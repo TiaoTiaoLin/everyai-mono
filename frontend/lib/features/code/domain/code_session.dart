@@ -88,6 +88,7 @@ final class CodeSessionInfo {
     this.leads = const {},
     this.pendingHandoff = '',
     this.nativeMode = '',
+    this.pendingRewind = '',
   });
 
   final String id;
@@ -130,6 +131,10 @@ final class CodeSessionInfo {
   /// session reopens; '' for none (the EveryAI harness, or not picked). A
   /// lead switch clears it.
   final String nativeMode;
+  /// The note telling a lead that kept the conversation that the files were
+  /// rewound: it goes out with the next message, even after a restart. ''
+  /// when none.
+  final String pendingRewind;
 
   /// Started on a harness the app no longer has.
   bool get removedHarness => harness == openHandsHarnessName;
@@ -189,6 +194,7 @@ final class CodeSessionInfo {
     Map<String, LeadRecord>? leads,
     String? pendingHandoff,
     String? nativeMode,
+    String? pendingRewind,
     bool merged = false,
   }) => CodeSessionInfo(
     id: id,
@@ -218,6 +224,7 @@ final class CodeSessionInfo {
     pendingHandoff: pendingHandoff ?? this.pendingHandoff,
     // Another lead's modes have other names.
     nativeMode: nativeMode ?? (harness != null && harness != this.harness ? '' : this.nativeMode),
+    pendingRewind: pendingRewind ?? this.pendingRewind,
   );
 
   factory CodeSessionInfo.fromJson(Map<String, Object?> json) => CodeSessionInfo(
@@ -258,6 +265,7 @@ final class CodeSessionInfo {
     },
     pendingHandoff: json['pending_handoff'] as String? ?? '',
     nativeMode: json['native_mode'] as String? ?? '',
+    pendingRewind: json['pending_rewind'] as String? ?? '',
   );
 
   Map<String, Object?> toJson() => {
@@ -286,5 +294,6 @@ final class CodeSessionInfo {
     if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
     if (pendingHandoff.isNotEmpty) 'pending_handoff': pendingHandoff,
     if (nativeMode.isNotEmpty) 'native_mode': nativeMode,
+    if (pendingRewind.isNotEmpty) 'pending_rewind': pendingRewind,
   };
 }

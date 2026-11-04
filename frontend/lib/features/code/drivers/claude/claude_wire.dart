@@ -9,6 +9,7 @@ import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart';
 import '../driver.dart';
 import '../driver_events.dart';
+import '../driver_policy.dart' show hostRunTools;
 import '../usage_limit.dart';
 
 // Claude Code's stdio protocol (`claude -p --input-format stream-json
@@ -262,8 +263,12 @@ const continueMessage = 'Carry on from where you stopped.';
 /// Tools that only touch Claude's own state (or, in a [briefed] session,
 /// reach the user through our MCP server), which the session allows itself:
 /// they still show. Without a briefing an `everyai` MCP server isn't ours.
+/// Our tools that run a command ([hostRunTools]) ask like any other.
 bool answeredBySession(String toolName, {required bool briefed}) =>
-    (briefed && toolName.startsWith('mcp__${everyaiServerName}__')) || _internalTools.contains(toolName);
+    (briefed &&
+        toolName.startsWith('mcp__${everyaiServerName}__') &&
+        !hostRunTools.contains(toolName.substring('mcp__${everyaiServerName}__'.length))) ||
+    _internalTools.contains(toolName);
 
 const _internalTools = {
   'ToolSearch',

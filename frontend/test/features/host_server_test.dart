@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/harness/everyai/mcp_io.dart';
 import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/code/host/host_script.dart' show hostScriptsAvailable;
 import 'package:every_ai/features/code/host/host_server_io.dart' as io;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -129,7 +130,20 @@ void main() {
       'headers': {'Authorization': 'Bearer ${tok.token}'},
     });
     addTearDown(c.close);
-    expect([for (final t in c.tools) t['name']], ['ask_user_question', 'present_plan', 'memory', 'saved_plans']);
+    expect(
+      [for (final t in c.tools) t['name']],
+      [
+        'ask_user_question',
+        'present_plan',
+        'memory',
+        'saved_plans',
+        'bug_check',
+        'check',
+        'diff_stats',
+        'goal_check',
+        if (hostScriptsAvailable) 'run_script',
+      ],
+    );
     expect(c.tools.first['description'], contains('come back as the result of this call'));
     expect(c.tools.first['inputSchema'], isA<Map<String, Object?>>());
     final out = await c.call('memory', {'action': 'add', 'text': '- run make'});
@@ -138,18 +152,23 @@ void main() {
     expect(tools.calls.single.sessionId, 's1');
   });
 
-  test('bug_check is listed and callable only for a Bug fix session', () async {
-    final r = await post(rpc('tools/call', {'name': 'bug_check', 'arguments': <String, Object?>{}}));
-    expect(errorCode(r), -32602);
-    final fix = await server.mint('s2', tools, bugFix: true);
+  test('the checks: bug_check and check run commands, the rest only read', () async {
     final c = await McpConnection.open('everyai', {
-      'url': '${fix.url}',
-      'headers': {'Authorization': 'Bearer ${fix.token}'},
+      'url': '${tok.url}',
+      'headers': {'Authorization': 'Bearer ${tok.token}'},
     });
     addTearDown(c.close);
-    final bug = c.tools.last;
-    expect(bug['name'], 'bug_check');
-    expect(bug['annotations'], containsPair('destructiveHint', true));
+    Map<String, Object?> hints(String name) =>
+        c.tools.firstWhere((t) => t['name'] == name)['annotations']! as Map<String, Object?>;
+    for (final name in ['bug_check', 'check']) {
+      expect(hints(name), {'readOnlyHint': false, 'destructiveHint': true}, reason: name);
+    }
+    for (final name in ['diff_stats', 'goal_check', if (hostScriptsAvailable) 'run_script']) {
+      expect(hints(name), {'readOnlyHint': true, 'destructiveHint': false}, reason: name);
+    }
+    final bug = c.tools.firstWhere((t) => t['name'] == 'bug_check')['inputSchema']! as Map<String, Object?>;
+    expect(((bug['properties']! as Map)['action'] as Map)['enum'], ['reproduced', 'verify', 'status']);
+    expect(hostToolSpecs.where((t) => t['name'] == 'run_script'), hostScriptsAvailable ? hasLength(1) : isEmpty);
   });
 
   test('params, method or arguments of the wrong type get a JSON-RPC error', () async {
@@ -282,7 +301,7 @@ void main() {
       final list = resultOf(r);
       expect(list['resultType'], 'complete');
       expect(list['ttlMs'], isA<int>());
-      expect((list['tools'] as List).length, 4);
+      expect((list['tools'] as List).length, hostToolSpecs.length);
     });
 
     test('a tools/call names the tool in Mcp-Name, base64 too', () async {

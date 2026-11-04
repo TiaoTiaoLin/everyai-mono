@@ -17,7 +17,8 @@ import 'opencode_server.dart';
 /// one. Its question tool and subagents are off (our question cards come
 /// through our MCP server; subagents run as the app's child sessions), the
 /// to-do list and skills need no answer, and our MCP server judges its own
-/// tools.
+/// tools, except the two that run a command in the app (bug_check, check):
+/// those ask, so the session's approval sees them before the host runs it.
 const openCodeSessionRules = [
   {'action': '*', 'resource': '*', 'effect': 'ask'},
   {'action': 'question', 'resource': '*', 'effect': 'deny'},
@@ -25,6 +26,8 @@ const openCodeSessionRules = [
   {'action': 'todowrite', 'resource': '*', 'effect': 'allow'},
   {'action': 'skill', 'resource': '*', 'effect': 'allow'},
   {'action': 'everyai_*', 'resource': '*', 'effect': 'allow'},
+  {'action': 'everyai_bug_check', 'resource': '*', 'effect': 'ask'},
+  {'action': 'everyai_check', 'resource': '*', 'effect': 'ask'},
 ];
 
 /// OpenCode's `{providerID, id, variant}` for the app's `provider/model` id

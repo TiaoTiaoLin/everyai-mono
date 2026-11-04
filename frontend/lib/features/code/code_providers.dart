@@ -28,6 +28,7 @@ import '../usage/usage_totals.dart';
 import 'domain/agent_mode.dart';
 import 'domain/code_session.dart';
 import 'domain/compaction.dart';
+import 'domain/floor_advice.dart';
 import 'domain/doom_loop.dart';
 import 'domain/git_commands.dart';
 import 'domain/goal.dart';
@@ -38,7 +39,6 @@ import 'domain/spill.dart';
 import 'domain/phases.dart'
     show
         Phase,
-        bugCheckTool,
         flowLabel,
         isResearchWorker,
         maxResearchAtOnce,
@@ -78,7 +78,9 @@ import 'harness/harness.dart';
 import 'harness/session_processes.dart';
 import 'harness/summarizer.dart';
 import 'host/host.dart';
+import 'host/host_checks.dart';
 import 'host/host_notes.dart';
+import 'host/host_output.dart';
 import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
@@ -168,10 +170,14 @@ final _hostTokensProvider = Provider<Map<String, String>>((ref) => {});
 /// The briefing text each outside session's agent was last sent (the transcript's "EveryAI briefing" row).
 final _briefingTextsProvider = Provider<Map<String, String>>((ref) => {});
 
-/// What the session text tells an outside agent about each host tool, in
-/// `hostToolSpecs` order. bug_check is left out until outside agents get Bug
-/// fix mode.
-const _hostToolInfos = <HostToolInfo>[
+/// What the session text tells an outside agent about each host tool it is
+/// offered, in `hostToolSpecs` order.
+List<HostToolInfo> get _hostToolInfos => [
+  for (final t in [..._baseToolInfos, ...checkToolInfos])
+    if (hostToolSpecs.any((s) => s['name'] == t.name)) t,
+];
+
+const _baseToolInfos = <HostToolInfo>[
   (
     name: askUserQuestionTool,
     when:
@@ -1551,8 +1557,24 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return hostMemory(dir, call.args);
       case savedPlansTool:
         return hostSavedPlans(dir, call.args);
-      case bugCheckTool:
-        return (text: "Error: bug_check is for Bug fix mode, which this session isn't in.", isError: true);
+      case final name when checkToolNames.contains(name):
+        final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        final context = HostCheckContext(
+          sessionId: sessionId,
+          workingDir: dir,
+          stateDir: await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId),
+          worktree: info?.worktree,
+          goal: state.goal,
+          refusal: (command) => hostRunRefusal(
+            policy: policy,
+            mode: state.mode,
+            tool: name,
+            args: call.args,
+            command: command,
+            approved: _hostRunGrants,
+          ),
+        );
+        return hostFit(dir, 'host-${DateTime.now().millisecondsSinceEpoch}-$name', await hostCheckTool(call, context));
       default:
         return (text: 'Error: there is no EveryAI tool called ${call.name}.', isError: true);
     }
@@ -1915,6 +1937,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (_decided.isNotEmpty && (ended || _decided.containsKey(settled))) {
       if (ended) {
         _decided.clear();
+        _hostRunGrants.clear();
       } else {
         _decided.remove(settled);
       }
@@ -1950,7 +1973,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Sends the next queued message once nothing runs or waits (and no lead switch is under way).
   void _sendQueued() {
     final t = state.transcript;
-    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty || state.queued.isEmpty) return;
+    if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
+    if (state.queued.isEmpty) return;
     final [next, ...rest] = state.queued;
     state = state.copyWith(queued: rest);
     if (_withinBudget()) unawaited(_checkpoint().then((_) => _sendNow(next)));
@@ -2096,6 +2120,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _answered = key;
     final session = _session;
     if (verdict.accept) {
+      _grantHostRuns(waiting);
       unawaited(session?.respond(accept: true));
     } else {
       // The server parks the conversation after a rejection; run it again so
@@ -2125,6 +2150,19 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Answers given to the calls waiting now (see [CodeSessionState.decided]).
   final _decided = <String, bool>{};
 
+  /// Floor reasons an outside harness was already advised about: when the
+  /// model hits one again, the user decides (see [outsideVerdict]).
+  final _floorAdvised = <String>{};
+
+  /// The host-run calls (bug_check, check) the user or the rules allowed in
+  /// this run, which the host may run once each (see [hostRunRefusal]).
+  /// Kept by arguments, not row: a driver may close its approval row before
+  /// its client calls the host (Codex).
+  final _hostRunGrants = <ActionCall>[];
+
+  void _grantHostRuns(Iterable<ActionCall> calls) =>
+      _hostRunGrants.addAll(calls.where((c) => hostRunTools.contains(hostToolOf(c))));
+
   void _markDecided(Iterable<String> ids, {required bool accept}) {
     for (final id in ids) {
       _decided[id] = accept;
@@ -2143,7 +2181,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (_isSubagent && isHeldTool(call)) continue;
       final verdict = switch (_mustWait([call], t)) {
         final reason? => (accept: false, reason: reason),
-        null => _gated([call], policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase))),
+        null => _gated(
+          [call],
+          _driver.info.id == everyaiHarnessName
+              ? policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase))
+              : outsideVerdict(policy, call, state.mode, askMcp: beforeBuild(t.phase?.phase), advised: _floorAdvised),
+        ),
       };
       if (verdict == null) continue;
       // Over budget: nothing is approved on its own; the run stops instead.
@@ -2152,6 +2195,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return;
       }
       _markDecided([call.id], accept: verdict.accept);
+      if (verdict.accept) _grantHostRuns([call]);
       unawaited(session.respond(accept: verdict.accept, reason: verdict.reason, callIds: [call.id]));
     }
   }
@@ -2244,6 +2288,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   String _tierNote = '';
 
+  /// While [rewind] runs: messages wait, so none goes out mid-restore or without the note.
+  bool _rewinding = false;
+
+  /// Whether [rewind] takes the conversation back too (the driver has its own rewind).
+  bool get rewindsConversation => _driver.caps.contains(DriverCap.rewind);
+
   /// `/skip-phase`: moves the Max or Ultra flow past where it is stuck.
   void skipPhase() {
     if (_session case final PhasedSession phased) unawaited(phased.skipPhase());
@@ -2253,10 +2303,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Nested instruction files found since the last message go first, after the mode note.
   String _noted(String text) {
     final told = state.transcript.notedMode;
-    final context = [_context?.takeNote() ?? '', _tierNote].where((n) => n.isNotEmpty).join('\n\n');
+    // The rewind note (saved with the session, so it survives a restart) goes right after the context notes,
+    // where the transcript splits it off again.
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    final rewound = info?.pendingRewind ?? '';
+    if (info != null && rewound.isNotEmpty) sessions.update(info.copyWith(pendingRewind: ''));
+    final context = [_context?.takeNote() ?? '', rewound, _tierNote].where((n) => n.isNotEmpty).join('\n\n');
     _tierNote = '';
     final body = context.isEmpty ? text : (text.isEmpty ? context : '$context\n\n$text');
-    final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
+    final subagent = info?.isSubagent ?? false;
     final full = told != state.mode || _freshLead;
     _freshLead = false;
     // A lead in one of its own modes has its own instructions for it; ours would contradict them.
@@ -2291,8 +2347,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     // An outside agent waiting on a card is mid-turn: free it, so the turn can end and the message go out.
     _releaseHostCards();
     final t = state.transcript;
-    // During a lead switch it waits for the new lead.
-    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
+    // During a lead switch it waits for the new lead, during a rewind for the files.
+    if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
       state = state.copyWith(queued: [...state.queued, out]);
       return;
     }
@@ -2379,8 +2435,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final out = await _outgoing(text, files);
     final session = _session;
     if (out == null || session == null) return;
-    // The lead is changing: it goes to the new one, like a message.
-    if (_switching) {
+    // The lead is changing: it goes to the new one, like a message (and waits out a rewind too).
+    if (_switching || _rewinding) {
       state = state.copyWith(queued: [...state.queued, out]);
       return;
     }
@@ -3080,11 +3136,34 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final session = _session;
     if (info == null || session == null) return const RewindOutcome.failed('The session is not connected.');
-    // Before anything is stopped or restored.
-    if (rewindRefusal(_driver.info, _driver.caps) case final refusal?) return RewindOutcome.failed(refusal);
+    // Our checkpoints take the files back for any harness; the conversation
+    // only goes back on a driver with its own rewind. Neither: refuse before
+    // anything is stopped.
+    final native = rewindsConversation;
+    if (!native && info.worktree == null) {
+      if (rewindRefusal(_driver.info, _driver.caps) case final refusal?) return RewindOutcome.failed(refusal);
+    }
     if (_compacting || _switching) return const RewindOutcome.busy();
     final turns = state.transcript.items.whereType<UserTurn>().toList();
     if (turn < 1 || turn > turns.length) return const RewindOutcome.nothing();
+    if (_rewinding) return const RewindOutcome.busy();
+    _rewinding = true;
+    try {
+      return await _rewind(info, session, turns, turn, native);
+    } finally {
+      _rewinding = false;
+      // What the user wrote meanwhile goes out now, with the note.
+      if (ref.mounted) _sendQueued();
+    }
+  }
+
+  Future<RewindOutcome> _rewind(
+    CodeSessionInfo info,
+    HarnessSession session,
+    List<UserTurn> turns,
+    int turn,
+    bool native,
+  ) async {
     if (_busy) {
       final settled = await _stopAndSettle();
       if (!ref.mounted) return const RewindOutcome.failed('The session was closed.');
@@ -3093,7 +3172,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final message = turns[turn - 1].key;
     var conversation = false;
     var note = '';
-    if (_events.any((e) => e.id == message) && !_replayed.contains(message)) {
+    if (!native) {
+      note = '${_driver.info.label} still remembers the later turns; your next message tells it the files went back.';
+    } else if (_events.any((e) => e.id == message) && !_replayed.contains(message)) {
       final head = rewindHead(_events, message);
       try {
         await session.rewindTo(head);
@@ -3122,6 +3203,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       try {
         await ref.read(codeGitProvider(sessionId).notifier).rewind(turn);
         files = true;
+        // The harness kept the later turns: it hears about the files with the next message.
+        if (!conversation) {
+          final sessions = ref.read(codeSessionsProvider.notifier);
+          if (sessions.byId(sessionId) case final now?) {
+            sessions.update(now.copyWith(pendingRewind: rewindNote(turns[turn - 1].text)));
+          }
+        }
       } on Object catch (e) {
         note = "The files weren't restored: $e";
       }
@@ -3972,6 +4060,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
     if (!perCall || callIds == null) _answered = pending.map((c) => c.id).join(',');
     if (perCall) _markDecided([for (final c in targets) c.id], accept: true);
+    _grantHostRuns(targets);
     await _session?.respond(accept: true, callIds: perCall ? callIds : null);
     // A rule just remembered may settle other calls in the batch.
     if (perCall && callIds != null && scope != ApprovalScope.once) _autoRespond(state.transcript);

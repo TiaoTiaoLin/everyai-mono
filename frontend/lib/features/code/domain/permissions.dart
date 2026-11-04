@@ -116,11 +116,13 @@ final class PermissionPolicy {
   /// The session's folder; paths in rules are relative to it.
   final String? workingDir;
 
-  Decision decide(ActionCall call, AgentMode mode) {
+  /// [floor]: false skips the safety floor, so an outside harness can see
+  /// what the rest of the policy says about a floor hit (see floor_advice.dart).
+  Decision decide(ActionCall call, AgentMode mode, {bool floor = true}) {
     if (isClientTool(call)) return const Decision(Verdict.allow, DecisionSource.clientTool);
     final command = _command(call);
     // Keys typed into a running shell are checked like a command.
-    if (command ?? _typed(call) case final text?) {
+    if (floor ? command ?? _typed(call) : null case final text?) {
       if (floorReason(text) case final why?) return Decision(Verdict.deny, DecisionSource.floor, why: why);
     }
     if (_matching(call, rules.deny, allowing: false) case final rule?) {
@@ -241,8 +243,8 @@ String relativeTo(String path, String? dir) {
 /// The shell command of a terminal action (not keystrokes to a running process).
 String? _command(ActionCall call) => call.actionKind == 'TerminalAction' && call.action['is_input'] != true
     ? call.str('command')
-    // Bug fix mode's repro runs a command too, checked the same way.
-    : call.toolName == 'bug_check' && call.str('command').isNotEmpty
+    // Bug fix mode's repro runs a command too (the host's for an outside agent), checked the same way.
+    : (call.toolName == 'bug_check' || hostToolOf(call) == 'bug_check') && call.str('command').isNotEmpty
     ? call.str('command')
     : null;
 

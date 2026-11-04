@@ -258,7 +258,7 @@ final class FakeHost implements HostServer {
   var _n = 0;
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
+  Future<HostToken> mint(String sessionId, HostTools tools) async {
     minted.add(sessionId);
     this.tools[sessionId] = tools;
     final token = 'tok${++_n}';

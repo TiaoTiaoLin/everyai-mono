@@ -20,7 +20,7 @@ import '../code_providers.dart';
 import '../morning_providers.dart';
 import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
-import '../domain/permissions.dart';
+import '../domain/floor_advice.dart';
 import '../domain/questions.dart';
 import '../domain/rewind.dart';
 import '../domain/transcript.dart';
@@ -246,14 +246,7 @@ class CodeSessionScreen extends ConsumerWidget {
                                       ? (id, scope) => controller.approve(scope, [id])
                                       : null,
                                   onDenyCall: controller.perCall ? (id) => controller.deny(null, [id]) : null,
-                                  flags: {
-                                    for (final c in t.pending)
-                                      if (controller.policy.decide(c, state.mode) case Decision(
-                                        source: DecisionSource.dangerous,
-                                        :final why,
-                                      ))
-                                        c.id: why,
-                                  },
+                                  flags: approvalFlags(controller.policy, t.pending, state.mode),
                                 ),
                               )
                             else if (t.plan.isNotEmpty && t.running)
@@ -442,7 +435,11 @@ class CodeSessionScreen extends ConsumerWidget {
     final ok = await showAdaptiveConfirm(
       context,
       title: 'Rewind to here?',
-      message: rewindPrompt('this message', files: files),
+      message: rewindPrompt(
+        'this message',
+        files: files,
+        conversation: ref.read(codeSessionProvider(sessionId).notifier).rewindsConversation,
+      ),
       confirmLabel: 'Rewind',
       destructive: true,
     );

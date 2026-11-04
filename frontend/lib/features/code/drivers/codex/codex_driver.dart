@@ -8,6 +8,7 @@ import '../../harness/events.dart';
 import '../../harness/harness.dart';
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart' as recipes;
+import '../driver_policy.dart' show hostRunTools;
 import '../driver.dart';
 import '../driver_process.dart';
 import '../event_journal.dart';
@@ -357,7 +358,9 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativ
   /// The briefing as Codex takes it (`recipes.codex`), plus two settings
   /// for our server the recipe doesn't set yet: a tool timeout above the
   /// host's 300 s wait for a question card (Codex's default is 60 s), and
-  /// our tools pre-approved, so a card isn't preceded by a Codex prompt.
+  /// our tools pre-approved, so a card isn't preceded by a Codex prompt;
+  /// except bug_check and check, which run a command in the app: those ask
+  /// (an elicitation), so the session's approval sees them.
   /// The session text is read from the briefing folder.
   Future<_Launch> _launch(DriverBriefing? b) async {
     if (b == null) return _noBriefing;
@@ -371,6 +374,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativ
         'mcp_servers.$everyaiServerName.tool_timeout_sec=330',
         '-c',
         'mcp_servers.$everyaiServerName.default_tools_approval_mode="approve"',
+        for (final tool in hostRunTools) ...['-c', 'mcp_servers.$everyaiServerName.tools.$tool.approval_mode="prompt"'],
       ],
       env: d.env,
       initRequests: skillDir.isEmpty ? const <RpcCall>[] : d.initRequests,

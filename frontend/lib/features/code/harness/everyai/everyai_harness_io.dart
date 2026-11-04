@@ -25,6 +25,7 @@ import 'mcp_io.dart';
 import 'model_family.dart';
 import 'prompt_io.dart';
 import 'reasoning_binding.dart';
+import 'repro_paths_io.dart';
 import 'project_notes_io.dart';
 import 'script_io.dart';
 import 'shell_io.dart';
@@ -1828,39 +1829,7 @@ final class EveryAISession
   /// files the command names.
   Future<Map<String, String>> _reproSnapshot(String command, {String output = ''}) async {
     final root = _spec.workingDir;
-    final paths = <String>{};
-    // Tracked tests count when the repro touches them: changed or new ones
-    // (written to reproduce it) and ones its output names. A test elsewhere
-    // in the repository isn't part of the repro, so editing it is fine.
-    try {
-      final r = await Process.run('git', ['ls-files', '-co', '--exclude-standard'], workingDirectory: root);
-      final st = await Process.run('git', ['status', '--porcelain', '--untracked-files=all'], workingDirectory: root);
-      final dirty = {
-        if (st.exitCode == 0)
-          for (final line in const LineSplitter().convert('${st.stdout}'))
-            if (line.length > 3) line.substring(3).split(' -> ').last.replaceAll('"', ''),
-      };
-      if (r.exitCode == 0) {
-        for (final p in const LineSplitter().convert('${r.stdout}').where(PhaseFlow.isReproPath).take(5000)) {
-          if (dirty.contains(p) || (output.isNotEmpty && output.contains(p.split('/').last))) paths.add(p);
-        }
-      }
-    } on Object {
-      // Not git: the scratch scripts and named files still count.
-    }
-    final scratch = Directory('$root/.everyai/scratch');
-    if (scratch.existsSync()) {
-      for (final e in scratch.listSync(recursive: true).whereType<File>().take(500)) {
-        final rel = e.path.substring(root.length + 1);
-        if (PhaseFlow.isReproPath(rel)) paths.add(rel);
-      }
-    }
-    for (final word in command.split(RegExp(r'\s+'))) {
-      final w = word.replaceAll(RegExp('^[\'"]+|[\'"]+\$'), '');
-      if (w.isEmpty || w.startsWith('-')) continue;
-      final full = resolvePath(root, w);
-      if (full.startsWith('$root/') && File(full).existsSync()) paths.add(full.substring(root.length + 1));
-    }
+    final paths = await reproPaths(root, command, output: output);
     // Copies to compare against at verify (a file that only gained lines is fine).
     final copies = Directory('${_dir.path}/repro-files');
     if (copies.existsSync()) copies.deleteSync(recursive: true);
