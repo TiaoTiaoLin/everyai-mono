@@ -81,6 +81,8 @@ Future<DriverProcess> spawnDriverTty({
   final made = await Process.run('mkfifo', [input, output]);
   if (made.exitCode != 0) throw HarnessError("Couldn't make the pipes for the agent: ${'${made.stderr}'.trim()}");
   final shell = await ShellEnv.load();
+  // Only what this run writes counts as its last words.
+  final logStart = _length(logPath);
   final TtyProgram program;
   try {
     program = await start(
@@ -101,7 +103,15 @@ Future<DriverProcess> spawnDriverTty({
     rethrow;
   }
   registerDriverRoot(sessionTag, program.pid);
-  return _TtyProcess(program, sessionTag, logPath, input, output);
+  return _TtyProcess(program, sessionTag, logPath, logStart, input, output);
+}
+
+int _length(String path) {
+  try {
+    return File(path).lengthSync();
+  } on FileSystemException {
+    return 0;
+  }
 }
 
 void _removePipes(String input, String output) {
@@ -120,11 +130,13 @@ void _removePipes(String input, String output) {
 /// held open read-write (which never waits) until our own open is through,
 /// so nothing waits on a CLI that never opened its side.
 final class _TtyProcess implements DriverProcess {
-  _TtyProcess(this._program, this._tag, this._logPath, this._input, this._output) {
-    _log = File(_logPath).openWrite(mode: FileMode.append);
+  _TtyProcess(this._program, this._tag, this._logPath, this._logStart, this._input, this._output) {
     // Whatever it writes to the terminal, so a full pty buffer can't stall it.
-    _program.output.listen((d) {
-      if (!_closed) _log.add(d);
+    // Its own file: sh appends the CLI's stderr to the log, which a second
+    // writer without O_APPEND would overwrite.
+    _tty = File('${File(_logPath).parent.path}/tty.log').openWrite();
+    _ttyOutput = _program.output.listen((d) {
+      if (!_released) _tty.add(d);
     }, onError: (Object _) {});
     _reader = File(_output).open();
     // Write-only, so a write after the CLI is gone fails instead of filling the pipe.
@@ -139,6 +151,7 @@ final class _TtyProcess implements DriverProcess {
         _live.remove(this);
         unregisterDriverRoot(_tag, pid);
         await _unblock();
+        await _release();
       }),
     );
   }
@@ -148,10 +161,15 @@ final class _TtyProcess implements DriverProcess {
   final String _logPath;
   final String _input;
   final String _output;
-  late final IOSink _log;
+  final int _logStart;
+  late final IOSink _tty;
+  late final StreamSubscription<List<int>> _ttyOutput;
   late final Future<RandomAccessFile> _reader;
   late final Future<RandomAccessFile> _writer;
   Future<void> _writes = Future.value();
+  Future<void>? _unblocking;
+  Future<void>? _releasing;
+  var _released = false;
   var _closed = false;
   var _exited = false;
 
@@ -180,12 +198,21 @@ final class _TtyProcess implements DriverProcess {
   @override
   Future<int> get exitCode => _program.exitCode;
 
-  /// The end of the log: the CLI's stderr and what it wrote to the terminal.
+  /// The end of what the CLI wrote to stderr in this run (the log holds
+  /// earlier runs too).
   @override
   String get lastError {
     try {
-      final text = File(_logPath).readAsStringSync();
-      return text.length > 2000 ? text.substring(text.length - 2000) : text;
+      final f = File(_logPath).openSync();
+      try {
+        final end = f.lengthSync();
+        final from = end - 2000 > _logStart ? end - 2000 : _logStart;
+        if (end <= from) return '';
+        f.setPositionSync(from);
+        return utf8.decode(f.readSync(end - from), allowMalformed: true);
+      } finally {
+        f.closeSync();
+      }
     } on FileSystemException {
       return '';
     }
@@ -203,8 +230,9 @@ final class _TtyProcess implements DriverProcess {
     });
   }
 
-  /// Holds each pipe open read-write until our own open of it is through.
-  Future<void> _unblock() async {
+  /// Holds each pipe open read-write until our own open of it is through;
+  /// once, as an open after [_release] removed the pipes would make files.
+  Future<void> _unblock() => _unblocking ??= () async {
     for (final (path, ours) in [(_output, _reader), (_input, _writer)]) {
       try {
         final hold = await File(path).open(mode: FileMode.write);
@@ -214,7 +242,23 @@ final class _TtyProcess implements DriverProcess {
         // Removed already.
       }
     }
-  }
+  }();
+
+  /// Lets go of the pipes and the terminal's log, once: when the CLI exits
+  /// or the session closes, whichever is first.
+  Future<void> _release() => _releasing ??= () async {
+    await _writes;
+    try {
+      await (await _writer).close();
+    } on Object {
+      // Never opened, or closed already.
+    }
+    _released = true;
+    await _ttyOutput.cancel();
+    await _tty.flush();
+    await _tty.close();
+    _removePipes(_input, _output);
+  }();
 
   @override
   Future<void> close() async {
@@ -224,15 +268,7 @@ final class _TtyProcess implements DriverProcess {
     unregisterDriverRoot(_tag, pid);
     await killTree(pid);
     await _unblock();
-    await _writes;
-    try {
-      await (await _writer).close();
-    } on Object {
-      // Never opened, or closed already.
-    }
-    await _log.flush();
-    await _log.close();
-    _removePipes(_input, _output);
+    await _release();
   }
 }
 

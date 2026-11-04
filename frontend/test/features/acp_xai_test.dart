@@ -151,12 +151,14 @@ void main() {
     });
   });
 
-  test('prompt completion: the direct method and turn_completed; wakes and nameless turns ignored', () {
+  test('prompt completion: the direct method and turn_completed; wakes marked, nameless turns ignored', () {
     expect(xaiPromptDone('session/prompt_complete', {'sessionId': 's', 'promptId': 'p1', 'stopReason': 'end_turn'}), (
       sessionId: 's',
       promptId: 'p1',
       stopReason: 'end_turn',
       agentResult: null,
+      wake: false,
+      usage: null,
     ));
     expect(xaiPromptDone('session/prompt_complete', {'sessionId': 's', 'stopReason': 'end_turn'})?.promptId, isNull);
     expect(
@@ -172,7 +174,16 @@ void main() {
       }),
       isNull,
     );
-    expect(xaiPromptDone('session/prompt_complete', {'promptId': 'task-completed-abc'}), isNull);
+    expect(xaiPromptDone('session/prompt_complete', {'promptId': 'task-completed-abc'})?.wake, isTrue);
+    final wake = xaiPromptDone('session/update', {
+      'update': {
+        'sessionUpdate': 'turn_completed',
+        'prompt_id': 'task-completed-t1',
+        'usage': {'inputTokens': 10},
+      },
+    });
+    expect(wake?.wake, isTrue);
+    expect(wake?.usage, {'inputTokens': 10});
     expect(
       xaiPromptDone('session_notification', {
         'update': {'sessionUpdate': 'subagent_finished', 'prompt_id': 'p'},
@@ -180,6 +191,96 @@ void main() {
       isNull,
     );
     expect(xaiPromptDone('task_completed', const {}), isNull);
+  });
+
+  test('turn usage: ACP fields, the cached part inside the input, cost from ticks', () {
+    // T3 Code's usage.test.ts turn_completed sample.
+    final u = xaiTurnUsage({
+      'inputTokens': 20272,
+      'outputTokens': 272,
+      'totalTokens': 20544,
+      'cachedReadTokens': 11264,
+      'cacheCreationTokens': 0,
+      'reasoningTokens': 180,
+      'costUsdTicks': 230272000,
+    }, id: 'u')!;
+    expect((u.input, u.output, u.cached, u.costMicros, u.onPlan), (20272, 272, 11264, 23027, true));
+    expect(xaiTurnUsage({'inputTokens': 1}, id: 'u')!.costMicros, isNull);
+    expect(xaiTurnUsage(null, id: 'u'), isNull);
+  });
+
+  test('kills: a finished kill ends the tasks it names; a failed one or another outcome ends nothing', () {
+    Map<String, Object?> call(Map<String, Object?> data, {String status = 'completed', String title = 'kill'}) => {
+      'title': title,
+      'status': status,
+      ...data,
+    };
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {'task_id': 'call-bg-1'},
+          'rawOutput': {'type': 'KillTask'},
+        }),
+      ),
+      ['call-bg-1'],
+    );
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {
+            'variant': 'KillTask',
+            'task_ids': ['a', 'b'],
+            'taskId': 'a',
+          },
+        }),
+      ),
+      ['a', 'b'],
+    );
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {'task_id': 't'},
+          'rawOutput': {'type': 'KillTask', 'outcome': 'already_exited'},
+        }),
+      ),
+      ['t'],
+    );
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {'task_id': 't'},
+        }, title: 'kill_command_or_subagent t'),
+      ),
+      ['t'],
+    );
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {'variant': 'KillTask', 'task_id': 't'},
+          'rawOutput': {
+            'type': 'KillTask',
+            'Result': {'outcome': 'error'},
+          },
+        }),
+      ),
+      isEmpty,
+    );
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {'variant': 'KillTask', 'task_id': 't'},
+        }, status: 'failed'),
+      ),
+      isEmpty,
+    );
+    expect(
+      xaiKilled(
+        call({
+          'rawInput': {'task_id': 't'},
+        }),
+      ),
+      isEmpty,
+    );
   });
 
   test('redaction: env and header values, secret-named strings; names kept; input untouched', () {

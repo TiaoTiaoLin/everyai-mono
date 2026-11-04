@@ -1,6 +1,7 @@
 @TestOn('mac-os || linux')
 library;
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/drivers/driver_process_io.dart';
@@ -59,5 +60,30 @@ while IFS= read -r line; do printf '%s\n' "$line"; done
     expect(await p.lines.toList(), isEmpty);
     expect(await p.exitCode, 3);
     await p.close();
+  });
+
+  test("last words: this run's stderr only, terminal output kept apart, odd bytes tolerated", () async {
+    final log = File('${tmp.path}/s/stderr.log')
+      ..parent.createSync(recursive: true)
+      ..writeAsStringSync('Error: Device not configured (os error 6)\n');
+    final agent = File('${tmp.path}/agent.sh')..writeAsStringSync("printf 'not logged in \\377\\n' >&2\n");
+    final p = await spawnDriverTty(
+      executable: '/bin/sh',
+      args: [agent.path],
+      cwd: tmp.path,
+      sessionTag: 'tty-test-3',
+      logPath: log.path,
+      // What it writes to the terminal.
+      start: (exe, args, cwd, env) async {
+        final t = await _piped(exe, args, cwd, env);
+        return (pid: t.pid, exitCode: t.exitCode, output: Stream.value(utf8.encode('terminal noise\n')));
+      },
+    );
+    expect(await p.lines.toList(), isEmpty);
+    await p.exitCode;
+    expect(p.lastError, 'not logged in �\n');
+    await p.close();
+    expect(utf8.decode(log.readAsBytesSync(), allowMalformed: true), contains('os error 6)\nnot logged in'));
+    expect(File('${tmp.path}/s/tty.log').readAsStringSync(), 'terminal noise\n');
   });
 }

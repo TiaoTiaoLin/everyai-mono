@@ -281,8 +281,9 @@ String acpChunkText(Object? content) => _blockText(content);
 /// What a turn used (`PromptResponse.usage`, OpenCode). `inputTokens` leaves
 /// cache reads and writes out when the totals add up that way (OpenCode's
 /// `TokenUsage.total`); otherwise it is taken as the whole prompt. Paid by the
-/// agent's own account ([UsageReport.onPlan]).
-UsageReport? acpTurnUsage(Object? usage, {required String id}) {
+/// agent's own account ([UsageReport.onPlan]); [costMicros] when the agent
+/// says what it cost.
+UsageReport? acpTurnUsage(Object? usage, {required String id, int? costMicros}) {
   if (usage is! Map<String, Object?>) return null;
   int n(String k) => (usage[k] as num?)?.toInt() ?? 0;
   final input = n('inputTokens');
@@ -296,6 +297,7 @@ UsageReport? acpTurnUsage(Object? usage, {required String id}) {
     input: apart ? input + read + write : input,
     output: apart ? output + thought : output,
     cached: read,
+    costMicros: costMicros,
     onPlan: true,
   );
 }

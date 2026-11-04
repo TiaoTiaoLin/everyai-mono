@@ -57,9 +57,9 @@ final class AcpLauncher {
   final Future<String> Function() resolve;
   final AcpConnect connect;
 
-  /// Starts later agents under a terminal of their own; false when they
-  /// already are (`AcpProfile.ttyFallback`).
-  final bool Function() switchToTty;
+  /// Starts later agents under a terminal of their own; false when the
+  /// channel given already ran under one (`AcpProfile.ttyFallback`).
+  final bool Function(LineChannel channel) switchToTty;
 
   /// The login shell's environment, read only to pick an `authenticate`
   /// method.
@@ -105,7 +105,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   @override
   final String id;
 
-  /// `<dataDir>/acp-sessions/<id>`: `meta.json`, `events.jsonl`, `stderr.log`.
+  /// `<dataDir>/acp-sessions/<id>`: `meta.json`, `events.jsonl`, `stderr.log`
+  /// (and `tty.log` under a terminal).
   final String dir;
   final String cwd;
   final String sessionTag;
@@ -196,13 +197,28 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   String? _xaiPrompt;
   Completer<Object?>? _xaiDone;
 
+  /// A prompt of ours is in flight (for every agent; [_xaiDone] is made for
+  /// each prompt).
+  bool get _prompting => _xaiDone != null;
+
+  /// Grok woke up on its own (a background task or subagent finished) and
+  /// works outside any prompt of ours: no prompt reply will end it, its
+  /// `task-completed-*` turn does.
+  var _waking = false;
+
+  /// The prompt id of Grok's last turn whose reply came without usage: a
+  /// later `turn_completed` for it still reports what it used.
+  String? _xaiUnreported;
+
   /// Grok's subagents that run on in the background, by child session id:
   /// their row waits for `subagent_finished`.
   final _xaiChildren = <String, ActionCall>{};
 
-  /// Grok's background tasks, by task id: their rows, and which finished.
+  /// Grok's background tasks, by task id: their rows, and which finished;
+  /// a task's tool call id leads to its task id (a kill can name either).
   final _xaiTasks = <String, ActionCall>{};
   final _xaiTasksDone = <String>{};
+  final _xaiTaskAlias = <String, String>{};
 
   ExecutionStatus get status => _status;
   String get _label => _launcher.info.label;
@@ -360,7 +376,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       if (closed &&
           _profile.ttyFallback &&
           isNoTtyExit('${e.message}\n${channel.lastError}') &&
-          _launcher.switchToTty()) {
+          _launcher.switchToTty(channel)) {
         return _connect(fresh: fresh);
       }
       throw HarnessError(_errorText(e, closed: closed));
@@ -399,6 +415,26 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     }
     _asking.clear();
     _endExtWaits(HostEnd.clientGone);
+    // Grok's background work went with it.
+    for (final id in _xaiTasks.keys.toList()) {
+      _xaiTaskEnded(id, text: 'Stopped when $_label exited.', failed: true);
+    }
+    for (final row in _xaiChildren.values) {
+      _emit(
+        resultEvent(
+          id: '${_resultId(row)}-done',
+          actionId: row.id,
+          toolName: row.toolName,
+          text: 'Stopped when $_label exited.',
+          isError: true,
+        ),
+      );
+    }
+    _xaiChildren.clear();
+    if (_waking) {
+      _waking = false;
+      _setStatus(ExecutionStatus.paused);
+    }
   }
 
   /// Gives up every card an extension request waits on ([why]); each request
@@ -649,6 +685,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     _cancelled = false;
     _parked = false;
     _paused = false;
+    _waking = false;
     _setStatus(ExecutionStatus.running);
     // Grok can leave the reply hanging after it says the prompt is complete;
     // whichever comes first ends the turn.
@@ -668,7 +705,14 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       );
       _afterLoad = false;
       _flush();
-      if (acpTurnUsage(reply['usage'], id: _next('usage')) case final u?) _emit(u);
+      final usage = promptId != null
+          ? xaiTurnUsage(reply['usage'], id: _next('usage'))
+          : acpTurnUsage(reply['usage'], id: _next('usage'));
+      if (usage != null) {
+        _emit(usage);
+      } else if (promptId != null) {
+        _xaiUnreported = promptId;
+      }
       final stop = reply['stopReason'];
       final note = switch (stop) {
         'max_tokens' => '$_label ran out of room for its reply.',
@@ -734,7 +778,12 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final turn = _turn;
     if (_status != ExecutionStatus.running && _status != ExecutionStatus.waitingForConfirmation) return;
     _stopTurn();
-    if (turn == null) return;
+    // No prompt of ours runs (Grok woke up on its own): no reply will end it.
+    if (turn == null || !_prompting) {
+      _waking = false;
+      _setStatus(ExecutionStatus.paused);
+      return;
+    }
     // The agent replies `cancelled`; one that doesn't is ended.
     await turn.timeout(
       const Duration(seconds: 15),
@@ -841,7 +890,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         ),
       );
     }
-    if (_asking.isEmpty && _status == ExecutionStatus.waitingForConfirmation && !all) {
+    if (all && !_prompting) {
+      // A wake: no prompt reply comes to end it.
+      _waking = false;
+      _setStatus(ExecutionStatus.paused);
+    } else if (_asking.isEmpty && _status == ExecutionStatus.waitingForConfirmation && !all) {
       _setStatus(ExecutionStatus.running);
     }
   }
@@ -869,6 +922,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final callId = tc['toolCallId'] as String? ?? _next('perm');
     // Asked about a call that already finished or was cancelled: nobody waits for it.
     if (_done.contains(callId) || _cancelled || _closed) return _cancelledOutcome;
+    _wake();
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, tc);
     _asked.add(callId);
     _afterLoad = false;
@@ -1049,38 +1103,69 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       case 'task_backgrounded' || 'task_completed':
         if (!_replaying) _xaiTask(p, completed: method == 'task_completed');
       case 'session/prompt_complete' || 'session_notification' || 'session/update':
-        if (xaiPromptDone(method, p) case final d?) {
-          final done = _xaiDone;
-          if (done != null && !done.isCompleted && (d.promptId == null || d.promptId == _xaiPrompt)) {
-            done.complete({'stopReason': d.stopReason ?? 'end_turn', 'agentResult': ?d.agentResult});
-          }
-        }
+        if (xaiPromptDone(method, p) case final d?) _xaiTurnDone(d);
         if (xaiSubagentDone(p) case final d? when !_replaying) _xaiSubagentFinished(d);
     }
   }
 
-  /// A background task's row, opened when Grok backgrounds it and closed
-  /// when it ends.
+  /// A Grok turn ended: our prompt (its reply may never come), or one of its
+  /// own wakes, which only this ends. What the turn used is reported when
+  /// the prompt reply didn't carry it.
+  void _xaiTurnDone(XaiPromptDone d) {
+    final done = _xaiDone;
+    if (!d.wake && done != null && !done.isCompleted && (d.promptId == null || d.promptId == _xaiPrompt)) {
+      done.complete({'stopReason': d.stopReason ?? 'end_turn', 'agentResult': ?d.agentResult, 'usage': ?d.usage});
+      return;
+    }
+    if (d.wake || (d.promptId != null && d.promptId == _xaiUnreported)) {
+      if (!d.wake) _xaiUnreported = null;
+      final usage = xaiTurnUsage(d.usage, id: _next('usage'));
+      if (usage != null && !_replaying) _emit(usage);
+    }
+    if (!d.wake || !_waking || _prompting || _asking.isNotEmpty) return;
+    _waking = false;
+    _flush();
+    _setStatus(d.stopReason == 'cancelled' ? ExecutionStatus.paused : ExecutionStatus.finished);
+  }
+
+  /// Grok works with no prompt of ours in flight: one of its background
+  /// wakes, which runs until its own turn ends ([_xaiTurnDone]).
+  void _wake() {
+    if (_profile.agent != AcpAgent.grok || _prompting || _replaying || _closed || _cancelled) return;
+    _waking = true;
+    if (_status != ExecutionStatus.waitingForConfirmation) _setStatus(ExecutionStatus.running);
+  }
+
+  /// A background task's row. It is closed at once ("still running"), so it
+  /// never waits among the calls to approve, and its end replaces that.
   void _xaiTask(Map<String, Object?> p, {required bool completed}) {
     final t = xaiTask(p, completed: completed);
-    if (t == null || _xaiTasksDone.contains(t.id)) return;
-    var row = _xaiTasks[t.id];
-    if (row == null) {
+    if (t == null) return;
+    if (t.toolCallId case final c? when c != t.id) _xaiTaskAlias[c] = t.id;
+    if (_xaiTasksDone.contains(t.id)) return;
+    if (!_xaiTasks.containsKey(t.id)) {
       _flush();
-      row = _xaiTasks[t.id] = xaiTaskCall(t, id: 'xbg-${t.id}');
+      final row = _xaiTasks[t.id] = xaiTaskCall(t, id: 'xbg-${t.id}');
       _emit(row);
+      _emit(
+        resultEvent(
+          id: 'xbr-${t.id}-bg',
+          actionId: row.id,
+          toolName: row.toolName,
+          text: 'Still running in the background.',
+        ),
+      );
     }
-    if (!completed) return;
-    _xaiTasksDone.add(t.id);
-    _emit(
-      resultEvent(
-        id: 'xbr-${t.id}',
-        actionId: row.id,
-        toolName: row.toolName,
-        text: xaiTaskResultText(t),
-        isError: t.status == 'failed',
-      ),
-    );
+    if (completed) _xaiTaskEnded(t.id, text: xaiTaskResultText(t), failed: t.status == 'failed');
+  }
+
+  /// Background task [id] (its task or tool call id) ended: its row gets
+  /// [text].
+  void _xaiTaskEnded(String id, {required String text, bool failed = false}) {
+    final key = _xaiTaskAlias[id] ?? id;
+    final row = _xaiTasks[key];
+    if (row == null || !_xaiTasksDone.add(key)) return;
+    _emit(resultEvent(id: 'xbr-$key', actionId: row.id, toolName: row.toolName, text: text, isError: failed));
   }
 
   /// A subagent that ran in the background finished: its row gets the report.
@@ -1092,7 +1177,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         (d.status == 'completed' ? 'Done.' : 'The subagent ${d.status == 'failed' ? 'failed' : 'was cancelled'}.');
     _emit(
       resultEvent(
-        id: _resultId(row),
+        id: '${_resultId(row)}-done',
         actionId: row.id,
         toolName: row.toolName,
         text: text,
@@ -1165,6 +1250,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final callId = u['toolCallId'];
     if (callId is! String || _done.contains(callId)) return;
     if (_extOwned.contains(callId)) return _extToolUpdate(callId, u);
+    final known = _calls.containsKey(callId) || _shown.containsKey(callId);
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, u);
     final status = call['status'] as String? ?? 'pending';
     final finished = status == 'completed' || status == 'failed';
@@ -1175,6 +1261,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       return;
     }
     _afterLoad = false;
+    // A new call with no prompt of ours running: Grok woke up on its own.
+    if (!known && !finished) _wake();
     // A pending call's input may still be streaming: shown once it runs or asks.
     if (status == 'pending') return;
     final shown = _shown[callId] ?? _show(callId, call);
@@ -1182,20 +1270,34 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     if (finished) {
       _done.add(callId);
       _calls.remove(callId);
+      if (_profile.agent == AcpAgent.grok) {
+        for (final task in xaiKilled(call)) {
+          _xaiTaskEnded(task, text: 'Stopped.');
+        }
+      }
       if (_xaiSpawned(call, shown)) return;
       _emit(acpResultEvent(call, id: 'tr-$callId', actionId: shown.id, toolName: shown.toolName));
     }
   }
 
   /// Closes a Grok subagent row: with its report, or, when the subagent runs
-  /// on in the background, not until `subagent_finished`. False for any
-  /// other call.
+  /// on in the background, as running there (so it never waits among the
+  /// calls to approve), its report replacing that at `subagent_finished`.
+  /// False for any other call.
   bool _xaiSpawned(Map<String, Object?> call, ActionCall shown) {
     if (_profile.agent != AcpAgent.grok || shown.actionKind != 'TaskAction') return false;
     final output = xaiOutputText(call);
     final child = xaiChildId(output);
     if (call['status'] == 'completed' && xaiAsyncAck(output) && child != null) {
       _xaiChildren[child] = shown;
+      _emit(
+        resultEvent(
+          id: 'tr-${call['toolCallId']}',
+          actionId: shown.id,
+          toolName: shown.toolName,
+          text: 'Running in the background; its report comes when it finishes.',
+        ),
+      );
       return true;
     }
     final failed = call['status'] == 'failed';

@@ -5,7 +5,7 @@ import 'dart:convert';
 import '../../harness/events.dart';
 import '../driver_events.dart';
 import '../json_rpc.dart';
-import 'acp_mapping.dart' show acpResultText, acpToolPrefix;
+import 'acp_mapping.dart' show acpResultText, acpToolPrefix, acpTurnUsage;
 
 // Grok Build's ACP extensions (`x.ai/*`, and the older `_x.ai/*` names) as
 // pure functions: the end of a prompt, background tasks, subagents that
@@ -83,42 +83,72 @@ bool xaiUsageLimit(JsonRpcError e) => e.code == xaiRateLimitedCode;
 const _wakePrefix = 'task-completed-';
 
 /// A finished prompt: from `session/prompt_complete`, or a `turn_completed`
-/// update in `session_notification` / `session/update`.
-typedef XaiPromptDone = ({String? sessionId, String? promptId, String? stopReason, String? agentResult});
+/// update in `session_notification` / `session/update`. [wake]: one of
+/// Grok's own background wakes, not a prompt of ours. [usage]: what the
+/// turn used (`turn_completed` only).
+typedef XaiPromptDone = ({
+  String? sessionId,
+  String? promptId,
+  String? stopReason,
+  String? agentResult,
+  bool wake,
+  Map<String, Object?>? usage,
+});
 
 /// The prompt [method] (an [xaiMethod] name) with [params] says finished,
 /// or null. A `turn_completed` must name its prompt; a direct
-/// `prompt_complete` without one is the only prompt running. Background
-/// wakes never count.
+/// `prompt_complete` without one is the only prompt running.
 XaiPromptDone? xaiPromptDone(String method, Map<String, Object?> params) {
-  final XaiPromptDone done;
   if (method == 'session/prompt_complete') {
-    done = (
-      sessionId: _str(params['sessionId']),
-      promptId: _str(params['promptId']),
-      stopReason: _str(params['stopReason']),
-      agentResult: _text(params['agentResult']),
-    );
-  } else if (method == 'session_notification' || method == 'session/update') {
-    final u = _map(params['update']);
-    if (u['sessionUpdate'] != 'turn_completed') return null;
-    final id = _str(u['prompt_id']) ?? _str(u['promptId']);
-    if (id == null) return null;
-    done = (
+    final id = _str(params['promptId']);
+    return (
       sessionId: _str(params['sessionId']),
       promptId: id,
-      stopReason: _str(u['stop_reason']) ?? _str(u['stopReason']),
-      agentResult: _text(u['agent_result']),
+      stopReason: _str(params['stopReason']),
+      agentResult: _text(params['agentResult']),
+      wake: id?.startsWith(_wakePrefix) == true,
+      usage: null,
     );
-  } else {
-    return null;
   }
-  return done.promptId?.startsWith(_wakePrefix) == true ? null : done;
+  if (method != 'session_notification' && method != 'session/update') return null;
+  final u = _map(params['update']);
+  if (u['sessionUpdate'] != 'turn_completed') return null;
+  final id = _str(u['prompt_id']) ?? _str(u['promptId']);
+  if (id == null) return null;
+  return (
+    sessionId: _str(params['sessionId']),
+    promptId: id,
+    stopReason: _str(u['stop_reason']) ?? _str(u['stopReason']),
+    agentResult: _text(u['agent_result']),
+    wake: id.startsWith(_wakePrefix),
+    usage: u['usage'] is Map<String, Object?> ? u['usage']! as Map<String, Object?> : null,
+  );
+}
+
+/// What a Grok turn used: ACP's usage fields (`inputTokens` counts the
+/// cached part), plus its cost in `costUsdTicks` (10^10 to the dollar).
+// Ported from T3 Code (MIT), packages/provider-grok/src/server/usage.ts.
+UsageReport? xaiTurnUsage(Object? usage, {required String id}) {
+  if (usage is! Map<String, Object?>) return null;
+  final ticks = usage['costUsdTicks'];
+  return acpTurnUsage(
+    usage,
+    id: id,
+    costMicros: ticks is num && ticks >= 0 && ticks.isFinite ? (ticks / 1e4).round() : null,
+  );
 }
 
 /// A background task's change: started (`task_backgrounded`) or ended
 /// (`task_completed`, failed on a non-zero exit code).
-typedef XaiTask = ({String id, String status, String label, bool monitor, String? output, int? exitCode});
+typedef XaiTask = ({
+  String id,
+  String? toolCallId,
+  String status,
+  String label,
+  bool monitor,
+  String? output,
+  int? exitCode,
+});
 
 /// The task in a `task_backgrounded` / `task_completed` notification's
 /// [params] (`{sessionId, update:{task_id, tool_call_id, task_snapshot,
@@ -144,6 +174,7 @@ XaiTask? xaiTask(Map<String, Object?> params, {required bool completed}) {
   final code = exit is num ? exit.toInt() : null;
   return (
     id: id,
+    toolCallId: _str(u['tool_call_id']),
     status: !completed ? 'running' : (code != null && code != 0 ? 'failed' : 'completed'),
     label: label,
     monitor: monitor,
@@ -171,6 +202,24 @@ String xaiTaskResultText(XaiTask t) {
   final out = (t.output ?? '').trimRight();
   if (out.isNotEmpty) return out.length > 30000 ? '${out.substring(0, 30000)}\n… (cut)' : out;
   return t.status == 'failed' ? 'Failed (exit code ${t.exitCode}).' : 'Done.';
+}
+
+/// The background tasks a finished kill call (merged ACP tool [call])
+/// ended: a finished kill is the end even without `task_completed`; a
+/// failed one, or one whose outcome isn't a kill, ends nothing.
+// Ported from T3 Code (MIT), xaiAcpExtension.ts `extractXAiKilledBackgroundTasks`.
+List<String> xaiKilled(Map<String, Object?> call) {
+  final raw = _map(call['rawInput']);
+  final out = _map(call['rawOutput']);
+  final variant = _str(raw['variant'])?.toLowerCase();
+  final legacy = (_str(call['title']) ?? '').toLowerCase().contains('kill_command_or_subagent') || variant == 'kill';
+  if (!legacy && variant != 'killtask' && out['type'] != 'KillTask') return const [];
+  if (call['status'] != 'completed') return const [];
+  final outcome = out['outcome'] ?? _map(out['Result'])['outcome'];
+  if (!legacy && outcome != null && outcome != 'killed' && outcome != 'already_exited') return const [];
+  return {
+    for (final v in [...?(raw['task_ids'] as List<Object?>?), raw['task_id'], raw['taskId']]) ?_str(v),
+  }.toList();
 }
 
 /// A subagent Grok started in the background has finished: its child

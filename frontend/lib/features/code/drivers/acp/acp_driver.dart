@@ -116,18 +116,27 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     required String sessionTag,
     required String logPath,
     required Map<String, String> env,
-  }) => (_tty ? _ttyConnect : _connect)(
-    executable: executable,
-    args: args,
-    cwd: cwd,
-    sessionTag: sessionTag,
-    logPath: logPath,
-    env: env,
-  );
+  }) async {
+    final tty = _tty;
+    final channel = await (tty ? _ttyConnect : _connect)(
+      executable: executable,
+      args: args,
+      cwd: cwd,
+      sessionTag: sessionTag,
+      logPath: logPath,
+      env: env,
+    );
+    if (!tty) _piped[channel] = true;
+    return channel;
+  }
 
-  /// Moves later starts under a terminal; false when they already are.
-  bool _switchToTty() {
-    if (_tty) return false;
+  /// The channels started on plain pipes.
+  final _piped = Expando<bool>();
+
+  /// Moves later starts under a terminal; false when [channel] already
+  /// had one (another session may have switched meanwhile).
+  bool _switchToTty(LineChannel channel) {
+    if (_piped[channel] != true) return false;
     _tty = true;
     return true;
   }

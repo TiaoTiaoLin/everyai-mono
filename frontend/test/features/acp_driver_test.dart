@@ -1358,11 +1358,13 @@ void main() {
         final limits = [for (final e in seen.all) ?usageLimitOf(e)];
         expect(limits.map((l) => l.resetsAt), [null, null]);
         expect(limits.last.message, 'Grok Build: Usage limit reached');
-        // The background task: one row, closed as failed with its output.
+        // The background task: one row, closed as running there, then as failed with its output.
         final row = seen.calls.single;
         expect((row.id, row.actionKind, row.summary), ('xbg-t1', 'TerminalAction', 'In the background: npm run dev'));
-        final result = seen.results.single;
-        expect((result.actionId, result.observation['is_error'], result.text), ('xbg-t1', true, 'crashed'));
+        expect(
+          [for (final r in seen.results) (r.actionId, r.observation['is_error'] == true, r.text)],
+          [('xbg-t1', false, 'Still running in the background.'), ('xbg-t1', true, 'crashed')],
+        );
         // No MCP environment, task environment or unknown payload got anywhere.
         await s.close();
         final journal = File('${r.dataDir}/acp-sessions/${s.id}/events.jsonl').readAsStringSync();
@@ -1391,8 +1393,10 @@ void main() {
       final subs = t.items.whereType<SubagentItem>().toList();
       expect(subs.map((i) => i.step.call.action['description']), ['Explore the server', 'Count files']);
       expect(subs.map((i) => i.step.result?.text), ['Found 3 routes.', 'There are 12 files.']);
+      // The one in the background is closed as running there first, so no approval lists it.
       final order = [for (final e in seen.results) e.actionId];
-      expect(order, ['tc-spawn-2', 'tc-spawn-1']);
+      expect(order, ['tc-spawn-1', 'tc-spawn-2', 'tc-spawn-1']);
+      expect(seen.results.first.text, startsWith('Running in the background'));
       await s.close();
     });
 
@@ -1417,6 +1421,193 @@ void main() {
         ),
       );
       r.expectPlayed();
+    });
+
+    group('background wakes', () {
+      /// A Grok that answers the handshake and holds every prompt's reply.
+      Future<(HarnessSession, _Live, _Seen)> started(_Rig r) async {
+        final live = _Live(
+          (m) => switch (m['method']) {
+            'initialize' => {'protocolVersion': 1, 'agentCapabilities': <String, Object?>{}},
+            'session/new' => {'sessionId': 'grok-1'},
+            'session/prompt' => null,
+            _ => <String, Object?>{},
+          },
+        );
+        final d = r.driver(
+          'grok',
+          'grok',
+          connect: ({
+            required String executable,
+            required List<String> args,
+            required String cwd,
+            required String sessionTag,
+            required String logPath,
+            required Map<String, String> env,
+          }) async => live,
+        );
+        final s = await d.start(r.spec(mode: AgentMode.fullAuto));
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.running);
+        // Our prompt ends by its turn_completed, with what it used; the reply never comes.
+        live.push({
+          'jsonrpc': '2.0',
+          'method': '_x.ai/session/update',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'turn_completed',
+              'prompt_id': live.promptIds.single,
+              'stop_reason': 'end_turn',
+              'usage': {'inputTokens': 100, 'outputTokens': 5, 'cachedReadTokens': 40, 'costUsdTicks': 2000000000},
+            },
+          },
+        });
+        await seen.untilStatus(ExecutionStatus.finished);
+        return (s, live, seen);
+      }
+
+      void ask(_Live live) => live.push({
+        'jsonrpc': '2.0',
+        'id': 'w1',
+        'method': 'session/request_permission',
+        'params': {
+          'sessionId': 'grok-1',
+          'toolCall': {
+            'toolCallId': 'wake-1',
+            'title': 'npm test',
+            'kind': 'execute',
+            'status': 'pending',
+            'rawInput': {'command': 'npm test'},
+          },
+          'options': [
+            {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+            {'optionId': 'reject', 'name': 'Reject', 'kind': 'reject_once'},
+          ],
+        },
+      });
+
+      test('a wake that asks runs until its own turn ends; the next message then goes out', () async {
+        final r = rig(const []);
+        final (s, live, seen) = await started(r);
+        final usage = seen.all.whereType<UsageReport>().single;
+        expect((usage.input, usage.output, usage.cached, usage.costMicros), (100, 5, 40, 200000));
+        ask(live);
+        await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+        await s.respond(accept: true);
+        await seen.until(() => live.replyTo('w1') != null);
+        expect(seen.status, ExecutionStatus.running);
+        live.push({
+          'jsonrpc': '2.0',
+          'method': '_x.ai/session/update',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'turn_completed',
+              'prompt_id': 'task-completed-t1',
+              'usage': {'inputTokens': 7, 'outputTokens': 1},
+            },
+          },
+        });
+        await seen.untilStatus(ExecutionStatus.finished);
+        expect(seen.all.whereType<UsageReport>().length, 2);
+        await s.send('again');
+        await seen.until(() => live.promptIds.length == 2);
+        await s.close();
+      });
+
+      test('Stop frees a wake that waits for an answer', () async {
+        final r = rig(const []);
+        final (s, live, seen) = await started(r);
+        ask(live);
+        await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+        // What the controller's Stop does: refuse everything, then interrupt.
+        await s.respond(accept: false);
+        await s.interrupt();
+        expect(seen.status, ExecutionStatus.paused);
+        expect(live.replyTo('w1'), {
+          'outcome': {'outcome': 'cancelled'},
+        });
+        await s.close();
+      });
+
+      test("background rows never wait among the calls to approve; a kill or Grok's exit ends them", () async {
+        final r = rig(const []);
+        final (s, live, seen) = await started(r);
+        void task(String id, String call) => live.push({
+          'jsonrpc': '2.0',
+          'method': 'x.ai/task_backgrounded',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'task_backgrounded',
+              'task_id': id,
+              'tool_call_id': call,
+              'command': 'npm run $id',
+            },
+          },
+        });
+        task('dev', 'call-dev');
+        task('watch', 'call-watch');
+        ask(live);
+        await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+        expect(_transcript(seen.all).pending.map((c) => c.id), ['tc-wake-1']);
+        await s.respond(accept: true);
+        // Killed by its tool call id, with no task_completed.
+        live.push({
+          'jsonrpc': '2.0',
+          'method': 'session/update',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'tool_call',
+              'toolCallId': 'kill-1',
+              'title': 'kill call-dev (killed)',
+              'kind': 'execute',
+              'status': 'completed',
+              'rawInput': {'variant': 'KillTask', 'task_id': 'call-dev'},
+              'rawOutput': {'type': 'KillTask', 'outcome': 'killed'},
+            },
+          },
+        });
+        await seen.until(() => seen.results.any((e) => e.actionId == 'xbg-dev' && e.text == 'Stopped.'));
+        await live.close();
+        await seen.until(() => seen.results.any((e) => e.actionId == 'xbg-watch' && e.text.contains('exited')));
+        // A wake cut off by the exit doesn't stay running.
+        expect(seen.status, ExecutionStatus.paused);
+        await s.close();
+      });
+    });
+
+    test('two sessions that exit for want of a terminal at once: both start again under one', () async {
+      final r = rig(['grok/handshake.jsonl', 'grok/handshake.jsonl']);
+      final both = Completer<void>();
+      var piped = 0;
+      final d = r.driver(
+        'grok',
+        'grok',
+        connect:
+            ({
+              required String executable,
+              required List<String> args,
+              required String cwd,
+              required String sessionTag,
+              required String logPath,
+              required Map<String, String> env,
+            }) async {
+              if (++piped == 2) both.complete();
+              await both.future;
+              return _NoTty();
+            },
+        ttyConnect: r.replay,
+      );
+      final sessions = await Future.wait([d.start(r.spec()), d.start(r.spec())]);
+      for (final s in sessions) {
+        await s.close();
+      }
+      r.expectPlayed();
+      expect((piped, r.channels.length), (2, 2));
     });
 
     test('exited for want of a terminal: started again under one, and so is the next session', () async {
@@ -1479,6 +1670,49 @@ void main() {
 }
 
 /// An agent that exits at once, saying it couldn't open a terminal.
+/// A Grok the test drives: [answer] gives the result of each request we
+/// send (null holds it), and [push] sends what Grok says on its own.
+final class _Live implements LineChannel {
+  _Live(this.answer);
+
+  final Map<String, Object?>? Function(Map<String, Object?> request) answer;
+  final _lines = StreamController<String>();
+  final sent = <Map<String, Object?>>[];
+
+  /// The `_meta.promptId` of each prompt we sent.
+  List<Object?> get promptIds => [
+    for (final m in sent)
+      if (m['method'] == 'session/prompt') ((m['params']! as Map)['_meta']! as Map)['promptId'],
+  ];
+
+  /// Our reply to Grok's request [id], or null.
+  Object? replyTo(String id) => [
+    for (final m in sent)
+      if (m['id'] == id && m['method'] == null) m['result'],
+  ].firstOrNull;
+
+  void push(Map<String, Object?> msg) => _lines.add(jsonEncode(msg));
+
+  @override
+  Stream<String> get lines => _lines.stream;
+
+  @override
+  void send(String line) {
+    final m = jsonDecode(line) as Map<String, Object?>;
+    sent.add(m);
+    if (m['method'] == null || m['id'] == null) return;
+    if (answer(m) case final result?) push({'jsonrpc': '2.0', 'id': m['id'], 'result': result});
+  }
+
+  @override
+  String get lastError => '';
+
+  @override
+  Future<void> close() async {
+    if (!_lines.isClosed) await _lines.close();
+  }
+}
+
 final class _NoTty implements LineChannel {
   @override
   Stream<String> get lines => const Stream.empty();
