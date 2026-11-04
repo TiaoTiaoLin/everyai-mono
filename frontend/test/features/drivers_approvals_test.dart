@@ -10,6 +10,7 @@ import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/rewind.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
@@ -22,6 +23,8 @@ import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:flutter_test/flutter_test.dart';
+
+import '../support/replay_transport.dart';
 
 class _FixedCatalog extends CatalogController {
   @override
@@ -122,7 +125,12 @@ void main() {
 
   /// A session on [harness] in [mode], connected, with the agent's events
   /// played by the test.
-  Future<CodeSessionController> open(AgentMode mode, {String harness = 'test', List<String> deny = const []}) async {
+  Future<CodeSessionController> open(
+    AgentMode mode, {
+    String harness = 'test',
+    List<String> deny = const [],
+    Map<String, HarnessDriver> extra = const {},
+  }) async {
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: tmp.path).toJson()]);
     prefs['code.sessions'] = jsonEncode([
@@ -153,6 +161,7 @@ void main() {
           DriverRegistry({
             everyaiHarnessName: _TestDriver(everyaiHarnessName, session, caps: const {DriverCap.rewind}),
             'test': _TestDriver('test', session),
+            ...extra,
           }),
         ),
       ],
@@ -264,5 +273,106 @@ void main() {
     await controller.steer('use tabs');
     expect(session.steered.first, '(interrupt)');
     expect(session.steered.last, contains('use tabs'));
+  });
+
+  group('an ACP agent through the controller (replayed)', () {
+    final channels = <ReplayChannel>[];
+    setUp(channels.clear);
+
+    /// The ACP driver on [script], with conversation c1 on disk (agent session [acpSession]).
+    Map<String, HarnessDriver> acp(String command, String script, String acpSession) {
+      final dir = Directory('${tmp.path}/data/acp-sessions/c1')..createSync(recursive: true);
+      File(
+        '${dir.path}/meta.json',
+      ).writeAsStringSync(jsonEncode({'acpSessionId': acpSession, 'cwd': tmp.path, 'sessionTag': 's1', 'mode': 'ask'}));
+      return {
+        'acp': AcpDriver(
+          id: 'acp:$command',
+          label: command,
+          command: command,
+          which: (c) async => '/usr/local/bin/$c',
+          dataDir: () async => '${tmp.path}/data',
+          connect:
+              ({
+                required String executable,
+                required List<String> args,
+                required String cwd,
+                required String sessionTag,
+                required String logPath,
+                required Map<String, String> env,
+              }) async {
+                final c = ReplayChannel.file('test/fixtures/drivers/$script');
+                channels.add(c);
+                return c;
+              },
+        ),
+      };
+    }
+
+    /// The option the app answered permission request 0 with, once it has.
+    Future<Object?> answered0() async {
+      for (var i = 0; i < 100 && !channels.single.sent.any((m) => m['id'] == 0); i++) {
+        await pumpEventQueue();
+      }
+      final reply = channels.single.sent.firstWhere((m) => m['id'] == 0);
+      return ((reply['result']! as Map)['outcome']! as Map)['optionId'];
+    }
+
+    const ses = 'ses_e5ad81ff1ffeGaamwMA9ctbrrE';
+
+    /// Waits until the conversation's journal has written [status] (so the
+    /// folder isn't deleted under a write).
+    Future<void> journalled(String status) async {
+      final f = File('${tmp.path}/data/acp-sessions/c1/events.jsonl');
+      bool done() => f.existsSync() && f.readAsStringSync().contains('"value":"$status"');
+      for (var i = 0; i < 200 && !done(); i++) {
+        await pumpEventQueue();
+      }
+      expect(done(), isTrue);
+    }
+
+    test("Full auto still refuses OpenCode's rm -rf ~ (the floor), as its reject option", () async {
+      final controller = await open(
+        AgentMode.fullAuto,
+        harness: 'acp',
+        extra: acp('opencode', 'opencode/perm_floor.jsonl', ses),
+      );
+      await controller.send('Clean up');
+      expect(await answered0(), 'reject');
+      await channels.single.finished;
+      channels.single.expectFinished();
+      await journalled('finished');
+    });
+
+    test("Ask runs OpenCode's ls at once, allowed once", () async {
+      final controller = await open(
+        AgentMode.ask,
+        harness: 'acp',
+        extra: acp('opencode', 'opencode/perm_read.jsonl', ses),
+      );
+      await controller.send('Look');
+      expect(await answered0(), 'once');
+      await channels.single.finished;
+      channels.single.expectFinished();
+      await journalled('finished');
+    });
+
+    test("Gemini's shell call waits for the user even in Full auto", () async {
+      final controller = await open(
+        AgentMode.fullAuto,
+        harness: 'acp',
+        extra: acp('gemini', 'gemini/exec_waits.jsonl', 'gemini-session-1'),
+      );
+      await controller.send('List');
+      await _when(
+        container,
+        codeSessionProvider('s1').select((s) => s.transcript.pending),
+        (List<ActionCall> p) => p.isNotEmpty,
+      );
+      await pumpEventQueue();
+      channels.single.expectFinished();
+      expect(channels.single.sent.where((m) => m['id'] == 0 && m['method'] == null), isEmpty);
+      await journalled('waiting_for_confirmation');
+    });
   });
 }

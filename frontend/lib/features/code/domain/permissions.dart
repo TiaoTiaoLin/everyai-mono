@@ -957,7 +957,18 @@ String denialMessage(DenialKind kind, {String? reason}) {
         ? '$head If you cannot continue without it, end your turn and say what you needed and why.'
         : head;
   }
-  return '$head\n\nThe user\'s reason, word for word (follow it if it asks for something else):\n$said';
+  return '$head\n\n$_reasonLead$said';
+}
+
+const _reasonLead = "The user's reason, word for word (follow it if it asks for something else):\n";
+
+/// The words the user typed in a [denialMessage], or null when [message]
+/// holds only the fixed text (or is some other refusal).
+String? typedReason(String? message) {
+  final at = message?.indexOf(_reasonLead) ?? -1;
+  if (at < 0) return null;
+  final said = message!.substring(at + _reasonLead.length).trim();
+  return said.isEmpty ? null : said;
 }
 
 const deniedLead = 'The user did NOT consent to this action, and it was not run.';

@@ -139,7 +139,6 @@ void main() {
         ClaudeDriver(which: _nowhere),
         CodexDriver(which: _nowhere),
         OpenCodeDriver(which: _nowhere),
-        AcpDriver(id: 'acp:x', label: 'x', command: 'x', which: _nowhere),
         TerminalDriver(id: 'terminal:x', label: 'x', command: 'x', which: _nowhere),
       ];
       for (final d in stubs) {
@@ -149,6 +148,49 @@ void main() {
         await expectLater(d.attach('c'), throwsA(isA<HarnessError>()), reason: d.info.id);
         expect(await d.statuses(['c']), isEmpty);
       }
+    });
+
+    test('ACP agents: a command with spaces is split, OpenCode gets acp, each profile its caps', () async {
+      final r = container.read(driverRegistryProvider);
+      final dsh = r.resolve('acp:dsh --profile acp')! as AcpDriver;
+      expect((dsh.resolved.executable, dsh.info.id), ('dsh', 'acp:dsh --profile acp'));
+      expect(dsh.resolved.args, ['--profile', 'acp']);
+      expect((r.resolve('acp:opencode')! as AcpDriver).resolved.args, ['acp']);
+      final gemini = r.resolve('gemini')!;
+      expect((gemini as AcpDriver).resolved.args, ['--acp', '--approval-mode', 'default']);
+      expect(dsh.caps, {DriverCap.resume, DriverCap.approvals, DriverCap.perCallApprovals});
+      expect(gemini.caps.containsAll({DriverCap.mcp, DriverCap.images, DriverCap.switchModel}), isTrue);
+      expect(gemini.caps.intersection({DriverCap.usage, DriverCap.effort, DriverCap.steer}), isEmpty);
+      final oc = r.resolve('acp:opencode')!;
+      expect(oc.caps.containsAll({DriverCap.usage, DriverCap.effort, DriverCap.subagents}), isTrue);
+      expect(oc.caps.intersection({DriverCap.steer, DriverCap.fork, DriverCap.rewind}), isEmpty);
+    });
+
+    test('an ACP agent reports whether it is signed in, and a missing one says so', () async {
+      final d = AcpDriver(
+        id: 'gemini',
+        label: 'Gemini CLI',
+        command: 'gemini',
+        which: (_) async => '/bin/echo',
+        signedIn: () async => false,
+      );
+      final s = await d.detect();
+      expect(
+        (s.installed, s.signedIn, s.problem),
+        (true, false, 'Not signed in. Run `gemini` in a terminal and sign in.'),
+      );
+      final missing = await AcpDriver(id: 'acp:x', label: 'x', command: 'x', which: _nowhere).detect();
+      expect((missing.installed, missing.problem), (false, null));
+    });
+
+    test('an ACP conversation with its files is idle; one without is unknown', () async {
+      final tmp = await Directory.systemTemp.createTemp('acp-statuses');
+      addTearDown(() => tmp.delete(recursive: true));
+      Directory('${tmp.path}/acp-sessions/c1').createSync(recursive: true);
+      File('${tmp.path}/acp-sessions/c1/meta.json').writeAsStringSync('{"acpSessionId":"a","cwd":"/w"}');
+      final d = AcpDriver(id: 'acp:x', label: 'x', command: 'x', dataDir: () async => tmp.path);
+      expect(await d.statuses(['c1', 'c2']), {'c1': ExecutionStatus.idle});
+      await expectLater(d.attach('c2'), throwsA(isA<HarnessError>()));
     });
 
     test('a found CLI reports its path and version', () async {
