@@ -944,6 +944,16 @@ String handoffMessage(Handoff h, {String? fromName}) {
   return b.toString();
 }
 
+/// Only the `<cut-turn>` block of [h], for a lead whose own session already
+/// holds the conversation (a native import); '' when no turn was cut.
+String cutTurnMessage(Handoff h) {
+  final cut = h.cut;
+  if (cut == null) return '';
+  final b = StringBuffer();
+  writeTaggedBlock(b, 'cut-turn', _cutLead, _cutText(cut, transcript: h.transcript.isNotEmpty));
+  return b.toString().trim();
+}
+
 const _cutLead =
     'The request the previous agent was working on when its usage limit stopped it. Finish it. The calls below '
     'already ran (results cut short): do not run them again unless a result shows it failed. A call with no result '

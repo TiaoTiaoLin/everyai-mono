@@ -711,9 +711,12 @@ class _TaskMark extends StatelessWidget {
 }
 
 class NoticeView extends StatefulWidget {
-  const NoticeView({super.key, required this.item, this.onRetry});
+  const NoticeView({super.key, required this.item, this.onRetry, this.onChange});
   final NoticeItem item;
   final VoidCallback? onRetry;
+
+  /// Change on an automatic handoff: the picker again.
+  final VoidCallback? onChange;
 
   @override
   State<NoticeView> createState() => _NoticeViewState();
@@ -766,6 +769,15 @@ class _NoticeViewState extends State<NoticeView> {
               if (widget.onRetry != null) ...[
                 const SizedBox(width: 8),
                 AdaptiveButton(label: 'Retry', emphasis: ButtonEmphasis.secondary, onPressed: widget.onRetry),
+              ],
+              if (widget.onChange != null) ...[
+                const SizedBox(width: 8),
+                AdaptiveButton(
+                  key: const ValueKey('notice.change'),
+                  label: 'Change',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: widget.onChange,
+                ),
               ],
             ],
           ),

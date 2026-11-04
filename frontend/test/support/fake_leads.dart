@@ -94,8 +94,15 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
 
   /// When set, [setMode] waits for it (an agent that takes the switch late).
   Completer<void>? modeGate;
+
+  /// The modes the app set on it, in order.
+  final modes = <AgentMode>[];
   @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async => modeGate?.future;
+  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
+    modes.add(mode);
+    await modeGate?.future;
+  }
+
   @override
   Future<void> switchLlm(SessionSpec spec) async => llmSwitches++;
   @override
@@ -110,7 +117,7 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
 /// A driver over fake sessions. Given [session], every start and attach
 /// returns it; otherwise each start makes a new one (`<id>-c1`, `<id>-c2`, …)
 /// and attach reopens it, replaying what it played ([attachFails] refuses).
-final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
+final class FakeLeadDriver implements HarnessDriver, AttachesBriefed, ChecksResume {
   FakeLeadDriver(
     this.id, {
     this.session,
@@ -118,9 +125,13 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
     this.caps = const {DriverCap.approvals},
     this.label = 'Test CLI',
     this.status = const DriverStatus(installed: true),
+    this.consentId,
   });
 
   final String id;
+
+  /// Where its consent is stored, when not under [id] (an ACP profile).
+  final String? consentId;
   final FakeLeadSession? session;
   final bool needsConsent;
   final String label;
@@ -134,6 +145,12 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   final conversations = <String, FakeLeadSession>{};
   var attachFails = false;
 
+  /// What [resumeProblem] says (null: it can be resumed).
+  String? problem;
+
+  @override
+  Future<String?> resumeProblem(String conversationId) async => problem;
+
   /// [start] throws (the CLI didn't start).
   var startFails = false;
 
@@ -144,9 +161,16 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   FakeLeadSession? latest;
 
   @override
-  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent);
+  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent, consentId: consentId);
+
+  /// When set, [detect] waits for it (harness detection still running).
+  Completer<void>? detectGate;
   @override
-  Future<DriverStatus> detect() async => status;
+  Future<DriverStatus> detect() async {
+    await detectGate?.future;
+    return status;
+  }
+
   @override
   Future<List<DriverModel>> models() async => const [];
   @override

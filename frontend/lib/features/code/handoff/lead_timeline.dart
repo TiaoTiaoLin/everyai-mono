@@ -40,6 +40,35 @@ Future<void> appendSegment(String dir, LeadSegment segment) async {
   await j.close();
 }
 
+/// The kind of the event that lists what a conversation imported into an
+/// outside CLI's own format replays of earlier leads' work (see
+/// [importedMarker]). It follows the segment of the lead that left.
+const leadImportedKind = 'EveryAILeadImported';
+
+/// The ids of the events conversation [conversationId] replayed when it
+/// was opened after a native import: earlier leads' turns the timeline
+/// already shows, skipped on every later reopen too.
+HarnessEvent importedMarker(String conversationId, Iterable<String> ids) => HarnessEvent.decode({
+  'id': '',
+  'kind': leadImportedKind,
+  'conversation_id': conversationId,
+  'ids': [...ids],
+});
+
+/// The ids [importedMarker]s in [segments] list for [conversationId].
+Iterable<String> importedIds(List<LeadSegment> segments, String conversationId) => [
+  for (final s in segments)
+    for (final e in s.events)
+      if (e is UnknownEvent && e.kind == leadImportedKind && e.raw['conversation_id'] == conversationId)
+        for (final id in (e.raw['ids'] as List<Object?>? ?? const [])) '$id',
+];
+
+/// Appends [event] under [dir], to the last segment.
+Future<void> appendToTimeline(String dir, HarnessEvent event) async {
+  final j = _journal(dir)..add(event);
+  await j.close();
+}
+
 /// [journal] cut at each segment header; events before the first are dropped.
 List<LeadSegment> splitSegments(List<HarnessEvent> journal) {
   final out = <LeadSegment>[];

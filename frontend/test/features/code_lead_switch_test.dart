@@ -23,6 +23,7 @@ import 'package:every_ai/features/code/gateway_key.dart';
 import 'package:every_ai/features/code/handoff/handoff.dart';
 import 'package:every_ai/features/code/handoff/handoff_store.dart';
 import 'package:every_ai/features/code/handoff/lead_timeline.dart';
+import 'package:every_ai/features/code/handoff/native_import.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/models/models_providers.dart';
@@ -55,6 +56,7 @@ void main() {
   late Preferences prefs;
   late ProviderContainer container;
   late Map<String, FakeLeadDriver> drivers;
+  late NativeImporter? Function(String) importerFor;
 
   ProviderContainer make() => ProviderContainer(
     overrides: [
@@ -63,6 +65,7 @@ void main() {
       modelCatalogProvider.overrideWith(FixedCatalog.new),
       codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
       driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
+      nativeImporterProvider.overrideWithValue((h) => importerFor(h)),
       hostServerProvider.overrideWithValue(host),
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       gatewayKeysProvider.overrideWith((ref) => throw StateError('no gateway key for outside agents')),
@@ -99,6 +102,20 @@ void main() {
     await pumpEventQueue();
   }
 
+  /// The session moved to [to] and the switch is over.
+  Future<void> handedOff(String id, String to) async {
+    await whenValue(
+      container,
+      codeSessionsProvider.select((all) => all.firstWhere((s) => s.id == id).harness),
+      (String h) => h == to,
+    );
+    await whenValue(container, codeSessionProvider(id).select((s) => s.switching), (bool s) => !s);
+  }
+
+  /// Why the automatic handoff didn't happen, once it says.
+  Future<String> handoffProblem(String id) =>
+      whenValue(container, codeSessionProvider(id).select((s) => s.handoffProblem), (String p) => p.isNotEmpty);
+
   /// Alpha works on a turn, then stops on its usage limit.
   Future<(CodeSessionInfo, CodeSessionController)> limited() async {
     final info = await start();
@@ -125,6 +142,7 @@ void main() {
       'off': FakeLeadDriver('off', label: 'Off', status: const DriverStatus(installed: true, signedIn: false)),
       'cli': FakeLeadDriver('cli', label: 'Consent', needsConsent: true),
     };
+    importerFor = nativeImporterFor;
     prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
     container = make();
@@ -144,17 +162,23 @@ void main() {
     final (info, c) = await limited();
     final notice = transcriptOf(info.id).items.last as NoticeItem;
     expect(notice.limit?.resetsAt, DateTime.utc(2026, 11, 5, 3));
-    expect(c.leadOffer?.message, 'You hit your 5-hour limit.');
+    expect(c.limitPick?.limit.message, 'You hit your 5-hour limit.');
     final statuses = await container.read(driverStatusesProvider.future);
-    final ready = readyLeads(container.read(driverRegistryProvider).listed, statuses, const {}, current: info.harness);
-    // Not signed in, and not allowed yet, are left out.
-    expect([for (final l in ready) l.id], [everyaiHarnessName, 'beta', 'term']);
-    expect([
-      for (final l in readyLeads(container.read(driverRegistryProvider).listed, statuses, {'cli'}, current: 'alpha'))
-        l.id,
-    ], contains('cli'));
+    List<String> ready(Set<String> own) => [
+      for (final ch in handoffChoices(
+        container.read(driverRegistryProvider).listed,
+        statuses,
+        own,
+        current: info.harness,
+        ranOut: info.harness,
+      ))
+        if (ch.blocked == null) ch.info.id,
+    ];
+    // Not signed in, and not allowed yet, are not ready.
+    expect(ready(const {}), [everyaiHarnessName, 'beta', 'term']);
+    expect(ready({'cli'}), contains('cli'));
     c.waitForLimit();
-    expect(c.leadOffer, isNull);
+    expect(c.limitPick, isNull);
   });
 
   test('switching hands the new lead everything, and the transcript stays one timeline', () async {
@@ -183,7 +207,7 @@ void main() {
     expect(card.message, 'Handoff to Beta');
     expect(card.detail, startsWith(handoffOpen));
     expect(items.indexOf(card), lessThan(items.indexOf(turns.last)));
-    expect(c.leadOffer, isNull);
+    expect(c.limitPick, isNull);
     // What Alpha did is kept, with the handoff.
     final dir = await sessions().timelineDir(info.id);
     final timeline = await readTimeline(dir);
@@ -218,7 +242,7 @@ void main() {
       ..add(usageLimitEvent('a1-limit', 'You hit your 5-hour limit.'))
       ..add(stateEvent('a1-s', ExecutionStatus.error));
     await pumpEventQueue();
-    expect(c.leadOffer, isNotNull);
+    expect(c.limitPick, isNotNull);
     await c.switchLead('beta', run: true);
     final first = d('beta').specs.single.initialMessage!;
     expect(first, contains('<cut-turn>'));
@@ -262,6 +286,120 @@ void main() {
     expect(d('alpha').specs, hasLength(2));
     expect(infoOf(info.id).conversationId, 'alpha-c2');
     expect(d('alpha').specs.last.initialMessage, contains('Added the toggle.'));
+  });
+
+  test('going back says it picked up its earlier conversation', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.path, outcome.why), (LeadPath.resumed, null));
+    expect(
+      transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+      contains('Alpha picked up its earlier conversation and what happened since.'),
+    );
+  });
+
+  test('alpha, beta, alpha, beta: each return gets only what that lead missed', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    await c.switchLead('alpha', run: true);
+    await turn(d('alpha').latest!, 'a3', 'Fixed the tests.');
+    final outcome = await c.switchLead('beta', run: true);
+    expect(outcome.kind, HandoffKind.delta);
+    expect(d('beta').specs, hasLength(1));
+    expect(d('beta').attached, ['beta-c1']);
+    final delta = d('beta').latest!.sent.last;
+    expect(delta, contains('Fixed the tests.'));
+    expect(delta, isNot(contains('Wrote the tests.')));
+    expect(delta, isNot(contains('Added the toggle.')));
+    expect(infoOf(info.id).leads.keys, ['alpha']);
+    expect(infoOf(info.id).conversationId, 'beta-c1');
+    await pumpEventQueue();
+    final texts = transcriptOf(info.id).items.whereType<AgentText>().map((t) => t.text).toList();
+    expect(texts, ['Added the toggle.', 'Wrote the tests.', 'Fixed the tests.']);
+  });
+
+  test('switching back and forth keeps every transcript row key unique', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    await c.switchLead('alpha', run: true);
+    await turn(d('alpha').latest!, 'a3', 'Fixed the tests.');
+    await c.switchLead('beta', run: true);
+    await c.switchLead('alpha', run: true);
+    await pumpEventQueue();
+    final keys = [for (final i in transcriptOf(info.id).items) i.key];
+    expect(keys.toSet(), hasLength(keys.length));
+  });
+
+  test("a conversation that can't be reopened is copied into its format when it can be", () async {
+    importerFor = (h) => h == 'alpha'
+        ? _FakeImporter('alpha', (_) {
+            // Only the old conversation is gone.
+            d('alpha').attachFails = false;
+            d('alpha').conversations['alpha-imp'] = FakeLeadSession(id: 'alpha-imp', replays: true);
+            return const ImportedSession(nativeId: 'alpha-imp');
+          })
+        : null;
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    d('alpha').attachFails = true;
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.path, outcome.why), (LeadPath.imported, 'That conversation is gone.'));
+    expect(d('alpha').specs, hasLength(1));
+    final sent = d('alpha').conversations['alpha-imp']!.sent.single;
+    expect(sent, endsWith(carryOnMessage('Beta')));
+    expect(sent, isNot(contains(handoffOpen)));
+    expect(infoOf(info.id).conversationId, 'alpha-imp');
+    expect(
+      transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+      contains(
+        "Alpha couldn't reopen its earlier conversation (That conversation is gone.); "
+        'it got a copy of the conversation in its own format.',
+      ),
+    );
+  });
+
+  for (final fails in [false, true]) {
+    test('an importer that ${fails ? 'fails' : 'gives nothing'} leaves the full handoff, with the reason', () async {
+      importerFor = (h) => h == 'alpha' ? _FakeImporter('alpha', (_) => fails ? throw StateError('no') : null) : null;
+      final (info, c) = await limited();
+      await c.switchLead('beta', run: true);
+      await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+      d('alpha').attachFails = true;
+      final outcome = await c.switchLead('alpha', run: true);
+      expect((outcome.kind, outcome.path), (HandoffKind.full, LeadPath.fresh));
+      expect(d('alpha').specs.last.initialMessage, contains('Added the toggle.'));
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+        contains('Alpha started a new conversation (That conversation is gone.); it got the full handoff.'),
+      );
+    });
+  }
+
+  test('a CLI that says its conversation is gone is not reopened', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    d('alpha').problem = 'Alpha no longer has that conversation.';
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.kind, outcome.path), (HandoffKind.full, LeadPath.fresh));
+    expect(outcome.why, 'Alpha no longer has that conversation.');
+    expect(d('alpha').attached, isEmpty);
+    expect(infoOf(info.id).conversationId, 'alpha-c2');
+  });
+
+  test('a return with too much to catch up on says so', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'x' * (handoffDeltaMaxChars + 10));
+    final outcome = await c.switchLead('alpha', run: true);
+    expect((outcome.kind, outcome.path), (HandoffKind.full, LeadPath.fresh));
+    expect(outcome.why, startsWith('too much happened'));
+    expect(transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message), isNotEmpty);
   });
 
   test('a harness that cannot resume gets everything each time', () async {
@@ -584,4 +722,293 @@ void main() {
     expect(infoOf(info.id).leads, isEmpty);
     expect(container.read(codeSettingsProvider).ownClis, isEmpty);
   });
+
+  group('the switch picker and the default handoff', () {
+    test('the picker lists the harnesses found here, greyed with the fix when not ready', () async {
+      final (info, c) = await limited();
+      final pick = c.limitPick!;
+      expect((pick.ranOut, pick.change, pick.problem), ('alpha', false, ''));
+      drivers['gone'] = FakeLeadDriver('gone', status: const DriverStatus(installed: false));
+      final statuses = {for (final MapEntry(:key, :value) in drivers.entries) key: await value.detect()};
+      final choices = handoffChoices(drivers.values, statuses, const {}, current: info.harness, ranOut: 'alpha');
+      expect(
+        {for (final ch in choices) ch.info.id: ch.blocked},
+        {
+          everyaiHarnessName: null,
+          'beta': null,
+          'term': null,
+          'off': 'Not signed in',
+          'cli': 'Turn on in Settings → Code → Harnesses',
+        },
+      );
+    });
+
+    test('handoffChoices reads consent where the profile keeps it', () async {
+      final profile = FakeLeadDriver('acp:cli', needsConsent: true, consentId: 'cli');
+      final statuses = {'acp:cli': await profile.detect()};
+      String? blocked(Set<String> own) =>
+          handoffChoices([profile], statuses, own, current: 'alpha', ranOut: 'alpha').single.blocked;
+      expect(blocked({'cli'}), isNull);
+      expect(blocked({'acp:cli'}), isNotNull);
+    });
+
+    test('the default handoff is stored with the lead pick, and cleared', () {
+      container.read(codeLeadProvider.notifier)
+        ..chooseModel('beta', 'b-1', '')
+        ..chooseHandoff('beta');
+      expect((jsonDecode(prefs[CodeLead.key]!) as Map<String, Object?>)['handoff'], 'beta');
+      container.dispose();
+      container = make();
+      expect(container.read(codeLeadProvider).handoff, 'beta');
+      expect(container.read(codeLeadProvider).of('beta').model, 'b-1');
+      container.read(codeLeadProvider.notifier).clearHandoff();
+      expect(container.read(codeLeadProvider).handoff, '');
+      // Older JSON has no default.
+      prefs[CodeLead.key] = jsonEncode({'harness': 'beta'});
+      container.dispose();
+      container = make();
+      expect(container.read(codeLeadProvider).handoff, '');
+    });
+
+    test('with no default, a limit waits for the user', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      final (info, c) = await limited();
+      await pumpEventQueue();
+      expect(infoOf(info.id).harness, 'alpha');
+      expect(d('beta').specs, isEmpty);
+      expect(c.limitPick, isNotNull);
+    });
+
+    test('with a default, a limit moves on to it by itself and says so', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      container.read(codeLeadProvider.notifier).chooseHandoff('beta');
+      final (info, c) = await limited();
+      await handedOff(info.id, 'beta');
+      final first = d('beta').specs.single.initialMessage!;
+      expect(first, contains('$handoffOpen from="alpha" kind="full">'));
+      expect(first, endsWith(carryOnMessage('Alpha')));
+      final notice = transcriptOf(info.id).items.whereType<NoticeItem>().singleWhere((n) => n.handedOffFrom.isNotEmpty);
+      expect(notice.message, 'Your Alpha limit ran out; continuing on Beta');
+      expect(notice.handedOffFrom, 'alpha');
+      expect(c.limitPick, isNull);
+      // Change opens the picker again, without the one that ran out; Keep closes it.
+      c.changeHandoff('alpha');
+      final pick = c.limitPick!;
+      expect((pick.change, pick.ranOut, pick.limit.message), (true, 'alpha', 'You hit your 5-hour limit.'));
+      c.keepLead();
+      expect(c.limitPick, isNull);
+    });
+
+    test('a default that is not ready leaves the picker up, with the reason', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      for (final (to, why) in [
+        ('off', 'Off: Not signed in'),
+        ('cli', 'Consent: Turn on in Settings → Code → Harnesses'),
+        ('alpha', 'Your default handoff, Alpha, is the one that ran out.'),
+      ]) {
+        container.read(codeLeadProvider.notifier).chooseHandoff(to);
+        final (info, c) = await limited();
+        expect(await handoffProblem(info.id), why);
+        expect(infoOf(info.id).harness, 'alpha');
+        expect(c.limitPick?.problem, why);
+      }
+      expect(d('off').specs, isEmpty);
+      expect(d('cli').specs, isEmpty);
+    });
+
+    test('a limit replayed on reopen does not hand off', () async {
+      final (info, _) = await limited();
+      container.dispose();
+      CodeSessionController.liveAfter = Duration.zero;
+      container = make();
+      container.read(codeLeadProvider.notifier).chooseHandoff('beta');
+      final c = await open(info.id);
+      // More of the old conversation, and a fresh event, once it is live.
+      await pumpEventQueue();
+      d('alpha').latest!.add(stateEvent('a3-s', ExecutionStatus.error));
+      await pumpEventQueue();
+      expect(infoOf(info.id).harness, 'alpha');
+      expect(d('beta').specs, isEmpty);
+      expect(c.limitPick?.ranOut, 'alpha');
+    });
+
+    test('the default running out too asks instead of looping', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      container.read(codeLeadProvider.notifier).chooseHandoff('beta');
+      final (info, c) = await limited();
+      await handedOff(info.id, 'beta');
+      final b = d('beta').latest!;
+      await turn(b, 'b1', 'Picked it up.');
+      b
+        ..add(usageLimitEvent('b2-limit', 'Beta is out too.'))
+        ..add(stateEvent('b2-s', ExecutionStatus.error));
+      expect(await handoffProblem(info.id), 'Your default handoff, Beta, is the one that ran out.');
+      expect(infoOf(info.id).harness, 'beta');
+      expect(c.limitPick?.ranOut, 'beta');
+      expect(d('alpha').specs, hasLength(1));
+    });
+
+    test('a new limit while Change is open gets its own pick and hands off to the default', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      container.read(codeLeadProvider.notifier).chooseHandoff('beta');
+      final (info, c) = await limited();
+      await handedOff(info.id, 'beta');
+      c.changeHandoff('alpha');
+      container.read(codeLeadProvider.notifier).chooseHandoff('term');
+      final b = d('beta').latest!;
+      await turn(b, 'b1', 'Picked it up.');
+      b
+        ..add(usageLimitEvent('b2-limit', 'Beta is out too.'))
+        ..add(stateEvent('b2-s', ExecutionStatus.error));
+      await handedOff(info.id, 'term');
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+        contains('Your Beta limit ran out; continuing on Term'),
+      );
+    });
+
+    test('Wait chosen while harness detection runs keeps the session where it is', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      final gate = d('term').detectGate = Completer<void>();
+      container.read(codeLeadProvider.notifier).chooseHandoff('beta');
+      final (info, c) = await limited();
+      expect(c.limitPick, isNotNull);
+      c.waitForLimit();
+      gate.complete();
+      await pumpEventQueue();
+      await whenValue(container, codeSessionProvider(info.id).select((s) => s.switching), (bool s) => !s);
+      expect(infoOf(info.id).harness, 'alpha');
+      expect(d('beta').specs, isEmpty);
+    });
+
+    test('the automatic handoff notice shows again after a restart', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      container.read(codeLeadProvider.notifier).chooseHandoff('beta');
+      final (info, _) = await limited();
+      await handedOff(info.id, 'beta');
+      container.dispose();
+      container = make();
+      await open(info.id);
+      await pumpEventQueue();
+      final notice = transcriptOf(info.id).items.whereType<NoticeItem>().singleWhere((n) => n.handedOffFrom.isNotEmpty);
+      expect((notice.message, notice.handedOffFrom), ('Your Alpha limit ran out; continuing on Beta', 'alpha'));
+    });
+  });
+
+  group('native import', () {
+    test('an imported conversation is reopened and gets only the carry-on', () async {
+      final written = <NativeImportSource>[];
+      importerFor = (h) => h == 'beta'
+          ? _FakeImporter('beta', (src) {
+              written.add(src);
+              d('beta').conversations['nat-1'] = FakeLeadSession(id: 'nat-1', replays: true);
+              return const ImportedSession(nativeId: 'nat-1', note: 'Imported 1 turn into Beta');
+            })
+          : null;
+      final (info, c) = await limited();
+      final outcome = await c.switchLead('beta', run: true);
+      expect(outcome.failed, isFalse);
+      expect(d('beta').specs, isEmpty);
+      expect(d('beta').attached, ['nat-1']);
+      final sent = d('beta').latest!.sent.single;
+      expect(sent, endsWith(carryOnMessage('Alpha')));
+      expect(sent, isNot(contains(handoffOpen)));
+      expect(infoOf(info.id).conversationId, 'nat-1');
+      expect(written.single.stints.map((s) => s.lead), ['Alpha']);
+      expect(written.single.handoff.fromHarness, 'alpha');
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+        contains('Imported 1 turn into Beta'),
+      );
+      // The facts are kept for a later return.
+      expect(await loadHandoffs(await sessions().timelineDir(info.id)), hasLength(1));
+    });
+
+    test("an imported conversation's replayed history is not shown again, now or after a restart", () async {
+      importerFor = (h) => h == 'beta'
+          ? _FakeImporter('beta', (src) {
+              d('beta').conversations['nat-1'] = FakeLeadSession(
+                id: 'nat-1',
+                replays: true,
+                history: [
+                  userMessageEvent('n-u', 'Add dark mode'),
+                  agentMessageEvent('n-a', 'Added the toggle.'),
+                  stateEvent('n-s', ExecutionStatus.idle),
+                ],
+              );
+              return const ImportedSession(nativeId: 'nat-1');
+            })
+          : null;
+      final (info, c) = await limited();
+      await c.switchLead('beta', run: true);
+      await pumpEventQueue();
+      int toggles() =>
+          transcriptOf(info.id).items.whereType<AgentText>().where((t) => t.text == 'Added the toggle.').length;
+      expect(toggles(), 1);
+      // The carry-on is under way: the replayed idle didn't end it.
+      expect(transcriptOf(info.id).running, isTrue);
+      // The switch leaves a mark even when the importer gives no note.
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+        contains('The conversation so far was imported into Beta.'),
+      );
+      // The session's mode holds on the reopened conversation.
+      expect(d('beta').latest!.modes, [AgentMode.ask]);
+      container.dispose();
+      container = make();
+      await open(info.id);
+      await pumpEventQueue();
+      expect(toggles(), 1);
+      expect(
+        transcriptOf(info.id).items.whereType<NoticeItem>().map((n) => n.message),
+        contains('The conversation so far was imported into Beta.'),
+      );
+    });
+
+    test('a cut-off turn goes with the carry-on to an imported conversation', () async {
+      importerFor = (h) => h == 'beta'
+          ? _FakeImporter('beta', (src) {
+              d('beta').conversations['nat-1'] = FakeLeadSession(id: 'nat-1', replays: true);
+              return const ImportedSession(nativeId: 'nat-1');
+            })
+          : null;
+      final info = await start();
+      final c = await open(info.id);
+      d('alpha').latest!
+        ..add(userMessageEvent('a1-u', 'Add dark mode'))
+        ..add(usageLimitEvent('a1-limit', 'You hit your 5-hour limit.'))
+        ..add(stateEvent('a1-s', ExecutionStatus.error));
+      await pumpEventQueue();
+      await c.switchLead('beta', run: true);
+      final sent = d('beta').latest!.sent.single;
+      expect(sent, contains('</cut-turn>'));
+      expect(sent, endsWith(carryOnMessage('Alpha', cut: true)));
+    });
+
+    test('no import, or a failed one, falls back to the facts handoff', () async {
+      for (final importer in [
+        _FakeImporter('beta', (_) => null),
+        _FakeImporter('beta', (_) => throw const FileSystemException('read-only')),
+        // Written, but the CLI can't open it.
+        _FakeImporter('beta', (_) => const ImportedSession(nativeId: 'missing')),
+      ]) {
+        importerFor = (h) => h == 'beta' ? importer : null;
+        final (info, c) = await limited();
+        await c.switchLead('beta', run: true);
+        expect(infoOf(info.id).harness, 'beta');
+        expect(d('beta').specs.last.initialMessage!, contains('$handoffOpen from="alpha" kind="full">'));
+      }
+    });
+  });
+}
+
+final class _FakeImporter implements NativeImporter {
+  _FakeImporter(this.harness, this._write);
+
+  @override
+  final String harness;
+  final ImportedSession? Function(NativeImportSource) _write;
+
+  @override
+  Future<ImportedSession?> write(NativeImportSource source) async => _write(source);
 }

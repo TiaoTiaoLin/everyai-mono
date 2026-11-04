@@ -16,3 +16,8 @@ Future<void> makeDir(String path) => impl.makeDir(path);
 /// What [executable] [args] prints, run with the login shell's environment
 /// (10 s at most), or null when it fails to run.
 Future<String?> runQuiet(String executable, List<String> args) => impl.runQuiet(executable, args);
+
+/// Whether the CLI still holds session [id] for folder [cwd] (`<config>/projects/<folder name>/<id>.jsonl`;
+/// [configDir] replaces `$CLAUDE_CONFIG_DIR` or `~/.claude`). True when it can't tell.
+Future<bool> claudeSessionExists(String cwd, String id, {String? configDir}) =>
+    impl.claudeSessionExists(cwd, id, configDir: configDir);

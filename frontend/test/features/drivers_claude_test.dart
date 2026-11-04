@@ -386,6 +386,28 @@ void main() {
     });
   });
 
+  group('resume check', () {
+    test("a session the CLI no longer holds is reported; one it holds, or never sent, isn't", () async {
+      final config = Directory('${tmp.path}/config')..createSync();
+      Directory('${tmp.path}/config/projects').createSync();
+      ClaudeDriver again() => ClaudeDriver(dataDir: () async => tmp.path, configDir: config.path);
+      final channel = ReplayChannel(_fixture('init_image_turn.jsonl'));
+      final session = await driver(_Spawner([channel])).start(_spec());
+      // Nothing was sent yet: the CLI has nothing to resume.
+      expect(await again().resumeProblem(session.id), isNull);
+      await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
+      await _played(channel);
+      await session.close();
+      expect(await again().resumeProblem(session.id), contains('no longer has'));
+      // The CLI names the folder's store after the path with each other character a dash.
+      File('${config.path}/projects/-work-repo/${session.id}.jsonl')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{}');
+      expect(await again().resumeProblem(session.id), isNull);
+      expect(await again().resumeProblem('gone'), contains('record is gone'));
+    });
+  });
+
   group('sessions', () {
     test('a turn with a picture: hook registered first, image sent, usage on the plan, then finished', () async {
       final channel = ReplayChannel(_fixture('init_image_turn.jsonl'));
