@@ -136,10 +136,21 @@ String rewindPrompt(String what, {required bool files, bool conversation = true}
 /// Goes before the next message after the files were rewound but the
 /// harness kept the conversation: [userText] is the turn the files went
 /// back to the start of.
+const _rewindOpen = '<everyai-rewind>';
+const _rewindClose = '</everyai-rewind>';
+
 String rewindNote(String userText) {
   final line = userText.trim().replaceAll(RegExp(r'\s+'), ' ');
   final quoted = line.length > 80 ? '${line.substring(0, 80)}…' : line;
-  return '<everyai-rewind>The user put the project\'s files back to how they were before their message "$quoted". '
+  return '${_rewindOpen}The user put the project\'s files back to how they were before their message "$quoted". '
       'Every file change made after that point is undone, even though this conversation still shows it. '
-      'Read files again before relying on what you remember of them.</everyai-rewind>';
+      'Read files again before relying on what you remember of them.$_rewindClose';
+}
+
+/// [text] without a leading [rewindNote] (the harness echoes the message
+/// as sent): what the user typed.
+String splitRewindNote(String text) {
+  if (!text.startsWith(_rewindOpen)) return text;
+  final end = text.indexOf(_rewindClose);
+  return end < 0 ? text : text.substring(end + _rewindClose.length).trimLeft();
 }

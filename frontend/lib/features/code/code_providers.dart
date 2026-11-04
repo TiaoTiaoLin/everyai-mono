@@ -1921,7 +1921,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Sends the next queued message once nothing runs or waits (and no lead switch is under way).
   void _sendQueued() {
     final t = state.transcript;
-    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty || state.queued.isEmpty) return;
+    if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
+    if (state.queued.isEmpty) return;
     final [next, ...rest] = state.queued;
     state = state.copyWith(queued: rest);
     if (_withinBudget()) unawaited(_checkpoint().then((_) => _sendNow(next)));
@@ -2226,8 +2227,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   String _tierNote = '';
 
-  /// Set when files were rewound but the harness kept the conversation; goes with the next message.
-  String _rewindNote = '';
+  /// While [rewind] runs: messages wait, so none goes out mid-restore or without the note.
+  bool _rewinding = false;
 
   /// Whether [rewind] takes the conversation back too (the driver has its own rewind).
   bool get rewindsConversation => _driver.caps.contains(DriverCap.rewind);
@@ -2241,11 +2242,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Nested instruction files found since the last message go first, after the mode note.
   String _noted(String text) {
     final told = state.transcript.notedMode;
-    final context = [_context?.takeNote() ?? '', _tierNote, _rewindNote].where((n) => n.isNotEmpty).join('\n\n');
+    // The rewind note (saved with the session, so it survives a restart) goes right after the context notes,
+    // where the transcript splits it off again.
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    final rewound = info?.pendingRewind ?? '';
+    if (info != null && rewound.isNotEmpty) sessions.update(info.copyWith(pendingRewind: ''));
+    final context = [_context?.takeNote() ?? '', rewound, _tierNote].where((n) => n.isNotEmpty).join('\n\n');
     _tierNote = '';
-    _rewindNote = '';
     final body = context.isEmpty ? text : (text.isEmpty ? context : '$context\n\n$text');
-    final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
+    final subagent = info?.isSubagent ?? false;
     final full = told != state.mode || _freshLead;
     _freshLead = false;
     return modeNote(state.mode, body, full: full, from: told, subagent: subagent);
@@ -2273,8 +2279,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     // An outside agent waiting on a card is mid-turn: free it, so the turn can end and the message go out.
     _releaseHostCards();
     final t = state.transcript;
-    // During a lead switch it waits for the new lead.
-    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
+    // During a lead switch it waits for the new lead, during a rewind for the files.
+    if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
       state = state.copyWith(queued: [...state.queued, out]);
       return;
     }
@@ -2327,8 +2333,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final out = await _outgoing(text, files);
     final session = _session;
     if (out == null || session == null) return;
-    // The lead is changing: it goes to the new one, like a message.
-    if (_switching) {
+    // The lead is changing: it goes to the new one, like a message (and waits out a rewind too).
+    if (_switching || _rewinding) {
       state = state.copyWith(queued: [...state.queued, out]);
       return;
     }
@@ -3026,6 +3032,24 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (_compacting || _switching) return const RewindOutcome.busy();
     final turns = state.transcript.items.whereType<UserTurn>().toList();
     if (turn < 1 || turn > turns.length) return const RewindOutcome.nothing();
+    if (_rewinding) return const RewindOutcome.busy();
+    _rewinding = true;
+    try {
+      return await _rewind(info, session, turns, turn, native);
+    } finally {
+      _rewinding = false;
+      // What the user wrote meanwhile goes out now, with the note.
+      if (ref.mounted) _sendQueued();
+    }
+  }
+
+  Future<RewindOutcome> _rewind(
+    CodeSessionInfo info,
+    HarnessSession session,
+    List<UserTurn> turns,
+    int turn,
+    bool native,
+  ) async {
     if (_busy) {
       final settled = await _stopAndSettle();
       if (!ref.mounted) return const RewindOutcome.failed('The session was closed.');
@@ -3066,7 +3090,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         await ref.read(codeGitProvider(sessionId).notifier).rewind(turn);
         files = true;
         // The harness kept the later turns: it hears about the files with the next message.
-        if (!conversation) _rewindNote = rewindNote(turns[turn - 1].text);
+        if (!conversation) {
+          final sessions = ref.read(codeSessionsProvider.notifier);
+          if (sessions.byId(sessionId) case final now?) {
+            sessions.update(now.copyWith(pendingRewind: rewindNote(turns[turn - 1].text)));
+          }
+        }
       } on Object catch (e) {
         note = "The files weren't restored: $e";
       }

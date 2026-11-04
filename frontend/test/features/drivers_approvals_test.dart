@@ -83,7 +83,15 @@ final class _Session implements HarnessSession {
   }
 
   @override
-  Future<void> send(String text, {bool run = true, List<String> images = const []}) async => steered.add(text);
+  Future<void> send(String text, {bool run = true, List<String> images = const []}) async {
+    steered.add(text);
+    if (!_sent.isCompleted) _sent.complete(text);
+  }
+
+  var _sent = Completer<String>();
+
+  /// The next message sent from now on.
+  Future<String> nextSend() => (_sent = Completer()).future;
   @override
   Future<void> interrupt() async => steered.add('(interrupt)');
   @override
@@ -168,23 +176,27 @@ void main() {
     List<String> deny = const [],
     Map<String, HarnessDriver> extra = const {},
     SessionWorktree? worktree,
+    bool reopen = false,
   }) async {
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: tmp.path).toJson()]);
-    prefs['code.sessions'] = jsonEncode([
-      CodeSessionInfo(
-        id: 's1',
-        projectId: 'p1',
-        title: 't',
-        conversationId: 'c1',
-        model: 'm',
-        mode: mode,
-        workingDir: worktree?.path ?? tmp.path,
-        createdAt: DateTime(2026),
-        harness: harness,
-        worktree: worktree,
-      ).toJson(),
-    ]);
+    // [reopen]: the session as the last run saved it (an app restart).
+    if (!reopen) {
+      prefs['code.sessions'] = jsonEncode([
+        CodeSessionInfo(
+          id: 's1',
+          projectId: 'p1',
+          title: 't',
+          conversationId: 'c1',
+          model: 'm',
+          mode: mode,
+          workingDir: worktree?.path ?? tmp.path,
+          createdAt: DateTime(2026),
+          harness: harness,
+          worktree: worktree,
+        ).toJson(),
+      ]);
+    }
     // The user turned on "Use my own installed CLIs" for the extra drivers that need it (Gemini).
     prefs['code.settings'] = jsonEncode({
       'global': {
@@ -345,7 +357,7 @@ void main() {
       );
     });
 
-    /// Sends [text] through the controller and echoes it back as the harness does.
+    /// Sends [text] through the controller and echoes back what the harness got, as the drivers do.
     Future<void> turn(CodeSessionController controller, String id, String text) async {
       await controller.send(text);
       final turns = container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>().length;
@@ -354,7 +366,7 @@ void main() {
           'kind': 'MessageEvent',
           'id': id,
           'source': 'user',
-          'llm_message': {'role': 'user', 'content': text},
+          'llm_message': {'role': 'user', 'content': session.steered.last},
         }),
       );
       await _when(
@@ -390,11 +402,50 @@ void main() {
       expect(File('${w.path}/new.txt').existsSync(), isFalse);
       expect(session.rewound, isEmpty);
       expect(container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>(), hasLength(2));
-      await controller.send('try again');
+      await turn(controller, 'm3', 'try again');
       expect(session.steered.last, contains('<everyai-rewind>'));
       expect(session.steered.last, contains('"Add a decrement method"'));
+      // The echoed note stays out of the user's turn, so a later rewind quotes what they typed.
+      final turns = container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>().toList();
+      expect(turns.last.text, 'try again');
+      await controller.rewind(3);
       await controller.send('and once more');
+      expect(session.steered.last, contains('"try again"'));
+      await controller.send('and again');
       expect(session.steered.last, isNot(contains('<everyai-rewind>')));
+    });
+
+    test('the note survives an app restart before the next message', () async {
+      await open(AgentMode.fullAuto, worktree: w);
+      final controller = container.read(codeSessionProvider('s1').notifier);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      expect((await controller.rewind(2)).files, isTrue);
+      container.dispose();
+      session = _Session();
+      final reopened = await open(AgentMode.fullAuto, worktree: w, reopen: true);
+      await reopened.send('try again');
+      expect(session.steered.last, contains('<everyai-rewind>'));
+      expect(session.steered.last, contains('"Add a decrement method"'));
+    });
+
+    test('a message sent while the files go back waits for them and carries the note', () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      final sent = session.steered.length;
+      final next = session.nextSend();
+      final rewinding = controller.rewind(2);
+      await controller.send('try again');
+      // It waits for the files and goes out once the rewind is done.
+      expect(session.steered, hasLength(sent));
+      await rewinding;
+      final text = await next;
+      expect(session.steered.skip(sent), hasLength(1));
+      expect(text, contains('<everyai-rewind>'));
+      expect(text, endsWith('try again'));
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
     });
 
     test('a driver with its own rewind takes the conversation back too', () async {
