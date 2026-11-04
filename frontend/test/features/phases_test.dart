@@ -1,4 +1,5 @@
 import 'package:every_ai/features/code/domain/phases.dart';
+import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/domain/subagents.dart';
 import 'package:every_ai/features/code/domain/transcript.dart'
     show planApprovedMessage, planApprovedReason, planRevisionLead;
@@ -162,6 +163,53 @@ void main() {
     expect(parseResearchAngles(many), hasLength(maxResearchers));
     final q = researchAnglesQuestion(models: {'google/gemini-argon': 'Gemini Argon'});
     expect(q, allOf(contains('"same"'), contains('google/gemini-argon'), contains('You decide how many')));
+  });
+
+  test('a workflow with no finished report waits for the user, whose message runs it again', () {
+    final f = PhaseFlow(ultra: true);
+    final failed = researchWorkflowMessage([
+      (title: 'A', report: const SubagentReport(SubagentStatus.stopped, 'Ran out of time.')),
+    ]);
+    expect(failed, contains('completed="0"'));
+    expect(f.onMessage(failed), isFalse);
+    expect(f.researchFailed, isTrue);
+    expect(f.onTurnEnd(), isA<Stuck>());
+    expect(f.next(), contains('/skip-phase'));
+    final run = f.run;
+    expect(f.onMessage('Try again, and look at Rust crates too.'), isTrue);
+    expect((f.researchFailed, f.phase), (false, Phase.research));
+    expect(f.run, isNot(run));
+  });
+
+  test('angles are read past prose brackets and fences; a bug falls back to bug angles', () {
+    const json = '[{"title": "Parsers", "question": "Which?"}]';
+    expect(parseResearchAngles('Options [a] and [b]:\n$json').single.title, 'Parsers');
+    expect(parseResearchAngles('```json\n$json\n```').single.title, 'Parsers');
+    expect(parseResearchAngles('', bug: true).first.title, 'The same bug elsewhere');
+    expect(parseResearchAngles('').first.title, 'Reference implementations');
+  });
+
+  test('background forks without a notification are found again after a restart', () {
+    ToolResult result(String id, String text) => ToolResult(
+      id: 'r$id',
+      raw: const {},
+      actionId: id,
+      toolName: taskTool,
+      observation: {'reason': text},
+      outcome: ToolOutcome.rejected,
+    );
+    final events = <HarnessEvent>[
+      result('a', subagentReason({'a': backgroundStarted('kid-a')})),
+      result('b', subagentReason({'b': backgroundStarted('kid-b')})),
+      result('c', subagentReason({'c': const SubagentReport(SubagentStatus.completed, 'done')})),
+      ChatMessage(
+        id: 'm',
+        raw: const {},
+        fromUser: true,
+        text: taskNotification('kid-a', 'A', const SubagentReport(SubagentStatus.completed, 'ok')),
+      ),
+    ];
+    expect(unreportedBackground(events), {'b': 'kid-b'});
   });
 
   group('Bug fix', () {

@@ -661,7 +661,8 @@ final class EveryAISession
   /// How a failed model call is retried: 8 attempts, 15 in a Max or Ultra
   /// session (long unattended runs ride out an overload).
   RetryPolicy get retryPolicy =>
-      testRetryPolicy ?? RetryPolicy(maxAttempts: const {'max', 'ultra'}.contains(_spec.phaseFlow) ? 15 : 8);
+      testRetryPolicy ??
+      RetryPolicy(maxAttempts: const {'max', 'ultra', 'bugfix-ultra'}.contains(_spec.phaseFlow) ? 15 : 8);
 
   /// Replaces [retryPolicy] in tests (short waits).
   @visibleForTesting
@@ -1067,6 +1068,9 @@ final class EveryAISession
                 finished ? _notePhase() : _saveFlow();
             }
           }
+          // Out of steps mid-flow: the phase note stays the last word, so the
+          // next message picks up where the flow is.
+          if (wrapUp && (_flow?.phase ?? Phase.done) != Phase.done) _notePhase();
           _setStatus(ExecutionStatus.finished);
           return;
         }
@@ -1199,6 +1203,8 @@ final class EveryAISession
       ..add({'role': 'user', 'content': message, '_eid': eid});
     _rewriteMessages();
     lastPromptTokens = 0;
+    // The summary drops the phase notes: say again where the flow is.
+    if (_flow case final f? when f.phase != Phase.done) _notePhase();
     return true;
   }
 

@@ -115,6 +115,7 @@ final class PhaseFlow {
     Map<String, String>? reproFiles,
     Map<String, String>? forks,
     String? run,
+    this.researchFailed = false,
   }) : reproFiles = reproFiles ?? {},
        forks = forks ?? {},
        run = run ?? newRunId(),
@@ -137,6 +138,10 @@ final class PhaseFlow {
   /// research, starts another): an Ultra workflow's workers carry it, so a
   /// later round never mistakes an earlier round's reports for its own.
   String run;
+
+  /// The Ultra workflow came back with no finished report: the flow waits
+  /// for the user (go on without research, or run it again).
+  bool researchFailed;
 
   static String newRunId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 
@@ -242,6 +247,7 @@ final class PhaseFlow {
       ultra: j['ultra'] == true,
       // Flows saved before runs had ids: their workers are named research-N.
       run: j['run'] as String? ?? '',
+      researchFailed: j['research_failed'] == true,
       bugfix: bugfix,
       phase: j['phase'] == null ? null : Phase.parse(j['phase']),
       nudges: (j['nudges'] as num?)?.toInt() ?? 0,
@@ -274,6 +280,7 @@ final class PhaseFlow {
     if (askedUser) 'asked_user': true,
     if (reproFiles.isNotEmpty) 'repro_files': reproFiles,
     if (forks.isNotEmpty) 'forks': forks,
+    if (researchFailed) 'research_failed': true,
   };
 
   /// This flow on the other tier (Max ↔ Ultra), where it is: switching tier
@@ -295,6 +302,7 @@ final class PhaseFlow {
     askedUser = false;
     reproFiles.clear();
     forkAsking = false;
+    researchFailed = false;
     run = newRunId();
   }
 
@@ -383,7 +391,10 @@ final class PhaseFlow {
       'call bug_check triage: "simple" when the cause is clear and local, "hard" when it is low level, rare or not '
           'yet understood (it then gets researched first), with why.',
     Phase.research =>
-      researchPending > 0
+      researchFailed
+          ? 'the research workflow came back without a finished report (its message says why). The user decides: '
+                'go on without research (/skip-phase), or send any message to run the workflow again.'
+          : researchPending > 0
           ? 'wait for the researcher reports (end your turn; they wake you).'
           : ultra
           ? 'the research workflow (researchers in parallel) is running; end your turn, and its reports '
@@ -503,11 +514,22 @@ final class PhaseFlow {
     // The user stepped in: the nudges start over, so a flow that was stuck
     // gets its two nudges again instead of pausing at the next turn end.
     if (fromUser(text)) nudges = 0;
+    // The workflow found nothing and the user wrote: run it again in a new round.
+    if (fromUser(text) && phase == Phase.research && researchFailed && !text.contains(planApprovedMessage)) {
+      researchFailed = false;
+      run = newRunId();
+      return true;
+    }
     // "Start building" for a plan that wasn't held (or was closed by a reply)
     // comes as a message; it approves the plan as much as the held answer does.
     if (phase == Phase.plan && text.contains(planApprovedMessage)) return _advanceFrom(Phase.plan);
     // Also after a switch to Max while the workflow ran: its reports are this round's research.
     if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
+      if (phase != Phase.research) return false;
+      if (RegExp(r'completed="(\d+)"').firstMatch(text)?[1] == '0') {
+        researchFailed = true;
+        return false;
+      }
       researchReports++;
       return _advanceFrom(Phase.research);
     }
@@ -574,6 +596,8 @@ final class PhaseFlow {
     switch (phase) {
       case Phase.done:
         return const EndTurn();
+      case Phase.research when ultra && researchFailed:
+        return Stuck(note(stuck: true));
       case Phase.research when researchPending > 0 || ultra:
         // Waiting for background researchers (or the workflow) is right.
         return const EndTurn();
@@ -636,6 +660,14 @@ const researchCallPrefix = 'research-';
 /// The most researchers one workflow starts, whatever the orchestrator asks.
 const maxResearchers = 16;
 
+/// How many of a workflow's researchers run at the same time; the rest wait
+/// their turn (rate limits, and the cost of many forks at once).
+const maxResearchAtOnce = 6;
+
+/// How long a research workflow may run: then the researchers still going
+/// are stopped, and what finished goes to the session.
+const researchTimeout = Duration(minutes: 45);
+
 /// What the session's own model (the orchestrator) is asked for an Ultra
 /// research workflow: how many researchers, on what, and on which of
 /// [models] (id → what it is good for; "same" is its own model).
@@ -663,51 +695,77 @@ String researchAnglesQuestion({Map<String, String> models = const {}, bool bug =
 }
 
 /// The researchers in [reply] (a model of "" means the orchestrator's), or
-/// general ones on its model when the reply can't be read.
-List<({String title, String question, String model})> parseResearchAngles(String reply) {
-  final start = reply.indexOf('[');
-  final end = reply.lastIndexOf(']');
-  final out = <({String title, String question, String model})>[];
-  if (start >= 0 && end > start) {
+/// general ones on its model when the reply can't be read ([bug]: angles
+/// for a bug rather than a build).
+List<({String title, String question, String model})> parseResearchAngles(String reply, {bool bug = false}) {
+  // The JSON may sit in a fence, after prose with brackets of its own, or
+  // stand alone: try each array that opens with an object.
+  final candidates = <String>[
+    for (final m in RegExp(r'```(?:json)?\s*([\s\S]*?)```').allMatches(reply)) m[1]!,
+    for (final m in RegExp(r'\[\s*\{').allMatches(reply))
+      if (reply.lastIndexOf(']') > m.start) reply.substring(m.start, reply.lastIndexOf(']') + 1),
+  ];
+  for (final c in candidates) {
+    final out = <({String title, String question, String model})>[];
     try {
-      final v = jsonDecode(reply.substring(start, end + 1));
-      if (v is List) {
-        for (final a in v) {
-          if (a case {'title': final String t, 'question': final String q} when t.trim().isNotEmpty) {
-            final m = a['model'];
-            out.add((title: t.trim(), question: q.trim(), model: m is String && m != 'same' ? m.trim() : ''));
-          }
+      final v = jsonDecode(c.trim());
+      if (v is! List) continue;
+      for (final a in v) {
+        if (a case {'title': final String t, 'question': final String q} when t.trim().isNotEmpty) {
+          final m = a['model'];
+          out.add((title: t.trim(), question: q.trim(), model: m is String && m != 'same' ? m.trim() : ''));
         }
       }
     } on FormatException {
-      // Falls back below.
+      continue;
     }
+    if (out.isNotEmpty) return out.take(maxResearchers).toList();
   }
-  if (out.isNotEmpty) return out.take(maxResearchers).toList();
-  return const [
-    (
-      title: 'Reference implementations',
-      question: 'Find the best existing implementations and what to borrow.',
-      model: '',
-    ),
-    (
-      title: 'Libraries and trade-offs',
-      question: 'Which libraries fit, and what each costs (size, licence, upkeep).',
-      model: '',
-    ),
-    (title: 'Pitfalls and security', question: 'Known bugs, vulnerabilities and mistakes to design around.', model: ''),
-    (
-      title: 'Prior art',
-      question: 'Similar projects on GitHub and Hugging Face and what users liked about them.',
-      model: '',
-    ),
-  ];
+  return bug ? _bugAngles : _buildAngles;
 }
+
+const _buildAngles = [
+  (
+    title: 'Reference implementations',
+    question: 'Find the best existing implementations and what to borrow.',
+    model: '',
+  ),
+  (
+    title: 'Libraries and trade-offs',
+    question: 'Which libraries fit, and what each costs (size, licence, upkeep).',
+    model: '',
+  ),
+  (title: 'Pitfalls and security', question: 'Known bugs, vulnerabilities and mistakes to design around.', model: ''),
+  (
+    title: 'Prior art',
+    question: 'Similar projects on GitHub and Hugging Face and what users liked about them.',
+    model: '',
+  ),
+];
+
+const _bugAngles = [
+  (
+    title: 'The same bug elsewhere',
+    question: 'Find issues, commits and fixes where established projects hit this exact bug, and the root cause.',
+    model: '',
+  ),
+  (
+    title: 'How the API really behaves',
+    question: 'Read the docs, specs and source of the library or subsystem involved: what it guarantees and what not.',
+    model: '',
+  ),
+  (
+    title: 'Fixes that held',
+    question: 'The smallest fixes others shipped for this kind of bug, and which ones regressed later.',
+    model: '',
+  ),
+];
 
 /// The one message an Ultra research workflow sends its session: every
 /// report, fenced as untrusted research.
 String researchWorkflowMessage(List<({String title, SubagentReport report})> reports) {
-  final out = StringBuffer('<$researchWorkflowTag reports="${reports.length}">\n');
+  final completed = reports.where((r) => r.report.status == SubagentStatus.completed).length;
+  final out = StringBuffer('<$researchWorkflowTag reports="${reports.length}" completed="$completed">\n');
   for (final r in reports) {
     final text = r.report.text.length > 8000 ? '${r.report.text.substring(0, 8000)}\n[…cut]' : r.report.text;
     // A report can't close its own fence (or the workflow's) early.

@@ -35,9 +35,11 @@ import 'domain/phases.dart'
         Phase,
         flowLabel,
         isResearchWorker,
+        maxResearchAtOnce,
         parseResearchAngles,
         researchAnglesQuestion,
         researchCallPrefix,
+        researchTimeout,
         researchWorkflowMessage;
 import 'domain/fork_files.dart';
 import 'domain/subagents.dart';
@@ -846,6 +848,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Background subagents by call id: their call was answered at the start,
   /// and their report goes to this session as a task notification.
   final _background = <String, ({String childId, String title})>{};
+
+  /// Whether forks left in the background before a restart are watched again.
+  bool _resumedBackground = false;
   bool _delivering = false;
 
   @override
@@ -856,6 +861,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       unawaited(_mirror.close());
       _gitTimer?.cancel();
       _disposeBuiltins();
+      _researchTimer?.cancel();
       for (final s in [..._childSubs.values, ..._researchSubs.values]) {
         s.close();
       }
@@ -884,12 +890,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   String? get budgetReached {
     final owner = _budgetOwner;
     final own = ref.read(codeSettingsProvider).budgets[owner];
-    // Ultra on the user's own key never runs uncapped: no budget of its own
-    // means the cap from Settings → Add API keys.
+    // Ultra never runs uncapped: no budget of its own means the Ultra cap
+    // (Settings → Add API keys; $25 unless changed), on credits too.
     final info = ref.read(codeSessionsProvider.notifier).byId(owner);
-    final keyCap = own == null && info != null && byokUltraCapped(info.tier, ModelId(info.model), ModelBilling.current)
-        ? ref.read(byokUltraCapProvider)
-        : null;
+    final ownKey = info != null && byokUltraCapped(info.tier, ModelId(info.model), ModelBilling.current);
+    final keyCap = own == null && info?.tier == HarnessTier.ultra ? ref.read(byokUltraCapProvider) : null;
     final budget = own ?? keyCap;
     final spent = budgetSpentMicros(
       owner,
@@ -898,8 +903,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     );
     if (budget == null || budget <= 0 || spent < budget * 1e6) return null;
     if (keyCap != null) {
-      return 'This Ultra session reached your \$${budget.toStringAsFixed(2)} spend cap on your own key. '
-          'Set a budget in the top bar, or raise the cap in Settings → Add API keys, to carry on.';
+      return ownKey
+          ? 'This Ultra session reached your \$${budget.toStringAsFixed(2)} spend cap on your own key. '
+                'Set a budget in the top bar, or raise the cap in Settings → Add API keys, to carry on.'
+          : 'This Ultra session reached the \$${budget.toStringAsFixed(2)} Ultra spend cap. Set a budget in the '
+                'top bar, or raise the cap in Settings → Add API keys, to carry on.';
     }
     return 'This session reached its \$${budget.toStringAsFixed(2)} budget. Raise it in the top bar to carry on.';
   }
@@ -1771,6 +1779,18 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = sessions.byId(sessionId);
     if (info == null || info.isSubagent) return;
+    if (!_resumedBackground) {
+      _resumedBackground = true;
+      // Forks left in the background before a restart: watch them again, so
+      // their notification (and merge) still comes; one already done reports now.
+      for (final MapEntry(key: callId, value: childId) in unreportedBackground(_events).entries) {
+        if (_childOf.containsKey(callId) || _background.containsKey(callId)) continue;
+        final child = sessions.byId(childId);
+        if (child == null) continue;
+        _background[callId] = (childId: childId, title: child.title);
+        _watch(callId, childId);
+      }
+    }
     final t = state.transcript;
     for (final item in t.openSubagents) {
       final id = item.step.call.id;
@@ -1869,6 +1889,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// The research round the workers below belong to.
   String _researchRun = '';
 
+  /// Workers planned but not started yet: at most [maxResearchAtOnce] run at
+  /// once. (A restart drops this queue; the workflow then reports what ran.)
+  final _researchQueue = <({String callId, SubagentTask task, String model})>[];
+
+  /// Workers being started right now.
+  int _researchLaunching = 0;
+
+  /// Ends the round's workers that are still going after [researchTimeout].
+  Timer? _researchTimer;
+
   /// This round's Ultra research workers (started earlier, maybe before a
   /// restart); an earlier round's (an earlier task's) are not.
   List<CodeSessionInfo> get _researchers => [
@@ -1876,20 +1906,24 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (s.parentId == sessionId && isResearchWorker(s.parentCallId, _researchRun)) s,
   ];
 
-  /// An Ultra session at research: start its workflow of 10–12 researchers
-  /// once (the session's own model drafts the angles), watch them, and send
-  /// their reports together when the last one is in.
+  /// An Ultra session at research: start its workflow once per round (the
+  /// session's own model sizes it and picks the models), run at most
+  /// [maxResearchAtOnce] workers at a time, and send their reports together
+  /// when the last one is in, or when [researchTimeout] runs out.
   void _ultraResearch(Transcript t) {
     final p = t.phase;
     final workflow = p != null && (p.flow == 'ultra' || p.flow == 'bugfix-ultra');
     if (!workflow || p.phase != Phase.research || _researchStarting == p.run || _researchSent == p.run) return;
     if (_researchRun != p.run) {
-      // A new round: the last one's watchers and reports are done with.
+      // A new round: the last one's watchers, queue and reports are done with.
       for (final sub in _researchSubs.values) {
         sub.close();
       }
       _researchSubs.clear();
       _researchReports.clear();
+      _researchQueue.clear();
+      _researchTimer?.cancel();
+      _researchTimer = null;
       _researchRun = p.run;
     }
     final sessions = ref.read(codeSessionsProvider.notifier);
@@ -1898,46 +1932,118 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final running = _researchers;
     if (running.isNotEmpty) {
       for (final r in running) {
-        if (!_researchSubs.containsKey(r.parentCallId)) _watchResearcher(r.parentCallId, r.id, r.title);
+        if (!_researchSubs.containsKey(r.parentCallId) && !_researchReports.containsKey(r.parentCallId)) {
+          _watchResearcher(r.parentCallId, r.id, r.title);
+        }
+      }
+      // After a restart the clock counts from the first worker's start.
+      if (_researchTimer == null) {
+        final first = running.map((r) => r.createdAt).reduce((a, b) => a.isBefore(b) ? a : b);
+        _armResearchTimer(researchTimeout - DateTime.now().difference(first));
       }
       return;
     }
     final session = _session;
     if (session is! AsksAside) return;
     _researchStarting = p.run;
+    final run = p.run;
+    final bug = p.flow == 'bugfix-ultra';
     unawaited(() async {
       try {
         // The orchestrator picks how many researchers and each one's model, from the user's models.
+        final library = (ref.read(libraryProvider).value ?? const <ModelSpec>[]).where((m) => m.tools).take(8);
         final models = {
-          for (final m in (ref.read(libraryProvider).value ?? const <ModelSpec>[]).where((m) => m.tools).take(8))
+          for (final m in library)
             if (m.id.value != info.model) m.id.value: m.name,
         };
-        final reply = await (session as AsksAside).askAside(
-          researchAnglesQuestion(models: models, bug: p.flow == 'bugfix-ultra'),
-          maxTokens: 3000,
-        );
-        final angles = parseResearchAngles(reply);
-        for (final (i, a) in angles.indexed) {
-          if (!ref.mounted) return;
-          final callId = '$researchCallPrefix${p.run}-${i + 1}';
-          final child = await sessions.startTask(
-            parent: info,
-            task: SubagentTask(description: a.title, prompt: a.question, agent: 'researcher'),
-            callId: callId,
-            mode: subagentMode(state.mode),
-            // Only a model it was offered; anything else runs on the orchestrator's.
-            model: models.containsKey(a.model) ? a.model : '',
+        String reply;
+        try {
+          reply = await (session as AsksAside).askAside(
+            researchAnglesQuestion(models: models, bug: bug),
+            maxTokens: 3000,
           );
-          _watchResearcher(callId, child.id, child.title);
+        } on Object {
+          // The general angles below rather than no research at all.
+          reply = '';
         }
+        if (!ref.mounted || _researchRun != run) return;
+        final angles = parseResearchAngles(reply, bug: bug);
+        _researchQueue
+          ..clear()
+          ..addAll([
+            for (final (i, a) in angles.indexed)
+              (
+                callId: '$researchCallPrefix$run-${i + 1}',
+                task: SubagentTask(description: a.title, prompt: a.question, agent: 'researcher'),
+                // Only a model it was offered; anything else runs on the orchestrator's.
+                model: models.containsKey(a.model) ? a.model : '',
+              ),
+          ]);
+        _armResearchTimer(researchTimeout);
+        await _startQueuedResearchers();
       } on Object catch (e) {
         if (ref.mounted) state = state.copyWith(error: "The research workflow couldn't start: $e");
       } finally {
-        _researchStarting = null;
+        if (_researchStarting == run) _researchStarting = null;
       }
       // Some may have finished while the rest were starting.
       if (ref.mounted) _researchMaybeDone();
     }());
+  }
+
+  /// Starts queued workers while fewer than [maxResearchAtOnce] run.
+  Future<void> _startQueuedResearchers() async {
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final run = _researchRun;
+    while (ref.mounted && _researchRun == run && _researchQueue.isNotEmpty) {
+      final busy = _researchers.where((r) => !_researchReports.containsKey(r.parentCallId)).length;
+      if (busy + _researchLaunching >= maxResearchAtOnce) return;
+      final info = sessions.byId(sessionId);
+      if (info == null) return;
+      final next = _researchQueue.removeAt(0);
+      _researchLaunching++;
+      try {
+        final child = await sessions.startTask(
+          parent: info,
+          task: next.task,
+          callId: next.callId,
+          mode: subagentMode(state.mode),
+          model: next.model,
+        );
+        if (ref.mounted && _researchRun == run) _watchResearcher(next.callId, child.id, child.title);
+      } on Object catch (e) {
+        _researchReports[next.callId] = (
+          title: next.task.title,
+          report: SubagentReport(SubagentStatus.notStarted, "The researcher couldn't start: $e"),
+        );
+      } finally {
+        _researchLaunching--;
+      }
+    }
+  }
+
+  void _armResearchTimer(Duration after) {
+    _researchTimer?.cancel();
+    final run = _researchRun;
+    _researchTimer = Timer(after.isNegative ? Duration.zero : after, () {
+      if (!ref.mounted || _researchRun != run || _researchSent == run) return;
+      // Out of time: what finished goes out; the rest are stopped and say so.
+      for (final r in _researchers) {
+        if (_researchReports.containsKey(r.parentCallId)) continue;
+        _researchSubs.remove(r.parentCallId)?.close();
+        unawaited(ref.read(_liveProvider)[r.id]?.interrupt());
+        _researchReports[r.parentCallId] = (
+          title: r.title,
+          report: SubagentReport(
+            SubagentStatus.stopped,
+            'Stopped: the research workflow ran out of time (${researchTimeout.inMinutes} minutes).',
+          ),
+        );
+      }
+      _researchQueue.clear();
+      _researchStarting = null;
+      _researchMaybeDone();
+    });
   }
 
   void _watchResearcher(String callId, String childId, String title) {
@@ -1946,16 +2052,21 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (outcome == null || _researchReports.containsKey(callId)) return;
       _researchReports[callId] = (title: title, report: outcome);
       _researchSubs.remove(callId)?.close();
+      unawaited(_startQueuedResearchers().then((_) => _researchMaybeDone()));
       _researchMaybeDone();
     }, fireImmediately: true);
   }
 
   void _researchMaybeDone() {
-    if (_researchSent == _researchRun || _researchStarting != null) return;
+    if (!ref.mounted || _researchSent == _researchRun || _researchStarting != null) return;
+    if (_researchQueue.isNotEmpty || _researchLaunching > 0) return;
     final all = _researchers;
-    if (all.isEmpty || all.any((r) => !_researchReports.containsKey(r.parentCallId))) return;
+    final ids = {for (final r in all) r.parentCallId, ..._researchReports.keys};
+    if (ids.isEmpty || ids.any((id) => !_researchReports.containsKey(id))) return;
     _researchSent = _researchRun;
-    final reports = [for (final r in all) _researchReports[r.parentCallId]!];
+    _researchTimer?.cancel();
+    _researchTimer = null;
+    final reports = [for (final id in ids) _researchReports[id]!];
     unawaited(_session?.send(researchWorkflowMessage(reports)).catchError((Object _) {}));
   }
 

@@ -344,6 +344,28 @@ SubagentReport withMergeNote(SubagentReport report, ({List<String> merged, List<
   return SubagentReport(report.status, '${report.text}$note');
 }
 
+/// Forks a session sent to the background whose task notification never
+/// came (call id → child id), from its [events]: after an app restart the
+/// app watches them again, so their reports (and merges) aren't lost.
+Map<String, String> unreportedBackground(Iterable<HarnessEvent> events) {
+  final started = <String, String>{};
+  final reported = <String>{};
+  for (final e in events) {
+    if (e is ToolResult && e.toolName == taskTool) {
+      final text = [e.text, if (e.observation['reason'] case final String r) r].join('\n');
+      final mine = parseSubagentReports(text)[e.actionId];
+      if (mine != null && mine.status != SubagentStatus.background) continue;
+      if (backgroundTaskId(mine?.text ?? text) case final id?) started[e.actionId] = id;
+    } else if (e is ChatMessage && e.fromUser) {
+      if (parseTaskNotification(e.text) case final n?) reported.add(n.childId);
+    }
+  }
+  return {
+    for (final MapEntry(:key, :value) in started.entries)
+      if (!reported.contains(value)) key: value,
+  };
+}
+
 /// The child id in a [backgroundStarted] (or [forkAsks]) report, or null.
 String? backgroundTaskId(String text) => RegExp(r'Started in the background as task ([\w-]+)').firstMatch(text)?[1];
 
