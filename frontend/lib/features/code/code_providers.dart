@@ -11,7 +11,7 @@ import '../../core/providers.dart';
 import '../agents/agents_providers.dart' show AgentDefinition, agentLibrarySettingsProvider, childSetup, codeAgentsFor;
 import '../attachments/attachment.dart';
 import '../models/domain/model_catalog.dart';
-import '../billing/billing_providers.dart' show billingProvider, formatMicros;
+import '../billing/billing_providers.dart' show formatMicros;
 import '../models/models_providers.dart';
 import '../settings/byok_keys.dart' show byokUltraCapProvider;
 import '../settings/domain/byok_providers.dart' show ModelBilling;
@@ -29,6 +29,7 @@ import 'domain/compaction.dart';
 import 'domain/doom_loop.dart';
 import 'domain/git_commands.dart';
 import 'domain/goal.dart';
+import 'domain/no_spend.dart';
 import 'domain/review.dart';
 import 'domain/rewind.dart';
 import 'domain/spill.dart';
@@ -116,6 +117,12 @@ const removedHarnessNotice =
 
 /// Whether a session on [harness] in [workingDir] runs on an outside agent
 /// (a coding CLI the app drives) rather than the EveryAI harness or the demo.
+/// Where the approval card asks the backend's decider for a risk label on a
+/// command of [info]: its folder, or null for none (the demo's commands
+/// never run, and an outside lead spends nothing of EveryAI's).
+String? riskLabelDir(CodeSessionInfo info) =>
+    isDemoPath(info.workingDir) || isOutsideLead(info.harness, info.workingDir) ? null : info.workingDir;
+
 bool isOutsideLead(String harness, String workingDir) =>
     harness != everyaiHarnessName && harness != openHandsHarnessName && !isDemoPath(workingDir);
 
@@ -1289,9 +1296,6 @@ final class LeadSwitchOutcome {
   final String message;
 }
 
-/// The line that follows a handoff when the new lead should carry on at once.
-String carryOnMessage(String from) => 'Carry on with the work where $from stopped.';
-
 /// One session's live state; talks to the harness.
 final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeSessionState, String>(
   CodeSessionController.new,
@@ -1680,6 +1684,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   /// [harness] as the user knows it.
+  @override
   String _leadLabel(String harness) => ref.read(driverRegistryProvider).resolve(harness)?.info.label ?? harness;
 
   /// Before the history replays, so files it shows delivered aren't sent again.
@@ -2354,14 +2359,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// it carries on at once; otherwise the handoff goes with the user's next
   /// message. A busy session is stopped first only with [stopFirst] (the
   /// user agreed). The worktree, mode and permissions stay the session's.
-  ///
-  /// [summarizer] replaces the gateway call for the handoff summary (tests).
-  Future<LeadSwitchOutcome> switchLead(
-    String to, {
-    required bool run,
-    bool stopFirst = false,
-    Summarizer? summarizer,
-  }) async {
+  /// The handoff costs nothing: it is built from the session and the
+  /// repository, with no model call (see `buildHandoff`).
+  Future<LeadSwitchOutcome> switchLead(String to, {required bool run, bool stopFirst = false}) async {
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = sessions.byId(sessionId);
     if (info == null || _session == null) return const LeadSwitchOutcome.failed('The session is not connected.');
@@ -2389,7 +2389,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       }
       if (_busy && (!stopFirst || !await _stopAndSettle())) return const LeadSwitchOutcome.busy();
       if (!ref.mounted) return const LeadSwitchOutcome.failed('The session was closed.');
-      final outcome = await _switchLead(sessions.byId(sessionId) ?? info, target, run: run, summarizer: summarizer);
+      final outcome = await _switchLead(sessions.byId(sessionId) ?? info, target, run: run);
       started = run && !outcome.failed;
       return outcome;
     } finally {
@@ -2402,12 +2402,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
   }
 
-  Future<LeadSwitchOutcome> _switchLead(
-    CodeSessionInfo info,
-    HarnessDriver target, {
-    required bool run,
-    Summarizer? summarizer,
-  }) async {
+  Future<LeadSwitchOutcome> _switchLead(CodeSessionInfo info, HarnessDriver target, {required bool run}) async {
     final sessions = ref.read(codeSessionsProvider.notifier);
     final old = _session!;
     final from = info.harness;
@@ -2435,7 +2430,22 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
     final since = placedSince(_timeline, current, lastSeenBy(stored, to));
     final git = noLocalFolder(info.workingDir) ? null : await handoffGit(info);
-    final summarize = await _handoffSummarizer(info, summarizer);
+    // The whole conversation as a file the new lead may read (and summarise for itself).
+    final now = DateTime.now();
+    var transcript = noLocalFolder(info.workingDir) ? '' : handoffTranscriptPath(now, to);
+    if (transcript.isNotEmpty) {
+      final stints = [
+        for (final s in _timeline) (lead: _leadLabel(s.harness), conversationId: s.conversationId, events: s.events),
+        (lead: fromLabel, conversationId: info.conversationId, events: current),
+      ];
+      try {
+        if (!await writeHandoffTranscript(info.workingDir, transcript, handoffTranscript(stints, title: info.title))) {
+          transcript = '';
+        }
+      } on Object {
+        transcript = '';
+      }
+    }
     var resumable = rec != null && rec.conversationId.isNotEmpty && target.caps.contains(DriverCap.resume);
 
     // The old lead is kept for a return. One that never got its handoff (a
@@ -2459,8 +2469,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final ready = Completer<void>();
     HarnessSession? live;
     final Handoff handoff;
+    var carryOn = '';
     try {
-      // Its old conversation is tried first, so the summary is asked for once.
+      // Its old conversation is tried first: a delta needs it.
       if (handoffScope(record, since: since, resumable: resumable).kind == HandoffKind.delta) {
         try {
           live = await sessions.attachSession(
@@ -2472,21 +2483,20 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
           resumable = false;
         }
       }
-      handoff = await summarizeHandoff(
-        buildHandoff(
-          record,
-          from: from,
-          fromConversation: info.conversationId,
-          to: to,
-          workingDir: info.workingDir,
-          since: since,
-          resumable: resumable,
-          git: git?.git,
-          diffs: git?.diffs ?? const {},
-        ),
-        handoffScope(record, since: since, resumable: resumable).events,
-        summarize,
+      handoff = buildHandoff(
+        record,
+        from: from,
+        fromConversation: info.conversationId,
+        to: to,
+        workingDir: info.workingDir,
+        since: since,
+        resumable: resumable,
+        now: now,
+        git: git?.git,
+        diffs: git?.diffs ?? const {},
+        transcript: transcript,
       );
+      carryOn = carryOnMessage(fromLabel, cut: handoff.cut != null);
       live ??= await sessions._startLead(
         info,
         harness: to,
@@ -2496,7 +2506,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         tier: tier,
         harnessMode: harnessMode,
         initialMessage: run
-            ? modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n${carryOnMessage(fromLabel)}')
+            ? modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n$carryOn')
             : null,
         ready: ready.future,
       );
@@ -2589,29 +2599,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     ready.complete();
     if (!outside) _syncFlow();
     if (run && handoff.kind == HandoffKind.delta) {
-      await live.send(_noted('$message\n\n${carryOnMessage(fromLabel)}'));
+      await live.send(_noted('$message\n\n$carryOn'));
     } else if (run) {
       // It started with the whole note.
       _freshLead = false;
     }
     return LeadSwitchOutcome.switched(handoff.kind);
-  }
-
-  /// The handoff's short summary, on the utility model through the gateway:
-  /// null when neither credits nor the user's key pay for it (the facts go
-  /// out alone).
-  Future<Summarizer?> _handoffSummarizer(CodeSessionInfo info, Summarizer? given) async {
-    if (given != null) return given;
-    final billing = ref.exists(billingProvider) ? ref.read(billingProvider).value : null;
-    if (!handoffSummaryPayable(ownKey: ModelBilling.current.ownKey(ModelId(compactionModel)), billing: billing)) {
-      return null;
-    }
-    return (List<Map<String, Object?>> request) async => gatewaySummarizer(
-      baseUrl: gatewayBaseUrl(ref),
-      apiKey: await gatewayKey(ref),
-      sessionTag: info.billingTag,
-      onUnauthorized: (k) => remintGatewayKey(ref, k),
-    )(request);
   }
 
   /// Takes the session back to just before user turn [turn] (1-based): the
@@ -2727,11 +2720,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// picked in the composer), reading the session so far (`/btw`). The agent
   /// is neither interrupted nor told: the call is separate, and the answer
   /// shows as an aside card. Billed to the session (or the model's key).
+  /// Off on an outside lead, where EveryAI spends nothing.
   /// [summarizer] replaces the gateway call (tests).
   Future<void> askAside(String question, {Summarizer? summarizer}) async {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final aside = Aside(id: ++_asideIds, kind: AsideKind.btw, question: question.trim(), busy: true);
     _putAside(aside);
+    if (info != null && isOutsideLead(info.harness, info.workingDir)) {
+      _putAside(aside.failed(btwOff(_leadLabel(info.harness))));
+      return;
+    }
     if (info == null || (summarizer == null && isDemoPath(info.workingDir))) {
       _putAside(aside.failed('Side questions need a real session (the demo has no model).'));
       return;

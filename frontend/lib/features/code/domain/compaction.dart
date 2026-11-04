@@ -221,6 +221,12 @@ String renderSessionRecord(List<HarnessEvent> events, {int maxChars = 60000}) {
 
 /// One event as a line of the transcript the summarizer (or the next agent)
 /// reads. An [outputCap] of 0 clears tool output.
+/// One step of [renderSessionRecord] as text: a message, a tool call (its
+/// arguments cut to [argsCap]) or a result (cut to [outputCap]); '' for
+/// events the model never saw.
+String renderStep(HarnessEvent e, {int outputCap = 800, int argsCap = 600}) =>
+    _render(e, outputCap: outputCap, argsCap: argsCap);
+
 String _render(HarnessEvent e, {required int outputCap, required int argsCap}) => switch (e) {
   ChatMessage(fromUser: true, :final text) => '[user]\n${_userText(text).trim()}',
   ChatMessage(:final text, :final reasoning) =>

@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:every_ai/features/billing/billing_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
@@ -9,7 +8,8 @@ import 'package:every_ai/features/code/handoff/handoff.dart';
 import 'package:every_ai/features/code/handoff/handoff_git.dart';
 import 'package:every_ai/features/code/handoff/handoff_store.dart';
 import 'package:every_ai/features/code/harness/events.dart';
-import 'package:every_ai/features/code/harness/harness.dart' show HarnessError;
+import 'package:every_ai/features/code/drivers/driver_events.dart' show stateEvent;
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _dir = '/p/app';
@@ -90,14 +90,31 @@ Handoff _build(List<HarnessEvent> events, {HandoffCoverage? since, bool resumabl
   now: DateTime.utc(2026, 11, 4, 10),
 );
 
-/// [_session] and then [n] long agent replies, past what is shown word for word.
-List<HarnessEvent> _long([int n = 40]) => [..._session(), for (var i = 0; i < n; i++) _agent('big$i', 'x' * 2000)];
-
 String _phase(String run) =>
     '<everyai-phase flow="max" phase="research" run="$run">\nResearch first.\n</everyai-phase>';
 
-const _goodSummary =
-    '## Objective\n- tests\n\n## Important details\n- none\n\n## Work state\n- half\n\n## Next move\n1. x';
+ToolResult _out(String id, String text) => _result(id, ToolOutcome.ok, text: text);
+
+/// The user asks, the agent edits and runs the tests, starts a build, and the limit stops it before the reply.
+List<HarnessEvent> _cutSession() => [
+  _user('u1', 'Add a decrement method'),
+  _agent('a1', 'Added it.'),
+  stateEvent('s1', ExecutionStatus.finished),
+  _user('u2', modeNote(AgentMode.autoEdit, 'Now make the tests pass')),
+  _call('c1', 'edit', {
+    'kind': 'EditAction',
+    'file_path': '$_dir/lib/counter.dart',
+    'old_string': 'a',
+    'new_string': 'b',
+  }),
+  _out('c1', 'edited'),
+  _agent('a2', 'Running the tests now.'),
+  _call('c2', 'bash', {'kind': 'TerminalAction', 'command': 'dart test'}),
+  _out('c2', '3 tests passed'),
+  _call('c3', 'bash', {'kind': 'TerminalAction', 'command': 'dart compile exe bin/main.dart'}),
+  usageLimitEvent('l1', 'You hit your 5-hour limit.'),
+  stateEvent('s2', ExecutionStatus.error),
+];
 
 void main() {
   test('facts come from the session: plan, todos, last request, open question, files newest first', () {
@@ -178,7 +195,7 @@ void main() {
     expect(h.recent, isNot(contains('[earlier steps omitted]')));
   });
 
-  test('files that may hold secrets: no content anywhere in the message, nor in what is summarized', () async {
+  test('files that may hold secrets: no content anywhere in the message, nor in the transcript', () async {
     final events = [
       _user('u1', 'set it up'),
       _call('e1', 'file_editor', {
@@ -202,16 +219,11 @@ void main() {
       {for (final f in h.files) f.path: f.withheld},
       {'.env.example': false, '.ssh/id_ed25519': true, '.env': true},
     );
-    // Long enough that the calls are summarized, not shown.
-    final long = [...events, for (var i = 0; i < 10; i++) _agent('big$i', 'x' * 2000)];
-    String? asked;
-    await summarizeHandoff(_build(long), long, (m) async {
-      asked = '$m';
-      return _goodSummary;
-    });
-    expect(asked, contains('.npmrc'));
-    expect(asked, isNot(contains('sk-secret123')));
-    expect(asked, isNot(contains('npm-secret456')));
+    // Nor in the transcript file.
+    final file = handoffTranscript([(lead: 'Claude Code', conversationId: 'c1', events: events)], title: 'Setup');
+    expect(file, contains('.npmrc'));
+    expect(file, isNot(contains('sk-secret123')));
+    expect(file, isNot(contains('npm-secret456')));
   });
 
   test('a plan approved for a task the flow started over from does not stand', () {
@@ -274,7 +286,14 @@ void main() {
   });
 
   test('the message keeps its blocks in a fixed order, volatile last, empty ones left out', () {
-    final h = _build(_session()).withSummary(_goodSummary, SummaryState.done);
+    final h = buildHandoff(
+      _session(),
+      from: 'claude',
+      fromConversation: 'c1',
+      to: 'codex',
+      workingDir: _dir,
+      transcript: '.everyai/handoffs/x.md',
+    );
     final m = handoffMessage(h, fromName: 'Claude Code');
     expect(
       m,
@@ -282,11 +301,11 @@ void main() {
     );
     expect(m, endsWith(handoffClose));
     final order = [
-      '<summary>',
       '<approved-plan>',
       '<todos>',
       '<open-questions>',
       '<files>',
+      '<transcript>',
       '<recent-turns>',
       '<last-request>',
     ];
@@ -297,62 +316,132 @@ void main() {
     expect(m, contains('<file path=".env">\n(diff not shown'));
     expect(m, isNot(contains('<proposed-plan>')));
     expect(m, isNot(contains('<git>')));
-    expect(handoffMessage(_build(_session())), isNot(contains('<summary>')));
+    expect(m, contains('<transcript>\n.everyai/handoffs/x.md\n</transcript>'));
+    expect(m, isNot(contains('<cut-turn>')));
+    expect(handoffMessage(_build(_session())), isNot(contains('<transcript>')));
   });
 
-  group('summary', () {
-    BillingSummary billing({int wallet = 0, int included = 0, int used = 0}) => BillingSummary.fromJson({
-      'plan': {'id': 'free', 'name': 'Free', 'price_cents': 0, 'included_micros': included},
-      'wallet_micros': wallet,
-      'included_micros': included,
-      'used_micros': used,
+  group('the turn the limit cut off', () {
+    test('is the last request: its calls, their results, the one that never finished', () {
+      final h = _build(_cutSession());
+      final cut = h.cut!;
+      expect(cut.request, 'Now make the tests pass');
+      expect([for (final c in cut.calls) c.tool], ['edit', 'bash', 'bash']);
+      expect(cut.calls[1].call, contains('dart test'));
+      expect(cut.calls[1].result, contains('3 tests passed'));
+      expect((cut.calls[2].finished, cut.calls[2].result), (false, ''));
+      final m = handoffMessage(h, fromName: 'Claude Code');
+      expect(m, contains('Claude Code was cut off by its usage limit in the middle of a request: finish it'));
+      expect(m, contains('<cut-turn>'));
+      expect(m, contains('Request:\nNow make the tests pass'));
+      expect(m, contains('(no result came: it may not have finished)'));
+      expect(m, isNot(contains('<last-request>')));
+      // The volatile part comes last.
+      expect(m.indexOf('<files>'), lessThan(m.indexOf('\n<cut-turn>\n')));
+      expect(Handoff.fromJson(h.toJson()).toJson(), h.toJson());
     });
 
-    test('is paid for by a key or credits; unknown billing tries anyway', () {
-      expect(handoffSummaryPayable(ownKey: false, billing: billing()), isFalse);
-      expect(handoffSummaryPayable(ownKey: false, billing: billing(included: 10, used: 10)), isFalse);
-      expect(handoffSummaryPayable(ownKey: true, billing: billing()), isTrue);
-      expect(handoffSummaryPayable(ownKey: false, billing: billing(wallet: 1)), isTrue);
-      expect(handoffSummaryPayable(ownKey: false), isTrue);
+    test('a turn that finished before the limit is not cut', () {
+      final events = [
+        _user('u1', 'Add a decrement method'),
+        _call('c1', 'bash', {'kind': 'TerminalAction', 'command': 'ls'}),
+        _out('c1', 'lib'),
+        _agent('a1', 'Added it.'),
+        stateEvent('s1', ExecutionStatus.idle),
+        usageLimitEvent('l1', 'You hit your 5-hour limit.'),
+      ];
+      expect(cutTurn(events), isNull);
+      expect(_build(events).lastRequest, 'Add a decrement method');
+      // Narration followed by a call is not a finished reply.
+      expect(
+        cutTurn([...events.sublist(0, 1), _agent('a0', 'Looking.'), ...events.sublist(1, 3), events.last]),
+        isNotNull,
+      );
+      // No limit, no cut: a switch from the menu.
+      expect(cutTurn(_session()), isNull);
     });
 
-    test('is skipped without a summarizer', () async {
-      final h = await summarizeHandoff(_build(_long()), _long(), null);
-      expect((h.summaryState, h.summary), (SummaryState.skipped, null));
+    test('a request the limit stopped before any call is cut, with no calls', () {
+      final cut = cutTurn([..._session(), _user('u3', 'and the docs'), usageLimitEvent('l1', 'Out of credit.')])!;
+      expect(cut.request, 'and the docs');
+      expect(cut.calls, isEmpty);
     });
 
-    test('is skipped when every turn is shown word for word', () async {
-      var asked = false;
-      final h = await summarizeHandoff(_build(_session()), _session(), (_) async {
-        asked = true;
-        return _goodSummary;
-      });
-      expect((h.summaryState, asked), (SummaryState.skipped, false));
+    test('a carry-on is the same turn: the request and every lead\'s calls stay', () {
+      final first = _cutSession();
+      final earlier = handoffMessage(_build(first));
+      final events = [
+        ...first,
+        _user('h1', '$earlier\n\n${carryOnMessage('Claude Code', cut: true)}'),
+        _call('d1', 'bash', {'kind': 'TerminalAction', 'command': 'dart analyze'}),
+        _out('d1', 'No issues found'),
+        usageLimitEvent('l2', 'Codex is out of usage.'),
+      ];
+      final cut = cutTurn(events)!;
+      expect(cut.request, 'Now make the tests pass');
+      expect(
+        [for (final c in cut.calls) c.call],
+        [contains('lib/counter.dart'), contains('dart test'), contains('dart compile'), contains('dart analyze')],
+      );
+      // The second lead finished it: nothing is cut.
+      expect(
+        cutTurn([
+          ...events.sublist(0, events.length - 1),
+          _agent('a9', 'All done.'),
+          stateEvent('s9', ExecutionStatus.finished),
+        ]),
+        isNull,
+      );
+      expect(isCarryOn(carryOnMessage('X')), isTrue);
+      expect(isCarryOn('Carry on, but use postgres'), isFalse);
     });
 
-    test('a failed call or a junk reply leaves the facts', () async {
-      final base = _build(_long());
-      final refused = await summarizeHandoff(base, _long(), (_) async => throw const HarnessError('no', status: 402));
-      expect((refused.summaryState, refused.summary), (SummaryState.failed, null));
-      expect(refused.approvedPlan, base.approvedPlan);
-      final junk = await summarizeHandoff(base, _long(), (_) async => 'Sure!');
-      expect(junk.summaryState, SummaryState.failed);
+    test('calls on files that may hold secrets are withheld; the oldest results give way', () {
+      final events = [
+        _user('u1', 'wire it up'),
+        _call('e1', 'read', {'kind': 'ReadAction', 'path': '$_dir/.env'}),
+        _out('e1', 'KEY=sk-secret123'),
+        for (var i = 0; i < 30; i++) ...[
+          _call('b$i', 'bash', {'kind': 'TerminalAction', 'command': 'step $i'}),
+          _out('b$i', 'y' * 2000),
+        ],
+        usageLimitEvent('l1', 'limit'),
+      ];
+      final cut = cutTurn(events)!;
+      expect(cut.calls, hasLength(31));
+      final m = handoffMessage(_build(events));
+      expect(m, isNot(contains('sk-secret123')));
+      expect(cut.resultsLeftOut, greaterThan(0));
+      expect(cut.calls.last.result, isNotEmpty);
+      expect(cut.calls[1].result, isEmpty);
+      final shown = cut.calls.fold(0, (n, c) => n + c.call.length + c.result.length);
+      expect(shown, lessThanOrEqualTo(handoffCutChars));
+      expect(m, contains('older results were left out'));
     });
+  });
 
-    test('a good reply lands in the message, asked with the handoff focus', () async {
-      List<Map<String, Object?>>? asked;
-      final h = await summarizeHandoff(_build(_long()), _long(), (m) async {
-        asked = m;
-        return _goodSummary;
-      });
-      expect(h.summaryState, SummaryState.done);
-      final input = '${asked!.last['content']}';
-      expect(input, contains(handoffFocus));
-      // The oldest turns are summarized; the newest, shown word for word, are not.
-      expect(input, contains('Add a decrement method'));
-      expect(('x' * 2000).allMatches(input).length, lessThan(40));
-      expect(handoffMessage(h), contains('<summary>\n## Objective'));
-    });
+  test('a handoff stored with a utility-model summary still loads, without it', () {
+    final h = _build(_session());
+    final old = {...h.toJson(), 'summary': '## Objective\n- tests', 'summary_state': 'done'};
+    final back = Handoff.fromJson(old);
+    expect(back.toJson(), h.toJson());
+    expect(handoffMessage(back), isNot(contains('## Objective')));
+    expect(back.cut, isNull);
+    expect(back.transcript, isEmpty);
+  });
+
+  test('the transcript names each lead and keeps every call with its result', () {
+    final md = handoffTranscript([
+      (lead: 'Claude Code', conversationId: 'c1', events: _cutSession()),
+      (lead: 'Codex', conversationId: 'x1', events: [_user('v1', 'go on'), _agent('v2', 'Done.')]),
+    ], title: 'Counter');
+    expect(md, startsWith('# Counter: the session so far'));
+    expect(md.indexOf('# Claude Code (conversation c1)'), lessThan(md.indexOf('# Codex (conversation x1)')));
+    expect(md, contains('```sh\ndart test\n```'));
+    expect(md, contains('3 tests passed'));
+    expect(md, contains('You hit your 5-hour limit.'));
+    expect(md, contains('Now make the tests pass'));
+    expect(md, isNot(contains('<everyai-mode')));
   });
 
   group('on disk', () {
@@ -441,6 +530,18 @@ void main() {
       expect(g.git.changes.map((c) => c.path), ['lib/a.txt']);
     });
 
+    test('the transcript lands under .everyai/handoffs and stays out of git status', () async {
+      final root = await repo();
+      final path = handoffTranscriptPath(DateTime.utc(2026, 11, 4, 10), 'codex');
+      expect(path, startsWith('$handoffTranscriptDir/'));
+      expect(await writeHandoffTranscript(root, path, '# T\n'), isTrue);
+      expect(File('$root/$path').readAsStringSync(), '# T\n');
+      expect(await git(root, ['status', '--porcelain', '--untracked-files=all']), isEmpty);
+      // Not a repository: written all the same.
+      final plain = await Directory('${tmp.path}/plain').create();
+      expect(await writeHandoffTranscript(plain.path, path, 'x'), isTrue);
+    });
+
     test('handoffs round-trip, newest first; a harness resumes from the last handoff away from it', () async {
       final first = _build(_session());
       final back = buildHandoff(
@@ -450,7 +551,8 @@ void main() {
         to: 'claude',
         workingDir: _dir,
         now: DateTime.utc(2026, 11, 4, 11),
-      ).withSummary(_goodSummary, SummaryState.done);
+        transcript: '.everyai/handoffs/b.md',
+      );
       await saveHandoff(tmp.path, first);
       await saveHandoff(tmp.path, back);
       File('${tmp.path}/handoffs/broken.json').writeAsStringSync('{');

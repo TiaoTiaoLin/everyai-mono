@@ -2,25 +2,31 @@
 
 import 'package:flutter/foundation.dart';
 
-import '../../billing/billing_providers.dart' show BillingSummary;
 import '../domain/compaction.dart';
 import '../domain/fork_files.dart';
 import '../domain/phases.dart' show parsePhaseNote;
 import '../domain/questions.dart' show Question;
 import '../domain/transcript.dart';
 import '../git/git_models.dart';
+import '../domain/transcript_export.dart' show transcriptSteps;
+import '../drivers/usage_limit.dart' show usageLimitOf;
 import '../harness/events.dart';
 import '../harness/everyai/research_sites.dart' show secretPath;
-import '../harness/summarizer.dart' show Summarizer;
 
 export '../domain/compaction.dart' show handoffClose, handoffOpen, splitHandoff;
 
 // The handoff: what a new lead of a Code session gets when another harness
 // took the work so far (the old one ran out of plan usage, or the user
-// switched). The facts are always read from the session's events and the
-// repository, with no model call. A short summary from the utility model is
-// added on the user's credits or own key, never on an outside plan, and the
-// outgoing lead is never asked (it may be the one out of usage).
+// switched). Only facts, read from the session's events and the repository:
+// no model is asked, so a handoff costs nothing (EveryAI spends nothing on a
+// session it doesn't lead, and the outgoing lead may be out of usage). The
+// new lead also gets the whole conversation as a Markdown file in the
+// project's git-excluded `.everyai/handoffs/`, which it may read and
+// summarise for itself, on its own plan.
+//
+// A turn the usage limit cut off is finished by the new lead: the handoff
+// names the request, the calls that already ran (with their results) and
+// the diff so far, so nothing is redone and the user repeats nothing.
 //
 // Going back to a harness that already has the earlier conversation gets a
 // delta: only what happened since it last led. A delta that is too big, or a
@@ -28,17 +34,12 @@ export '../domain/compaction.dart' show handoffClose, handoffOpen, splitHandoff;
 
 enum HandoffKind { full, delta }
 
-/// skipped: neither credits nor a key pay for it, or every turn it covers is
-/// shown word for word anyway; failed: the call or its reply was bad, so only
-/// the facts go out.
-enum SummaryState { done, skipped, failed }
-
 /// A delta over this many rendered characters (about 15K tokens) is stale.
 /// One that fits is shown whole: the lead coming back reads all it missed.
 const handoffDeltaMaxChars = 60000;
 
 /// The newest turns of a full handoff shown word for word (tool output cut
-/// short); the summary covers what came before.
+/// short); the transcript file has the rest.
 const handoffRecentChars = 12000;
 
 /// The user's last message, cut to this many characters.
@@ -47,8 +48,44 @@ const handoffRequestChars = 4000;
 /// The most changed files the git block lists, the biggest first.
 const handoffChanges = 30;
 
-/// What the summarizer reads (about 30K tokens): a handoff summary is short.
-const handoffSummaryBudget = CompactionBudget(input: 120000, protectedOutput: 30000);
+/// The calls of a cut-off turn: each result cut to [handoffCallResultChars],
+/// and all of them shown in [handoffCutChars] (the oldest results give way
+/// first; the transcript file has them).
+const handoffCallResultChars = 800;
+const handoffCutChars = 16000;
+
+/// Where handoff transcripts go, relative to the session's folder (kept out
+/// of git through `info/exclude`).
+const handoffTranscriptDir = '.everyai/handoffs';
+
+/// A transcript result over this many characters is cut.
+const handoffTranscriptResultChars = 8000;
+
+/// The name a handoff's files share: its time and the harness it went to
+/// (the stored JSON and the transcript file).
+String handoffStem(DateTime createdAt, String toHarness) =>
+    '${createdAt.toUtc().toIso8601String().replaceAll(RegExp('[^0-9]'), '')}-'
+    '${toHarness.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}';
+
+/// The transcript file of a handoff made at [createdAt] for [toHarness],
+/// relative to the session's folder.
+String handoffTranscriptPath(DateTime createdAt, String toHarness) =>
+    '$handoffTranscriptDir/${handoffStem(createdAt, toHarness)}.md';
+
+/// The line that follows a handoff when the new lead should carry on at
+/// once; with [cut], it finishes the request the old lead was cut off in.
+String carryOnMessage(String from, {bool cut = false}) => cut
+    ? 'Finish the request $from was working on when it stopped (see <cut-turn> above), without redoing the calls '
+          'that already ran.'
+    : 'Carry on with the work where $from stopped.';
+
+/// Whether [text] (a user message, notes split off) is only a
+/// [carryOnMessage]: the same turn going on, not a new request.
+bool isCarryOn(String text) {
+  final t = text.trim();
+  return (t.startsWith('Carry on with the work where ') && t.endsWith(' stopped.')) ||
+      (t.startsWith('Finish the request ') && t.endsWith('without redoing the calls that already ran.'));
+}
 
 /// At most this many files, the newest first, each diff cut to [handoffDiffChars]
 /// and all of them to [handoffDiffTotalChars].
@@ -94,6 +131,65 @@ final class HandoffFile {
     if (diff.isNotEmpty) 'diff': diff,
     if (cut) 'cut': true,
     if (withheld) 'withheld': true,
+  };
+}
+
+/// A tool call of a cut-off turn, as the new lead reads it: the call and its
+/// result, both rendered and cut short.
+@immutable
+final class HandoffCall {
+  const HandoffCall({required this.tool, required this.call, this.result = '', this.finished = true});
+  final String tool;
+
+  /// The call with its arguments, as [renderStep] shows it.
+  final String call;
+
+  /// Its result as [renderStep] shows it ('' when there is none, or it gave
+  /// way to newer ones; see [handoffCutChars]).
+  final String result;
+
+  /// False when no result came: the call may not have finished.
+  final bool finished;
+
+  factory HandoffCall.fromJson(Map<String, Object?> j) => HandoffCall(
+    tool: j['tool'] as String? ?? '',
+    call: j['call'] as String? ?? '',
+    result: j['result'] as String? ?? '',
+    finished: j['finished'] != false,
+  );
+
+  Map<String, Object?> toJson() => {
+    'tool': tool,
+    'call': call,
+    if (result.isNotEmpty) 'result': result,
+    if (!finished) 'finished': false,
+  };
+}
+
+/// The turn the usage limit cut off: the user's request and the calls made
+/// for it so far, oldest first.
+@immutable
+final class HandoffCut {
+  const HandoffCut({required this.request, this.calls = const [], this.resultsLeftOut = 0});
+  final String request;
+  final List<HandoffCall> calls;
+
+  /// Results not shown to stay within [handoffCutChars].
+  final int resultsLeftOut;
+
+  factory HandoffCut.fromJson(Map<String, Object?> j) => HandoffCut(
+    request: j['request'] as String? ?? '',
+    calls: [
+      for (final c in (j['calls'] as List<Object?>? ?? const []))
+        if (c case final Map<String, Object?> m) HandoffCall.fromJson(m),
+    ],
+    resultsLeftOut: (j['results_left_out'] as num?)?.toInt() ?? 0,
+  );
+
+  Map<String, Object?> toJson() => {
+    'request': request,
+    'calls': [for (final c in calls) c.toJson()],
+    if (resultsLeftOut > 0) 'results_left_out': resultsLeftOut,
   };
 }
 
@@ -186,7 +282,7 @@ final class HandoffGit {
 }
 
 /// What a new lead gets: facts from the session and the repository, and
-/// maybe a short summary. Stored per session (see `saveHandoff`).
+/// where the whole conversation is. Stored per session (see `saveHandoff`).
 @immutable
 final class Handoff {
   const Handoff({
@@ -206,8 +302,8 @@ final class Handoff {
     this.files = const [],
     this.git,
     this.recent = '',
-    this.summary,
-    this.summaryState = SummaryState.skipped,
+    this.cut,
+    this.transcript = '',
   });
 
   final String fromHarness;
@@ -245,29 +341,14 @@ final class Handoff {
 
   /// The newest turns as text.
   final String recent;
-  final String? summary;
-  final SummaryState summaryState;
 
-  Handoff withSummary(String? summary, SummaryState state) => Handoff(
-    fromHarness: fromHarness,
-    fromConversation: fromConversation,
-    toHarness: toHarness,
-    createdAt: createdAt,
-    kind: kind,
-    coverage: coverage,
-    since: since,
-    staleReason: staleReason,
-    approvedPlan: approvedPlan,
-    proposedPlan: proposedPlan,
-    todos: todos,
-    openQuestions: openQuestions,
-    lastRequest: lastRequest,
-    files: files,
-    git: git,
-    recent: recent,
-    summary: summary,
-    summaryState: state,
-  );
+  /// The turn the usage limit cut off, which the new lead finishes; null
+  /// when the last request was answered (or no limit stopped it).
+  final HandoffCut? cut;
+
+  /// The whole conversation as Markdown, relative to the session's folder
+  /// (see [handoffTranscriptPath]); '' when it couldn't be written.
+  final String transcript;
 
   factory Handoff.fromJson(Map<String, Object?> j) => Handoff(
     fromHarness: j['from_harness'] as String? ?? '',
@@ -299,11 +380,13 @@ final class Handoff {
       _ => null,
     },
     recent: j['recent'] as String? ?? '',
-    summary: j['summary'] as String?,
-    summaryState: SummaryState.values.firstWhere(
-      (s) => s.name == j['summary_state'],
-      orElse: () => SummaryState.skipped,
-    ),
+    // Handoffs stored before 2026-11-04 may carry a `summary` from a utility
+    // model: it is no longer used.
+    cut: switch (j['cut']) {
+      final Map<String, Object?> c => HandoffCut.fromJson(c),
+      _ => null,
+    },
+    transcript: j['transcript'] as String? ?? '',
   );
 
   Map<String, Object?> toJson() => {
@@ -325,8 +408,8 @@ final class Handoff {
     'files': [for (final f in files) f.toJson()],
     if (git != null) 'git': git!.toJson(),
     'recent': recent,
-    if (summary != null) 'summary': summary,
-    'summary_state': summaryState.name,
+    if (cut != null) 'cut': cut!.toJson(),
+    if (transcript.isNotEmpty) 'transcript': transcript,
   };
 }
 
@@ -360,7 +443,8 @@ final class Handoff {
 /// and last request are current state, so they come from all of [events];
 /// the files and the recent turns come from the scope (see [handoffScope]).
 /// [git] and [diffs] (by path) come from `handoffGit`; without them the
-/// files are paths only.
+/// files are paths only. [transcript] is where the conversation was saved
+/// (see [handoffTranscript]). No model is asked and nothing is fetched.
 Handoff buildHandoff(
   List<HarnessEvent> events, {
   required String from,
@@ -372,6 +456,7 @@ Handoff buildHandoff(
   DateTime? now,
   HandoffGit? git,
   Map<String, FileDiff> diffs = const {},
+  String transcript = '',
 }) {
   final scope = handoffScope(events, since: since, resumable: resumable);
   final builder = TranscriptBuilder();
@@ -394,10 +479,7 @@ Handoff buildHandoff(
     if (lastRequest.isEmpty && item is UserTurn) lastRequest = item.text.trim();
     if (approved.isNotEmpty && lastRequest.isNotEmpty) break;
   }
-  if (lastRequest.length > handoffRequestChars) {
-    lastRequest =
-        '${lastRequest.substring(0, handoffRequestChars)}\n[… ${lastRequest.length - handoffRequestChars} characters cut …]';
-  }
+  lastRequest = _capRequest(lastRequest);
 
   // Files the agent wrote, the newest first; else what git saw change (an
   // outside agent's patch may not name its files), the biggest first.
@@ -447,7 +529,118 @@ Handoff buildHandoff(
       handoffRecord(scope.events),
       maxChars: scope.kind == HandoffKind.delta ? handoffDeltaMaxChars : handoffRecentChars,
     ),
+    cut: cutTurn(events),
+    transcript: transcript,
   );
+}
+
+String _capRequest(String text) => text.length <= handoffRequestChars
+    ? text
+    : '${text.substring(0, handoffRequestChars)}\n[… ${text.length - handoffRequestChars} characters cut …]';
+
+/// The turn the usage limit cut off in [events] (the session's record,
+/// oldest first), or null. That is the last request from the user (a
+/// message that only hands over or says to carry on doesn't count: the
+/// same turn goes on) whose turn the limit stopped before the agent's reply
+/// finished. A reply finished when a turn end (idle or finished) follows
+/// the agent's text with no tool call between; a limit after that hit a
+/// turn that was already done. The calls are those made for the request by
+/// every lead since, files that may hold secrets withheld.
+HandoffCut? cutTurn(List<HarnessEvent> events) {
+  final record = handoffRecord(events);
+  var start = -1;
+  var request = '';
+  for (var i = record.length - 1; i >= 0; i--) {
+    if (record[i] case ChatMessage(fromUser: true, :final text)) {
+      final said = userTextOf(text).trim();
+      if (said.isEmpty || isCarryOn(said)) continue;
+      start = i;
+      request = said;
+      break;
+    }
+  }
+  if (start < 0) return null;
+  var cut = false;
+  var replied = false;
+  var finished = false;
+  final turn = record.sublist(start + 1);
+  for (final e in turn) {
+    switch (e) {
+      case ChatMessage(fromUser: true):
+        // A carry-on: the next lead works on the same request.
+        replied = false;
+        finished = false;
+      case ChatMessage(:final text) when text.trim().isNotEmpty:
+        replied = true;
+      case ActionCall():
+        replied = false;
+      case StateChange(executionStatus: ExecutionStatus.idle || ExecutionStatus.finished) when replied:
+        finished = true;
+        cut = false;
+      default:
+        if (usageLimitOf(e) != null && !finished) cut = true;
+    }
+  }
+  if (!cut) return null;
+  final results = {
+    for (final e in turn)
+      if (e is ToolResult) e.actionId: e,
+  };
+  final calls = [
+    for (final e in turn)
+      if (e is ActionCall)
+        (call: e, result: results[e.id] == null ? '' : renderStep(results[e.id]!, outputCap: handoffCallResultChars)),
+  ];
+  // The oldest results give way first.
+  var size = calls.fold(0, (n, c) => n + renderStep(c.call).length + c.result.length);
+  var left = 0;
+  final shown = [for (final c in calls) c.result.isNotEmpty];
+  for (var i = 0; i < calls.length && size > handoffCutChars; i++) {
+    if (!shown[i]) continue;
+    shown[i] = false;
+    size -= calls[i].result.length;
+    left++;
+  }
+  return HandoffCut(
+    request: _capRequest(request),
+    calls: [
+      for (final (i, c) in calls.indexed)
+        HandoffCall(
+          tool: c.call.toolName,
+          call: renderStep(c.call),
+          result: shown[i] ? c.result : '',
+          finished: results.containsKey(c.call.id),
+        ),
+    ],
+    resultsLeftOut: left,
+  );
+}
+
+/// One lead's stint for [handoffTranscript]: the lead as the user knows it,
+/// its conversation and the events it added.
+typedef HandoffStint = ({String lead, String conversationId, List<HarnessEvent> events});
+
+/// The whole session so far as plain Markdown, for the new lead to read:
+/// every lead's stint, oldest first, with each message, tool call and result
+/// (long results cut). Withheld the same way as the facts ([handoffRecord]).
+String handoffTranscript(List<HandoffStint> stints, {required String title}) {
+  final b = StringBuffer('# $title: the session so far\n\n')
+    ..writeln(
+      'Every conversation of this Code session, oldest first, with each tool call and its result (results over '
+      '$handoffTranscriptResultChars characters are cut). Files that may hold secrets are named but not shown.',
+    );
+  for (final s in stints) {
+    final steps = transcriptSteps(handoffRecord(s.events), resultCap: handoffTranscriptResultChars);
+    if (steps.trim().isEmpty) continue;
+    b
+      ..writeln()
+      ..writeln('---')
+      ..writeln()
+      ..writeln('# ${s.lead}${s.conversationId.isEmpty ? '' : ' (conversation ${s.conversationId})'}')
+      ..writeln()
+      ..write(steps);
+  }
+  return b.toString();
 }
 
 /// Where the flow last started over: the first event of its newest run
@@ -465,7 +658,7 @@ int _lastRestart(List<HarnessEvent> events) {
   return at;
 }
 
-/// [events] as the next lead and the summarizer may read them: an earlier
+/// [events] as the next lead may read them (in the facts and the transcript file): an earlier
 /// handoff is split off the user's message (a message that was only that is
 /// left out), and the content of calls on files that may hold secrets, and
 /// their results, is withheld (only the path is shown).
@@ -543,20 +736,24 @@ bool _secret(String path) => secretPath(path.startsWith('/') ? path : '/$path');
 /// The message the new lead gets before the user's own next message: our
 /// words, the facts in tagged blocks in a fixed order (the most volatile
 /// last), empty blocks left out. [fromName] is the outgoing lead as the user
-/// knows it (its harness id when not given).
+/// knows it (its harness id when not given). With a cut-off turn, that turn
+/// is what to do first.
 String handoffMessage(Handoff h, {String? fromName}) {
   final from = fromName ?? h.fromHarness;
+  final cut = h.cut;
+  final next = cut == null
+      ? "Your tools work as usual, and the user's next message is what to do."
+      : 'Your tools work as usual. $from was cut off by its usage limit in the middle of a request: finish it '
+            '(see <cut-turn>); the user will not repeat it.';
   final b = StringBuffer()
     ..writeln('$handoffOpen from="${h.fromHarness}" kind="${h.kind.name}">')
     ..writeln(switch (h.kind) {
       HandoffKind.full =>
         'You are taking over a coding session from $from. The facts below were read from the session and the '
-            "repository. Your tools work as usual, and the user's next message is what to do.",
+            'repository. $next',
       HandoffKind.delta =>
-        'While you were away, $from worked on this session. Below is what changed since your last turn. Your '
-            "tools work as usual, and the user's next message is what to do.",
+        'While you were away, $from worked on this session. Below is what changed since your last turn. $next',
     });
-  writeTaggedBlock(b, 'summary', 'A short account of the work so far:', h.summary ?? '');
   writeTaggedBlock(b, 'approved-plan', 'The plan the user approved, which still stands:', h.approvedPlan);
   writeTaggedBlock(b, 'proposed-plan', 'A plan that was proposed and still waits for the user:', h.proposedPlan);
   writeTaggedBlock(
@@ -585,9 +782,48 @@ String handoffMessage(Handoff h, {String? fromName}) {
             : f.diff}\n</file>',
     ].join('\n'),
   );
+  writeTaggedBlock(
+    b,
+    'transcript',
+    'The whole conversation so far, with every tool call and its result, is saved in this file (relative to the '
+        'working directory). Read it when the facts here are not enough, and summarise it for yourself as you need:',
+    h.transcript,
+  );
   writeTaggedBlock(b, 'recent-turns', 'The latest turns:', h.recent);
-  writeTaggedBlock(b, 'last-request', 'What the user asked for last:', h.lastRequest);
+  if (cut != null) {
+    writeTaggedBlock(b, 'cut-turn', _cutLead, _cutText(cut));
+  } else {
+    writeTaggedBlock(b, 'last-request', 'What the user asked for last:', h.lastRequest);
+  }
   b.write(handoffClose);
+  return b.toString();
+}
+
+const _cutLead =
+    'The request the previous agent was working on when its usage limit stopped it. Finish it. The calls below '
+    'already ran (results cut short): do not run them again unless a result shows it failed. A call with no result '
+    'may not have finished, so check what it did before running it again. The diff so far is in <files> and <git>.';
+
+String _cutText(HandoffCut c) {
+  final b = StringBuffer('Request:\n${c.request}');
+  if (c.calls.isEmpty) {
+    b.write('\n\nNo tool calls were made for it yet.');
+    return b.toString();
+  }
+  b.write('\n\nCalls already made, oldest first:');
+  for (final (i, call) in c.calls.indexed) {
+    b.write('\n\n${i + 1}. ${call.call}');
+    if (call.result.isNotEmpty) {
+      b.write('\n${call.result}');
+    } else if (!call.finished) {
+      b.write('\n(no result came: it may not have finished)');
+    } else {
+      b.write('\n(result left out here; it is in the transcript file)');
+    }
+  }
+  if (c.resultsLeftOut > 0) {
+    b.write('\n\n${c.resultsLeftOut} older results were left out to keep this short; the transcript file has them.');
+  }
   return b.toString();
 }
 
@@ -601,55 +837,3 @@ String _gitText(HandoffGit g) => [
   'Files not committed yet: ${g.uncommitted}',
   if (g.commits.isNotEmpty) ...['Commits since the session started, newest first:', for (final c in g.commits) '- $c'],
 ].join('\n');
-
-/// The one line added to the summary request (see [summarizeHandoff]).
-const handoffFocus =
-    'that it hands the work to a different coding agent that has seen none of it, so keep it short and leave out '
-    'the plan, todos, files and git state, which that agent gets separately (write "see below" under those '
-    'headings).';
-
-/// Whether the utility summary can be paid for: by the user's own key
-/// ([ownKey]), or by credits. Unknown [billing] tries anyway (the gateway
-/// refuses with a 402 at no cost, and the handoff goes out with the facts).
-bool handoffSummaryPayable({required bool ownKey, BillingSummary? billing}) =>
-    ownKey || billing == null || billing.walletMicros + billing.quotaLeftMicros > 0;
-
-/// [h] with a summary of [scope] (the events it covers) from [summarize]: the
-/// utility model through the gateway, billed to the session. [summarize] is
-/// null when neither credits nor a key pay for it ([handoffSummaryPayable]),
-/// which skips it. Only the turns older than [Handoff.recent] are summarized
-/// (in [handoffSummaryBudget]); with none, it is skipped. Never throws: a
-/// failed call or a bad reply leaves the facts.
-Future<Handoff> summarizeHandoff(Handoff h, List<HarnessEvent> scope, Summarizer? summarize) async {
-  final head = _olderThanShown(
-    handoffRecord(scope),
-    h.kind == HandoffKind.delta ? handoffDeltaMaxChars : handoffRecentChars,
-  );
-  if (summarize == null || !head.any(countsForModel)) return h.withSummary(null, SummaryState.skipped);
-  try {
-    final reply = await summarize(
-      summaryRequest(
-        CompactionPlan(head: head, tail: const []),
-        focus: handoffFocus,
-        budget: handoffSummaryBudget,
-      ),
-    );
-    final summary = cleanSummary(reply);
-    return summary == null ? h.withSummary(null, SummaryState.failed) : h.withSummary(summary, SummaryState.done);
-  } on Object {
-    return h.withSummary(null, SummaryState.failed);
-  }
-}
-
-/// [events] up to the newest ones that fit in [shown] rendered characters
-/// (what [renderSessionRecord] shows word for word).
-List<HarnessEvent> _olderThanShown(List<HarnessEvent> events, int shown) {
-  var size = 0;
-  for (var i = events.length - 1; i >= 0; i--) {
-    final n = renderSessionRecord([events[i]], maxChars: 1 << 30).length;
-    if (n == 0) continue;
-    if (size + n > shown) return events.sublist(0, i + 1);
-    size += n + 2;
-  }
-  return const [];
-}

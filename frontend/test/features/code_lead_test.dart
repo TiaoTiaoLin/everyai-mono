@@ -4,15 +4,22 @@ import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:every_ai/core/db/app_database.dart';
+import 'package:every_ai/core/net/api_client.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/git_commands.dart' show plainPrBody;
+import 'package:every_ai/features/code/domain/no_spend.dart';
+import 'package:every_ai/features/code/domain/permissions.dart' show DenialKind, denialMessage;
 import 'package:every_ai/features/code/domain/questions.dart';
+import 'package:every_ai/features/code/domain/session_commands.dart' show AsideKind;
+import 'package:every_ai/features/code/git/git_models.dart' show SessionWorktree;
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent, userMessageEvent;
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/gateway_key.dart';
@@ -25,6 +32,8 @@ import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import '../support/fake_leads.dart';
 
@@ -59,6 +68,7 @@ void main() {
   late ProviderContainer container;
   late Map<String, FakeLeadDriver> drivers;
   var calls = 0;
+  final reached = <String>[];
 
   ProviderContainer make(Preferences prefs) => ProviderContainer(
     overrides: [
@@ -71,6 +81,20 @@ void main() {
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       // An outside CLI runs on the user's own account: no EveryAI key is minted for it.
       gatewayKeysProvider.overrideWith((ref) => throw StateError('no gateway key for outside agents')),
+      // Nothing an outside lead does reaches the backend or a side model (checked after each test).
+      apiClientProvider.overrideWithValue(
+        ApiClient(
+          baseUrl: Uri.parse('http://backend/'),
+          client: MockClient((req) async {
+            reached.add('${req.method} ${req.url}');
+            return http.Response('no network in this test', 599);
+          }),
+        ),
+      ),
+      codeSideModelProvider.overrideWithValue((messages) async {
+        reached.add('side model');
+        return '';
+      }),
     ],
   );
 
@@ -125,6 +149,9 @@ void main() {
   });
 
   tearDown(() async {
+    final sent = [...reached];
+    reached.clear();
+    expect(sent, isEmpty, reason: 'an outside lead reached the network or a side model');
     container.dispose();
     await db.close();
     await tmp.delete(recursive: true);
@@ -269,10 +296,24 @@ void main() {
     final info = await start();
     final c = await open(info.id);
     row('a1', askUserQuestionTool, _questions);
-    final call = hostCall(info.id, askUserQuestionTool, _questions);
-    await pumpEventQueue();
+    // The card is up once the agent's row is folded.
+    await whenValue(
+      container,
+      codeSessionProvider(info.id).select((s) => s.transcript.openQuestion?.call.id),
+      (String? id) => id == 'a1',
+    );
+    // Straight to the controller (no hop through the host's ready gate), so the call is waiting when Stop runs.
+    final result = c.call(
+      HostCall(
+        id: 'h1',
+        sessionId: info.id,
+        name: askUserQuestionTool,
+        args: _questions,
+        ended: Completer<HostEnd>().future,
+      ),
+    );
     await c.stop();
-    expect((await call.result).isError, isTrue);
+    expect(await result, (text: denialMessage(DenialKind.cancelled), isError: true));
   });
 
   test('a card left open by an earlier run never takes a new call', () async {
@@ -334,6 +375,89 @@ void main() {
     await c.steer('Skip the database, use files');
     expect((await call.result).text, repliedInChat);
     expect(session.steered.single, endsWith('Skip the database, use files'));
+  });
+
+  group('EveryAI spends nothing on an outside lead', () {
+    test('/btw is off, with the reason', () async {
+      final info = await start();
+      final c = await open(info.id);
+      await c.askAside('Why SQLite?', summarizer: (_) async => fail('no model for /btw on an outside lead'));
+      final aside = stateOf(info.id).asides.single;
+      expect(aside.error, btwOff('Test CLI'));
+    });
+
+    test('/goal is refused, with the reason', () async {
+      final info = await start();
+      final c = await open(info.id);
+      expect(await c.setGoal('The tests pass'), goalOff('Test CLI'));
+      expect(stateOf(info.id).goal, isNull);
+      expect(session.sent.where((m) => m.contains('The tests pass')), isEmpty);
+    });
+
+    test('/learn writes no skill from the session or a page', () async {
+      final info = await start();
+      final c = await open(info.id);
+      session
+        ..add(userMessageEvent('u1', 'Add dark mode'))
+        ..add(agentMessageEvent('a1', 'Done.'));
+      await whenValue(container, codeSessionProvider(info.id).select((s) => s.transcript.items.length), (n) => n > 1);
+      await c.learn('');
+      await c.learn('https://example.com/guide');
+      expect([for (final a in stateOf(info.id).asides) a.error], [learnOff('Test CLI'), learnOff('Test CLI')]);
+    });
+
+    test('a commit message is the session title, with no side model', () async {
+      Future<String> git(List<String> args) async {
+        final r = await Process.run('git', ['-C', project.path, ...args]);
+        if (r.exitCode != 0) fail('git ${args.join(' ')}: ${r.stderr}');
+        return '${r.stdout}'.trim();
+      }
+
+      await git(['init', '-q', '-b', 'main']);
+      await git(['config', 'user.name', 'Dev']);
+      await git(['config', 'user.email', 'dev@example.com']);
+      File('${project.path}/a.txt').writeAsStringSync('one\n');
+      await git(['add', '-A']);
+      await git(['commit', '-q', '-m', 'Initial']);
+      final head = await git(['rev-parse', 'HEAD']);
+      File('${project.path}/a.txt').writeAsStringSync('two\n');
+      final prefs = container.read(preferencesProvider);
+      prefs['code.sessions'] = jsonEncode([
+        CodeSessionInfo(
+          id: 's1',
+          projectId: 'p1',
+          title: 'Dark mode',
+          conversationId: 'c1',
+          model: '',
+          mode: AgentMode.ask,
+          workingDir: project.path,
+          createdAt: DateTime(2026),
+          harness: 'test',
+          branch: 'main',
+          worktree: SessionWorktree(
+            repoRoot: project.path,
+            path: project.path,
+            branch: 'main',
+            baseBranch: 'main',
+            baseCommit: head,
+          ),
+        ).toJson(),
+      ]);
+      container.dispose();
+      container = make(prefs);
+      final c = await open('s1');
+      await c.draftCommit('');
+      final aside = stateOf('s1').asides.single;
+      expect((aside.kind, aside.answer, aside.error), (AsideKind.commit, 'Dark mode', null));
+      expect(plainPrBody(['Add the toggle', 'Add colours']), '- Add the toggle\n- Add colours');
+    });
+
+    test('approval cards ask the decider for no risk label', () async {
+      final info = await start();
+      expect(riskLabelDir(info), isNull);
+      final own = CodeSessionInfo.fromJson({...info.toJson(), 'harness': everyaiHarnessName});
+      expect(riskLabelDir(own), project.path);
+    });
   });
 
   test('/compact leaves an outside session to its own CLI', () async {

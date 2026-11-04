@@ -3,14 +3,13 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../settings/settings.dart' show excludeFromGit;
 import 'handoff.dart';
 
 Future<String> saveHandoff(String sessionDir, Handoff h) async {
   final dir = Directory('$sessionDir/handoffs');
   await dir.create(recursive: true);
-  final stamp = h.createdAt.toUtc().toIso8601String().replaceAll(RegExp('[^0-9]'), '');
-  final to = h.toHarness.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-  final path = '${dir.path}/$stamp-$to.json';
+  final path = '${dir.path}/${handoffStem(h.createdAt, h.toHarness)}.json';
   final tmp = File('$path.$pid.tmp');
   await tmp.writeAsString('${const JsonEncoder.withIndent('  ').convert(h.toJson())}\n', flush: true);
   await tmp.rename(path);
@@ -35,6 +34,20 @@ Future<List<Handoff>> loadHandoffs(String sessionDir) async {
     }
   }
   return out..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+}
+
+Future<bool> writeHandoffTranscript(String workingDir, String relativePath, String markdown) async {
+  try {
+    final file = File('$workingDir/$relativePath');
+    await file.parent.create(recursive: true);
+    await excludeFromGit(workingDir, const ['/$handoffTranscriptDir/']);
+    final tmp = File('${file.path}.$pid.tmp');
+    await tmp.writeAsString(markdown, flush: true);
+    await tmp.rename(file.path);
+    return true;
+  } on FileSystemException {
+    return false;
+  }
 }
 
 Future<void> removeTimeline(String dir) async {

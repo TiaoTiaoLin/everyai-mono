@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:every_ai/core/db/app_database.dart';
+import 'package:every_ai/core/net/api_client.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
@@ -27,10 +28,20 @@ import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import '../support/fake_leads.dart';
 
 const _resume = {DriverCap.approvals, DriverCap.resume};
+
+/// What reached the network: an outside lead's handoff sends nothing (checked after each test, so a call the
+/// app caught still fails it).
+final _sent = <String>[];
+final _noNetwork = MockClient((req) async {
+  _sent.add('${req.method} ${req.url}');
+  return http.Response('no network in this test', 599);
+});
 
 void main() {
   // The app-quit listener needs a binding.
@@ -54,6 +65,8 @@ void main() {
       hostServerProvider.overrideWithValue(host),
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       gatewayKeysProvider.overrideWith((ref) => throw StateError('no gateway key for outside agents')),
+      // A handoff asks no model and fetches nothing: any backend call fails the test.
+      apiClientProvider.overrideWithValue(ApiClient(baseUrl: Uri.parse('http://backend/'), client: _noNetwork)),
     ],
   );
 
@@ -117,6 +130,9 @@ void main() {
   });
 
   tearDown(() async {
+    final sent = [..._sent];
+    _sent.clear();
+    expect(sent, isEmpty, reason: 'an outside lead reached the network');
     container.dispose();
     await db.close();
     await tmp.delete(recursive: true);
@@ -171,6 +187,46 @@ void main() {
     final timeline = await readTimeline(dir);
     expect([for (final s in timeline) (s.harness, s.conversationId)], [('alpha', 'alpha-c1')]);
     expect((await loadHandoffs(dir)).single.kind, HandoffKind.full);
+  });
+
+  test('a handoff asks no model and fetches nothing; the whole conversation waits in a file', () async {
+    final (info, c) = await limited();
+    final outcome = await http.runWithClient(() => c.switchLead('beta', run: true), () => _noNetwork);
+    expect(outcome.failed, isFalse);
+    final first = d('beta').specs.single.initialMessage!;
+    final path = RegExp(r'<transcript>\n(.+)\n</transcript>').firstMatch(first)![1]!;
+    expect(path, startsWith('.everyai/handoffs/'));
+    final file = File('${project.path}/$path');
+    expect(file.readAsStringSync(), contains('# Alpha (conversation alpha-c1)'));
+    expect(file.readAsStringSync(), contains('Added the toggle.'));
+    expect((await loadHandoffs(await sessions().timelineDir(info.id))).single.transcript, path);
+    // The turn had finished before the limit: nothing to finish.
+    expect(first, isNot(contains('<cut-turn>')));
+    expect(first, endsWith(carryOnMessage('Alpha')));
+  });
+
+  test('a turn the limit cut off is finished by the new lead, which redoes nothing', () async {
+    final info = await start();
+    final c = await open(info.id);
+    final a = d('alpha').latest!;
+    a
+      ..add(userMessageEvent('a1-u', a.sent.last))
+      ..add(actionEvent(id: 'a1-c', toolName: 'Bash', kind: 'TerminalAction', args: {'command': 'flutter test'}))
+      ..add(resultEvent(id: 'a1-r', actionId: 'a1-c', toolName: 'Bash', text: '2 tests failed'))
+      ..add(usageLimitEvent('a1-limit', 'You hit your 5-hour limit.'))
+      ..add(stateEvent('a1-s', ExecutionStatus.error));
+    await pumpEventQueue();
+    expect(c.leadOffer, isNotNull);
+    await c.switchLead('beta', run: true);
+    final first = d('beta').specs.single.initialMessage!;
+    expect(first, contains('<cut-turn>'));
+    expect(first, contains('Request:\nAdd dark mode'));
+    expect(first, contains('flutter test'));
+    expect(first, contains('2 tests failed'));
+    expect(first, isNot(contains('<last-request>')));
+    expect(first, endsWith(carryOnMessage('Alpha', cut: true)));
+    final stored = (await loadHandoffs(await sessions().timelineDir(info.id))).single;
+    expect(stored.cut?.request, 'Add dark mode');
   });
 
   test('going back reopens the old conversation with only what it missed', () async {

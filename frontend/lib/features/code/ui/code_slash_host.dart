@@ -149,7 +149,7 @@ CodeSlashHost codeSlashHost(BuildContext context, WidgetRef ref, String sessionI
       }
       final goal = parseGoalArgs(args);
       if (goal == null) return toast('Say what the goal is: /goal make the tests pass');
-      controller().setGoal(goal.objective, budget: goal.budget);
+      controller().setGoal(goal.objective, budget: goal.budget).then((refused) => toast(refused ?? ''));
     },
     commit: (hint) => controller().draftCommit(hint),
     pr: (hint) => controller().draftPr(hint),

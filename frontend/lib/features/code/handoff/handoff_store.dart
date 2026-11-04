@@ -16,5 +16,11 @@ Future<List<Handoff>> loadHandoffs(String sessionDir) => impl.loadHandoffs(sessi
 HandoffCoverage? lastSeenBy(List<Handoff> newestFirst, String harness) =>
     newestFirst.where((h) => h.fromHarness == harness).firstOrNull?.coverage;
 
+/// Writes a handoff's transcript [markdown] to [relativePath] under
+/// [workingDir] (see `handoffTranscriptPath`), keeping that folder out of
+/// git. False when it couldn't be written (the handoff then goes without it).
+Future<bool> writeHandoffTranscript(String workingDir, String relativePath, String markdown) =>
+    impl.writeHandoffTranscript(workingDir, relativePath, markdown);
+
 /// Deletes [dir]: a session's timeline and handoffs (the session is gone).
 Future<void> removeTimeline(String dir) => impl.removeTimeline(dir);

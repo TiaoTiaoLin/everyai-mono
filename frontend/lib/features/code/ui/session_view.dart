@@ -224,8 +224,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                   onDeny: controller.deny,
                                   onMode: controller.setMode,
                                   remember: controller.rememberable(),
-                                  // The demo's commands never run; no need to ask about them.
-                                  workingDir: isDemoPath(info.workingDir) ? null : info.workingDir,
+                                  // None for the demo (its commands never run) or an outside lead (no EveryAI spend).
+                                  workingDir: riskLabelDir(info),
                                   session: info.billingTag,
                                   decided: state.decided,
                                   rememberBy: controller.rememberBy(),
