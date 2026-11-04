@@ -38,6 +38,7 @@ final class InstalledAgent {
     this.description = '',
     this.exe,
     this.package,
+    this.home,
     this.args = const [],
     this.env = const {},
     this.sha256Checked = false,
@@ -55,6 +56,11 @@ final class InstalledAgent {
 
   /// The pinned package spec ([DistKind.npx], [DistKind.uvx]).
   final String? package;
+
+  /// The app's own folder for it (`agents/<id>`), where an npx or uvx
+  /// agent's runner starts from instead of the project, so a repo's own
+  /// `.npmrc`, `node_modules` or uv config can't pick what runs.
+  final String? home;
   final List<String> args;
   final Map<String, String> env;
 
@@ -71,6 +77,7 @@ final class InstalledAgent {
     'kind': kind.name,
     'exe': ?exe,
     'package': ?package,
+    'home': ?home,
     'args': args,
     'env': env,
     'sha256Checked': sha256Checked,
@@ -80,6 +87,9 @@ final class InstalledAgent {
     if (json case {'name': final String name, 'version': final String version, 'kind': final String kind}
         when DistKind.values.any((k) => k.name == kind)) {
       final m = json as Map<String, Object?>;
+      // A runner agent needs its own folder to start from (records made
+      // before it had one are added again).
+      if (kind != DistKind.binary.name && m['home'] is! String) return null;
       return InstalledAgent(
         id: id,
         name: name,
@@ -88,6 +98,7 @@ final class InstalledAgent {
         description: m['description'] as String? ?? '',
         exe: m['exe'] as String?,
         package: m['package'] as String?,
+        home: m['home'] as String?,
         args: [...?(m['args'] as List<Object?>?)?.whereType<String>()],
         env: {
           for (final MapEntry(:key, :value) in ((m['env'] as Map<String, Object?>?) ?? const {}).entries)
@@ -159,10 +170,13 @@ AcpDriver registryDriver(
       DistKind.uvx => 'uvx',
     },
     args: agent.args,
+    // `--prefix` makes npm read its project config and local packages from
+    // the agent's own folder, not the project the session runs in;
+    // `--no-config` keeps uv off the project's uv.toml and pyproject.toml.
     prefix: switch (agent.kind) {
       DistKind.binary => const [],
-      DistKind.npx => ['-y', ?agent.package],
-      DistKind.uvx => [?agent.package],
+      DistKind.npx => ['--prefix', ?agent.home, '-y', ?agent.package],
+      DistKind.uvx => ['--no-config', ?agent.package],
     },
     profile: profile.withEnv(agent.env),
     knownVersion: agent.version,
@@ -185,17 +199,20 @@ final class AgentInstaller {
     Future<String> Function()? dataDir,
     String? Function()? platform,
     Future<void> Function(String path)? makeExecutable,
+    Future<void> Function(String path)? makeDir,
     this.maxDownload = maxAgentDownload,
     this.maxUnpacked = maxAgentUnpacked,
   }) : _client = client ?? http.Client(),
        _dataDir = dataDir ?? GitService.dataDir,
        _platform = platform ?? impl.currentPlatformKey,
-       _makeExecutable = makeExecutable ?? impl.chmodExecutable;
+       _makeExecutable = makeExecutable ?? impl.chmodExecutable,
+       _makeDir = makeDir ?? impl.makeDir;
 
   final http.Client _client;
   final Future<String> Function() _dataDir;
   final String? Function() _platform;
   final Future<void> Function(String path) _makeExecutable;
+  final Future<void> Function(String path) _makeDir;
   final int maxDownload;
   final int maxUnpacked;
 
@@ -238,6 +255,8 @@ final class AgentInstaller {
           sha256Checked: binary.sha256 != null,
         );
       case Distribution(:final kind, :final run?):
+        final home = '${await _root()}/${agent.id}';
+        await _makeDir(home);
         return InstalledAgent(
           id: base.id,
           name: base.name,
@@ -245,6 +264,7 @@ final class AgentInstaller {
           description: base.description,
           kind: kind,
           package: run.package,
+          home: home,
           args: run.args,
           env: run.env,
         );
@@ -253,7 +273,12 @@ final class AgentInstaller {
     }
   }
 
-  /// Deletes `agents/<id>/` (nothing for an npx or uvx agent).
+  /// Makes [agent]'s own folder again (after [remove] took a download).
+  Future<void> makeHome(InstalledAgent agent) async {
+    if (agent.home case final home?) await _makeDir(home);
+  }
+
+  /// Deletes `agents/<id>/`.
   Future<void> remove(String id) async => impl.removeAgentFiles(await _root(), id);
 }
 
@@ -266,14 +291,34 @@ final acpRegistryClientProvider = Provider<AcpRegistryClient>(
 );
 
 /// The registry's agents, fetched when the kept copy is over an hour old.
-final acpRegistryProvider = FutureProvider<RegistryList>((ref) => ref.read(acpRegistryClientProvider).load());
-
-/// Runs after an agent is added or removed: the harness check again, so
-/// Start Session offers it (tests replace it).
-final rescanHarnessesProvider = Provider<void Function()>(
-  (ref) =>
-      () => unawaited(ref.read(driverStatusesProvider.notifier).refresh()),
+/// Dropped when the list closes, so opening it again reads it again.
+final acpRegistryProvider = FutureProvider.autoDispose<RegistryList>(
+  (ref) => ref.read(acpRegistryClientProvider).load(),
 );
+
+/// Runs after an agent is added, updated or removed: the harness check of
+/// that driver alone, so Start Session offers it (tests replace it).
+final rescanHarnessesProvider = Provider<void Function(String driverId)>(
+  (ref) =>
+      (id) => unawaited(ref.read(driverStatusesProvider.notifier).recheck(id)),
+);
+
+/// The registry ids an install, update or remove is running for.
+final agentsInFlightProvider = NotifierProvider<AgentsInFlight, Set<String>>(AgentsInFlight.new);
+
+final class AgentsInFlight extends Notifier<Set<String>> {
+  @override
+  Set<String> build() => const {};
+
+  /// Marks [id] as being worked on; false when it already is.
+  bool claim(String id) {
+    if (state.contains(id)) return false;
+    state = {...state, id};
+    return true;
+  }
+
+  void release(String id) => state = {...state}..remove(id);
+}
 
 /// The agents added from the ACP registry, by registry id.
 final installedAgentsProvider = NotifierProvider<InstalledAgents, Map<String, InstalledAgent>>(InstalledAgents.new);
@@ -283,21 +328,33 @@ final class InstalledAgents extends Notifier<Map<String, InstalledAgent>> {
   Map<String, InstalledAgent> build() => readInstalledAgents(ref.read(preferencesProvider));
 
   /// Installs [agent], or updates it to the registry's version.
-  Future<void> install(RegistryAgent agent, {bool allowUnchecked = false}) async {
-    if (busy(agent.id)) throw InstallError('Close its sessions first.');
+  Future<void> install(RegistryAgent agent, {bool allowUnchecked = false}) => _alone(agent.id, () async {
     final rec = await ref.read(agentInstallerProvider).install(agent, allowUnchecked: allowUnchecked);
-    // A binary that became an npx agent leaves no folder behind.
+    // A binary that became an npx agent leaves no download behind.
     if (state[agent.id]?.kind == DistKind.binary && rec.kind != DistKind.binary) {
       await ref.read(agentInstallerProvider).remove(agent.id);
+      await ref.read(agentInstallerProvider).makeHome(rec);
     }
-    _save({...state, agent.id: rec});
-  }
+    _save({...state, agent.id: rec}, agent.id);
+  });
 
   /// Removes [id]'s files and record.
-  Future<void> remove(String id) async {
-    if (busy(id)) throw InstallError('Close its sessions first.');
+  Future<void> remove(String id) => _alone(id, () async {
     await ref.read(agentInstallerProvider).remove(id);
-    _save({...state}..remove(id));
+    _save({...state}..remove(id), id);
+  });
+
+  /// Runs [action] for [id] unless a session of it is open or another
+  /// install, update or remove of it is still running.
+  Future<void> _alone(String id, Future<void> Function() action) async {
+    if (busy(id)) throw InstallError('Close its sessions first.');
+    final flight = ref.read(agentsInFlightProvider.notifier);
+    if (!flight.claim(id)) throw InstallError('This agent is already being installed or removed.');
+    try {
+      await action();
+    } finally {
+      if (ref.mounted) flight.release(id);
+    }
   }
 
   /// Whether a session of [id] is open in this app run.
@@ -306,11 +363,11 @@ final class InstalledAgents extends Notifier<Map<String, InstalledAgent>> {
     _ => false,
   };
 
-  void _save(Map<String, InstalledAgent> next) {
+  void _save(Map<String, InstalledAgent> next, String id) {
     state = next;
     _writeInstalledAgents(ref.read(preferencesProvider), next);
     final registry = ref.read(driverRegistryProvider);
     registry.setInstalled(installedDrivers(next, registry.fixed));
-    ref.read(rescanHarnessesProvider)();
+    ref.read(rescanHarnessesProvider)('registry:$id');
   }
 }

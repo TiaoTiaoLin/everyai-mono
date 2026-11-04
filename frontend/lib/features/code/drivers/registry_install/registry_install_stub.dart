@@ -17,6 +17,9 @@ Future<String> installBinary({
   required Future<void> Function(String path) makeExecutable,
   required int maxDownload,
   required int maxUnpacked,
+  Duration idle = downloadIdleTimeout,
 }) => throw InstallError("Agents can't be downloaded here.");
 
 Future<void> removeAgentFiles(String root, String id) async {}
+
+Future<void> makeDir(String path) async {}

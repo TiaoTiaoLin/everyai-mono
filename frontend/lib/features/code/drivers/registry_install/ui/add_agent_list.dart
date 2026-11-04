@@ -29,25 +29,17 @@ class _AddAgentListState extends ConsumerState<AddAgentList> {
 
   /// The agent whose download has no checksum and awaits a second click.
   String? _confirming;
-  String? _working;
   final _errors = <String, String>{};
 
   Future<void> _run(String id, Future<void> Function() action) async {
     setState(() {
-      _working = id;
       _errors.remove(id);
+      if (_confirming == id) _confirming = null;
     });
     try {
       await action();
     } on Object catch (e) {
       if (mounted) setState(() => _errors[id] = '$e');
-    } finally {
-      if (mounted) {
-        setState(() {
-          _working = null;
-          _confirming = null;
-        });
-      }
     }
   }
 
@@ -58,6 +50,7 @@ class _AddAgentListState extends ConsumerState<AddAgentList> {
     final installed = ref.watch(installedAgentsProvider);
     final runners = ref.watch(agentRunnersProvider).value ?? const {};
     final installer = ref.read(agentInstallerProvider);
+    final inFlight = ref.watch(agentsInFlightProvider);
     final value = list.value;
     final q = _query.trim().toLowerCase();
     final agents = [
@@ -83,8 +76,8 @@ class _AddAgentListState extends ConsumerState<AddAgentList> {
           Text('Loading the agent list…', style: theme.type.caption.tint(theme.textMuted)),
         if (value?.note case final note?)
           Text(note, key: const ValueKey('add-agent.note'), style: theme.type.caption.tint(theme.textMuted)),
-        for (final a in agents) _row(theme, a, installed[a.id], installer.distributionOf(a), runners),
-        for (final a in gone) _row(theme, null, a, null, runners),
+        for (final a in agents) _row(theme, a, installed[a.id], installer.distributionOf(a), runners, inFlight),
+        for (final a in gone) _row(theme, null, a, null, runners, inFlight),
         const SizedBox(height: 6),
         Text(
           'From the ACP registry (agentclientprotocol.com). Downloads go in the app\'s own folder; npx and uvx agents '
@@ -101,12 +94,13 @@ class _AddAgentListState extends ConsumerState<AddAgentList> {
     InstalledAgent? have,
     Distribution? dist,
     Map<DistKind, bool> runners,
+    Set<String> inFlight,
   ) {
     final id = agent?.id ?? have!.id;
     final name = agent?.name ?? have!.name;
     final notifier = ref.read(installedAgentsProvider.notifier);
     final busy = have != null && notifier.busy(id);
-    final working = _working == id;
+    final working = inFlight.contains(id);
     final kind = dist?.kind ?? have?.kind;
     final noRunner = kind != null && kind != DistKind.binary && runners[kind] == false;
     final unchecked = dist?.binary != null && dist!.binary!.sha256 == null;

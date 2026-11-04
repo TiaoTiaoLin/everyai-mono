@@ -1,7 +1,9 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
+import 'dart:async';
 import 'dart:ffi' show Abi;
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:archive/archive_io.dart';
 import 'package:crypto/crypto.dart';
@@ -34,6 +36,7 @@ Future<String> installBinary({
   required Future<void> Function(String path) makeExecutable,
   required int maxDownload,
   required int maxUnpacked,
+  Duration idle = downloadIdleTimeout,
 }) async {
   final agentDir = '$root/$id';
   final dest = Directory('$agentDir/$version');
@@ -43,14 +46,19 @@ Future<String> installBinary({
   try {
     final suffix = _suffix(target.archive);
     final download = File('${part.path}/download$suffix');
-    final res = await client.send(http.Request('GET', Uri.parse(target.archive)));
+    final res = await client
+        .send(http.Request('GET', Uri.parse(target.archive)))
+        .timeout(idle, onTimeout: () => throw const InstallError(_stalled));
     if (res.statusCode != 200) throw InstallError('The download failed (HTTP ${res.statusCode}).');
     final sink = download.openWrite();
     final digest = _Digest();
     final hasher = sha256.startChunkedConversion(digest);
     var size = 0;
     try {
-      await for (final chunk in res.stream) {
+      await for (final chunk in res.stream.timeout(
+        idle,
+        onTimeout: (sink) => sink.addError(const InstallError(_stalled)),
+      )) {
         size += chunk.length;
         if (size > maxDownload) throw InstallError('The download is larger than ${_mb(maxDownload)}.');
         hasher.add(chunk);
@@ -69,23 +77,15 @@ Future<String> installBinary({
       exe.parent.createSync(recursive: true);
       download.renameSync(exe.path);
     } else {
-      final outside = <String>[];
-      try {
-        await extractFileToDisk(
-          download.path,
-          files.path,
-          maxSize: maxUnpacked,
-          callback: (e) {
-            if (leavesFolder(e.name, e.symbolicLink)) outside.add(e.name);
-          },
-        );
-      } on ArchiveException catch (e) {
-        throw InstallError("Couldn't unpack the download: ${e.message}");
+      // Unpacking is synchronous work that can take seconds, so it runs off
+      // the UI isolate.
+      // A tear-off of a plain object, so the isolate is sent nothing else.
+      final (:outside, :error) = await Isolate.run(_Unpack(download.path, files.path, maxUnpacked).call);
+      if (error != null) throw InstallError("Couldn't unpack the download: $error");
+      if (outside != null) {
+        throw InstallError('The download has files outside its folder ($outside), so nothing was installed.');
       }
-      if (outside.isNotEmpty) {
-        throw InstallError('The download has files outside its folder (${outside.first}), so nothing was installed.');
-      }
-      download.deleteSync();
+      await download.delete();
     }
     final exe = '${files.path}/${target.cmd}';
     final real = FileSystemEntity.typeSync(exe) == FileSystemEntityType.notFound
@@ -96,12 +96,12 @@ Future<String> installBinary({
       throw InstallError("The download didn't contain ${target.cmd}.");
     }
     await makeExecutable(real);
-    if (dest.existsSync()) dest.deleteSync(recursive: true);
-    files.renameSync(dest.path);
-    part.deleteSync(recursive: true);
+    if (await dest.exists()) await dest.delete(recursive: true);
+    await files.rename(dest.path);
+    await part.delete(recursive: true);
     // Older versions go once the new one is in place.
-    for (final other in Directory(agentDir).listSync()) {
-      if (other.path.split('/').last != version) other.deleteSync(recursive: true);
+    await for (final other in Directory(agentDir).list()) {
+      if (other.path.split('/').last != version) await other.delete(recursive: true);
     }
     return '${dest.path}/${target.cmd}';
   } on Object {
@@ -109,6 +109,37 @@ Future<String> installBinary({
     rethrow;
   }
 }
+
+/// Unpacks [archive] into [dir] (in a background isolate): the first entry
+/// that would leave [dir], or what package:archive refused.
+final class _Unpack {
+  const _Unpack(this.archive, this.dir, this.maxSize);
+
+  final String archive;
+  final String dir;
+  final int maxSize;
+
+  Future<({String? outside, String? error})> call() async {
+    String? outside;
+    try {
+      await extractFileToDisk(
+        archive,
+        dir,
+        maxSize: maxSize,
+        callback: (e) {
+          if (leavesFolder(e.name, e.symbolicLink)) outside ??= e.name;
+        },
+      );
+    } on ArchiveException catch (e) {
+      return (outside: null, error: e.message);
+    }
+    return (outside: outside, error: null);
+  }
+}
+
+const _stalled = 'The download stopped. Try again.';
+
+Future<void> makeDir(String path) => Directory(path).create(recursive: true);
 
 Future<void> removeAgentFiles(String root, String id) async {
   final dir = Directory('$root/$id');

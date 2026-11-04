@@ -265,8 +265,11 @@ String? normalizeCommandPath(String command) {
 }
 
 /// Why an install or removal didn't happen, in plain words.
+/// How long a download may go without a byte before it is given up.
+const downloadIdleTimeout = Duration(seconds: 60);
+
 final class InstallError implements Exception {
-  InstallError(this.message);
+  const InstallError(this.message);
 
   final String message;
 

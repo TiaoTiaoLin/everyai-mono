@@ -34,7 +34,7 @@ void main() {
         driverRegistryProvider.overrideWithValue(
           DriverRegistry({'gemini': AcpDriver(id: 'gemini', label: 'Gemini CLI', command: 'gemini')}),
         ),
-        rescanHarnessesProvider.overrideWithValue(() => rescans++),
+        rescanHarnessesProvider.overrideWithValue((_) => rescans++),
         acpRegistryClientProvider.overrideWithValue(
           AcpRegistryClient(prefs, client: MockClient((_) async => http.Response(_fixture, 200))),
         ),
@@ -46,6 +46,7 @@ void main() {
             }),
             dataDir: () async => '/nonexistent',
             platform: () => 'darwin-aarch64',
+            makeDir: (_) async {},
           ),
         ),
         agentRunnersProvider.overrideWith((ref) async => {DistKind.npx: false, DistKind.uvx: true}),
@@ -117,6 +118,7 @@ void main() {
           version: '0.65.0',
           kind: DistKind.npx,
           package: '@google/gemini-cli@0.65.0',
+          home: '/nonexistent/agents/gemini',
         ).toJson(),
       },
     });

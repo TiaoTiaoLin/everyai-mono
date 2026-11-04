@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -5,13 +6,15 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart';
 import 'package:every_ai/core/preferences.dart';
-import 'package:every_ai/features/code/code_providers.dart' show harnessProvider;
+import 'package:every_ai/features/code/code_providers.dart' show harnessProvider, readyLeads;
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/drivers/registry_install/acp_registry.dart';
 import 'package:every_ai/features/code/drivers/registry_install/installed_agents.dart';
+import 'package:every_ai/features/code/drivers/registry_install/registry_install_io.dart' show installBinary;
+import 'package:every_ai/features/code/ui/agent_menu.dart' show leadOptions;
 import 'package:every_ai/features/code/harness/fake_harness.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -342,8 +345,67 @@ void main() {
       final rec = await i.install(_agent('gemini'));
       expect((rec.kind, rec.package, rec.exe), (DistKind.npx, '@google/gemini-cli@0.66.0', null));
       expect(fetched, isFalse);
-      expect(Directory('${tmp.path}/agents').existsSync(), isFalse);
+      // Only the empty folder its runner starts from.
+      expect(rec.home, '${tmp.path}/agents/gemini');
+      expect(Directory(rec.home!).listSync(), isEmpty);
     });
+
+    test('a second install of the same agent is refused while the first runs', () async {
+      final body = _tarGz([_exe('bin/agent')]);
+      final gate = Completer<void>();
+      final c = ProviderContainer(
+        overrides: [
+          harnessProvider.overrideWithValue(FakeHarness()),
+          preferencesProvider.overrideWithValue(Preferences.inMemory()),
+          driverRegistryProvider.overrideWithValue(DriverRegistry(const {})),
+          rescanHarnessesProvider.overrideWithValue((_) {}),
+          agentInstallerProvider.overrideWithValue(
+            AgentInstaller(
+              client: MockClient((_) async {
+                await gate.future;
+                return http.Response.bytes(body, 200);
+              }),
+              dataDir: () async => tmp.path,
+              platform: () => 'linux-x86_64',
+              makeExecutable: (_) async {},
+            ),
+          ),
+        ],
+      );
+      addTearDown(c.dispose);
+      final notifier = c.read(installedAgentsProvider.notifier);
+      final first = notifier.install(agent(body));
+      expect(c.read(agentsInFlightProvider), {'demo'});
+      await expectLater(notifier.install(agent(body)), throwsA(isA<InstallError>()));
+      await expectLater(notifier.remove('demo'), throwsA(isA<InstallError>()));
+      gate.complete();
+      await first;
+      expect(c.read(agentsInFlightProvider), isEmpty);
+      expect(File(c.read(installedAgentsProvider)['demo']!.exe!).existsSync(), isTrue);
+    });
+
+    for (final (what, response) in [
+      ('no answer', () => Completer<http.StreamedResponse>().future),
+      ('a stream that stops', () async => http.StreamedResponse(StreamController<List<int>>().stream, 200)),
+    ]) {
+      test('a download with $what gives up and leaves nothing', () async {
+        await expectLater(
+          installBinary(
+            root: '${tmp.path}/agents',
+            id: 'demo',
+            version: '1',
+            target: const BinaryTarget(archive: 'https://example.com/a.tar.gz', cmd: 'bin/agent'),
+            client: _Stalled(response),
+            makeExecutable: (_) async {},
+            maxDownload: 1 << 20,
+            maxUnpacked: 1 << 20,
+            idle: Duration.zero,
+          ),
+          throwsA(isA<InstallError>().having((e) => e.message, 'message', contains('stopped'))),
+        );
+        expect(Directory('${tmp.path}/agents/demo').listSync(), isEmpty);
+      });
+    }
   });
 
   group('command lines', () {
@@ -357,6 +419,7 @@ void main() {
         kind: d.kind,
         exe: exe,
         package: d.run?.package,
+        home: d.kind == DistKind.binary ? null : '/data/agents/$id',
         args: d.args,
         env: d.env,
       );
@@ -367,6 +430,8 @@ void main() {
     test('gemini through npx keeps its asking flags', () {
       expect(line(registryDriver(rec('gemini'), _fixed)), [
         'npx',
+        '--prefix',
+        '/data/agents/gemini',
         '-y',
         '@google/gemini-cli@0.66.0',
         '--acp',
@@ -379,6 +444,8 @@ void main() {
       final d = registryDriver(rec('grok-build'), _fixed);
       expect(line(d), [
         'npx',
+        '--prefix',
+        '/data/agents/grok-build',
         '-y',
         '@xai-official/grok@1.0.74',
         '--permission-mode',
@@ -393,7 +460,7 @@ void main() {
 
     test('fast-agent through uvx with its env', () {
       final d = registryDriver(rec('fast-agent'), _fixed);
-      expect(line(d), ['uvx', 'fast-agent-acp==0.10.1', '-x']);
+      expect(line(d), ['uvx', '--no-config', 'fast-agent-acp==0.10.1', '-x']);
       expect(d.resolved.profile.env(null), {'FAST_AGENT_MODEL': 'codexplan'});
       expect(d.initTimeout, const Duration(minutes: 5));
     });
@@ -474,6 +541,7 @@ void main() {
       version: '0.66.0',
       kind: DistKind.npx,
       package: '@google/gemini-cli@0.66.0',
+      home: '/data/agents/gemini',
     );
 
     test('an installed agent is listed and resolves; the listed one is untouched', () {
@@ -495,6 +563,7 @@ void main() {
         version: '0.67.0',
         kind: DistKind.npx,
         package: '@google/gemini-cli@0.67.0',
+        home: '/data/agents/gemini',
       );
       r.setInstalled(installedDrivers({'gemini': newer}, _fixed));
       expect(r.resolve('registry:gemini'), isNot(same(first)));
@@ -522,6 +591,17 @@ void main() {
       expect(r.resolve('registry:gemini')!.info.consentId, 'gemini');
     });
 
+    test('a runner record without its own folder is dropped', () {
+      final old = {...gemini.toJson()}..remove('home');
+      final prefs = Preferences.inMemory({
+        installedAgentsKey: jsonEncode({
+          'v': 1,
+          'agents': {'gemini': old},
+        }),
+      });
+      expect(readInstalledAgents(prefs), isEmpty);
+    });
+
     test('records survive a round trip through Preferences', () {
       final prefs = Preferences.inMemory({
         installedAgentsKey: jsonEncode({
@@ -531,6 +611,7 @@ void main() {
       });
       final read = readInstalledAgents(prefs);
       expect(read.keys, ['gemini']);
+      expect(read['gemini']!.home, '/data/agents/gemini');
       expect(jsonEncode(read['gemini']!.toJson()), jsonEncode(gemini.toJson()));
     });
   });
@@ -552,5 +633,42 @@ void main() {
       final agy = info('antigravity-acp', DistKind.binary, exe: '/x/agy_acp_server.par');
       expect((agy.needsConsent, agy.consentId), (true, 'registry:antigravity-acp'));
     });
+
+    test("a listed agent's switch lets its registry copy lead", () {
+      final d = registryDriver(
+        const InstalledAgent(
+          id: 'gemini',
+          name: 'Gemini',
+          version: '1',
+          kind: DistKind.npx,
+          package: 'g@1',
+          home: '/h',
+        ),
+        _fixed,
+      );
+      const status = {'registry:gemini': DriverStatus(installed: true, signedIn: true)};
+      expect(
+        [
+          for (final l in readyLeads([d], status, {'gemini'}, current: 'everyai')) l.id,
+        ],
+        ['registry:gemini'],
+      );
+      expect(readyLeads([d], status, {'registry:gemini'}, current: 'everyai'), isEmpty);
+      expect(
+        [
+          for (final o in leadOptions([d.info], status, {'gemini'}, current: 'everyai')) o.blocked,
+        ],
+        [null],
+      );
+    });
   });
+}
+
+/// A client whose answer is [response].
+final class _Stalled extends http.BaseClient {
+  _Stalled(this.response);
+  final Future<http.StreamedResponse> Function() response;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) => response();
 }
