@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/subagents.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/git/git_service.dart';
 import 'package:every_ai/features/code/handoff/handoff.dart';
@@ -362,9 +363,62 @@ void main() {
     });
 
     test('a request the limit stopped before any call is cut, with no calls', () {
-      final cut = cutTurn([..._session(), _user('u3', 'and the docs'), usageLimitEvent('l1', 'Out of credit.')])!;
+      final done = [..._session(), _agent('a9', 'Which runner?'), stateEvent('s9', ExecutionStatus.idle)];
+      final cut = cutTurn([...done, _user('u3', 'and the docs'), usageLimitEvent('l1', 'Out of credit.')])!;
       expect(cut.request, 'and the docs');
+      expect(cut.earlier, isEmpty);
       expect(cut.calls, isEmpty);
+      expect(
+        handoffMessage(_build([...done, _user('u3', 'and the docs'), usageLimitEvent('l1', 'x')])),
+        contains('No tool calls were made for it yet.'),
+      );
+    });
+
+    test('notes from the app or the harness are not the request', () {
+      const report = SubagentReport(SubagentStatus.completed, 'Callers are in lib/a.dart');
+      final events = [
+        _user('u1', 'Rename the parser module'),
+        _call('m1', 'bash', {'kind': 'TerminalAction', 'command': 'git mv lib/parse.dart lib/parser.dart'}),
+        _out('m1', ''),
+        _user('n1', _phase('r1')),
+        _call('m2', 'edit', {'kind': 'EditAction', 'file_path': '$_dir/lib/main.dart'}),
+        _out('m2', 'edited'),
+        _user('n2', taskNotification('k1', 'Find callers', report)),
+        _user('n3', '<research-workflow reports="2">\n…\n</research-workflow>'),
+        _call('m3', 'bash', {'kind': 'TerminalAction', 'command': 'dart test'}),
+        usageLimitEvent('l1', 'limit'),
+      ];
+      for (final note in [_phase('r1'), taskNotification('k1', 'Find callers', report)]) {
+        expect(isHarnessNote(note), isTrue, reason: note);
+      }
+      expect(isHarnessNote('Rename the parser module'), isFalse);
+      final cut = cutTurn(events)!;
+      expect(cut.request, 'Rename the parser module');
+      expect(cut.earlier, isEmpty);
+      expect([for (final c in cut.calls) c.call], [contains('git mv'), contains('main.dart'), contains('dart test')]);
+    });
+
+    test('a steer joins the request it steered: both messages and every call since the first', () {
+      final events = [
+        _user('u0', 'Add a decrement method'),
+        _agent('a0', 'Added it.'),
+        stateEvent('s0', ExecutionStatus.finished),
+        _user('u1', 'Refactor the parser'),
+        _call('m1', 'bash', {'kind': 'TerminalAction', 'command': 'git mv a.dart b.dart'}),
+        _out('m1', ''),
+        stateEvent('p1', ExecutionStatus.paused),
+        _user('u2', 'use pnpm, not npm'),
+        _call('m2', 'bash', {'kind': 'TerminalAction', 'command': 'pnpm install'}),
+        usageLimitEvent('l1', 'limit'),
+      ];
+      final cut = cutTurn(events)!;
+      expect(cut.request, 'use pnpm, not npm');
+      expect(cut.earlier, ['Refactor the parser']);
+      expect([for (final c in cut.calls) c.call], [contains('git mv'), contains('pnpm install')]);
+      final m = handoffMessage(_build(events));
+      expect(m, contains("The user's messages in this turn, oldest first"));
+      expect(m.indexOf('1. Refactor the parser'), lessThan(m.indexOf('2. use pnpm, not npm')));
+      expect(Handoff.fromJson(_build(events).toJson()).cut!.earlier, ['Refactor the parser']);
     });
 
     test('a carry-on is the same turn: the request and every lead\'s calls stay', () {
@@ -417,6 +471,71 @@ void main() {
       final shown = cut.calls.fold(0, (n, c) => n + c.call.length + c.result.length);
       expect(shown, lessThanOrEqualTo(handoffCutChars));
       expect(m, contains('older results were left out'));
+    });
+
+    test('a long turn keeps to its size: the oldest calls give way too, and the notes match the transcript', () {
+      final events = [
+        _user('u1', 'migrate every table'),
+        for (var i = 0; i < 150; i++) ...[
+          _call('b$i', 'bash', {'kind': 'TerminalAction', 'command': 'migrate --table t$i ${'x' * 500}'}),
+          _out('b$i', 'ok'),
+        ],
+        usageLimitEvent('l1', 'limit'),
+      ];
+      final cut = cutTurn(events)!;
+      expect(cut.callsLeftOut, greaterThan(0));
+      expect(cut.calls.length + cut.callsLeftOut, 150);
+      expect(cut.calls.last.call, contains('t149'));
+      final shown = cut.calls.fold(0, (n, c) => n + c.call.length + c.result.length);
+      expect(shown, lessThanOrEqualTo(handoffCutChars));
+      final without = handoffMessage(_build(events));
+      expect(without, contains('earlier calls left out to keep this short; check <files> and <git>'));
+      expect(without, isNot(contains('transcript file')));
+      expect(without, contains('${cut.callsLeftOut + 1}. '));
+      final withFile = handoffMessage(
+        buildHandoff(events, from: 'claude', fromConversation: 'c1', to: 'codex', workingDir: _dir, transcript: 't.md'),
+      );
+      expect(withFile, contains('earlier calls left out to keep this short; the transcript file has them'));
+    });
+
+    test('shell reads of secret files are withheld, and credential-looking text is redacted everywhere', () {
+      const pem = '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----';
+      final events = [
+        _user('u1', 'wire up the API'),
+        _call('s1', 'bash', {'kind': 'TerminalAction', 'command': 'cat .env.local'}),
+        _out('s1', 'DATABASE_URL=postgres://x\nOTHER=plain-value-here'),
+        _call('s2', 'bash', {'kind': 'TerminalAction', 'command': 'grep -r API_KEY .'}),
+        _out(
+          's2',
+          'src/config.ts:const API_KEY = "sk-live-abcdefghijklmnop1234"\nsrc/b.ts:token: ghp_abcdefghijklmnopqrstuvwxyz12',
+        ),
+        _call('s3', 'bash', {'kind': 'TerminalAction', 'command': 'cat deploy/id'}),
+        _out('s3', pem),
+        _call('s4', 'bash', {'kind': 'TerminalAction', 'command': 'echo OPENAI_API_KEY=abcdefgh12345678 >> notes.txt'}),
+        _out('s4', ''),
+        usageLimitEvent('l1', 'limit'),
+      ];
+      final m = handoffMessage(_build(events));
+      final md = handoffTranscript([(lead: 'Claude Code', conversationId: 'c1', events: events)], title: 'T');
+      for (final text in [m, md]) {
+        for (final secret in [
+          'postgres://x',
+          'plain-value-here',
+          'sk-live-abcdefghijklmnop1234',
+          'ghp_abcdefghijklmnopqrstuvwxyz12',
+          'b3BlbnNzaC1rZXk',
+          'abcdefgh12345678',
+        ]) {
+          expect(text, isNot(contains(secret)), reason: secret);
+        }
+        expect(text, contains('cat .env.local'));
+        expect(text, contains('grep -r API_KEY .'));
+      }
+      // Code and references stay as they are.
+      for (final plain in ['final key = map[k];', r'API_KEY=$API_KEY', 'password: ****', 'keyboard: true']) {
+        expect(redactSecrets(plain), plain);
+      }
+      expect(redactSecrets('export GITHUB_TOKEN=abcd1234efgh5678'), 'export GITHUB_TOKEN=(redacted)');
     });
   });
 
@@ -540,6 +659,21 @@ void main() {
       // Not a repository: written all the same.
       final plain = await Directory('${tmp.path}/plain').create();
       expect(await writeHandoffTranscript(plain.path, path, 'x'), isTrue);
+    });
+
+    test('a session in a subfolder of the repository keeps its transcript out of git (uploads and spill exclude the same way)', () async {
+      final root = await repo();
+      final sub = await Directory('$root/packages/app').create(recursive: true);
+      final path = handoffTranscriptPath(DateTime.utc(2026, 11, 4, 10), 'codex');
+      expect(await writeHandoffTranscript(sub.path, path, '# T\n'), isTrue);
+      expect(File('${sub.path}/$path').existsSync(), isTrue);
+      expect(await git(root, ['status', '--porcelain', '--untracked-files=all']), isEmpty);
+      final exclude = File('$root/.git/info/exclude').readAsStringSync();
+      expect(exclude, contains('/packages/app/$handoffTranscriptDir/'));
+      // The same session at the top keeps the top-level pattern.
+      await writeHandoffTranscript(root, path, '# T\n');
+      expect(File('$root/.git/info/exclude').readAsLinesSync(), contains('/$handoffTranscriptDir/'));
+      expect(await git(root, ['status', '--porcelain', '--untracked-files=all']), isEmpty);
     });
 
     test('handoffs round-trip, newest first; a harness resumes from the last handoff away from it', () async {

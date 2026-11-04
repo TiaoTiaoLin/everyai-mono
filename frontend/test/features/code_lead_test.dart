@@ -69,6 +69,8 @@ void main() {
   late Map<String, FakeLeadDriver> drivers;
   var calls = 0;
   final reached = <String>[];
+  // A test that wants the real key flow (minting recorded in [reached]) sets this.
+  GatewayKeys? keys;
 
   ProviderContainer make(Preferences prefs) => ProviderContainer(
     overrides: [
@@ -80,7 +82,7 @@ void main() {
       hostServerProvider.overrideWithValue(host),
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       // An outside CLI runs on the user's own account: no EveryAI key is minted for it.
-      gatewayKeysProvider.overrideWith((ref) => throw StateError('no gateway key for outside agents')),
+      gatewayKeysProvider.overrideWith((ref) => keys ?? (throw StateError('no gateway key for outside agents'))),
       // Nothing an outside lead does reaches the backend or a side model (checked after each test).
       apiClientProvider.overrideWithValue(
         ApiClient(
@@ -149,6 +151,8 @@ void main() {
   });
 
   tearDown(() async {
+    keys = null;
+    CodeSessionController.liveAfter = const Duration(milliseconds: 1500);
     final sent = [...reached];
     reached.clear();
     expect(sent, isEmpty, reason: 'an outside lead reached the network or a side model');
@@ -452,6 +456,31 @@ void main() {
       expect(plainPrBody(['Add the toggle', 'Add colours']), '- Add the toggle\n- Add colours');
     });
 
+    test("an outside lead's own login error mints no gateway key and runs nothing again", () async {
+      keys = GatewayKeys(
+        store: _MemoryStore(),
+        mint: () async {
+          reached.add('POST v1/keys');
+          return 'sk-eai-new';
+        },
+      );
+      CodeSessionController.liveAfter = Duration.zero;
+      final info = await start();
+      await open(info.id);
+      // Past the replay window: events are live.
+      await pumpEventQueue();
+      session
+        ..add(const ConversationFailure(id: 'e1', raw: {}, message: 'Invalid API key · Please run /login'))
+        ..add(const ConversationFailure(id: 'e2', raw: {}, message: 'unexpected status 401 Unauthorized'));
+      await whenValue(
+        container,
+        codeSessionProvider(info.id).select((s) => s.transcript.items.whereType<NoticeItem>().length),
+        (n) => n >= 2,
+      );
+      await pumpEventQueue();
+      expect((session.resumes, session.llmSwitches), (0, 0));
+    });
+
     test('approval cards ask the decider for no risk label', () async {
       final info = await start();
       expect(riskLabelDir(info), isNull);
@@ -606,4 +635,14 @@ void main() {
     await expectLater(start(harness: everyaiHarnessName), throwsA(anything));
     expect(host.minted, isEmpty);
   });
+}
+
+final class _MemoryStore implements SecretStore {
+  final values = <String, String>{};
+  @override
+  Future<String?> read(String key) async => values[key];
+  @override
+  Future<void> write(String key, String value) async => values[key] = value;
+  @override
+  Future<void> delete(String key) async => values.remove(key);
 }

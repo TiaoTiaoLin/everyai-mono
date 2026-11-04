@@ -170,26 +170,45 @@ final class HandoffCall {
 /// for it so far, oldest first.
 @immutable
 final class HandoffCut {
-  const HandoffCut({required this.request, this.calls = const [], this.resultsLeftOut = 0});
+  const HandoffCut({
+    required this.request,
+    this.earlier = const [],
+    this.calls = const [],
+    this.resultsLeftOut = 0,
+    this.callsLeftOut = 0,
+  });
+
+  /// The user's newest message in the turn.
   final String request;
+
+  /// Earlier messages of the same turn (sent before the reply to them
+  /// finished, like a steer), oldest first.
+  final List<String> earlier;
   final List<HandoffCall> calls;
 
   /// Results not shown to stay within [handoffCutChars].
   final int resultsLeftOut;
 
+  /// The oldest calls left out to stay within [handoffCutChars] (before [calls]).
+  final int callsLeftOut;
+
   factory HandoffCut.fromJson(Map<String, Object?> j) => HandoffCut(
     request: j['request'] as String? ?? '',
+    earlier: [for (final r in (j['earlier_requests'] as List<Object?>? ?? const [])) '$r'],
     calls: [
       for (final c in (j['calls'] as List<Object?>? ?? const []))
         if (c case final Map<String, Object?> m) HandoffCall.fromJson(m),
     ],
     resultsLeftOut: (j['results_left_out'] as num?)?.toInt() ?? 0,
+    callsLeftOut: (j['calls_left_out'] as num?)?.toInt() ?? 0,
   );
 
   Map<String, Object?> toJson() => {
     'request': request,
+    if (earlier.isNotEmpty) 'earlier_requests': earlier,
     'calls': [for (final c in calls) c.toJson()],
     if (resultsLeftOut > 0) 'results_left_out': resultsLeftOut,
+    if (callsLeftOut > 0) 'calls_left_out': callsLeftOut,
   };
 }
 
@@ -541,70 +560,69 @@ String _capRequest(String text) => text.length <= handoffRequestChars
 /// The turn the usage limit cut off in [events] (the session's record,
 /// oldest first), or null. That is the last request from the user (a
 /// message that only hands over or says to carry on doesn't count: the
-/// same turn goes on) whose turn the limit stopped before the agent's reply
+/// same turn goes on; nor does a note from the app or the harness, see
+/// [isHarnessNote]) whose turn the limit stopped before the agent's reply
 /// finished. A reply finished when a turn end (idle or finished) follows
 /// the agent's text with no tool call between; a limit after that hit a
-/// turn that was already done. The calls are those made for the request by
-/// every lead since, files that may hold secrets withheld.
+/// turn that was already done. Earlier requests whose replies never
+/// finished (the user steered, or wrote mid-turn) belong to the same turn,
+/// up to [handoffCutRequests]. The calls are those made since the earliest
+/// of them by every lead, files that may hold secrets withheld; within
+/// [handoffCutChars] the oldest results give way first, then the oldest
+/// calls.
 HandoffCut? cutTurn(List<HarnessEvent> events) {
   final record = handoffRecord(events);
-  var start = -1;
-  var request = '';
+  // The user's requests, newest first; harness notes (phase notes, task
+  // notifications, reports, answers, compaction) and carry-ons are not.
+  final requests = <({int at, String text})>[];
   for (var i = record.length - 1; i >= 0; i--) {
     if (record[i] case ChatMessage(fromUser: true, :final text)) {
       final said = userTextOf(text).trim();
-      if (said.isEmpty || isCarryOn(said)) continue;
-      start = i;
-      request = said;
-      break;
+      if (said.isEmpty || isCarryOn(said) || isHarnessNote(said)) continue;
+      requests.add((at: i, text: said));
     }
   }
-  if (start < 0) return null;
-  var cut = false;
-  var replied = false;
-  var finished = false;
-  final turn = record.sublist(start + 1);
-  for (final e in turn) {
-    switch (e) {
-      case ChatMessage(fromUser: true):
-        // A carry-on: the next lead works on the same request.
-        replied = false;
-        finished = false;
-      case ChatMessage(:final text) when text.trim().isNotEmpty:
-        replied = true;
-      case ActionCall():
-        replied = false;
-      case StateChange(executionStatus: ExecutionStatus.idle || ExecutionStatus.finished) when replied:
-        finished = true;
-        cut = false;
-      default:
-        if (usageLimitOf(e) != null && !finished) cut = true;
-    }
+  if (requests.isEmpty) return null;
+  // A request sent while an earlier one was still unfinished (a steer, or a
+  // message in the middle of the turn) goes on with it: both are the turn.
+  var first = 0;
+  while (first + 1 < requests.length &&
+      first + 1 < handoffCutRequests &&
+      !_settle(record.sublist(requests[first + 1].at + 1, requests[first].at)).ended) {
+    first++;
   }
-  if (!cut) return null;
+  final turn = record.sublist(requests[first].at + 1);
+  if (!_settle(turn).cut) return null;
   final results = {
     for (final e in turn)
       if (e is ToolResult) e.actionId: e,
   };
-  final calls = [
+  final all = [
     for (final e in turn)
       if (e is ActionCall)
         (call: e, result: results[e.id] == null ? '' : renderStep(results[e.id]!, outputCap: handoffCallResultChars)),
   ];
-  // The oldest results give way first.
-  var size = calls.fold(0, (n, c) => n + renderStep(c.call).length + c.result.length);
+  // The oldest results give way first, then the oldest calls (the newest one stays).
+  var size = all.fold(0, (n, c) => n + renderStep(c.call).length + c.result.length);
   var left = 0;
-  final shown = [for (final c in calls) c.result.isNotEmpty];
-  for (var i = 0; i < calls.length && size > handoffCutChars; i++) {
+  final shown = [for (final c in all) c.result.isNotEmpty];
+  for (var i = 0; i < all.length && size > handoffCutChars; i++) {
     if (!shown[i]) continue;
     shown[i] = false;
-    size -= calls[i].result.length;
+    size -= all[i].result.length;
     left++;
   }
+  var dropped = 0;
+  while (dropped < all.length - 1 && size > handoffCutChars) {
+    size -= renderStep(all[dropped].call).length + (shown[dropped] ? all[dropped].result.length : 0);
+    if (shown[dropped]) left++;
+    dropped++;
+  }
   return HandoffCut(
-    request: _capRequest(request),
+    request: _capRequest(requests.first.text),
+    earlier: [for (final r in requests.sublist(1, first + 1).reversed) _capRequest(r.text)],
     calls: [
-      for (final (i, c) in calls.indexed)
+      for (final (i, c) in all.indexed.skip(dropped))
         HandoffCall(
           tool: c.call.toolName,
           call: renderStep(c.call),
@@ -613,7 +631,40 @@ HandoffCut? cutTurn(List<HarnessEvent> events) {
         ),
     ],
     resultsLeftOut: left,
+    callsLeftOut: dropped,
   );
+}
+
+/// At most this many requests of the user make up one cut turn (see [cutTurn]).
+const handoffCutRequests = 5;
+
+/// How the events after a request went: whether the agent's reply ever
+/// finished (a turn end after its text, with no call between), and whether
+/// a usage limit cut it short after its last finished reply.
+({bool ended, bool cut}) _settle(List<HarnessEvent> turn) {
+  var cut = false;
+  var replied = false;
+  var finished = false;
+  var ended = false;
+  for (final e in turn) {
+    switch (e) {
+      case ChatMessage(fromUser: true):
+        // A carry-on or a note: the agent works on the same request.
+        replied = false;
+        finished = false;
+      case ChatMessage(:final text) when text.trim().isNotEmpty:
+        replied = true;
+      case ActionCall():
+        replied = false;
+      case StateChange(executionStatus: ExecutionStatus.idle || ExecutionStatus.finished) when replied:
+        finished = true;
+        ended = true;
+        cut = false;
+      default:
+        if (usageLimitOf(e) != null && !finished) cut = true;
+    }
+  }
+  return (ended: ended, cut: cut);
 }
 
 /// One lead's stint for [handoffTranscript]: the lead as the user knows it,
@@ -660,8 +711,11 @@ int _lastRestart(List<HarnessEvent> events) {
 
 /// [events] as the next lead may read them (in the facts and the transcript file): an earlier
 /// handoff is split off the user's message (a message that was only that is
-/// left out), and the content of calls on files that may hold secrets, and
-/// their results, is withheld (only the path is shown).
+/// left out); the content of calls on files that may hold secrets, and
+/// their results, is withheld (only the path is shown); so are the results
+/// of shell commands that name such a file (`cat .env`). Anything left that
+/// looks like a credential (`API_KEY=…`, a private key, a known token shape)
+/// is redacted (see [redactSecrets]).
 List<HarnessEvent> handoffRecord(List<HarnessEvent> events) {
   final withheld = <String>{};
   final out = <HarnessEvent>[];
@@ -705,6 +759,40 @@ List<HarnessEvent> handoffRecord(List<HarnessEvent> events) {
             },
           ),
         );
+      case ActionCall(:final action):
+        if (action['command'] case final String command when _commandWords(command).any(_secret)) {
+          withheld.add(e.id);
+        }
+        final redacted = _redactDeep(action);
+        out.add(
+          identical(redacted, action)
+              ? e
+              : ActionCall(
+                  id: e.id,
+                  raw: const {},
+                  toolName: e.toolName,
+                  toolCallId: e.toolCallId,
+                  action: redacted as Map<String, Object?>,
+                  thought: e.thought,
+                  summary: e.summary,
+                  risk: e.risk,
+                ),
+        );
+      case ToolResult(:final observation):
+        final redacted = _redactDeep(observation);
+        out.add(
+          identical(redacted, observation)
+              ? e
+              : ToolResult(
+                  id: e.id,
+                  raw: const {},
+                  actionId: e.actionId,
+                  toolName: e.toolName,
+                  toolCallId: e.toolCallId,
+                  outcome: e.outcome,
+                  observation: redacted as Map<String, Object?>,
+                ),
+        );
       default:
         out.add(e);
     }
@@ -721,6 +809,63 @@ Set<String> _callPaths(ActionCall call) => {
     if (call.action[key] case final String p when p.isNotEmpty) p,
   ...?(call.action['paths'] as List<Object?>?)?.whereType<String>(),
 };
+
+/// The words of a shell [command] that could be paths (quotes, redirects
+/// and separators split off).
+Iterable<String> _commandWords(String command) =>
+    command.split(RegExp('[\\s;|&<>()`\'"=]+')).where((w) => w.isNotEmpty && !w.startsWith('-'));
+
+final _secretPatterns = [
+  // A private key block, to its end (or the end of the text, when cut).
+  RegExp(r'-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)'),
+  // NAME=value or "name": "value", where the name says it is a credential
+  // (API_KEY, GITHUB_TOKEN, "password", "client_secret"), and the value is
+  // long enough to be one (not `$VAR` or a short placeholder).
+  RegExp(
+    r'''\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?)[A-Z0-9_]*|'''
+    r'''(?:[a-z]+[_-]?)?(?:api[_-]?key|access[_-]?key|token|secret|password|passwd))'''
+    r'''(["']?\s*[=:]\s*["']?)([^\s"',;$(){}\[\]]{8,})''',
+  ),
+  // Well-known token shapes.
+  RegExp(
+    r'\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|'
+    r'xox[abprs]-[A-Za-z0-9-]{10,})',
+  ),
+];
+
+/// [text] with what looks like a credential replaced by `(redacted)`.
+String redactSecrets(String text) {
+  var out = text;
+  for (final (i, p) in _secretPatterns.indexed) {
+    out = out.replaceAllMapped(p, (m) => i == 1 ? '${m[1]}${m[2]}(redacted)' : '(redacted)');
+  }
+  return out;
+}
+
+/// [value] with every string in it redacted; the same object when nothing changed.
+Object? _redactDeep(Object? value) {
+  switch (value) {
+    case final String s:
+      final r = redactSecrets(s);
+      return r == s ? s : r;
+    case final Map<String, Object?> m:
+      Map<String, Object?>? copy;
+      for (final MapEntry(:key, value: v) in m.entries) {
+        final r = _redactDeep(v);
+        if (!identical(r, v)) (copy ??= {...m})[key] = r;
+      }
+      return copy ?? m;
+    case final List<Object?> l:
+      List<Object?>? copy;
+      for (final (i, v) in l.indexed) {
+        final r = _redactDeep(v);
+        if (!identical(r, v)) (copy ??= [...l])[i] = r;
+      }
+      return copy ?? l;
+    default:
+      return value;
+  }
+}
 
 String _diffText(FileDiff d) {
   if (d.binary) return '(binary)';
@@ -791,7 +936,7 @@ String handoffMessage(Handoff h, {String? fromName}) {
   );
   writeTaggedBlock(b, 'recent-turns', 'The latest turns:', h.recent);
   if (cut != null) {
-    writeTaggedBlock(b, 'cut-turn', _cutLead, _cutText(cut));
+    writeTaggedBlock(b, 'cut-turn', _cutLead, _cutText(cut, transcript: h.transcript.isNotEmpty));
   } else {
     writeTaggedBlock(b, 'last-request', 'What the user asked for last:', h.lastRequest);
   }
@@ -804,25 +949,40 @@ const _cutLead =
     'already ran (results cut short): do not run them again unless a result shows it failed. A call with no result '
     'may not have finished, so check what it did before running it again. The diff so far is in <files> and <git>.';
 
-String _cutText(HandoffCut c) {
-  final b = StringBuffer('Request:\n${c.request}');
-  if (c.calls.isEmpty) {
+/// [transcript]: whether the transcript file was written, so left-out parts
+/// can point at it.
+String _cutText(HandoffCut c, {required bool transcript}) {
+  final b = StringBuffer();
+  if (c.earlier.isEmpty) {
+    b.write('Request:\n${c.request}');
+  } else {
+    b.write("The user's messages in this turn, oldest first (where they differ, the newest decides):");
+    for (final (i, r) in [...c.earlier, c.request].indexed) {
+      b.write('\n\n${i + 1}. $r');
+    }
+  }
+  if (c.calls.isEmpty && c.callsLeftOut == 0) {
     b.write('\n\nNo tool calls were made for it yet.');
     return b.toString();
   }
+  final where = transcript ? 'the transcript file has them' : 'check <files> and <git> for what they did';
   b.write('\n\nCalls already made, oldest first:');
+  if (c.callsLeftOut > 0) b.write('\n\n(${c.callsLeftOut} earlier calls left out to keep this short; $where.)');
   for (final (i, call) in c.calls.indexed) {
-    b.write('\n\n${i + 1}. ${call.call}');
+    b.write('\n\n${c.callsLeftOut + i + 1}. ${call.call}');
     if (call.result.isNotEmpty) {
       b.write('\n${call.result}');
     } else if (!call.finished) {
       b.write('\n(no result came: it may not have finished)');
     } else {
-      b.write('\n(result left out here; it is in the transcript file)');
+      b.write(transcript ? '\n(result left out here; it is in the transcript file)' : '\n(result left out here)');
     }
   }
   if (c.resultsLeftOut > 0) {
-    b.write('\n\n${c.resultsLeftOut} older results were left out to keep this short; the transcript file has them.');
+    b.write(
+      '\n\n${c.resultsLeftOut} older results were left out to keep this short'
+      '${transcript ? '; the transcript file has them' : ''}.',
+    );
   }
   return b.toString();
 }

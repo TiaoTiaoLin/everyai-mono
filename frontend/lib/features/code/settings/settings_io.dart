@@ -71,15 +71,28 @@ Future<CommitStyle> resolveCommitStyle(String projectDir, CommitStyle style) asy
   }
 }
 
-Future<void> excludeFromGit(String workingDir, List<String> patterns) async {
+Future<void> excludeFromGit(String workingDir, List<String> anchored) async {
   final ProcessResult res;
   try {
-    res = await Process.run('git', ['-C', workingDir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
+    res = await Process.run('git', [
+      '-C',
+      workingDir,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+      '--show-prefix',
+    ]);
   } on Object {
     return;
   }
   if (res.exitCode != 0) return;
-  final exclude = File('${(res.stdout as String).trim()}/info/exclude');
+  final out = const LineSplitter().convert(res.stdout as String);
+  if (out.isEmpty) return;
+  // info/exclude patterns are anchored at the repository's top: a session in
+  // a subfolder of the repository gets its folder in front.
+  final prefix = out.length > 1 ? out[1].trim() : '';
+  final patterns = [for (final p in anchored) p.startsWith('/') ? '/$prefix${p.substring(1)}' : p];
+  final exclude = File('${out.first.trim()}/info/exclude');
   final lines = exclude.existsSync() ? await exclude.readAsLines() : <String>[];
   // Earlier versions excluded all of .everyai/, which hid the committed settings.
   final kept = [

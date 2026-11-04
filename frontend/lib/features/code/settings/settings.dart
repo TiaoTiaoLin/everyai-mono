@@ -42,7 +42,8 @@ Future<CommitStyle> resolveCommitStyle(String projectDir, CommitStyle style) =>
     impl.resolveCommitStyle(projectDir, style);
 
 /// Adds [patterns] to the repository's `info/exclude` (shared by its
-/// worktrees). Does nothing outside a git repository.
+/// worktrees). A pattern starting with `/` is relative to [workingDir], which
+/// may be a subfolder of the repository. Does nothing outside a git repository.
 Future<void> excludeFromGit(String workingDir, List<String> patterns) => impl.excludeFromGit(workingDir, patterns);
 
 /// The persona and system-prompt suffix for a session in [projectDir], from

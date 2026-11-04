@@ -362,14 +362,20 @@ class CodeSessionScreen extends ConsumerWidget {
       return;
     }
     final t = ref.read(codeSessionProvider(sessionId)).transcript;
-    final busy = t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty;
+    final working = t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty;
+    // Background forks and research workers on EveryAI stop when it no longer leads.
+    final children = controller.leaveStopsChildren(harness);
+    final busy = working || children;
     final from = _label(ref, info.harness);
     final to = _label(ref, harness);
     if (busy &&
         !await showAdaptiveConfirm(
           context,
           title: 'Stop $from and switch to $to?',
-          message: '$from stops where it is. $to gets the work so far, and the files stay as they are.',
+          message:
+              '${working ? '$from stops where it is. ' : ''}'
+              '${children ? 'Its background forks and researchers stop too. ' : ''}'
+              '$to gets the work so far, and the files stay as they are.',
           confirmLabel: 'Stop and switch',
         )) {
       return;

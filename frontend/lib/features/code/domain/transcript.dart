@@ -690,6 +690,23 @@ final class TranscriptBuilder {
   }
 }
 
+/// Whether [text] (a user-role message, mode and context notes split off)
+/// came from the app or the harness rather than from the user: a compaction
+/// continuation, a phase note, a background task's notification, subagent
+/// reports, a research workflow's reports, or answers to a question card.
+/// [TranscriptBuilder] shows none of these as a [UserTurn]; nor is any of
+/// them a request a handoff finishes.
+bool isHarnessNote(String text) {
+  final t = text.trimLeft();
+  return splitCompacted(t) != null ||
+      t.startsWith('<$researchWorkflowTag') ||
+      parsePhaseNote(t) != null ||
+      parseTaskNotification(t) != null ||
+      parseSubagentReports(t).isNotEmpty ||
+      t.startsWith(answersHeading) ||
+      t.startsWith(answersReasonLead);
+}
+
 /// A short label for a tool step ("Read lib/a.dart", "Ran flutter test").
 String stepTitle(ActionCall call) {
   final path = call.str('path');

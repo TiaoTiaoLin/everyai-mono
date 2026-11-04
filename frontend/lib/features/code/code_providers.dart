@@ -1362,6 +1362,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Events before this are history being replayed, which never raise a loop card.
   bool _live = false;
 
+  /// How long after attaching the session's events count as live (the
+  /// history a reattached harness replays comes first).
+  @visibleForTesting
+  static Duration liveAfter = const Duration(milliseconds: 1500);
+
   /// What earlier leads did, oldest first (a session that switched harness).
   List<LeadSegment> _timeline = const [];
 
@@ -1626,7 +1631,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
       _sub = session.events.listen(_onEvent);
-      Timer(const Duration(milliseconds: 1500), () {
+      Timer(liveAfter, () {
         _live = true;
         // Calls still waiting after the history replayed (an app restart).
         if (ref.mounted) _syncSubagents();
@@ -2309,6 +2314,60 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     return t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty;
   }
 
+  /// Whether a switch to [to] moves the session off the EveryAI harness while
+  /// children of it still work with no card open: background forks and Ultra
+  /// research workers (queued or starting too). They would keep spending, so
+  /// the switch stops them, once the user agrees.
+  bool leaveStopsChildren(String to) {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || isOutsideLead(info.harness, info.workingDir) || !isOutsideLead(to, info.workingDir)) {
+      return false;
+    }
+    return _background.isNotEmpty ||
+        _researchQueue.isNotEmpty ||
+        _researchLaunching > 0 ||
+        _researchStarting != null ||
+        _researchers.any((r) => !_researchReports.containsKey(r.parentCallId));
+  }
+
+  /// Stops the background forks and the research round's workers, and drops
+  /// the queued ones; their reports don't go to the next lead.
+  Future<void> _stopEveryaiChildren() async {
+    _researchQueue.clear();
+    _researchTimer?.cancel();
+    _researchTimer = null;
+    _researchStarting = null;
+    _researchSent = _researchRun;
+    for (final sub in _researchSubs.values) {
+      sub.close();
+    }
+    _researchSubs.clear();
+    final children = {
+      for (final r in _researchers)
+        if (!_researchReports.containsKey(r.parentCallId)) r.id,
+    };
+    for (final MapEntry(key: callId, value: bg) in _background.entries) {
+      children.add(bg.childId);
+      _calls.remove(callId);
+      _childOf.remove(callId);
+      _childSubs.remove(callId)?.close();
+      _childWaiting.remove(callId);
+    }
+    _background.clear();
+    state = state.copyWith(subagentNeedsInput: _childWaiting.isNotEmpty);
+    await Future.wait([
+      for (final c in children)
+        if (ref.exists(codeSessionProvider(c))) ref.read(codeSessionProvider(c).notifier).stop(),
+    ]);
+  }
+
+  /// Whether the session is led by an outside harness now: the research
+  /// workflow (EveryAI's) neither starts workers nor sends reports then.
+  bool get _onOutsideLead {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    return info != null && isOutsideLead(info.harness, info.workingDir);
+  }
+
   /// Stops the run and waits (up to 5 s) until the agent says it stopped.
   /// False while it still runs.
   Future<bool> _stopAndSettle() async {
@@ -2388,6 +2447,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return LeadSwitchOutcome.failed('${target.info.label}: $why');
       }
       if (_busy && (!stopFirst || !await _stopAndSettle())) return const LeadSwitchOutcome.busy();
+      // EveryAI spends nothing once it no longer leads: its background forks
+      // and Ultra researchers stop too (the user agreed, see [leaveStopsChildren]).
+      if (leaveStopsChildren(to)) {
+        if (!stopFirst) return const LeadSwitchOutcome.busy();
+        await _stopEveryaiChildren();
+      }
       if (!ref.mounted) return const LeadSwitchOutcome.failed('The session was closed.');
       final outcome = await _switchLead(sessions.byId(sessionId) ?? info, target, run: run);
       started = run && !outcome.failed;
@@ -2797,14 +2862,18 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// The gateway refused the agent's key (revoked, another account, a reset
   /// dev database): mint a new one, hand it to the agent and run again. Once
   /// per few minutes, so a refusal the new key doesn't fix can't loop.
+  /// An outside lead's auth error is its own login (`/login`), not our key:
+  /// nothing is minted and its turn is not run again (EveryAI spends nothing
+  /// on a session it doesn't lead).
   Future<void> _renewGatewayKey() async {
-    final last = _keyRenewedAt;
-    if (last != null && DateTime.now().difference(last) < const Duration(minutes: 5)) return;
-    _keyRenewedAt = DateTime.now();
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = sessions.byId(sessionId);
     final session = _session;
     if (info == null || session == null || isDemoPath(info.workingDir)) return;
+    if (isOutsideLead(info.harness, info.workingDir)) return;
+    final last = _keyRenewedAt;
+    if (last != null && DateTime.now().difference(last) < const Duration(minutes: 5)) return;
+    _keyRenewedAt = DateTime.now();
     try {
       await ref.read(gatewayKeysProvider).renewAfterRefusal();
       if (!ref.mounted) return;
@@ -3020,6 +3089,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final p = t.phase;
     final workflow = p != null && (p.flow == 'ultra' || p.flow == 'bugfix-ultra');
     if (!workflow || p.phase != Phase.research || _researchStarting == p.run || _researchSent == p.run) return;
+    if (_onOutsideLead) return;
     if (_researchRun != p.run) {
       // A new round: the last one's watchers, queue and reports are done with.
       for (final sub in _researchSubs.values) {
@@ -3072,7 +3142,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
           // The general angles below rather than no research at all.
           reply = '';
         }
-        if (!ref.mounted || _researchRun != run) return;
+        if (!ref.mounted || _researchRun != run || _researchStarting != run || _onOutsideLead) return;
         final angles = parseResearchAngles(reply, bug: bug);
         _researchQueue
           ..clear()
@@ -3105,7 +3175,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       final busy = _researchers.where((r) => !_researchReports.containsKey(r.parentCallId)).length;
       if (busy + _researchLaunching >= maxResearchAtOnce) return;
       final info = sessions.byId(sessionId);
-      if (info == null) return;
+      // Queued angles are EveryAI's: they never start on an outside lead.
+      if (info == null || isOutsideLead(info.harness, info.workingDir)) return;
       final next = _researchQueue.removeAt(0);
       _researchLaunching++;
       try {
@@ -3164,7 +3235,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   void _researchMaybeDone() {
-    if (!ref.mounted || _researchSent == _researchRun || _researchStarting != null) return;
+    if (!ref.mounted || _researchSent == _researchRun || _researchStarting != null || _onOutsideLead) return;
     if (_researchQueue.isNotEmpty || _researchLaunching > 0) return;
     final all = _researchers;
     final ids = {for (final r in all) r.parentCallId, ..._researchReports.keys};
