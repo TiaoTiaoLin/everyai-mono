@@ -31,6 +31,7 @@ dependencies:
   go_router: ^18.1.2
   drift: ^2.35.3
   drift_flutter: ^0.3.1
+  sqlite3: ^3.8.0 # already under drift; reads OpenCode's session DB read-only (resume)
   path_provider: ^2.1.6
   uuid: ^4.6.0
 
