@@ -1701,10 +1701,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     try {
       if (info.leads.isNotEmpty) await _loadTimeline(info);
       _builder.lead = _leadLabel(info.harness);
-      _showBriefing();
       final live = ref.read(_liveProvider);
       final session = _session = live[sessionId] ?? await ref.read(codeSessionsProvider.notifier).attachSession(info);
       live[sessionId] = session;
+      // After attaching: a reopen briefs the agent then, and that is the text to show.
+      _showBriefing();
       await _openContext(info);
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
@@ -2734,6 +2735,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final host = ref.read(hostServerProvider);
     final tokens = ref.read(_hostTokensProvider);
     final oldToken = tokens[sessionId];
+    final oldBriefing = ref.read(_briefingTextsProvider)[sessionId];
     final ready = Completer<void>();
     HarnessSession? live;
     final Handoff handoff;
@@ -2849,6 +2851,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         tokens.remove(sessionId);
       }
       if (outside) await sessions._restoreBriefing(info);
+      final texts = ref.read(_briefingTextsProvider);
+      if (oldBriefing != null) {
+        texts[sessionId] = oldBriefing;
+      } else {
+        texts.remove(sessionId);
+      }
       if (ref.mounted) sessions.update(sessions.byId(sessionId)?.copyWith(leads: info.leads) ?? info);
       return LeadSwitchOutcome.failed('$e');
     }

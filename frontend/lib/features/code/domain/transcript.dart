@@ -171,7 +171,7 @@ final class PlanProposal extends TranscriptItem {
 
   /// The plan as Markdown, for copying.
   String get markdown => [
-    '# $title',
+    if (title.isNotEmpty || !shown) '# $title',
     if (summary.isNotEmpty) '\n$summary',
     if (body.trim().isNotEmpty) '\n${body.trim()}',
     '',

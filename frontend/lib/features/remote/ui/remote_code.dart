@@ -248,8 +248,8 @@ class RemoteSessionScreen extends ConsumerWidget {
         state.mode == AgentMode.plan &&
         !busy &&
         t.openQuestion == null &&
-        t.items.whereType<PlanProposal>().isEmpty &&
-        t.items.lastOrNull is AgentText &&
+        t.items.whereType<PlanProposal>().every((p) => p.shown) &&
+        (t.items.lastOrNull is AgentText || t.items.lastOrNull is PlanProposal) &&
         t.items.whereType<UserTurn>().isNotEmpty;
     final linked = remote.link == RemoteLinkStatus.ready;
     final model = info == null ? null : ref.watch(modelCatalogProvider)[ModelId(info.model)];

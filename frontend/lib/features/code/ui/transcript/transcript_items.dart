@@ -310,7 +310,7 @@ class _ToolView extends StatelessWidget {
 /// "\$ git status".
 TextSpan stepTitleSpan(BuildContext context, ActionCall call, TextStyle base) {
   final span = _titleSpan(context, call, base);
-  if (!call.native || call.nativeName.isEmpty) return span;
+  if (!call.native || call.nativeName.isEmpty || span.toPlainText().contains(call.nativeName)) return span;
   // An outside harness's own word for the tool (Bash, apply_patch), before our title.
   final theme = EveryTheme.of(context);
   return TextSpan(

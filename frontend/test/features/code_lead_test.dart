@@ -604,6 +604,10 @@ void main() {
     expect(host.revoked, isNot(contains('tok2')));
     expect(host.live[info.id], {'tok2'});
     expect(drivers['test']!.specs.single.briefing!.mcpToken, 'tok1');
+    // A fresh container (an app restart) still shows the briefing row, with the text just sent.
+    final notice = stateOf(info.id).transcript.items.whereType<NoticeItem>().first;
+    expect(notice.message, briefingNotice);
+    expect(notice.detail, again.sessionSkill);
   });
 
   test('a reopened session passes the approved MCP servers, minus one named like the app host', () async {

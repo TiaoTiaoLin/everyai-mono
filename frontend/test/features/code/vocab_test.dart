@@ -3,7 +3,8 @@ import 'dart:io';
 import 'package:every_ai/core/platform/platform_kind.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
-import 'package:every_ai/features/code/domain/compaction.dart' show userTextOf;
+import 'package:every_ai/features/code/domain/compaction.dart' show renderStep, userTextOf;
+import 'package:every_ai/features/code/domain/transcript_export.dart' show transcriptSteps;
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart';
@@ -248,5 +249,16 @@ void main() {
       expect(shown, sent);
       expect(shown, contains('demo'));
     });
+  });
+
+  test('a harness plan keeps Plan mode on offer and stays whole in the handoff text', () {
+    final plan = actionEvent(id: 'p', toolName: 'ExitPlanMode', kind: 'ProposedPlanAction', args: {'body': 'x' * 3000});
+    final items = _fold([plan]);
+    final proposal = items.whereType<PlanProposal>().single;
+    expect(proposal.shown, isTrue);
+    expect(proposal.markdown, isNot(startsWith('#  ')));
+    expect(proposal.markdown.startsWith('# '), isFalse);
+    expect(transcriptSteps([plan]), contains('x' * 3000));
+    expect(renderStep(plan), contains('x' * 3000));
   });
 }

@@ -538,7 +538,7 @@ Handoff buildHandoff(
     since: scope.kind == HandoffKind.delta ? since : null,
     staleReason: scope.staleReason,
     approvedPlan: approved,
-    proposedPlan: t.openPlan?.markdown ?? '',
+    proposedPlan: (t.openPlan ?? t.items.whereType<PlanProposal>().where((p) => p.shown).lastOrNull)?.markdown ?? '',
     todos: t.plan,
     openQuestions: [for (final q in t.openQuestion?.questions ?? const <Question>[]) q.question],
     lastRequest: lastRequest,
@@ -653,6 +653,9 @@ const handoffCutRequests = 5;
         replied = false;
         finished = false;
       case ChatMessage(:final text) when text.trim().isNotEmpty:
+        replied = true;
+      case ActionCall(actionKind: 'ProposedPlanAction'):
+        // The harness's plan is its reply.
         replied = true;
       case ActionCall():
         replied = false;

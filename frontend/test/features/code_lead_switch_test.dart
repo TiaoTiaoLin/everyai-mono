@@ -437,6 +437,7 @@ void main() {
       'user@Alpha',
       'Added the toggle.',
       'You hit your 5-hour limit.',
+      'EveryAI briefing',
       'Handoff to Beta',
       'user@Beta',
       'Picked it up.',
