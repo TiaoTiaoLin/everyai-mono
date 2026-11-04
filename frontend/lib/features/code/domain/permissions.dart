@@ -146,7 +146,10 @@ final class PermissionPolicy {
   /// One answer for everything the server is waiting on (it approves or
   /// rejects all pending actions at once): a refusal with the text the
   /// agent reads, approval, or null to ask the user.
-  ({bool accept, String? reason})? decideAll(List<ActionCall> calls, AgentMode mode) {
+  /// [askMcp]: MCP tools that only the mode (Full auto) would run go to the
+  /// user instead; a Max/Ultra flow sets it before the plan is approved,
+  /// since an MCP tool may change things outside the files it gates.
+  ({bool accept, String? reason})? decideAll(List<ActionCall> calls, AgentMode mode, {bool askMcp = false}) {
     if (calls.isEmpty) return null;
     final decisions = [for (final c in calls) (c, decide(c, mode))];
     final blocked = [
@@ -157,6 +160,7 @@ final class PermissionPolicy {
     if (decisions.any((e) => e.$2.source == DecisionSource.plan)) {
       return (accept: false, reason: AgentMode.planRefusal);
     }
+    if (askMcp && decisions.any((e) => isMcpTool(e.$1) && e.$2.source == DecisionSource.mode)) return null;
     if (decisions.every((e) => e.$2.verdict == Verdict.allow)) return (accept: true, reason: null);
     return null;
   }

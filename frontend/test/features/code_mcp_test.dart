@@ -214,6 +214,11 @@ void main() {
       expect(AgentMode.plan.rejects(call), isFalse);
       expect(policy.decide(call, AgentMode.fullAuto).verdict, Verdict.allow);
       expect(policy.decideAll([call], AgentMode.plan), isNull);
+      // Before a Max/Ultra plan is approved, Full auto asks too; an allow rule still runs them.
+      expect(policy.decideAll([call], AgentMode.fullAuto)!.accept, isTrue);
+      expect(policy.decideAll([call], AgentMode.fullAuto, askMcp: true), isNull);
+      const allowed = PermissionPolicy(rules: PermissionRules(allow: ['Mcp(browser_*)']));
+      expect(allowed.decideAll([call], AgentMode.fullAuto, askMcp: true)!.accept, isTrue);
     });
 
     test('Mcp(…) rules allow and deny by tool name', () {

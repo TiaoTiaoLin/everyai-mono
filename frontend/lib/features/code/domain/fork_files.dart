@@ -7,10 +7,20 @@ import 'phases.dart';
 // agent change before its plan is approved.
 
 /// The file [call] writes or edits, as the agent gave it; null for any other action.
-String? writeTarget(ActionCall call) {
-  if (!AgentMode.isFileEdit(call) || AgentMode.isReadOnly(call)) return null;
+/// A patch names its first file here; [writeTargets] has them all.
+String? writeTarget(ActionCall call) => writeTargets(call).firstOrNull;
+
+/// Every file [call] writes or edits: one for a write or an edit, each file
+/// of a patch (added, updated, deleted, or moved and where to). Empty for
+/// any other action.
+List<String> writeTargets(ActionCall call) {
+  if (!AgentMode.isFileEdit(call) || AgentMode.isReadOnly(call)) return const [];
+  if (call.actionKind == 'ApplyPatchAction') {
+    final paths = [...?(call.action['paths'] as List<Object?>?)?.whereType<String>()];
+    if (paths.isNotEmpty) return paths;
+  }
   final path = call.str('file_path').isNotEmpty ? call.str('file_path') : call.str('path');
-  return path.isEmpty ? null : path;
+  return path.isEmpty ? const [] : [path];
 }
 
 /// [path] relative to [dir] (an absolute path inside it, or a relative one);
@@ -58,13 +68,8 @@ Set<String> filesWritten(Iterable<HarnessEvent> events, String dir) {
 
 Set<String> _written(Iterable<HarnessEvent> events, String dir) => {
   for (final e in events)
-    if (e is ActionCall) ...[
-      if (writeTarget(e) case final path?) ?relativeTo(path, dir),
-      // A patch can write several files.
-      if (e.actionKind == 'ApplyPatchAction')
-        for (final p in e.action['paths'] as List<Object?>? ?? const [])
-          if (p is String) ?relativeTo(p, dir),
-    ],
+    if (e is ActionCall)
+      for (final path in writeTargets(e)) ?relativeTo(path, dir),
 };
 
 /// File names a task's text mentions ("index.html", "src/games.js").
@@ -76,11 +81,14 @@ final _fileName = RegExp(r'(?<![\w/.:@-])(?:\.?/)?(?:[\w-]+/)*[\w-]+\.[A-Za-z][A
 /// [owned] maps each running subagent's title to its files, relative to [dir].
 String? waitForSubagent(ActionCall call, Map<String, Set<String>> owned, String dir) {
   if (owned.isEmpty) return null;
-  if (writeTarget(call) case final path?) {
-    final rel = relativeTo(path, dir);
-    if (rel == null) return null;
-    for (final MapEntry(key: title, value: files) in owned.entries) {
-      if (files.contains(rel)) return _wait(rel, title);
+  final targets = writeTargets(call);
+  if (targets.isNotEmpty) {
+    for (final path in targets) {
+      final rel = relativeTo(path, dir);
+      if (rel == null) continue;
+      for (final MapEntry(key: title, value: files) in owned.entries) {
+        if (files.contains(rel)) return _wait(rel, title);
+      }
     }
     return null;
   }
@@ -101,17 +109,20 @@ String _wait(String file, String title) =>
     'its report arrives (its result, or a <task-notification>): work on other files, or end your turn and the '
     'report wakes you. Then read the file again before you change it.';
 
-/// Phases of the Max/Ultra flow in which the project isn't built yet.
+/// Phases of the Max/Ultra flow in which the project isn't built yet. (Bug
+/// fix's reproduce and triage are gated by the harness itself.)
 bool beforeBuild(Phase? phase) => phase == Phase.research || phase == Phase.questions || phase == Phase.plan;
 
 /// Why [call] is refused in [phase] of [flow], before the plan is approved:
 /// it writes a project file (the agent's own `.everyai/` notes are fine).
 String? refusedBeforeBuild(ActionCall call, Phase? phase, String flow, String dir) {
   if (!beforeBuild(phase)) return null;
-  final path = writeTarget(call);
-  if (path == null) return null;
-  final rel = relativeTo(path, dir);
-  if (rel == null || rel == '.everyai' || rel.startsWith('.everyai/')) return null;
+  // Every file of a patch counts, not just its first.
+  final project = [
+    for (final path in writeTargets(call))
+      if (relativeTo(path, dir) case final rel? when rel != '.everyai' && !rel.startsWith('.everyai/')) rel,
+  ];
+  if (project.isEmpty) return null;
   return 'Not written: the $flow flow is in its ${phase!.name} phase, and project files change in Build, once '
       'the plan is approved. Until then write only under .everyai/scratch/ (the plan goes in '
       '.everyai/scratch/plan.md).';

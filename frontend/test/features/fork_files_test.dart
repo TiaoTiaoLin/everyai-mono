@@ -83,6 +83,14 @@ void main() {
     expect(refusedBeforeBuild(_edit('/p/os/index.html'), Phase.build, 'Max', dir), isNull);
     expect(refusedBeforeBuild(_edit('/p/os/index.html'), Phase.reproduce, 'Bug fix', dir), isNull);
     expect(refusedBeforeBuild(_bash('mkdir -p .everyai/scratch'), Phase.research, 'Ultra', dir), isNull);
+    // A patch is refused for any project file it touches, not just its first.
+    final patch = _call({
+      'kind': 'ApplyPatchAction',
+      'path': '/p/os/.everyai/scratch/notes.md',
+      'paths': ['/p/os/.everyai/scratch/notes.md', '/p/os/index.html'],
+    });
+    expect(writeTargets(patch), hasLength(2));
+    expect(refusedBeforeBuild(patch, Phase.plan, 'Max', dir), contains('plan phase'));
 
     expect(subagentBeforeBuild('', Phase.plan, 'Ultra'), contains('Not started'));
     expect(subagentBeforeBuild('researcher', Phase.research, 'Max'), isNull);

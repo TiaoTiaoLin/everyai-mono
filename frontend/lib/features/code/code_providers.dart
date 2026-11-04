@@ -1200,7 +1200,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       unawaited(session?.respond(accept: false, reason: reason).then((_) => session.resume()));
       return;
     }
-    final verdict = policy.decideAll(waiting, state.mode);
+    final verdict = policy.decideAll(waiting, state.mode, askMcp: beforeBuild(t.phase?.phase));
     if (verdict == null) return;
     // Over budget: nothing is approved on its own; the run stops instead.
     if (verdict.accept && !_withinBudget()) {
@@ -1243,7 +1243,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (_isSubagent && isHeldTool(call)) continue;
       final verdict = switch (_mustWait([call], t)) {
         final reason? => (accept: false, reason: reason),
-        null => policy.decideAll([call], state.mode),
+        null => policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase)),
       };
       if (verdict == null) continue;
       // Over budget: nothing is approved on its own; the run stops instead.

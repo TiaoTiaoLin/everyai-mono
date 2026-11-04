@@ -1329,6 +1329,12 @@ final class EveryAISession
           call.name,
           args,
           inScratch: (p) => resolvePath(_spec.workingDir, p).startsWith('${_spec.workingDir}/.everyai/scratch/'),
+          patchPaths: call.name == ToolNames.applyPatch
+              ? [
+                  ...?(patchSummary(args['patch'] as String? ?? '', _spec.workingDir)['paths'] as List<Object?>?)
+                      ?.whereType<String>(),
+                ]
+              : null,
         );
         if (refusal != null) {
           _result(call, actionId, ToolOutput(refusal, isError: true));
