@@ -1061,10 +1061,19 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (!_mirror.isClosed) _mirror.add(event);
     final transcript = _builder.snapshot;
     state = state.copyWith(transcript: transcript);
-    // The batch was answered and has moved on: its per-call answers go.
-    if (_decided.isNotEmpty && transcript.pending.isEmpty && transcript.held.isEmpty) {
-      _decided.clear();
-      state = state.copyWith(decided: const {});
+    // An answer goes with its call's result, and the rest when the run ends.
+    // Not when the batch moves on: a driver that runs each call once it is
+    // allowed (OpenCode) can ask about the next one while the first still
+    // runs, and that one must not be asked about again.
+    final ended = !transcript.running && transcript.pending.isEmpty && transcript.held.isEmpty;
+    final settled = event is ToolResult ? event.actionId : null;
+    if (_decided.isNotEmpty && (ended || _decided.containsKey(settled))) {
+      if (ended) {
+        _decided.clear();
+      } else {
+        _decided.remove(settled);
+      }
+      state = state.copyWith(decided: Map.unmodifiable(_decided));
     }
     // Edits and commands change files: refresh Changes as they land, not just at turn end.
     if (event is ToolResult && editsFiles(event.toolName)) _refreshGitSoon();
