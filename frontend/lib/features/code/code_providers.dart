@@ -52,6 +52,7 @@ import 'domain/transcript.dart';
 import 'gateway_key.dart';
 import 'git/git_service.dart';
 import 'domain/transcript_export.dart';
+import 'drivers/acp/acp_driver.dart' show AcpDriver;
 import 'drivers/briefing/briefing_types.dart' show everyaiServerName;
 import 'drivers/briefing/session_skill.dart';
 import 'drivers/briefing/skill_export.dart';
@@ -672,12 +673,20 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// (subagent, review, fork) started without a briefing, so it reopens without one.
   Future<HarnessSession> attachSession(CodeSessionInfo info) async {
     final harness = await harnessFor(ref, info.workingDir, harness: info.harness);
+    final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
+    // The user's approved MCP servers, as at start (specFor): the app's list for the project found by
+    // its folder, never repository files.
+    final mcp = <String, Object?>{
+      if (!noLocalFolder(project?.path ?? info.workingDir))
+        ...ref.read(codeMcpServersProvider).mcpConfigFor(project?.id),
+    }..remove(everyaiServerName);
     if (harness is! HarnessDriver || info.parentId != null || !isOutsideLead(info.harness, info.workingDir)) {
+      // A child session has no briefing, but an ACP agent still gets the user's servers back.
+      if (harness is AcpDriver && info.parentId != null) return harness.attachWithMcp(info.conversationId, mcp);
       return harness.attach(info.conversationId);
     }
     if (consentProblem(harness.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
     if (harness is! AttachesBriefed) return harness.attach(info.conversationId);
-    final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
     // Whatever token the session had before (a run that ended without its quit hook) ends now.
     await ref.read(hostServerProvider).revokeSession(info.id);
     final briefing = await _brief(
@@ -687,11 +696,6 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       driver: harness,
       model: info.model,
     );
-    // The user's approved MCP servers, as at start: the app's list, never repository files.
-    final mcp = <String, Object?>{
-      if (!noLocalFolder(project?.path ?? info.workingDir))
-        ...ref.read(codeMcpServersProvider).mcpConfigFor(info.projectId),
-    }..remove(everyaiServerName);
     try {
       return await (harness as AttachesBriefed).attachBriefed(info.conversationId, briefing, mcpConfig: mcp);
     } on Object {

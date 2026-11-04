@@ -411,6 +411,21 @@ void main() {
       }
     });
 
+    test('a reopen with an empty server list says nothing about lost servers and forgets them', () async {
+      final r = rig(['opencode/usage_reopen.jsonl']);
+      _stored(r, 'o1', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE', mcp: ['charts']);
+      // A child session reopens without a briefing, with the app's current (now empty) list.
+      final s = await r.driver('acp:opencode', 'opencode').attachWithMcp('o1', const <String, Object?>{});
+      final seen = _Seen(s);
+      await s.send('Hi');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.notices.where((n) => n.contains('without your MCP servers')), isEmpty);
+      await s.close();
+      final meta = jsonDecode(File('${r.dataDir}/acp-sessions/o1/meta.json').readAsStringSync()) as Map;
+      expect(meta['mcpServers'], isEmpty);
+    });
+
     test('attachBriefed with the user\'s MCP servers sends them in session/load; no secret is stored', () async {
       final r = rig(['opencode/reopen_mcp.jsonl']);
       _stored(r, 'o1', 'ses_e5ad81ff1ffeGaamwMA9ctbrrE', mcp: ['charts']);
