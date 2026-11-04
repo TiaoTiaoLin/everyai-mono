@@ -58,7 +58,12 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
   Future<String?>? _path;
 
   @override
-  DriverInfo get info => const DriverInfo(id: 'claude-code', label: 'Claude Code', needsConsent: true);
+  DriverInfo get info => const DriverInfo(
+    id: 'claude-code',
+    label: 'Claude Code',
+    needsConsent: true,
+    installHint: 'npm install -g @anthropic-ai/claude-code',
+  );
 
   @override
   Set<DriverCap> get caps => const {

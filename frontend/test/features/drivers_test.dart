@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
@@ -252,22 +253,22 @@ void main() {
       expect((s.installed, s.path, s.version, s.problem), (true, '/bin/echo', '--version', 'Not built yet.'));
     });
 
-    test('statuses are looked up once, kept, and again after invalidating', () async {
+    test('statuses are looked up once, kept, and again on refresh', () async {
       final ok = _Detecting('a', () async => const DriverStatus(installed: true, version: '1.0'));
       final broken = _Detecting('b', () async => throw StateError('no PATH'));
       final c = ProviderContainer(
         overrides: [
           driverRegistryProvider.overrideWithValue(DriverRegistry({'a': ok, 'b': broken})),
+          preferencesProvider.overrideWithValue(Preferences.inMemory()),
         ],
       );
       addTearDown(c.dispose);
       final first = await c.read(driverStatusesProvider.future);
       expect(first['a']!.version, '1.0');
-      expect(first['b']!.problem, contains('no PATH'));
+      expect(first['b']!.problem, "Couldn't check: Bad state: no PATH");
       await c.read(driverStatusesProvider.future);
       expect(ok.detects, 1);
-      c.invalidate(driverStatusesProvider);
-      await c.read(driverStatusesProvider.future);
+      await c.read(driverStatusesProvider.notifier).refresh();
       expect(ok.detects, 2);
     });
   });

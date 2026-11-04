@@ -29,3 +29,7 @@ Future<DriverStatus> detectCli(
 }) async => const DriverStatus(problem: 'Needs the desktop app.');
 
 Future<void> closeAllDriverProcesses() async {}
+
+Future<void> reloadShellEnv() async {}
+
+Future<void> loadShellEnv() async {}

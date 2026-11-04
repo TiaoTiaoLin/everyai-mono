@@ -49,7 +49,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
   final _live = <String, CodexSession>{};
 
   @override
-  DriverInfo get info => const DriverInfo(id: 'codex', label: 'Codex');
+  DriverInfo get info => const DriverInfo(id: 'codex', label: 'Codex', installHint: 'npm install -g @openai/codex');
 
   /// Not fork or rewind (Codex has thread forks and rollbacks; not wired
   /// yet), not subagents (its own aren't mapped; ours stand in).

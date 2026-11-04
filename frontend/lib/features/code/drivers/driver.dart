@@ -53,6 +53,7 @@ enum DriverCap {
 /// Who a driver is: [id] is the name stored with its sessions
 /// (`CodeSessionInfo.harness`). [needsConsent]: the user agrees to the
 /// vendor's terms before the app drives it (a subscription CLI).
+/// [installHint]: how to install it, shown in Settings when it is missing.
 @immutable
 final class DriverInfo {
   const DriverInfo({
@@ -91,6 +92,22 @@ final class DriverStatus {
 
   DriverStatus withProblem(String? problem) =>
       DriverStatus(installed: installed, path: path, version: version, signedIn: signedIn, problem: problem);
+
+  Map<String, Object?> toJson() => {
+    'installed': installed,
+    if (path != null) 'path': path,
+    if (version != null) 'version': version,
+    if (signedIn != null) 'signedIn': signedIn,
+    if (problem != null) 'problem': problem,
+  };
+
+  factory DriverStatus.fromJson(Map<String, Object?> json) => DriverStatus(
+    installed: json['installed'] == true,
+    path: json['path'] as String?,
+    version: json['version'] as String?,
+    signedIn: json['signedIn'] as bool?,
+    problem: json['problem'] as String?,
+  );
 }
 
 /// A model a driver offers, with the reasoning [efforts] it takes.

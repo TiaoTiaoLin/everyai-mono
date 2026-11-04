@@ -342,27 +342,64 @@ Future<DriverStatus> detectCli(
   if (path == null) return const DriverStatus();
   try {
     final shell = await ShellEnv.load();
-    final res = await Process.run(
-      path,
-      versionArgs,
-      environment: shell.env,
-      stdoutEncoding: const Utf8Codec(allowMalformed: true),
-    ).timeout(const Duration(seconds: 10));
-    final first = '${res.stdout}'.trim().split('\n').first.trim();
+    final process = await Process.start(path, versionArgs, environment: shell.env);
+    unawaited(process.stderr.drain<void>());
+    final out = process.stdout.transform(const Utf8Decoder(allowMalformed: true)).join();
+    try {
+      await process.exitCode.timeout(versionTimeout);
+    } on TimeoutException {
+      // A CLI that waits on a prompt (an update offer) would stay running.
+      process.kill(ProcessSignal.sigkill);
+      return DriverStatus(installed: true, path: path, problem: "$command didn't say its version.");
+    }
+    final first = (await out).trim().split('\n').first.trim();
     return DriverStatus(installed: true, path: path, version: first.isEmpty ? null : first);
   } on Object catch (e) {
     return DriverStatus(installed: true, path: path, problem: "Couldn't run $command: $e");
   }
 }
 
-Future<String?> _which(String command) async {
-  if (command.startsWith('/')) return File(command).existsSync() ? command : null;
-  try {
-    final shell = await ShellEnv.load();
-    final res = await Process.run('/usr/bin/which', [command], environment: shell.env);
-    final path = '${res.stdout}'.trim().split('\n').first.trim();
-    return res.exitCode == 0 && path.isNotEmpty ? path : null;
-  } on Object {
-    return null;
+/// How long `--version` may take before the check gives up on it.
+const versionTimeout = Duration(seconds: 4);
+
+Future<void> reloadShellEnv() => ShellEnv.reload();
+
+Future<void> loadShellEnv() => ShellEnv.load();
+
+Future<String?> _which(String command) async =>
+    findOnPath(command, (await ShellEnv.load()).env[Platform.isWindows ? _windowsPathKey : 'PATH'] ?? '');
+
+String get _windowsPathKey =>
+    Platform.environment.keys.firstWhere((k) => k.toUpperCase() == 'PATH', orElse: () => 'Path');
+
+/// The first file named [command] in the directories of [path] (or
+/// [command] itself when it is a path), without starting a process. On
+/// Windows each [pathExt] extension is tried too. [isFile] tells a file
+/// that can run from a directory or a missing one (tests).
+String? findOnPath(String command, String path, {bool? windows, String? pathExt, bool Function(String path)? isFile}) {
+  final win = windows ?? Platform.isWindows;
+  final runs = isFile ?? (win ? (p) => File(p).existsSync() : _isExecutable);
+  final sep = win ? '\\' : '/';
+  final exts = win
+      ? [
+          '',
+          ...(pathExt ?? Platform.environment['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD')
+              .split(';')
+              .where((e) => e.isNotEmpty),
+        ]
+      : const [''];
+  final named = command.contains('/') || (win && command.contains('\\'));
+  final dirs = named ? const [''] : path.split(win ? ';' : ':').where((d) => d.isNotEmpty);
+  for (final dir in dirs) {
+    for (final ext in exts) {
+      final candidate = named ? '$command$ext' : '${dir.endsWith(sep) ? dir : '$dir$sep'}$command$ext';
+      if (runs(candidate)) return candidate;
+    }
   }
+  return null;
+}
+
+bool _isExecutable(String path) {
+  final stat = FileStat.statSync(path);
+  return stat.type == FileSystemEntityType.file && stat.mode & 0x49 != 0;
 }

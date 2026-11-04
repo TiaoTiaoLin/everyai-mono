@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -573,13 +575,22 @@ class HarnessesSetting extends ConsumerWidget {
                     children: [
                       Text(d.info.label, style: theme.type.callout.medium.tint(theme.text)),
                       Text(switch (statuses) {
-                        AsyncData(:final value) when value[d.info.id] != null => harnessStatusLine(
+                        AsyncValue(:final value?) when value[d.info.id] != null => harnessStatusLine(
                           d.info.id,
                           value[d.info.id]!,
                         ),
                         AsyncError() => "Couldn't check",
                         _ => 'Checking…',
                       }, style: theme.type.caption.tint(theme.textMuted)),
+                      if (statuses.value?[d.info.id] case DriverStatus(installed: false)
+                          when d.info.installHint != null)
+                        AdaptiveSelectionArea(
+                          child: Text(
+                            'To install: ${d.info.installHint}',
+                            key: ValueKey('code-settings.harness.${d.info.id}.hint'),
+                            style: theme.type.caption.mono.tint(theme.textMuted),
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -604,21 +615,35 @@ class HarnessesSetting extends ConsumerWidget {
           ),
         ],
         const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: AdaptiveButton(
-            key: const ValueKey('code-settings.harnesses.refresh'),
-            label: 'Refresh',
-            emphasis: ButtonEmphasis.secondary,
-            onPressed: () => ref
-              ..invalidate(driverStatusesProvider)
-              ..invalidate(driverModelsProvider),
-          ),
+        Row(
+          children: [
+            AdaptiveButton(
+              key: const ValueKey('code-settings.harnesses.refresh'),
+              label: 'Refresh',
+              emphasis: ButtonEmphasis.secondary,
+              onPressed: () {
+                unawaited(ref.read(driverStatusesProvider.notifier).refresh(reloadShell: true));
+                ref.invalidate(driverModelsProvider);
+              },
+            ),
+            if (ref.read(driverStatusesProvider.notifier).checkedAt case final at?) ...[
+              const SizedBox(width: 10),
+              Text(checkedAgo(DateTime.now().difference(at)), style: theme.type.caption.tint(theme.textMuted)),
+            ],
+          ],
         ),
       ],
     );
   }
 }
+
+/// When the harnesses were last checked, in plain words.
+String checkedAgo(Duration ago) => switch (ago.inMinutes) {
+  < 1 => 'Checked just now',
+  1 => 'Checked 1 min ago',
+  < 60 => 'Checked ${ago.inMinutes} min ago',
+  _ => ago.inHours == 1 ? 'Checked 1 hour ago' : 'Checked ${ago.inHours} hours ago',
+};
 
 /// One driver's status in plain words: the version or "Not installed",
 /// whether it is signed in (when known) and what is in the way.
