@@ -254,9 +254,8 @@ const _openCode = AcpProfile._(
 
 // Antigravity CLI: `agy acp` arrived in agy 1.5.0 (its release notes; the
 // ACP registry still lists only the older antigravity-acp 1.4.5). It offers
-// session/resume, not session/load, so no resume here. Consent: Google's
-// Antigravity Additional Terms §6 leave third-party clients open; only a
-// forum reply allows ACP clients.
+// session/resume, not session/load, so no resume here. No consent gate: the
+// owner decided (2026-11-04) that agy ships on consumer logins.
 const _antigravity = AcpProfile._(
   agent: AcpAgent.generic,
   pinned: [
@@ -267,7 +266,6 @@ const _antigravity = AcpProfile._(
   planMode: 'plan',
   signIn: 'Run `agy` in a terminal and sign in, or `agy acp --login` without a browser',
   minVersion: '1.5.0',
-  needsConsent: true,
 );
 
 // GitHub Copilot CLI (docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server).

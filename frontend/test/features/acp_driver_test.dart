@@ -825,7 +825,7 @@ void main() {
       expect(acpProfileOf('copilot').env(null)['COPILOT_ALLOW_ALL'], 'false');
     });
 
-    test('an Antigravity CLI before 1.5.0 shows the version problem; it needs consent', () async {
+    test('an Antigravity CLI before 1.5.0 shows the version problem; it needs no consent', () async {
       final agy = File('${tmp.path}/agy')..writeAsStringSync('#!/bin/sh\necho "agy 1.4.11"\n');
       await Process.run('chmod', ['+x', agy.path]);
       AcpDriver driver() => AcpDriver(
@@ -835,7 +835,7 @@ void main() {
         which: (c) async => agy.path,
         signedIn: () async => false,
       );
-      expect(driver().info.needsConsent, isTrue);
+      expect(driver().info.needsConsent, isFalse);
       final old = await driver().detect();
       expect((old.installed, old.version), (true, 'agy 1.4.11'));
       expect(old.problem, 'Antigravity CLI 1.4.11 is too old: update to 1.5.0 or later.');
