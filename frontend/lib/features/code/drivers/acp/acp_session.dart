@@ -1087,7 +1087,13 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         return xaiQuestionReply;
       case 'exit_plan_mode':
         _flush();
-        _emit(agentMessageEvent(_next('m'), xaiPlanText(p) ?? 'No plan was written yet.'));
+        if (xaiPlanText(p) case final text?) {
+          final (call, result) = planTextEvents(_next('p'), toolName: '${acpToolPrefix}exit_plan_mode', body: text);
+          _emit(call);
+          _emit(result);
+        } else {
+          _emit(agentMessageEvent(_next('m'), 'No plan was written yet.'));
+        }
         return xaiPlanReply;
       default:
         throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');

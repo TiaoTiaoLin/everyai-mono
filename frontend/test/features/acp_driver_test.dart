@@ -1387,16 +1387,25 @@ void main() {
       expect(_replyTo(c, 'q1'), {'outcome': 'cancelled'});
       expect((_replyTo(c, 'p1')! as Map)['outcome'], 'abandoned');
       expect(seen.notices.single, contains('"Which database?"'));
-      expect(seen.messages.map((m) => m.text), contains('1. Add the route\n2. Test it'));
+      // The plan shows as its own card (a call with the text), and never waits for approval.
+      final plan = seen.all.whereType<ActionCall>().singleWhere((a) => a.actionKind == 'ProposedPlanAction');
+      expect(plan.str('body'), '1. Add the route\n2. Test it');
+      expect(plan.nativeName, 'exit_plan_mode');
       // Subagents: one reported at once, one held until subagent_finished.
       final t = _transcript(seen.all);
       final subs = t.items.whereType<SubagentItem>().toList();
       expect(subs.map((i) => i.step.call.action['description']), ['Explore the server', 'Count files']);
       expect(subs.map((i) => i.step.result?.text), ['Found 3 routes.', 'There are 12 files.']);
       // The one in the background is closed as running there first, so no approval lists it.
-      final order = [for (final e in seen.results) e.actionId];
+      final order = [
+        for (final e in seen.results)
+          if (e.toolName != 'acp:exit_plan_mode') e.actionId,
+      ];
       expect(order, ['tc-spawn-1', 'tc-spawn-2', 'tc-spawn-1']);
-      expect(seen.results.first.text, startsWith('Running in the background'));
+      expect(
+        seen.results.firstWhere((e) => e.toolName != 'acp:exit_plan_mode').text,
+        startsWith('Running in the background'),
+      );
       await s.close();
     });
 

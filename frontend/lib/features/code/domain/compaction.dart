@@ -120,7 +120,7 @@ String _between(String text, String open, String close) {
 }
 
 /// The user's text of a message: mode and context notes split off.
-String userTextOf(String raw) => splitContextNotes(splitModeNote(raw).$2).$2;
+String userTextOf(String raw) => splitContextNotes(splitModeNote(splitSessionBlock(raw).$2).$2).$2;
 
 String _userText(String raw) => userTextOf(raw);
 

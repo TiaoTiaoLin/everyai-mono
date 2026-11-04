@@ -252,6 +252,8 @@ const _internalTools = {
     // user approves each one.
     'WebFetch' => (kind: 'ClaudeWebFetchAction', args: {'url': s('url')}),
     'WebSearch' => (kind: 'ClaudeWebSearchAction', args: {'query': s('query')}),
+    // The plan the agent proposes; the approval decides, the card shows it.
+    'ExitPlanMode' => (kind: 'ProposedPlanAction', args: {'body': s('plan')}),
     'TodoWrite' => (
       kind: 'TaskTrackerAction',
       args: {
@@ -266,6 +268,7 @@ const _internalTools = {
                   'in_progress' => 'in_progress',
                   _ => 'todo',
                 },
+                if (t['activeForm'] is String) 'active': t['activeForm'],
               },
         ],
       },

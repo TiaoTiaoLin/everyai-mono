@@ -565,7 +565,11 @@ void main() {
     final c = await open(info.id);
     host.touchOk = false;
     await c.send('go on');
-    expect(stateOf(info.id).transcript.items.whereType<NoticeItem>().single.message, hostToolsExpired);
+    final notices = stateOf(info.id).transcript.items.whereType<NoticeItem>().toList();
+    // The briefing row comes first, with the text the agent was sent.
+    expect(notices.first.message, briefingNotice);
+    expect(notices.first.detail, isNotEmpty);
+    expect(notices.last.message, hostToolsExpired);
   });
 
   test('deleting the session ends its token and its briefing', () async {

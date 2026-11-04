@@ -178,6 +178,7 @@ ToolResult acpRejectedEvent({
         _ => 'todo',
       },
       'notes': '',
+      'priority': ?_str(e['priority']),
     },
 ], id: id);
 
