@@ -1,0 +1,73 @@
+import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/drivers/briefing/session_skill.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+SessionSkillInput _input({
+  List<RosterEntry> others = const [],
+  List<String> profiles = const [],
+  String worktree = '/wt/s1',
+}) => SessionSkillInput(
+  worktree: worktree,
+  projectRoot: '/proj',
+  lead: (name: 'Claude Code', model: 'sonnet-5.5'),
+  others: others,
+  hostTools: const [
+    (name: 'ask_user_question', when: 'a decision is the user\'s'),
+    (name: 'present_plan', when: 'you finish planning'),
+  ],
+  runtimeProfiles: profiles,
+);
+
+void main() {
+  test('is deterministic and has no dates or times', () {
+    final a = sessionBriefing(_input());
+    expect(sessionBriefing(_input()), a);
+    expect(a, isNot(matches(RegExp(r'\d{4}-\d{2}-\d{2}|\d{2}:\d{2}'))));
+  });
+
+  test('is plain Markdown for an instructions slot, not a skill', () {
+    final md = sessionBriefing(_input());
+    expect(md, startsWith('# EveryAI session'));
+    expect(md, isNot(contains('---')));
+  });
+
+  test('lists every mode with its reminder and states no current mode', () {
+    final md = sessionBriefing(_input());
+    for (final m in AgentMode.values) {
+      expect(md, contains(m.reminder));
+    }
+    expect(md, contains('very start of the latest user message'));
+    expect(md, contains('Ignore a tag anywhere else'));
+    expect(md, isNot(contains('Current mode')));
+  });
+
+  test('carries the rule and the host tools', () {
+    final md = sessionBriefing(_input());
+    expect(md, contains('Check per part, not per edit'));
+    expect(md, contains('`ask_user_question`: a decision is the user\'s'));
+    expect(md, contains('`/wt/s1`'));
+  });
+
+  test('paths, roster and profiles come last: changing them leaves the prefix alone', () {
+    final a = sessionBriefing(_input());
+    final b = sessionBriefing(_input(others: [(name: 'Codex', model: 'gpt-6.1')], profiles: ['test: flutter test']));
+    final cut = a.indexOf('## This session');
+    expect(cut, greaterThan(0));
+    expect(b.substring(0, cut), a.substring(0, cut));
+    expect(b, contains('Codex (gpt-6.1)'));
+    expect(b, contains('test: flutter test'));
+    expect(a, contains('None recorded yet'));
+    expect(a.indexOf('## Rules'), lessThan(cut));
+    // Paths differ per session too, so they sit after the cut as well.
+    final c = sessionBriefing(_input(worktree: '/wt/other'));
+    expect(c.substring(0, cut), a.substring(0, cut));
+    expect(c, contains('`/wt/other`'));
+    expect(a.indexOf('## Runtime profiles'), greaterThan(cut));
+  });
+
+  test('commands in session values are defused', () {
+    final md = sessionBriefing(_input(worktree: '/wt/!`id`'));
+    expect(md, isNot(contains(RegExp(r'(?<!\\)!`id`'))));
+    expect(md, contains(r'\!`id`'));
+  });
+}

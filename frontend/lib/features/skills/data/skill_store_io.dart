@@ -160,6 +160,22 @@ Future<String> _digest(List<(String, File)> files) async {
   return sink.value.toString();
 }
 
+/// The digest of files already in memory ([path] relative to the skill folder, bytes): the same hash as the scan's,
+/// so a copy can be checked against the digest a skill was trusted at.
+String digestOfBytes(Iterable<(String, List<int>)> files) {
+  final sink = _DigestSink();
+  final input = sha256.startChunkedConversion(sink);
+  final sorted = [...files]..sort((a, b) => a.$1.compareTo(b.$1));
+  for (final (rel, bytes) in sorted) {
+    input
+      ..add(utf8.encode('$rel\u0000'))
+      ..add(bytes)
+      ..add(const [0]);
+  }
+  input.close();
+  return sink.value.toString();
+}
+
 final class _DigestSink implements Sink<Digest> {
   late Digest value;
   @override
