@@ -20,6 +20,7 @@ import 'package:every_ai/features/models/domain/model_catalog.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
 import 'package:flutter_test/flutter_test.dart';
 
 class _FixedCatalog extends CatalogController {
@@ -27,14 +28,13 @@ class _FixedCatalog extends CatalogController {
   ModelCatalog build() => builtInCatalog;
 }
 
-Future<T> _until<T>(T Function() read, bool Function(T) cond) async {
-  final end = DateTime.now().add(const Duration(seconds: 8));
-  while (true) {
-    final v = read();
-    if (cond(v)) return v;
-    if (DateTime.now().isAfter(end)) throw TimeoutException('condition not met: $v');
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-  }
+/// The first value of [p] that meets [cond], now or when it changes.
+Future<T> _when<T>(ProviderContainer c, ProviderListenable<T> p, bool Function(T) cond) {
+  final done = Completer<T>();
+  final sub = c.listen<T>(p, (_, v) {
+    if (cond(v) && !done.isCompleted) done.complete(v);
+  }, fireImmediately: true);
+  return done.future.whenComplete(sub.close);
 }
 
 /// An outside driver's session: the test plays its events and reads the
@@ -42,6 +42,10 @@ Future<T> _until<T>(T Function() read, bool Function(T) cond) async {
 final class _Session implements HarnessSession {
   final _events = StreamController<HarnessEvent>.broadcast();
   final answers = <({bool accept, String? reason})>[];
+  var _answered = Completer<({bool accept, String? reason})>();
+
+  /// The next answer the controller gives.
+  Future<({bool accept, String? reason})> get nextAnswer => _answered.future;
   final steered = <String>[];
   var _seq = 0;
 
@@ -60,8 +64,17 @@ final class _Session implements HarnessSession {
   void add(HarnessEvent e) => _events.add(e);
 
   @override
-  Future<void> respond({required bool accept, String? reason, List<String>? callIds}) async =>
-      answers.add((accept: accept, reason: reason));
+  Future<void> respond({required bool accept, String? reason, List<String>? callIds}) async {
+    final a = (accept: accept, reason: reason);
+    answers.add(a);
+    if (!_answered.isCompleted) _answered.complete(a);
+  }
+
+  void forgetAnswers() {
+    answers.clear();
+    _answered = Completer();
+  }
+
   @override
   Future<void> send(String text, {bool run = true, List<String> images = const []}) async => steered.add(text);
   @override
@@ -145,7 +158,7 @@ void main() {
       ],
     );
     container.listen(codeSessionProvider('s1'), (_, _) {});
-    await _until(() => container.read(codeSessionProvider('s1')).connected, (c) => c);
+    await _when(container, codeSessionProvider('s1').select((s) => s.connected), (bool c) => c);
     return container.read(codeSessionProvider('s1').notifier);
   }
 
@@ -161,8 +174,12 @@ void main() {
     await tmp.delete(recursive: true);
   });
 
-  Future<({bool accept, String? reason})> answered() =>
-      _until(() => session.answers, (a) => a.isNotEmpty).then((a) => a.single);
+  Future<({bool accept, String? reason})> answered() async {
+    final a = await session.nextAnswer;
+    await pumpEventQueue();
+    expect(session.answers, hasLength(1));
+    return a;
+  }
 
   test('the safety floor holds for an outside driver in Full auto', () async {
     await open(AgentMode.fullAuto);
@@ -183,10 +200,14 @@ void main() {
     await open(AgentMode.ask);
     session.ask('Bash', 'TerminalAction', {'command': 'ls'});
     expect((await answered()).accept, isTrue);
-    session.answers.clear();
+    session.forgetAnswers();
     session.add(resultEvent(id: 'r1', actionId: 'a1', toolName: 'Bash', text: 'README.md'));
     session.ask('Bash', 'TerminalAction', {'command': 'git push'});
-    await _until(() => container.read(codeSessionProvider('s1')).transcript.pending, (p) => p.isNotEmpty);
+    await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s.transcript.pending),
+      (List<ActionCall> p) => p.isNotEmpty,
+    );
     await pumpEventQueue();
     expect(session.answers, isEmpty);
   });
@@ -202,7 +223,11 @@ void main() {
   test('a tool of the driver\'s own is never approved on its own, even in Full auto', () async {
     await open(AgentMode.fullAuto);
     session.ask('Task', 'ClaudeTaskAction', {'prompt': 'look around'});
-    await _until(() => container.read(codeSessionProvider('s1')).transcript.pending, (p) => p.isNotEmpty);
+    await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s.transcript.pending),
+      (List<ActionCall> p) => p.isNotEmpty,
+    );
     await pumpEventQueue();
     expect(session.answers, isEmpty);
   });
@@ -223,7 +248,11 @@ void main() {
         'llm_message': {'role': 'user', 'content': 'hi'},
       }),
     );
-    await _until(() => container.read(codeSessionProvider('s1')).transcript.items, (i) => i.isNotEmpty);
+    await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s.transcript.items),
+      (List<Object> i) => i.isNotEmpty,
+    );
     final out = await controller.rewind(1);
     expect(out.kind, RewindKind.failed);
     expect(out.message, contains("Test CLI can't go back"));

@@ -9,7 +9,9 @@ import '../harness/events.dart';
 
 /// A tool call: [kind] is one of the app's action kinds when the native
 /// tool maps onto one (`TerminalAction {command}`, `FileEditorAction {command,
-/// path}`, `ReadFileAction {path}`, `MCPToolAction`), else the driver's own.
+/// path}`, `ApplyPatchAction {paths}`, `ReadFileAction {path}`,
+/// `MCPToolAction`), else the driver's own. The policy reads those fields:
+/// without them the call always asks the user.
 ActionCall actionEvent({
   required String id,
   required String toolName,

@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:every_ai/features/code/drivers/json_rpc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -31,11 +29,12 @@ void main() {
     final result = await peer.request('initialize', {'protocolVersion': 1, 'cwd': '/work/tree'});
     expect(result, {'agent': 'fake', 'cwd': '/work/tree'});
     expect(channel.sent.first['id'], 1);
-    await _until(() => asked.isNotEmpty && notes.isNotEmpty);
+    await pumpEventQueue();
     expect(notes.single.$1, 'session/update');
     expect(notes.single.$2, {'text': 'hello'});
     expect(asked, ['session/request_permission']);
-    await _until(() => channel.sent.length == 2);
+    await pumpEventQueue();
+    expect(channel.sent, hasLength(2));
     peer.notify('session/cancel');
     await channel.finished;
     channel.expectFinished();
@@ -108,12 +107,4 @@ void main() {
       throwsA(isA<TestFailure>().having((f) => f.message, 'message', contains('line 1: still waiting'))),
     );
   });
-}
-
-Future<void> _until(bool Function() cond) async {
-  final end = DateTime.now().add(const Duration(seconds: 5));
-  while (!cond()) {
-    if (DateTime.now().isAfter(end)) throw TimeoutException('condition not met');
-    await Future<void>.delayed(const Duration(milliseconds: 5));
-  }
 }

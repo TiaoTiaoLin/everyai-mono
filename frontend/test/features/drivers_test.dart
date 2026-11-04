@@ -8,6 +8,7 @@ import 'package:every_ai/features/code/drivers/codex/codex_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/driver_process.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/drivers/everyai_driver.dart';
 import 'package:every_ai/features/code/drivers/opencode/opencode_driver.dart';
@@ -17,6 +18,7 @@ import 'package:every_ai/features/code/harness/everyai/everyai.dart';
 import 'package:every_ai/features/code/harness/everyai/everyai_harness_io.dart';
 import 'package:every_ai/features/code/harness/fake_harness.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
+import 'package:every_ai/features/code/harness/session_processes.dart' show driverRootsOf;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -218,12 +220,35 @@ void main() {
     });
 
     test('only kinds the rules understand are decided without the user', () {
-      ActionCall call(String kind, [String tool = 'Bash']) => actionEvent(id: 'a', toolName: tool, kind: kind);
-      expect(autoDecidable(call('TerminalAction')), isTrue);
-      expect(autoDecidable(call('FileEditorAction', 'Edit')), isTrue);
+      ActionCall call(String kind, [String tool = 'Bash', Map<String, Object?> args = const {}]) =>
+          actionEvent(id: 'a', toolName: tool, kind: kind, args: args);
+      expect(autoDecidable(call('TerminalAction', 'Bash', {'command': 'ls'})), isTrue);
+      expect(autoDecidable(call('FileEditorAction', 'Edit', {'command': 'str_replace', 'path': 'a.dart'})), isTrue);
       expect(autoDecidable(call('MCPToolAction', 'github_search')), isTrue);
       expect(autoDecidable(call('ClaudeTaskAction', 'Task')), isFalse);
       expect(autoDecidable(call('BrowserAction', 'browser')), isFalse);
+    });
+
+    test('a known kind without the fields its rules read asks the user', () {
+      ActionCall call(String kind, Map<String, Object?> args) =>
+          actionEvent(id: 'a', toolName: 'native', kind: kind, args: args);
+      // A patch to an outside or denied path would pass on an empty list.
+      expect(autoDecidable(call('ApplyPatchAction', {'patch': '*** Begin Patch'})), isFalse);
+      expect(autoDecidable(call('ApplyPatchAction', {'patch': '*** Begin Patch', 'paths': <String>[]})), isFalse);
+      expect(
+        autoDecidable(
+          call('ApplyPatchAction', {
+            'paths': ['../../.ssh/authorized_keys'],
+          }),
+        ),
+        isTrue,
+      );
+      // Claude Code's native key instead of ours.
+      expect(autoDecidable(call('WriteFileAction', {'file_path': '/etc/hosts'})), isFalse);
+      expect(autoDecidable(call('FileEditorAction', {'command': 'create', 'file_path': 'a'})), isFalse);
+      expect(autoDecidable(call('EditAction', {'path': ''})), isFalse);
+      expect(autoDecidable(call('ReadFileAction', {})), isFalse);
+      expect(autoDecidable(call('TerminalAction', {'cmd': 'rm -rf /'})), isFalse);
     });
 
     test('event builders give the shapes the transcript reads', () {
@@ -236,5 +261,22 @@ void main() {
         ExecutionStatus.waitingForConfirmation,
       );
     });
+  });
+
+  test('a line sent after the CLI died is dropped, not an uncaught pipe error', () async {
+    final dir = Directory.systemTemp.createTempSync('driver_proc');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final p = await spawnDriver(
+      executable: '/bin/sh',
+      args: ['-c', 'exit 3'],
+      cwd: dir.path,
+      sessionTag: 'dead-cli',
+      logPath: '${dir.path}/log/driver.log',
+    );
+    expect(await p.exitCode, 3);
+    expect(driverRootsOf('dead-cli'), isEmpty);
+    p.send('{"jsonrpc":"2.0","id":1,"result":{}}');
+    await pumpEventQueue();
+    await p.close();
   });
 }

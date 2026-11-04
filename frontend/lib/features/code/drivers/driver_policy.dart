@@ -35,8 +35,20 @@ bool usesOurChildSessions(Set<DriverCap> caps) => !caps.contains(DriverCap.subag
 /// The action kinds the permission policy understands for an outside
 /// driver: commands, file edits and reads, MCP calls, and the app's client
 /// tools. Any other kind is the driver's own tool, which the rules can't
-/// judge, so only the user may approve it.
-bool autoDecidable(ActionCall call) => isClientTool(call) || _knownKinds.contains(call.actionKind);
+/// judge, so only the user may approve it. So is a known kind without the
+/// field its rules read (a patch without `paths`, an edit with its native
+/// `file_path` instead of `path`): judged on nothing, it would pass.
+bool autoDecidable(ActionCall call) {
+  if (isClientTool(call)) return true;
+  if (!_knownKinds.contains(call.actionKind)) return false;
+  bool has(String key) => call.str(key).isNotEmpty;
+  return switch (call.actionKind) {
+    'TerminalAction' => has('command'),
+    'FileEditorAction' || 'EditAction' || 'WriteFileAction' || 'ReadFileAction' => has('path'),
+    'ApplyPatchAction' => (call.action['paths'] as List<Object?>? ?? const []).any((p) => p is String && p.isNotEmpty),
+    _ => true,
+  };
+}
 
 const _knownKinds = {
   'TerminalAction',

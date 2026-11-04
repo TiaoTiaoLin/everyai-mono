@@ -647,6 +647,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     };
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
+      ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
     }
     state = [
       for (final s in state)
@@ -1018,7 +1019,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       return;
     }
     if (!ref.mounted) return;
-    _answered = '';
+    // Only a batch still left for the user is decided again: one answered
+    // before the rules arrived keeps its answer (resetting [_answered] here
+    // sent it a second time while it still showed as pending).
     _autoRespond(state.transcript);
   }
 
@@ -2647,6 +2650,9 @@ bool ownsWorkingDir(CodeSessionInfo info, {CodeSessionInfo? parent}) =>
 bool editsFiles(String toolName) =>
     const {'file_editor', 'terminal', 'str_replace_editor', 'apply_patch'}.contains(toolName);
 
+/// Prefs key prefix of what outside drivers reported per session (see [CodeUsage]).
+const codeUsageReportsPrefix = 'code.usage_reports.';
+
 /// Tokens and spend of a Code session, from the backend's ledger (the gateway
 /// attributes every model call to the session). Demo sessions have none.
 final codeUsageProvider = AsyncNotifierProvider.family<CodeUsage, UsageTotals, String>(CodeUsage.new);
@@ -2657,10 +2663,14 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
   Timer? _debounce;
 
   /// The backend's reading, and what an outside driver reported itself
-  /// (by event id, so history replayed again isn't counted twice).
+  /// (by event id, so history replayed again isn't counted twice). The
+  /// reported part is kept in prefs: no ledger has it, and a compaction into
+  /// a fresh conversation never replays the old one's reports.
   UsageTotals _backend = UsageTotals.zero;
   UsageTotals _reported = UsageTotals.zero;
   final _reportIds = <String>{};
+
+  String get _reportsKey => '$codeUsageReportsPrefix$sessionId';
 
   @override
   Future<UsageTotals> build() async {
@@ -2668,22 +2678,43 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
       _debounce?.cancel();
       _later?.cancel();
     });
+    _loadReports();
     _backend = await _fetch();
     return _backend + _reported;
   }
 
-  /// Adds what a driver says a model call used. A cost on the user's plan
-  /// shows apart; one on their own key counts toward the budget.
+  void _loadReports() {
+    final raw = ref.read(preferencesProvider)[_reportsKey];
+    if (raw == null) return;
+    try {
+      final j = jsonDecode(raw) as Map<String, Object?>;
+      _reported = UsageTotals.fromJson(j['totals'] as Map<String, Object?>? ?? const {});
+      _reportIds.addAll([...?(j['ids'] as List<Object?>?)?.whereType<String>()]);
+    } on Object {
+      // A broken entry counts as none.
+    }
+  }
+
+  /// Adds what a driver says a model call (or turn) used. A cost on the
+  /// user's plan shows apart; one on their own key counts toward the budget.
+  /// The context ring moves only when the report says how full the window is.
   void report(UsageReport r) {
     if (r.id.isNotEmpty && !_reportIds.add(r.id)) return;
     final cost = r.costMicros ?? 0;
-    _reported = _reported.addCall(
+    var next = _reported.addCall(
       prompt: r.input,
       completion: r.output,
       cached: r.cached,
       ownKey: r.onPlan ? 0 : cost,
       plan: r.onPlan ? cost : 0,
+      context: false,
     );
+    if (r.contextTokens case final c?) next = next.withContext(c);
+    _reported = next;
+    ref.read(preferencesProvider)[_reportsKey] = jsonEncode({
+      'totals': _reported.toJson(),
+      'ids': [..._reportIds],
+    });
     state = AsyncData(_backend + _reported);
   }
 

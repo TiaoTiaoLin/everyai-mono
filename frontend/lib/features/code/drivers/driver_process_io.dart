@@ -41,7 +41,14 @@ final class _Process implements DriverProcess {
           ..write(keep);
       }
     }, onDone: () => unawaited(_log.close()));
-    unawaited(_process.exitCode.then((_) => unregisterDriverRoot(_tag, pid)));
+    // A write after the CLI died fails on the pipe; nobody else listens.
+    unawaited(_process.stdin.done.catchError((Object _) {}));
+    unawaited(
+      _process.exitCode.then((_) {
+        _exited = true;
+        unregisterDriverRoot(_tag, pid);
+      }),
+    );
   }
 
   final Process _process;
@@ -49,6 +56,7 @@ final class _Process implements DriverProcess {
   final IOSink _log;
   final _tail = StringBuffer();
   var _closed = false;
+  var _exited = false;
 
   @override
   late final Stream<String> lines = _process.stdout
@@ -67,7 +75,7 @@ final class _Process implements DriverProcess {
 
   @override
   void send(String line) {
-    if (!_closed) _process.stdin.writeln(line);
+    if (!_closed && !_exited) _process.stdin.writeln(line);
   }
 
   @override

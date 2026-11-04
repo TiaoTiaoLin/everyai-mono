@@ -51,6 +51,22 @@ void main() {
     expect(t.sessionProcesses(tag: 'a', workingDir: dir, ownsDir: true, roots: {99}), isEmpty);
   });
 
+  test("a driver CLI's own children are spared; only the shells it runs for tools are signalled", () {
+    // Gemini CLI relaunches itself in a child node process; the agent there
+    // runs tool commands in shells and keeps an MCP server going.
+    final t = ProcessTable([
+      _row(5, 1, '/Applications/EveryAI.app/EveryAI'),
+      _row(50, 5, 'node /opt/homebrew/bin/gemini --acp', tag: 'a'),
+      _row(51, 50, '/opt/homebrew/bin/node /opt/homebrew/lib/gemini.js --acp', tag: 'a'),
+      _row(52, 51, 'bash -c sleep 600', env: false),
+      _row(53, 52, '/bin/sleep 600', env: false),
+      _row(54, 51, 'npx some-mcp-server', tag: 'a'),
+      _row(55, 54, 'node mcp.js', tag: 'a'),
+      _row(56, 51, '-zsh', env: false),
+    ]);
+    expect(t.sessionProcesses(tag: 'a', workingDir: dir, ownsDir: true, roots: {50}), [52, 53, 56]);
+  });
+
   test('driver roots are kept per session until unregistered', () {
     registerDriverRoot('t1', 50);
     registerDriverRoot('t1', 51);

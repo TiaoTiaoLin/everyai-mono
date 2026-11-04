@@ -98,9 +98,11 @@ final class DriverModel {
 /// one:
 /// - a shell command is a `TerminalAction {command}`, a file edit a
 ///   `FileEditorAction {command, path}` (or `WriteFileAction`/`EditAction`
-///   `{path}`), a read a `ReadFileAction {path}`, `GrepAction` or
+///   `{path}`, `ApplyPatchAction {paths}` with every file the patch
+///   touches), a read a `ReadFileAction {path}`, `GrepAction` or
 ///   `GlobAction`, an MCP call an `MCPToolAction`; anything else keeps its
-///   own kind and always asks the user. The native tool name goes in
+///   own kind and always asks the user, and so does a call missing the
+///   field its kind's rules read (`command`, `path`, `paths`). The native tool name goes in
 ///   `tool_name`, and must not be one of the app's client tool names.
 /// - an approval is the call without a result plus a `waiting_for_confirmation`
 ///   state change; `respond(callIds)` maps back to the native reply. A driver

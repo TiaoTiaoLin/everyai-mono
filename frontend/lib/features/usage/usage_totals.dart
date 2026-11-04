@@ -105,6 +105,20 @@ final class UsageTotals {
     lastCompletionTokens: context ? completion : lastCompletionTokens,
   );
 
+  /// The same, with the context window [prompt] + [completion] full.
+  UsageTotals withContext(int prompt, [int completion = 0]) => UsageTotals(
+    calls: calls,
+    promptTokens: promptTokens,
+    completionTokens: completionTokens,
+    cachedTokens: cachedTokens,
+    cacheWriteTokens: cacheWriteTokens,
+    chargedMicros: chargedMicros,
+    ownKeyMicros: ownKeyMicros,
+    planMicros: planMicros,
+    lastPromptTokens: prompt,
+    lastCompletionTokens: completion,
+  );
+
   /// Sums; the context reading comes from [other] when it has one.
   UsageTotals operator +(UsageTotals other) => UsageTotals(
     calls: calls + other.calls,
