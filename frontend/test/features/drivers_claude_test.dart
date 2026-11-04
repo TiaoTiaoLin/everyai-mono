@@ -712,21 +712,16 @@ void main() {
       await three.close();
     });
 
-    test('attachBriefed on a session still open restarts its idle CLI with the new token', () async {
+    test('attachBriefed on a session still open returns it as it is', () async {
       const fresh = DriverBriefing(mcpUrl: 'http://127.0.0.1:7001/mcp', mcpToken: 'tok-new');
       final first = ReplayChannel(_script([_init, _say('Go.'), _done('r1')]));
-      final second = ReplayChannel(_script([_init, _say('Next.'), _done('r2')]));
-      final s = _Spawner([first, second]);
+      final s = _Spawner([first]);
       final d = driver(s);
       final one = await d.start(_spec(message: 'Go.'));
       await _played(first);
       expect(await d.attachBriefed(one.id, fresh), same(one));
-      await one.send('Next.');
-      await _played(second);
-      expect(s.calls, hasLength(2));
-      expect(s.calls[0].env.containsKey(tokenEnvVar), isFalse);
-      expect(s.calls[1].env[tokenEnvVar], 'tok-new');
-      expect(s.calls[1].args, containsAllInOrder(['--resume', one.id]));
+      expect(s.calls, hasLength(1));
+      expect(s.calls.single.env.containsKey(tokenEnvVar), isFalse);
       await one.close();
     });
 
