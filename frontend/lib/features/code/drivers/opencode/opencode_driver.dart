@@ -19,7 +19,7 @@ import 'opencode_session.dart';
 /// reopening one reads its message list back. What [attach] needs besides
 /// the id (the folder, the session's tag) is kept in
 /// `<data>/driver-sessions/opencode/<id>.json`.
-final class OpenCodeDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
+final class OpenCodeDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode, AdoptsNativeSession {
   OpenCodeDriver({
     this.which,
     OpenCodeLauncher? launch,
@@ -203,6 +203,30 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed, StartsInNa
   /// see [attachBriefed].
   @override
   Future<HarnessSession> attach(String conversationId) => _attach(conversationId, null);
+
+  @override
+  Future<String> adoptNative(
+    String nativeId, {
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+  }) async {
+    await _saveRecord(
+      await _dataDir(),
+      nativeId,
+      workingDir: cwd,
+      sessionTag: sessionTag,
+      model: model,
+      effort: effort,
+    );
+    return nativeId;
+  }
+
+  /// A reopen binds with `replay: true`: OpenCode sends the history itself.
+  @override
+  bool get replaysNativeHistory => true;
 
   /// [attach] with a new briefing (the old token was revoked when the session
   /// closed): the new server gets its MCP entry, token and skills in its

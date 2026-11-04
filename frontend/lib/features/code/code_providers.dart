@@ -81,6 +81,8 @@ import 'settings/script_caps.dart';
 import 'settings/settings.dart';
 import 'session_notifications.dart';
 import 'spill/spill.dart';
+import 'resume/past_sessions.dart';
+import 'resume/resume_providers.dart' show resumedJournal, saveResumedHistory;
 import 'uploads/uploads.dart';
 import 'workflows/workflow_bridge.dart'
     show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile, retireJournalFile;
@@ -590,6 +592,64 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     state = [info, ...state];
     _save();
     if (script != null) await ref.read(codeSessionProvider(id).notifier).launchWorkflow(script, task);
+    return info;
+  }
+
+  /// Picks up [past], a conversation [past.harness] keeps for [project]'s folder (started in the CLI on its own,
+  /// or in a session EveryAI no longer lists), as a new session on that harness: in the folder it ran in (the CLI
+  /// keys its sessions by folder, so no new worktree), reopened on the driver's own resume path, briefed like any
+  /// reopen. [history] (read from the harness's files) shows before its next turn, unless the driver replays the
+  /// conversation itself.
+  Future<CodeSessionInfo> resumePast({
+    required CodeProject project,
+    required PastSession past,
+    required AgentMode mode,
+    List<HarnessEvent> history = const [],
+  }) async {
+    final runner = await harnessFor(ref, past.cwd, harness: past.harness);
+    if (runner is! HarnessDriver || runner is! AdoptsNativeSession || !isOutsideLead(past.harness, past.cwd)) {
+      throw HarnessError("This harness can't resume its sessions here.");
+    }
+    final adopt = runner as AdoptsNativeSession;
+    if (consentProblem(runner.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
+    final pick = ref.read(codeLeadProvider).of(past.harness);
+    final model = past.model?.isNotEmpty ?? false ? past.model! : pick.model;
+    final effort = pick.effort.isEmpty ? null : pick.effort;
+    final id = const Uuid().v7();
+    final conversationId = await adopt.adoptNative(
+      past.nativeId,
+      cwd: past.cwd,
+      sessionTag: id,
+      model: model,
+      effort: effort,
+      mode: mode,
+    );
+    if (!adopt.replaysNativeHistory && history.isNotEmpty) {
+      try {
+        await saveResumedHistory(await timelineDir(id), history);
+      } on Object {
+        // Without it the transcript starts at the next turn; the harness still has the whole conversation.
+      }
+    }
+    final baseline = noLocalFolder(past.cwd) ? null : await _baselineFor(past.cwd);
+    final info = CodeSessionInfo(
+      id: id,
+      projectId: project.id,
+      title: titleFor(past.title),
+      conversationId: conversationId,
+      model: model,
+      mode: mode,
+      workingDir: past.cwd,
+      createdAt: DateTime.now(),
+      branch: past.branch ?? baseline?.branch ?? '',
+      baseline: baseline,
+      harness: past.harness,
+      effort: effort ?? '',
+      holdClientTools: true,
+      tier: ref.read(codeSettingsProvider).tier,
+    );
+    state = [info, ...state];
+    _save();
     return info;
   }
 
@@ -1573,6 +1633,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// What earlier leads did, oldest first (a session that switched harness).
   List<LeadSegment> _timeline = const [];
 
+  /// The turns a resumed session had before EveryAI picked it up ([_loadResumed]), and the harness they ran on.
+  List<HarnessEvent> _resumed = const [];
+  String _resumedLead = '';
+
   /// Ids of the current conversation's events already in [_timeline]: a lead
   /// that came back replays them, and they are shown once.
   final _replayed = <String>{};
@@ -1843,6 +1907,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   Future<void> _connect(CodeSessionInfo info) async {
     try {
+      await _loadResumed(info);
       if (info.leads.isNotEmpty) await _loadTimeline(info);
       _builder.lead = _leadLabel(info.harness);
       final live = ref.read(_liveProvider);
@@ -1878,6 +1943,36 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final text = ref.read(_briefingTextsProvider)[sessionId];
     if (text == null || text.isEmpty) return;
     _builder.addNotice(NoticeItem('briefing-${_timeline.length}', briefingNotice, detail: text));
+    _carried = _builder.snapshot.items;
+    state = state.copyWith(transcript: _builder.snapshot);
+  }
+
+  /// A session picked up from a harness's own earlier conversation ([CodeSessions.resumePast]): the turns it
+  /// had before, read from the harness's files, shown first (the driver doesn't replay them).
+  Future<void> _loadResumed(CodeSessionInfo info) async {
+    // Kept after a lead switch too: the journal exists only for a resumed session.
+    if (noLocalFolder(info.workingDir)) return;
+    final List<HarnessEvent> history;
+    final String dir;
+    try {
+      dir = await ref.read(codeSessionsProvider.notifier).timelineDir(sessionId);
+      history = await resumedJournal(dir).read();
+    } on Object {
+      return;
+    }
+    if (history.isEmpty) return;
+    // The conversation came from the first lead: the timeline's first stint, or the lead now when none switched.
+    String first;
+    try {
+      first = (await readTimeline(dir)).firstOrNull?.harness ?? info.harness;
+    } on Object {
+      first = info.harness;
+    }
+    _resumed = history;
+    _resumedLead = first;
+    _builder.lead = _leadLabel(first);
+    history.forEach(_builder.add);
+    _settleSegment();
     _carried = _builder.snapshot.items;
     state = state.copyWith(transcript: _builder.snapshot);
   }
@@ -2975,7 +3070,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       for (final e in _events)
         if (!_replayed.contains(e.id)) e,
     ];
-    final record = [for (final s in _timeline) ...s.events, ...current];
+    final record = [..._resumed, for (final s in _timeline) ...s.events, ...current];
     List<Handoff> stored;
     try {
       stored = await loadHandoffs(dir);
@@ -2988,6 +3083,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final now = DateTime.now();
     var transcript = noLocalFolder(info.workingDir) ? '' : handoffTranscriptPath(now, to);
     final stints = [
+      // What the resumed conversation had before EveryAI picked it up.
+      if (_resumed.isNotEmpty) (lead: _leadLabel(_resumedLead), conversationId: '', events: _resumed),
       for (final s in _timeline) (lead: _leadLabel(s.harness), conversationId: s.conversationId, events: s.events),
       (lead: fromLabel, conversationId: info.conversationId, events: current),
     ];

@@ -20,6 +20,28 @@ Future<String> _out(String dir, List<String> args, {Map<String, String>? env}) a
 
 Future<String> dataDir() async => (await getApplicationSupportDirectory()).path;
 
+Future<List<String>> worktrees(String dir) async {
+  try {
+    final res = await _git(dir, ['worktree', 'list', '--porcelain'], check: false);
+    if (res.exitCode != 0) return const [];
+    return worktreePaths('${res.stdout}');
+  } on Object {
+    return const [];
+  }
+}
+
+/// The paths in `git worktree list --porcelain` output (prunable and bare entries left out).
+List<String> worktreePaths(String porcelain) {
+  final out = <String>[];
+  for (final block in porcelain.split(RegExp(r'\n\s*\n'))) {
+    final lines = block.split('\n');
+    final path = lines.firstWhere((l) => l.startsWith('worktree '), orElse: () => '');
+    if (path.isEmpty || lines.any((l) => l == 'bare' || l.startsWith('prunable'))) continue;
+    out.add(path.substring('worktree '.length).trim());
+  }
+  return out;
+}
+
 Future<String?> repoRoot(String dir) async {
   try {
     final res = await _git(dir, ['rev-parse', '--show-toplevel'], check: false);
