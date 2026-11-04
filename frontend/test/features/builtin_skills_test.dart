@@ -42,6 +42,8 @@ void main() {
       expect(m.body, contains('`$tool`'), reason: tool);
     }
     expect(m.body, contains('run_subagent'));
+    expect(m.body, contains('isolation: "worktree"'));
+    expect(m.description, endsWith('Use when the user picks Max.'));
   });
 
   test('seeding installs once, respects removal and updates on a new digest', () async {

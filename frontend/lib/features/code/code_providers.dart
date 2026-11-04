@@ -190,6 +190,13 @@ const _hostToolInfos = <HostToolInfo>[
   ...maxHostToolInfos,
 ];
 
+/// [_hostToolInfos] for a fork: no Max tools, and no plan (its task is a
+/// plan step).
+final _forkHostToolInfos = [
+  for (final t in _hostToolInfos)
+    if (!maxHostTools.contains(t.name) && t.name != presentPlanTool) t,
+];
+
 /// Ends the outside CLIs and the MCP host when the app quits (provider
 /// disposal doesn't run then). The shell listens to it from app start, so
 /// every CLI is covered, however it was spawned.
@@ -655,6 +662,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     required String model,
     Future<void>? ready,
     bool keepCurrent = false,
+    bool asFork = false,
   }) async {
     if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
     ref.read(driverShutdownProvider);
@@ -675,6 +683,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         workingDir: workingDir,
         driver: driver,
         model: model,
+        asFork: asFork,
       );
       tokens[id] = token.token;
       return DriverBriefing(
@@ -693,13 +702,15 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// Writes session [id]'s briefing folder for [driver] on [model]: our
   /// skills, and the session text. The text names only the lead: it is the
   /// start of a resumed conversation's prompt, so it must not change when
-  /// other harnesses lead meanwhile (the handoff names them).
+  /// other harnesses lead meanwhile (the handoff names them). A fork
+  /// ([asFork]) can't start forks, so its text leaves the Max tools out.
   Future<({String skillDir, String text})> _exportBriefing(
     String id, {
     required String projectDir,
     required String workingDir,
     required HarnessDriver driver,
     required String model,
+    bool asFork = false,
   }) async {
     final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
     final notes = await hostProjectNotes(workingDir);
@@ -709,7 +720,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           worktree: workingDir,
           projectRoot: projectDir,
           lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
-          hostTools: _hostToolInfos,
+          hostTools: asFork ? _forkHostToolInfos : _hostToolInfos,
         ),
       ),
       // Volatile, so last; the memory is text earlier sessions wrote.
@@ -1055,6 +1066,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             driver: driver,
             model: model,
             ready: saved.future,
+            asFork: true,
           );
     Future<HarnessSession> begin(SessionSpec spec) async {
       try {
@@ -3788,7 +3800,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (isOutsideLead(info.harness, info.workingDir) && !isOutsideLead(harness, info.workingDir)) {
       return no(forkOnEveryaiOff(lead));
     }
-    final driver = registry.resolve(harness);
+    // Only a harness the app lists (built in, or installed by the user): `resolve` would make an `acp:` or
+    // `terminal:` driver for any command line the model wrote.
+    final driver = harness == info.harness
+        ? registry.resolve(harness)
+        : registry.listed.where((d) => d.info.id == harness).firstOrNull;
     if (driver == null) return no('there is no harness called "$harness". Leave out harness to fork on $lead.');
     final label = driver.info.label;
     if (harness != info.harness) {
@@ -3898,8 +3914,16 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final forkId = str('fork_id').trim();
     switch (name) {
       case checkForksTool:
-        if (_activeForks.isEmpty) return 'No forks are running. Every fork you started has reported.';
-        return [for (final id in _activeForks.keys) _forkStatus(id)].join('\n\n');
+        // Reports and questions held for the end of an outside lead's turn come with the answer instead.
+        final held = [..._forkNotices];
+        _forkNotices.clear();
+        return [
+          if (_activeForks.isEmpty)
+            held.isEmpty ? 'No forks are running. Every fork you started has reported.' : 'No forks are running.'
+          else
+            for (final id in _activeForks.keys) _forkStatus(id),
+          ...held,
+        ].join('\n\n');
       case answerForkTool:
         if (!_activeForks.containsKey(forkId)) return _noSuchFork(forkId);
         final ok = await ref.read(codeSessionProvider(forkId).notifier).answerFromOrchestrator(str('answer'));
@@ -3963,6 +3987,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (item != null) {
       if (_hostFor(item.call.id) case final wait?) {
         _answerHost(wait, forkAnswerReason(answer));
+        // As in [answer]: the card closes now, not when (or if) the CLI reports the call's result.
+        _builder.settleLocal(item.call.id, const []);
+        state = state.copyWith(transcript: _builder.snapshot);
         return true;
       }
     }

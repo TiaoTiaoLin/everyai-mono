@@ -168,6 +168,15 @@ void main() {
     expect(host.minted, [l.info.id, f.info.id]);
     expect(driver.specs.last.briefing!.mcpToken, isNotEmpty);
     expect(l.session.sent, hasLength(1)); // Only the lead's first message so far.
+    // A fork's briefing leaves out the Max tools and the plan card; the lead's has them.
+    final leadText = driver.specs.first.briefing!.sessionSkill;
+    final forkText = driver.specs.last.briefing!.sessionSkill;
+    expect(leadText, contains('`$forkHostTool`'));
+    expect(leadText, contains('`$presentPlanTool`'));
+    for (final t in [...maxHostTools, presentPlanTool]) {
+      expect(forkText, isNot(contains('`$t`')), reason: t);
+    }
+    expect(forkText, contains('`$askUserQuestionTool`'));
   });
 
   test('the fork\'s final message reaches the lead as one task notification', () async {
@@ -201,6 +210,12 @@ void main() {
     final sent = await hostCall(l.info.id, answerForkTool, {'fork_id': f.info.id, 'answer': 'SQLite'});
     expect(sent.text, startsWith('Sent.'));
     expect(await asked, (text: forkAnswerReason('SQLite'), isError: false));
+    // The fork's card closes now, even though this CLI never reports the call's result.
+    await pumpEventQueue();
+    expect(container.read(codeSessionProvider(f.info.id)).transcript.openQuestion, isNull);
+    expect(container.read(codeSessionProvider(l.info.id)).subagentNeedsInput, isFalse);
+    final again = await hostCall(l.info.id, answerForkTool, {'fork_id': f.info.id, 'answer': 'Postgres'});
+    expect(again.text, startsWith('That fork has no open question'));
   });
 
   test('stop_fork stops the child, and what it did comes as its report', () async {
@@ -230,6 +245,24 @@ void main() {
     expect(notices(l.session), hasLength(1));
   });
 
+  test('check_forks mid-turn gives a busy lead the reports held for its turn end', () async {
+    final l = await lead();
+    final f = await fork(l.info.id);
+    l.session.add(stateEvent('r1', ExecutionStatus.running));
+    await pumpEventQueue();
+    finish(f.session, 'Added the page.');
+    await pumpEventQueue();
+    final out = await hostCall(l.info.id, checkForksTool, const {});
+    expect(out.text, startsWith('No forks are running.'));
+    expect(out.text, isNot(contains('Every fork you started has reported')));
+    expect(parseTaskNotification(out.text.substring(out.text.indexOf('<task-notification>')))!.childId, f.info.id);
+    expect(out.text, contains('Added the page.'));
+    // Already seen, so the turn end sends nothing more.
+    l.session.add(stateEvent('r2', ExecutionStatus.finished));
+    await pumpEventQueue();
+    expect(notices(l.session), isEmpty);
+  });
+
   test('another harness the user allows runs the fork on its own default model', () async {
     final l = await lead();
     final f = await fork(l.info.id, {'task': 'Review the diff', 'harness': 'other', 'worktree': false});
@@ -250,6 +283,10 @@ void main() {
     expect(await refused(l.info.id, {'task': ' '}), contains('task is empty'));
     expect(await refused(l.info.id, {'task': 'x', 'harness': everyaiHarnessName}), forkOnEveryaiOff('Test CLI'));
     expect(await refused(l.info.id, {'task': 'x', 'harness': 'nope'}), contains('no harness called "nope"'));
+    // A command line the model wrote is never run as a harness.
+    for (final made in ['acp:sh -c touch\${IFS}/tmp/pwned', 'terminal:/bin/sh', 'acp:test']) {
+      expect(await refused(l.info.id, {'task': 'x', 'harness': made}), contains('no harness called'), reason: made);
+    }
     expect(await refused(l.info.id, {'task': 'x', 'harness': 'absent'}), contains("isn't installed"));
     expect(await refused(l.info.id, {'task': 'x', 'harness': 'cli'}), contains("Turn on 'Use my own installed CLIs'"));
     for (var i = 0; i < maxConcurrentSubagents - 1; i++) {

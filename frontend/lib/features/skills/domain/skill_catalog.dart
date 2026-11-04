@@ -119,14 +119,24 @@ String? skillStatus(InstalledSkill s, SkillSettings settings, {InstalledSkill? s
   return null;
 }
 
+/// The bundled Max approach skill. It reaches a session only when the
+/// user picks Max for it, never by default (it starts forks).
+const maxSkillName = 'everyai-max';
+
 /// The skills a session in [projectId] gets: active ones, sorted by name so
 /// the prompt stays the same between sessions (a cache-stable prefix). A
 /// trusted project skill wins over a library or shared one of the same name,
 /// and a library skill over a shared one. An untrusted project skill can't
-/// hide the user's own skill.
-List<InstalledSkill> sessionSkills(List<InstalledSkill> all, SkillSettings settings, String? projectId) {
+/// hide the user's own skill. [maxSkillName] is left out unless [max].
+List<InstalledSkill> sessionSkills(
+  List<InstalledSkill> all,
+  SkillSettings settings,
+  String? projectId, {
+  bool max = false,
+}) {
   final byName = <String, InstalledSkill>{};
   for (final s in winnersFor(all, projectId, settings: settings).values) {
+    if (s.name == maxSkillName && !max) continue;
     if (settings.active(s)) byName[s.name] = s;
   }
   return [...byName.values]..sort((a, b) => a.name.compareTo(b.name));

@@ -44,11 +44,13 @@ void main() {
     expect(read('session.md'), sessionMd);
   });
 
-  test('the bundled Max skill is exported for outside harnesses', () async {
+  test('the bundled Max skill is off by default and exported for outside harnesses on Max', () async {
     final lib = '${tmp.path}/library';
     await seedBuiltins(lib, await loadBuiltinSkills());
     final all = await scan((library: lib, shared: null, projects: const []));
-    final active = sessionSkills(all, const SkillSettings(), null);
+    // Off by default: only a session whose workflow is Max gets it.
+    expect(sessionSkills(all, const SkillSettings(), null).map((s) => s.name), isNot(contains(maxSkillName)));
+    final active = sessionSkills(all, const SkillSettings(), null, max: true);
     final r = await exportSkills(session, active, sessionText: sessionMd);
     expect(r.names, contains('everyai-max'));
     final md = read('skills/everyai-max/SKILL.md');

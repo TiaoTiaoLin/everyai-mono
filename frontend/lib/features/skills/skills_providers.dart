@@ -98,14 +98,15 @@ base class NoInstalledSkills extends InstalledSkills {
 }
 
 /// The skills a new Code session in [projectId] gets, read from disk now
-/// so a project skill changed since it was trusted stays out.
-Future<List<InstalledSkill>> codeInstalledSkillsFor(Ref ref, String? projectId) async {
+/// so a project skill changed since it was trusted stays out. The Max skill
+/// comes only with [max] (the session's workflow is Max).
+Future<List<InstalledSkill>> codeInstalledSkillsFor(Ref ref, String? projectId, {bool max = false}) async {
   final projects = [
     for (final p in ref.read(codeProjectsProvider))
       if (p.id == projectId) (id: p.id, path: p.path),
   ];
   final all = await scanSkills(await skillRoots(projects));
-  return sessionSkills(all, ref.read(skillSettingsProvider), projectId);
+  return sessionSkills(all, ref.read(skillSettingsProvider), projectId, max: max);
 }
 
 /// [codeInstalledSkillsFor] as `agent_context.skills`.

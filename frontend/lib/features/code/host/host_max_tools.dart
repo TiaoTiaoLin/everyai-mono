@@ -79,7 +79,8 @@ String hostForkBrief(SubagentTask task) =>
     '${subagentBrief(task)}\n\n'
     'You are a fork: another agent started you for this task, and your final message is your report to it. End '
     'with what you did, what you checked and anything left. If something only that agent or the user can decide '
-    'blocks you, ask with ask_user_question (it reaches that agent). Don\'t start forks.';
+    'blocks you, ask with ask_user_question (it reaches that agent). Don\'t start forks, and don\'t present a '
+    'plan: your task is a step of one.';
 
 /// What a session offers for the Max tools; the session controller
 /// implements it.

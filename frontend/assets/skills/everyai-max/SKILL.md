@@ -1,6 +1,6 @@
 ---
 name: everyai-max
-description: How to take on a large or unclear coding task. Research it, ask the user what only they can decide, present a plan, build it in parallel forks, then verify. Use when the user picks Max, or when the task spans several parts of the code.
+description: How to take on a large or unclear coding task. Research it, ask the user what only they can decide, present a plan, build it in parallel forks, then verify. Use when the user picks Max.
 license: Apache-2.0
 compatibility: Code sessions only (a shell, git and the EveryAI coding tools).
 ---
@@ -8,7 +8,7 @@ compatibility: Code sessions only (a shell, git and the EveryAI coding tools).
 
 This is an approach, not a script. Take the steps in order when the task needs them, skip what it doesn't need, and keep a small task small.
 
-On the EveryAI harness, `fork` is `run_subagent` with `run_in_background: true`. Elsewhere these tools come from the `everyai` MCP server.
+On the EveryAI harness, `fork` is `run_subagent` with `run_in_background: true`, and `worktree` on is `isolation: "worktree"`. Elsewhere these tools come from the `everyai` MCP server.
 
 ## 1. Research
 - Read enough to know which parts of the code the task touches, how they fit, and how the project builds and tests.
