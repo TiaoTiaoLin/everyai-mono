@@ -7,10 +7,10 @@ import '../domain/agent_mode.dart';
 import '../domain/mcp_servers.dart';
 import '../domain/permissions.dart';
 import '../harness/everyai/research_sites.dart' show defaultResearchSites;
-import 'agent_prompt.dart' show HarnessMode, HarnessTier;
+import 'agent_prompt.dart' show HarnessTier;
 import 'script_caps.dart' show ScriptLevel;
 
-export 'agent_prompt.dart' show HarnessMode, HarnessTier;
+export 'agent_prompt.dart' show HarnessTier;
 import '../permissions_providers.dart' show StoredPermissions;
 
 /// Where a Code setting lives. Later layers win: global, then the project,
@@ -46,7 +46,6 @@ final class StoredCodeSettings {
     this.tier = HarnessTier.efficient,
     this.forksIsolated = true,
     this.researchSites = defaultResearchSites,
-    this.harnessMode = HarnessMode.build,
     this.scripts = ScriptLevel.byTier,
     this.ownClis = const {},
   });
@@ -59,10 +58,7 @@ final class StoredCodeSettings {
   /// run_script for sessions started from now on: by tier, or one level.
   final ScriptLevel scripts;
 
-  /// Build or Bug fix, for sessions started from now on.
-  final HarnessMode harnessMode;
-
-  /// The only sites research jobs (Max and Ultra) may fetch from.
+  /// The only sites research jobs (researcher subagents) may fetch from.
   final List<String> researchSites;
 
   /// Efficiency ↔ Quality, for sessions started from now on.
@@ -100,8 +96,6 @@ final class StoredCodeSettings {
 
   StoredCodeSettings withTier(HarnessTier tier) => _copy(tier: tier);
 
-  StoredCodeSettings withHarnessMode(HarnessMode mode) => _copy(harnessMode: mode);
-
   StoredCodeSettings withForksIsolated(bool on) => _copy(forksIsolated: on);
 
   StoredCodeSettings withScripts(ScriptLevel level) => _copy(scripts: level);
@@ -128,12 +122,10 @@ final class StoredCodeSettings {
     HarnessTier? tier,
     bool? forksIsolated,
     List<String>? researchSites,
-    HarnessMode? harnessMode,
     ScriptLevel? scripts,
     Set<String>? ownClis,
   }) => StoredCodeSettings(
     ownClis: ownClis ?? this.ownClis,
-    harnessMode: harnessMode ?? this.harnessMode,
     scripts: scripts ?? this.scripts,
     researchSites: researchSites ?? this.researchSites,
     tier: tier ?? this.tier,
@@ -164,7 +156,6 @@ final class StoredCodeSettings {
         _ => HarnessTier.efficient,
       },
       forksIsolated: !(global is Map<String, Object?> && global['forksIsolated'] == false),
-      harnessMode: HarnessMode.parse(global is Map<String, Object?> ? global['harnessMode'] : null),
       scripts: ScriptLevel.parse(global is Map<String, Object?> ? global['scripts'] : null),
       ownClis: switch (global) {
         {'ownClis': final List<Object?> ids} => {...ids.whereType<String>()},
@@ -197,7 +188,6 @@ final class StoredCodeSettings {
       if (autoCompactPercent != defaultAutoCompactPercent) 'autoCompactPercent': autoCompactPercent,
       if (tier != HarnessTier.efficient) 'harnessTier': tier.name,
       if (!forksIsolated) 'forksIsolated': false,
-      if (harnessMode != HarnessMode.build) 'harnessMode': harnessMode.name,
       if (scripts != ScriptLevel.byTier) 'scripts': scripts.name,
       if (ownClis.isNotEmpty) 'ownClis': [...ownClis]..sort(),
       if (!listEquals(researchSites, defaultResearchSites)) 'researchSites': researchSites,

@@ -32,6 +32,7 @@ import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:every_ai/features/code/workflows/workflow_picker.dart' show WorkflowPick;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -173,13 +174,13 @@ void main() {
     expect(b.sessionSkill, contains('`ask_user_question`'));
     expect(b.sessionSkill, isNot(contains('bug_check')));
     expect(spec.llmApiKey, isEmpty);
-    expect(spec.phaseFlow, isNull);
+    expect(spec.bugCheck, isFalse);
     expect(spec.initialMessage, startsWith('<everyai-mode name="ask">'));
     expect(host.minted, [info.id]);
     expect(info.harness, 'test');
   });
 
-  test('Max is stored as Thorough and Bug fix as Build for an outside lead', () async {
+  test('an outside lead keeps its effort level and the Max workflow', () async {
     final info = await container
         .read(codeSessionsProvider.notifier)
         .start(
@@ -188,10 +189,10 @@ void main() {
           model: '',
           mode: AgentMode.ask,
           harness: 'test',
-          tier: HarnessTier.max,
-          harnessMode: HarnessMode.bugFix,
+          tier: HarnessTier.thorough,
+          workflow: const WorkflowPick.max(),
         );
-    expect((info.tier, info.harnessMode), (HarnessTier.thorough, HarnessMode.build));
+    expect((info.tier, info.workflow), (HarnessTier.thorough, 'max'));
   });
 
   test('every message carries the mode note, in full after a switch', () async {

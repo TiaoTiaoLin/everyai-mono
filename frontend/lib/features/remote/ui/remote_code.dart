@@ -9,10 +9,8 @@ import '../../../core/ui/adaptive_page.dart';
 import '../../../core/ui/every_icons.dart';
 import '../../code/domain/agent_mode.dart';
 import '../../code/domain/code_session.dart';
-import '../../code/domain/phases.dart' show Phase;
 import '../../code/domain/transcript.dart';
 import '../../code/ui/code_composer.dart';
-import '../../code/ui/phase_strip.dart';
 import '../../code/ui/session_view.dart' show StartBuildingBar, StatusPill, TranscriptList;
 import '../../code/ui/transcript/approval_card.dart';
 import '../../code/ui/transcript/retry_row.dart';
@@ -348,11 +346,6 @@ class RemoteSessionScreen extends ConsumerWidget {
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),
                           child: PlanView(tasks: t.plan, compact: true),
-                        ),
-                      if (t.phase case final p? when p.phase != Phase.done)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: PhaseStrip(flow: p.flow, phase: p.phase, stuck: p.stuck),
                         ),
                       if (showStartBuilding)
                         Padding(

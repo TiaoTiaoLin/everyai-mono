@@ -51,9 +51,6 @@ final codeBuiltIns = <SlashCommand>[
     if (stop == null) return showAdaptiveToast(ctx.context, 'The agent is not working.');
     stop();
   }),
-  _code('skip-phase', 'Move a Max or Ultra flow on to its next phase', (ctx, _) {
-    _withSession(ctx, ctx.code?.skipPhase, (f) => f());
-  }),
   _code('cost', 'Show tokens and spend for this session', (ctx, _) {
     _withSession(ctx, ctx.code?.cost, (f) => f());
   }),

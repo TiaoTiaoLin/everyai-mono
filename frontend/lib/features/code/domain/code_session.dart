@@ -3,7 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../git/git_models.dart';
 
 import 'agent_mode.dart';
-import '../settings/agent_prompt.dart' show HarnessMode, HarnessTier;
+import '../settings/agent_prompt.dart' show HarnessTier;
 
 /// A folder the agent works in.
 @immutable
@@ -84,7 +84,6 @@ final class CodeSessionInfo {
     this.ownTag = false,
     this.forkCopy,
     this.tier = HarnessTier.efficient,
-    this.harnessMode = HarnessMode.build,
     this.leads = const {},
     this.pendingHandoff = '',
     this.workflow,
@@ -139,9 +138,8 @@ final class CodeSessionInfo {
   /// The model's reasoning effort ('' for the server default).
   final String effort;
 
-  /// How hard it works (the tier bar); a fork keeps its parent's.
+  /// How hard it works (the effort level); a fork keeps its parent's.
   final HarnessTier tier;
-  final HarnessMode harnessMode;
 
   /// The session-long workflow that is on ('max', the Max approach skill), or
   /// null. Script workflows run once and aren't kept here.
@@ -183,7 +181,6 @@ final class CodeSessionInfo {
     String? model,
     String? effort,
     HarnessTier? tier,
-    HarnessMode? harnessMode,
     String? harness,
     Map<String, LeadRecord>? leads,
     String? pendingHandoff,
@@ -213,7 +210,6 @@ final class CodeSessionInfo {
     // Once merged back, the copy is gone.
     forkCopy: merged ? null : forkCopy,
     tier: tier ?? this.tier,
-    harnessMode: harnessMode ?? this.harnessMode,
     leads: leads ?? this.leads,
     pendingHandoff: pendingHandoff ?? this.pendingHandoff,
     workflow: clearWorkflow ? null : workflow ?? this.workflow,
@@ -248,15 +244,16 @@ final class CodeSessionInfo {
     // Ultra children saved before the flag was kept billed under their own id too.
     ownTag: json['own_tag'] == true || (json['parent_call_id'] as String? ?? '').startsWith('ultra-'),
     forkCopy: ForkCopy.fromJson(json['fork_copy']),
-    tier: HarnessTier.parse(json['tier']),
-    harnessMode: HarnessMode.parse(json['harness_mode']),
+    // Max and Ultra were tiers, and Bug fix a mode: Max is a workflow now, kept on the session; Ultra and Bug
+    // fix run once, so those sessions go on as Thorough with none.
+    tier: json['harness_mode'] == 'bugFix' ? HarnessTier.thorough : HarnessTier.parse(json['tier']),
     leads: {
       if (json['leads'] case final Map<String, Object?> leads)
         for (final MapEntry(:key, :value) in leads.entries)
           if (value case final Map<String, Object?> lead) key: LeadRecord.fromJson(lead),
     },
     pendingHandoff: json['pending_handoff'] as String? ?? '',
-    workflow: json['workflow'] as String?,
+    workflow: json['workflow'] as String? ?? (json['tier'] == 'max' ? 'max' : null),
   );
 
   Map<String, Object?> toJson() => {
@@ -281,7 +278,6 @@ final class CodeSessionInfo {
     if (ownTag) 'own_tag': true,
     if (forkCopy case final f?) 'fork_copy': f.toJson(),
     'tier': tier.name,
-    if (harnessMode != HarnessMode.build) 'harness_mode': harnessMode.name,
     if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
     if (pendingHandoff.isNotEmpty) 'pending_handoff': pendingHandoff,
     'workflow': ?workflow,

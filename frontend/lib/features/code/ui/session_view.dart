@@ -34,8 +34,6 @@ import 'code_composer.dart';
 import 'code_slash_host.dart';
 import 'transcript/files_card.dart';
 import 'code_top_bar.dart';
-import 'phase_strip.dart';
-import '../domain/phases.dart' show Phase;
 import '../panes/panes_providers.dart';
 import 'panes/session_panes.dart';
 import 'transcript/approval_card.dart';
@@ -266,11 +264,6 @@ class CodeSessionScreen extends ConsumerWidget {
                               Padding(
                                 padding: const EdgeInsets.only(bottom: 8),
                                 child: PlanView(tasks: t.plan, compact: true),
-                              ),
-                            if (t.phase case final p? when p.phase != Phase.done)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: PhaseStrip(flow: p.flow, phase: p.phase, stuck: p.stuck),
                               ),
                             if (showStartBuilding)
                               Padding(

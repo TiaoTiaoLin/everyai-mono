@@ -11,9 +11,10 @@ import 'package:uuid/uuid.dart';
 
 import '../../domain/agent_mode.dart';
 import '../../domain/compaction.dart';
-import '../../domain/phases.dart';
+import '../../domain/bug_check.dart';
+import '../../domain/permissions.dart' show cancelledLead;
 import '../../domain/shell_readonly.dart';
-import '../../domain/transcript.dart' show PlanProposal, planApprovedMessage, planApprovedReason;
+import '../../domain/transcript.dart' show PlanProposal, planApprovedReason;
 import '../../domain/subagents.dart' show forkingTaskSpec, subagentRules, taskTool;
 import '../../settings/agent_prompt.dart' show forHeldClientTools;
 import '../events.dart';
@@ -105,14 +106,7 @@ const maxStepsPerRun = 400;
 /// One conversation: its history (OpenAI-style messages), its events, and the
 /// loop that calls the model and runs tools.
 final class EveryAISession
-    implements
-        HarnessSession,
-        AsksAside,
-        HasBackgroundShells,
-        CompactsInPlace,
-        PhasedSession,
-        RetriesModelCalls,
-        PerCallApprovals {
+    implements HarnessSession, AsksAside, HasBackgroundShells, CompactsInPlace, RetriesModelCalls, PerCallApprovals {
   EveryAISession._(this.id, this._spec, this._dir, http.Client? client)
     : _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey, client: client),
       _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell') {
@@ -183,75 +177,25 @@ final class EveryAISession
   /// Of [lastPromptTokens], how many came from the prompt cache (live checks).
   int lastCachedTokens = 0;
 
-  /// The Max or Ultra flow this session runs, or null.
-  late PhaseFlow? _flow = _loadFlow();
+  /// What bug_check learned about the bug (Bug fix agents).
+  late final BugCheckState _bug = _loadBug();
 
-  PhaseFlow? _loadFlow() {
-    final file = File('${_dir.path}/phases.json');
-    if (file.existsSync()) {
+  BugCheckState _loadBug() {
+    // Sessions from before workflows kept the repro in their phase flow's file.
+    for (final name in const ['bug_check.json', 'phases.json']) {
+      final file = File('${_dir.path}/$name');
+      if (!file.existsSync()) continue;
       try {
         final j = jsonDecode(file.readAsStringSync());
-        if (j is Map<String, Object?>) return PhaseFlow.fromJson(j);
+        if (j is Map<String, Object?>) return BugCheckState.fromJson(j);
       } on Object {
-        // A broken file starts the flow over.
+        // A broken file starts over.
       }
     }
-    return PhaseFlow.named(_spec.phaseFlow);
+    return BugCheckState();
   }
 
-  void _saveFlow() {
-    final file = File('${_dir.path}/phases.json');
-    if (_flow case final f?) {
-      file.writeAsStringSync(jsonEncode(f.toJson()));
-    } else if (file.existsSync()) {
-      file.deleteSync();
-    }
-  }
-
-  /// Puts the flow's note for the current phase in the conversation.
-  void _notePhase({bool stuck = false}) {
-    final f = _flow;
-    if (f == null) return;
-    _saveFlow();
-    final eid = _newId();
-    final text = f.note(stuck: stuck);
-    _emit({
-      'kind': 'MessageEvent',
-      'id': eid,
-      'source': 'user',
-      'llm_message': {'role': 'user', 'content': text},
-    });
-    _append({'role': 'user', 'content': text, '_eid': eid});
-  }
-
-  @override
-  Future<void> skipPhase() async {
-    final f = _flow;
-    if (f == null || f.phase == Phase.done) return;
-    f.skip();
-    _notePhase();
-    if (!_looping) unawaited(_run());
-  }
-
-  @override
-  Future<void> setPhaseFlow(String? flow) async {
-    final had = _flow;
-    final next = PhaseFlow.named(flow);
-    _flow = switch ((had, next)) {
-      (final h?, final n?) when h.name == n.name => h,
-      // Max ↔ Ultra (or the Bug fix pair) mid-flow: same flow, other tier;
-      // what was researched, answered and approved stands.
-      (final h?, final n?) when h.bugfix == n.bugfix => h.withUltra(n.ultra),
-      _ => next,
-    };
-    _spec = _withSpec(phaseFlow: flow ?? '');
-    _writeSpec();
-    if (_flow != null && _flow != had) {
-      _notePhase();
-    } else {
-      _saveFlow();
-    }
-  }
+  void _saveBug() => File('${_dir.path}/bug_check.json').writeAsStringSync(jsonEncode(_bug.toJson()));
 
   // ------------------------------------------------- what compaction keeps
 
@@ -406,14 +350,7 @@ final class EveryAISession
     final system = await _systemPrompt();
     _append({'role': 'system', 'content': system});
     if (_spec.initialMessage case final first?) {
-      // The flow's first note follows the task, before the first model call.
-      if (_flow != null) await send(first, run: false, images: _spec.initialImages);
-      if (_flow != null) {
-        _notePhase();
-        if (_spec.runInitial) unawaited(_run());
-      } else {
-        await send(first, run: _spec.runInitial, images: _spec.initialImages);
-      }
+      await send(first, run: _spec.runInitial, images: _spec.initialImages);
     }
   }
 
@@ -519,7 +456,7 @@ final class EveryAISession
     'mcp_config': s.mcpConfig,
     'path_map': s.pathMap,
     'research_sites': ?s.researchSites,
-    'phase_flow': ?s.phaseFlow,
+    if (s.bugCheck) 'bug_check': true,
     'script': ?s.script?.toJson(),
     'review_model': ?s.reviewModel,
   };
@@ -546,7 +483,8 @@ final class EveryAISession
     mcpConfig: (j['mcp_config'] as Map<String, Object?>?) ?? const {},
     pathMap: {for (final e in (j['path_map'] as Map<String, Object?>? ?? const {}).entries) e.key: '${e.value}'},
     researchSites: (j['research_sites'] as List<Object?>?)?.cast<String>(),
-    phaseFlow: j['phase_flow'] as String?,
+    // Bug fix sessions from before workflows named their flow.
+    bugCheck: j['bug_check'] == true || (j['phase_flow'] as String? ?? '').startsWith('bugfix'),
     script: ScriptCaps.fromJson(j['script']),
     reviewModel: j['review_model'] as String?,
   );
@@ -590,7 +528,7 @@ final class EveryAISession
         if (_scripting) runScriptSpec,
         memoryToolSpec,
         ..._mcp.specs,
-        if (!_spec.subagent && (_spec.phaseFlow?.startsWith('bugfix') ?? false))
+        if (_spec.bugCheck)
           {
             'type': 'function',
             'function': {
@@ -662,11 +600,8 @@ final class EveryAISession
     }
   }
 
-  /// How a failed model call is retried: 8 attempts, 15 in a Max or Ultra
-  /// session (long unattended runs ride out an overload).
-  RetryPolicy get retryPolicy =>
-      testRetryPolicy ??
-      RetryPolicy(maxAttempts: const {'max', 'ultra', 'bugfix-ultra'}.contains(_spec.phaseFlow) ? 15 : 8);
+  /// How a failed model call is retried: 8 attempts.
+  RetryPolicy get retryPolicy => testRetryPolicy ?? const RetryPolicy(maxAttempts: 8);
 
   /// Replaces [retryPolicy] in tests (short waits).
   @visibleForTesting
@@ -729,92 +664,16 @@ final class EveryAISession
       'llm_message': {'role': 'user', 'content': content},
     });
     final message = {'role': 'user', 'content': images.isEmpty ? text : content, '_eid': eid};
-    final routed = await _newTask(text) || await _buildNow(text);
-    final moved = (_flow?.onMessage(text) ?? false) || routed;
     if (_looping) {
       // Steering: read before the next model call. A message right after a
       // stop (Option-Enter) is a new instruction, so the run carries on.
       _pauseRequested = false;
       _inbox.add(message);
-      if (moved) _inbox.add({'role': 'user', 'content': _flow!.note(), '_eid': _newId()});
-      if (moved) _saveFlow();
       if (!_arrived.isCompleted) _arrived.complete();
       return;
     }
     _append(message);
-    if (moved) _notePhase();
     if (run) unawaited(_run());
-  }
-
-  /// A message after the flow finished: when it is a new task rather than a
-  /// follow-up to the finished one (the decider tells them apart), the flow
-  /// starts over, and the old plan no longer stands. True when it restarted.
-  Future<bool> _newTask(String text) async {
-    final f = _flow;
-    if (f == null || f.phase != Phase.done || !PhaseFlow.fromUser(text)) return false;
-    final said = userTextOf(text).trim();
-    if (said.isEmpty) return false;
-    final finished = _approvedPlan.isNotEmpty ? _approvedPlan : _firstTask();
-    String cut(String s, int n) => s.length > n ? '${s.substring(0, n)}…' : s;
-    try {
-      final a = await _gateway.decide(
-        '<finished-task>\n${cut(finished, 3000)}\n</finished-task>\n<new-message>\n${cut(said, 3000)}\n</new-message>',
-        const [
-          {
-            'id': 'new_task',
-            'kind': 'bool',
-            'prompt':
-                'An agent finished the task above. Is the new message a different task that needs its own research '
-                'and plan (true), or a follow-up to the finished work: a tweak, fix, extension, question or test of '
-                'it (false)?',
-          },
-        ],
-        sessionTag: _spec.sessionTag,
-        job: 'flow',
-      );
-      if (a['new_task'] != true) return false;
-    } on Object {
-      // Unsure or unreachable: a follow-up, which runs without phases.
-      return false;
-    }
-    f.restart();
-    _approvedPlan = '';
-    _saveState();
-    return true;
-  }
-
-  /// A message while the flow still prepares (research, questions, plan):
-  /// when the user tells the agent to stop preparing and build ("just build
-  /// it"), the flow goes straight to build. Bug fix never skips its proofs.
-  /// True when it moved.
-  Future<bool> _buildNow(String text) async {
-    final f = _flow;
-    if (f == null || f.bugfix || !f.phase.preparing || !PhaseFlow.fromUser(text)) return false;
-    // "Start building" on the plan card is an approval, which onMessage handles.
-    if (text.contains(planApprovedMessage)) return false;
-    final said = userTextOf(text).trim();
-    if (said.isEmpty || said.length > 4000) return false;
-    try {
-      final a = await _gateway.decide(
-        '<phase>${f.phase.label}</phase>\n<message>\n$said\n</message>',
-        const [
-          {
-            'id': 'build_now',
-            'kind': 'bool',
-            'prompt':
-                'An agent is preparing a task in steps (research, questions to the user, a plan for approval). Does '
-                'this message from the user tell it to skip the rest of that and start building right away (true)? '
-                'An answer to a question, a new requirement or a question of their own is false.',
-          },
-        ],
-        sessionTag: _spec.sessionTag,
-        job: 'flow',
-      );
-      if (a['build_now'] != true) return false;
-    } on Object {
-      return false;
-    }
-    return f.buildNow();
   }
 
   /// The session's first task, as the user wrote it.
@@ -901,7 +760,6 @@ final class EveryAISession
     String? llmApiKey,
     int? maxInputTokens,
     bool? vision,
-    String? phaseFlow,
     ScriptCaps? script,
   }) {
     final s = _spec;
@@ -924,7 +782,7 @@ final class EveryAISession
       mcpConfig: s.mcpConfig,
       pathMap: s.pathMap,
       researchSites: s.researchSites,
-      phaseFlow: phaseFlow == null ? s.phaseFlow : (phaseFlow.isEmpty ? null : phaseFlow),
+      bugCheck: s.bugCheck,
       script: script ?? s.script,
       reviewModel: s.reviewModel,
     );
@@ -1092,24 +950,6 @@ final class EveryAISession
         });
         if (reply.toolCalls.isEmpty || wrapUp) {
           if (_inbox.isNotEmpty) continue;
-          // The flow decides whether this turn may end.
-          if (!wrapUp && _flow != null) {
-            switch (_flow!.onTurnEnd()) {
-              case Nudge():
-                _notePhase();
-                continue;
-              case Stuck():
-                _notePhase(stuck: true);
-                _setStatus(ExecutionStatus.paused);
-                return;
-              case EndTurn(:final finished):
-                // The done note closes the phase strip and tells the model follow-ups run free.
-                finished ? _notePhase() : _saveFlow();
-            }
-          }
-          // Out of steps mid-flow: the phase note stays the last word, so the
-          // next message picks up where the flow is.
-          if (wrapUp && (_flow?.phase ?? Phase.done) != Phase.done) _notePhase();
           _setStatus(ExecutionStatus.finished);
           return;
         }
@@ -1246,8 +1086,6 @@ final class EveryAISession
       ..add({'role': 'user', 'content': message, '_eid': eid});
     _rewriteMessages();
     lastPromptTokens = 0;
-    // The summary drops the phase notes: say again where the flow is.
-    if (_flow case final f? when f.phase != Phase.done) _notePhase();
     return true;
   }
 
@@ -1372,24 +1210,6 @@ final class EveryAISession
         _result(call, actionId, ToolOutput(early, isError: true));
         continue;
       }
-      if (args != null && _flow != null) {
-        _flow!.onCall(call.name, args);
-        final refusal = _flow!.gate(
-          call.name,
-          args,
-          inScratch: (p) => resolvePath(_spec.workingDir, p).startsWith('${_spec.workingDir}/.everyai/scratch/'),
-          patchPaths: call.name == ToolNames.applyPatch
-              ? [
-                  ...?(patchSummary(args['patch'] as String? ?? '', _spec.workingDir)['paths'] as List<Object?>?)
-                      ?.whereType<String>(),
-                ]
-              : null,
-        );
-        if (refusal != null) {
-          _result(call, actionId, ToolOutput(refusal, isError: true));
-          continue;
-        }
-      }
       if (args != null && _repeats(call) >= doomRepeats) {
         _result(
           call,
@@ -1424,7 +1244,6 @@ final class EveryAISession
     final denyAll = _denyAll;
     _denyAll = false;
     final approved = <({LlmToolCall call, String actionId})>[];
-    var moved = false;
     for (final (n, w) in waiting.indexed) {
       final verdict = verdicts[n];
       if (verdict.accept) {
@@ -1434,7 +1253,10 @@ final class EveryAISession
       }
       final reason = verdict.reason ?? '';
       if (w.call.name == presentPlanTool && reason.startsWith(planApprovedReason)) _planApproved(w.call);
-      if (_flow?.onAnswer(w.call.name, w.call.args ?? const {}, reason, callId: w.actionId) ?? false) moved = true;
+      // An answered question lets bug_check record a bug (or a fix) only the user could confirm.
+      if (w.call.name == askUserQuestionTool && reason.trim().isNotEmpty && !reason.startsWith(cancelledLead)) {
+        _bug.askedUser = true;
+      }
       _emit({
         'kind': 'UserRejectObservation',
         'id': _newId(),
@@ -1449,8 +1271,6 @@ final class EveryAISession
         '_eid': w.actionId,
       });
     }
-    if (moved) _notePhase();
-    if (_flow != null && approved.length < waiting.length) _saveFlow();
     if (approved.isEmpty && (denyAll || cancel.isCompleted)) {
       // Parked like the agent-server: a refusal the app decided is followed
       // by resume(); the user's own "Deny all" leaves it waiting for them.
@@ -1485,10 +1305,6 @@ final class EveryAISession
       i += batch.length;
     }
     _flushImages();
-    if (_notePhaseAfter) {
-      _notePhaseAfter = false;
-      _notePhase();
-    }
     return false;
   }
 
@@ -1591,11 +1407,11 @@ final class EveryAISession
     );
   }
 
-  /// Bug fix mode's proofs: the harness runs the repro itself, so a fix the
+  /// Bug fix's proofs: the harness runs the repro itself, so a fix the
   /// model only claims doesn't count.
   Future<ToolOutput> _bugCheck(Map<String, Object?> args, Future<void> cancel) async {
-    final f = _flow;
-    if (f == null || !f.bugfix) return const ToolOutput('Error: bug_check is for Bug fix mode.', isError: true);
+    if (!_spec.bugCheck) return const ToolOutput('Error: bug_check is for Bug fix agents.', isError: true);
+    final f = _bug;
     Future<({int exit, String out})> run(String command) async {
       final r = await _tools.run(ToolNames.bash, {'command': command, 'timeout': 300000}, cancel: cancel);
       return (exit: (r.observation['exit_code'] as num?)?.toInt() ?? (r.isError ? 1 : 0), out: r.text);
@@ -1623,15 +1439,17 @@ final class EveryAISession
             observation: const {'repro_match': 'other'},
           );
         }
-        if (f.reproduced(command, expect, shown: shown)) {
-          f.reproFiles
-            ..clear()
-            ..addAll(await _reproSnapshot(command, output: r.out));
+        if (shown) {
+          f
+            ..reproCommand = command
+            ..reproExpect = expect
+            ..reviews = 0
+            ..reproFiles.clear()
+            ..reproFiles.addAll(await _reproSnapshot(command, output: r.out));
           result = ToolOutput(
             'Reproduced: the harness ran it and saw the bug.\n${tail(r.out)}',
             observation: {'repro_match': match},
           );
-          _notePhaseAfter = true;
         } else {
           result = ToolOutput(
             'Not reproduced: the harness ran it and ${expect.isNotEmpty ? 'the output lacks "$expect"' : 'it '
@@ -1641,9 +1459,11 @@ final class EveryAISession
           );
         }
       case 'confirmed_by_user':
-        if (f.confirmedByUser()) {
+        if (f.askedUser) {
+          f
+            ..reproByUser = true
+            ..askedUser = false;
           result = const ToolOutput('Recorded: the user confirmed the bug.');
-          _notePhaseAfter = true;
         } else {
           result = const ToolOutput(
             'Error: ask the user first (ask_user_question) whether what you describe is the bug.',
@@ -1652,9 +1472,7 @@ final class EveryAISession
         }
       case 'triage':
         final hard = args['kind'] == 'hard';
-        f.triage(hard: hard);
         result = ToolOutput('Triaged as ${hard ? 'hard: research it first' : 'simple: plan the fix'}.');
-        _notePhaseAfter = true;
       case 'verify':
         if (f.reproByUser) {
           if (!f.askedUser) {
@@ -1664,10 +1482,11 @@ final class EveryAISession
             );
           }
           f.askedUser = false;
-          f.verified(gone: true);
           result = const ToolOutput('Verified by the user.');
-          _notePhaseAfter = true;
           break;
+        }
+        if (f.reproCommand.isEmpty) {
+          return const ToolOutput('Error: reproduce the bug first (bug_check reproduced).', isError: true);
         }
         // The repro has to pass as it was: a test edited into passing proves nothing.
         final changed = f.changedReproFiles(
@@ -1699,8 +1518,8 @@ final class EveryAISession
         final clean = marked ? !r.out.contains(f.reproExpect) : r.exit == 0;
         final other = !clean && !marked && await _reproMatch(f.reproCommand, r.out, afterFix: true) == 'other';
         final gone = clean || other;
-        final moved = f.verified(gone: gone);
         if (gone) {
+          f.reviews = 0;
           final caveat = r.exit == 0
               ? ''
               : other
@@ -1713,10 +1532,11 @@ final class EveryAISession
             observation: {'repro_exit': r.exit},
           );
         } else {
+          f.failedFixes++;
           result = ToolOutput(
-            moved
+            f.failedFixes % 2 == 0
                 ? 'Still failing, after ${f.failedFixes} fixes. Stop trying variations: the cause is not '
-                      'understood yet. The flow goes back to research: find how others fixed this, then plan again.'
+                      'understood yet. Go back to research: find how others fixed this, then plan again.'
                       '\n${tail(r.out)}'
                 : 'Still failing: the harness ran the repro and the bug is still there. Do not try another variation; '
                       'rethink the cause from the evidence. If you are sure the check is wrong (the failure is not this '
@@ -1725,7 +1545,6 @@ final class EveryAISession
             isError: true,
           );
         }
-        if (moved) _notePhaseAfter = true;
       case 'review':
         final claim = args['claim'] as String? ?? '';
         final evidence = (args['evidence'] as String? ?? args['why'] as String? ?? '').trim();
@@ -1735,9 +1554,9 @@ final class EveryAISession
         if (evidence.isEmpty) {
           return const ToolOutput('Error: give your evidence: why the harness\'s check is wrong here.', isError: true);
         }
-        if (f.reviews >= PhaseFlow.maxReviews) {
+        if (f.reviews >= BugCheckState.maxReviews) {
           return const ToolOutput(
-            'Not reviewed: this step was reviewed ${PhaseFlow.maxReviews} times already. Ask the user '
+            'Not reviewed: this step was reviewed ${BugCheckState.maxReviews} times already. Ask the user '
             '(ask_user_question) how to go on, or rethink the cause.',
             isError: true,
           );
@@ -1758,24 +1577,24 @@ final class EveryAISession
           );
           break;
         }
+        f.reviews = 0;
         if (claim == 'reproduced') {
-          f.reproduced(command, '', shown: true);
-          f.reproFiles
-            ..clear()
-            ..addAll(await _reproSnapshot(command, output: r?.out ?? ''));
+          f
+            ..reproCommand = command
+            ..reproExpect = ''
+            ..reproFiles.clear()
+            ..reproFiles.addAll(await _reproSnapshot(command, output: r?.out ?? ''));
         } else {
           f.askedUser = false;
-          f.verified(gone: true);
         }
         result = ToolOutput(
           'Accepted by review (${verdict.model}): ${verdict.reason}',
           observation: {'reviewer': verdict.model},
         );
-        _notePhaseAfter = true;
       default:
         return ToolOutput('Error: unknown bug_check action "$action".', isError: true);
     }
-    _saveFlow();
+    _saveBug();
     return result;
   }
 
@@ -1841,7 +1660,7 @@ final class EveryAISession
             if (line.length > 3) line.substring(3).split(' -> ').last.replaceAll('"', ''),
       };
       if (r.exitCode == 0) {
-        for (final p in const LineSplitter().convert('${r.stdout}').where(PhaseFlow.isReproPath).take(5000)) {
+        for (final p in const LineSplitter().convert('${r.stdout}').where(BugCheckState.isReproPath).take(5000)) {
           if (dirty.contains(p) || (output.isNotEmpty && output.contains(p.split('/').last))) paths.add(p);
         }
       }
@@ -1852,7 +1671,7 @@ final class EveryAISession
     if (scratch.existsSync()) {
       for (final e in scratch.listSync(recursive: true).whereType<File>().take(500)) {
         final rel = e.path.substring(root.length + 1);
-        if (PhaseFlow.isReproPath(rel)) paths.add(rel);
+        if (BugCheckState.isReproPath(rel)) paths.add(rel);
       }
     }
     for (final word in command.split(RegExp(r'\s+'))) {
@@ -1965,9 +1784,6 @@ final class EveryAISession
       if (File('${_spec.workingDir}/$p') case final f when f.existsSync())
         p: sha256.convert(f.readAsBytesSync()).toString().substring(0, 24),
   };
-
-  /// A bug_check moved the flow: its note follows this turn's results.
-  bool _notePhaseAfter = false;
 
   void _result(LlmToolCall call, String actionId, ToolOutput out) {
     _emit({
