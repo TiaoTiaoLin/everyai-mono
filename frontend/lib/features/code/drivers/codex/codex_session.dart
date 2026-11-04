@@ -100,7 +100,10 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   var _starting = 0;
   var _stopAsked = false;
   Completer<void>? _started;
-  Map<String, Object?>? _rateLimits;
+
+  /// The rate-limit snapshots by `limitId`, and the one updated last.
+  final _rateLimits = <String, Map<String, Object?>>{};
+  String? _lastLimit;
   CodexTokens? _total;
   var _status = ExecutionStatus.idle;
   var _closing = false;
@@ -134,10 +137,15 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     final reply = await codexHandshake(_peer);
     // Recorded signed in with ChatGPT: `{type: chatgpt, email, planType,
     // workspaceName}` (a free plan too: its use isn't billed per token).
-    _onPlan = switch (reply['account']) {
-      {'type': 'chatgpt'} => true,
-      _ => false,
-    };
+    // The other account types are billed per token; with no account the
+    // account/updated notice that came first (recorded) has the say, as
+    // the auth modes with no account type (headers, ...) only show there.
+    switch (reply['account']) {
+      case {'type': 'chatgpt'}:
+        _onPlan = true;
+      case {'type': String()}:
+        _onPlan = false;
+    }
     for (final r in initRequests) {
       try {
         await _peer.request(r.method, r.params, codexSetupTimeout);
@@ -554,20 +562,25 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       case 'thread/tokenUsage/updated':
         _usage(params);
       case 'account/updated':
-        // Sent before the account/read reply too (recorded); a sign-in or
-        // sign-out later changes how usage counts.
-        if (params['authMode'] case final String mode) _onPlan = mode == 'chatgpt' || mode == 'chatgptAuthTokens';
+        // Sent before the account/read reply too (recorded); a sign-in,
+        // a switch to an API key or a sign-out (authMode null) later
+        // changes how usage counts.
+        _onPlan = codexAuthOnPlan(params['authMode']);
       case 'account/rateLimits/updated':
         // Sparse: a field left out keeps what came before. Core sends one
         // just before a usage-limit error (core/src/session/turn.rs lines
         // 1846-1851, app-server/src/bespoke_event_handling.rs lines
         // 1637-1645 @ rust-v0.166.0).
+        // Each snapshot is one limit's (`limitId`, "codex" in every
+        // recording), so limits are kept apart.
         if (params['rateLimits'] case final Map<String, Object?> update) {
-          _rateLimits = {
-            ...?_rateLimits,
+          final id = update['limitId'] as String? ?? 'codex';
+          _rateLimits[id] = {
+            ...?_rateLimits[id],
             for (final e in update.entries)
               if (e.value != null) e.key: e.value,
           };
+          _lastLimit = id;
         }
       case 'error':
         // Retries (willRetry: true, "Reconnecting... n/5") aren't shown.
@@ -648,7 +661,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   /// A usage limit (with when it lifts, from the last rate-limit snapshot)
   /// or a plain failure, by Codex's `codexErrorInfo`.
   HarnessEvent _failureOf(String message, Object? info) => codexUsageLimit(info)
-      ? usageLimitEvent(_newId(), message, resetsAt: codexLimitResetsAt(_rateLimits))
+      ? usageLimitEvent(_newId(), message, resetsAt: codexLimitResetsAtOf(_rateLimits, _lastLimit))
       : _failure(message);
 
   void _usage(Map<String, Object?> params) {

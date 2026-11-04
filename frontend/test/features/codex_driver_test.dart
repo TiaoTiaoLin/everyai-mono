@@ -6,6 +6,7 @@
 // UNVERIFIED, hand-built in the 0.166.0 shapes: turn_extras (picture, reasoning summary, plan),
 // file_change_refused, server_requests, usage_limit and models_paged. The recording tools and steps are described
 // in docs/research/batches/multi-harness/run3/x2.md.
+import 'dart:async';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
@@ -46,6 +47,45 @@ List<String> _turnStarts(ReplayChannel c) => [
   for (final m in c.sent)
     if (m['method'] == 'turn/start') (((m['params']! as Map)['input'] as List).first as Map)['text'] as String,
 ];
+
+/// [inner]'s lines, with the one [held] matches handed on together with the
+/// line after it, as Codex writes a reply and the notice after it in one read.
+final class _Burst implements LineChannel {
+  _Burst(this.inner, this.held) {
+    inner.lines.listen(
+      (line) {
+        if (_waiting case final w?) {
+          _waiting = null;
+          _out
+            ..add(w)
+            ..add(line);
+        } else if (held(line)) {
+          _waiting = line;
+        } else {
+          _out.add(line);
+        }
+      },
+      onDone: () {
+        if (_waiting case final w?) _out.add(w);
+        _out.close();
+      },
+    );
+  }
+
+  final ReplayChannel inner;
+  final bool Function(String line) held;
+  final _out = StreamController<String>(sync: true);
+  String? _waiting;
+
+  @override
+  Stream<String> get lines => _out.stream;
+  @override
+  void send(String line) => inner.send(line);
+  @override
+  String get lastError => inner.lastError;
+  @override
+  Future<void> close() => inner.close();
+}
 
 typedef _Spawned = ({List<String> args, String cwd, Map<String, String> env, String sessionTag});
 
@@ -104,19 +144,49 @@ void main() {
 
   group('mapping', () {
     test('every mode lets Codex ask and the app answer; no sandbox outside Plan, Plan read-only with network', () {
-      List<Object?> flat(CodexPolicy p) => [p.approvalPolicy, p.sandbox, p.sandboxPolicy];
+      List<Object?> flat(CodexPolicy p) => [p.approvalPolicy, p.approvalsReviewer, p.sandbox, p.sandboxPolicy];
       expect(flat(codexPolicy(AgentMode.plan)), [
         'untrusted',
+        'user',
         'read-only',
         {'type': 'readOnly', 'networkAccess': true},
       ]);
+      // The thread is read-only in every mode (a writable thread/start marks the
+      // project trusted in the user's Codex config); the turn carries the sandbox.
       for (final m in [AgentMode.ask, AgentMode.autoEdit, AgentMode.fullAuto]) {
         expect(flat(codexPolicy(m)), [
           'untrusted',
-          'danger-full-access',
+          'user',
+          'read-only',
           {'type': 'dangerFullAccess'},
         ], reason: m.name);
       }
+    });
+
+    test('usage counts on a plan for the auth modes Codex serves itself, not for API keys or signed out', () {
+      for (final m in ['chatgpt', 'chatgptAuthTokens', 'headers', 'agentIdentity', 'personalAccessToken']) {
+        expect(codexAuthOnPlan(m), isTrue, reason: m);
+      }
+      for (final m in ['apikey', 'apiKey', 'bedrockApiKey', 'bedrockAccessKeys', null, 42]) {
+        expect(codexAuthOnPlan(m), isFalse, reason: '$m');
+      }
+    });
+
+    test('usage-limit reset time: the limit updated last, else the latest used-up one of the others', () {
+      Map<String, Object?> snap(String id, int used, int at) => {
+        'limitId': id,
+        'primary': {'usedPercent': used, 'resetsAt': at},
+      };
+      final a = snap('codex', 100, 1000);
+      final b = snap('codex_other', 10, 5000);
+      final at = codexLimitResetsAtOf({'codex': a, 'codex_other': b}, 'codex_other');
+      expect(at, DateTime.fromMillisecondsSinceEpoch(1000 * 1000, isUtc: true));
+      expect(
+        codexLimitResetsAtOf({'codex': a, 'codex_other': snap('codex_other', 100, 3000)}, 'codex_other'),
+        DateTime.fromMillisecondsSinceEpoch(3000 * 1000, isUtc: true),
+      );
+      expect(codexLimitResetsAtOf({'codex': snap('codex', 5, 1000)}, 'codex'), isNull);
+      expect(codexLimitResetsAtOf({}, null), isNull);
     });
 
     test('commands run through a shell are unwrapped; anything else is left alone', () {
@@ -295,6 +365,29 @@ void main() {
       await s.close();
     },
   );
+
+  test('a switch to an API key or a sign-out mid-session: the next usage is billed per token', () async {
+    for (final mode in ['"apikey"', 'null']) {
+      final lines = File('$_fixtures/turn.jsonl').readAsLinesSync();
+      final at = lines.indexWhere((l) => l.contains('"method":"thread/tokenUsage/updated"'));
+      final channel = ReplayChannel(
+        [
+          ...lines.take(at),
+          '{"dir":"in","msg":{"method":"account/updated","params":{"authMode":$mode,"planType":null}}}',
+          ...lines.skip(at),
+        ].join('\n'),
+      );
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final events = _listen(s);
+      await s.send('reply OK');
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      final usage = events.whereType<UsageReport>().single;
+      expect((usage.input, usage.onPlan), (12910, false), reason: mode);
+      await s.close();
+    }
+  });
 
   test('a turn (recorded): streamed text, the answer, usage on the ChatGPT plan, finished', () async {
     final channel = _fixture('turn');
@@ -715,24 +808,19 @@ ${_upTo('resume', '"id":2,"result"')}
     final lines = File('$_fixtures/approve_command.jsonl').readAsLinesSync();
     final cut = lines.indexWhere((l) => l.contains('requestApproval'));
     final dead = ReplayChannel([...lines.take(cut + 1), '{"dir":"eof"}'].join('\n'));
-    final channel = ReplayChannel('''
-${_upTo('resume', '"id":2,"result"')}
-{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","approvalsReviewer":"user","sandbox":"danger-full-access"}}}
-{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
-{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Try again"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
-{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
-{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
-{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
-''');
+    // The recorded reopen: the saved count for turn_1 right after the
+    // resume reply is a baseline, though this session had seen a turn.
+    final channel = _fixture('resume');
     final spawned = <_Spawned>[];
-    final driver = _driver(data, [dead, channel], spawned);
+    final burst = _Burst(channel, (l) => l.contains('"id":3,"result"'));
+    final driver = _driver(data, [dead, burst], spawned);
     final s = await driver.start(_spec(work));
     final events = _listen(s);
     await s.send(_lsPrompt);
     await pumpEventQueue();
     expect(_states(events).last, ExecutionStatus.error);
     expect(await driver.attach('thr_1'), same(s));
-    await s.send('Try again');
+    await s.send('reply OK again');
     await channel.finished;
     await pumpEventQueue();
     channel.expectFinished();
@@ -745,6 +833,11 @@ ${_upTo('resume', '"id":2,"result"')}
       ExecutionStatus.running,
       ExecutionStatus.finished,
     ]);
+    final usage = events.whereType<UsageReport>().single;
+    expect(
+      (usage.id, usage.input, usage.cached, usage.output, usage.contextTokens, usage.onPlan),
+      ('usage-turn_2-25844', 12924, 9728, 5, 12929, true),
+    );
     await s.close();
   });
 
@@ -1005,6 +1098,21 @@ ${_upTo('approve_command', '"id":3,"result"')}
       expect(limit.message, message);
       expect(limit.resetsAt, DateTime.fromMillisecondsSinceEpoch(1793800000 * 1000, isUtc: true));
       expect(_states(events).last, ExecutionStatus.error);
+    });
+
+    test('another limit updated after the used-up one: the reset time is still the used-up one', () async {
+      final lines = File('$_fixtures/usage_limit.jsonl').readAsLinesSync();
+      final at = lines.indexWhere((l) => l.contains('"method":"account/rateLimits/updated"')) + 1;
+      final events = await run(
+        [
+          ...lines.take(at),
+          '{"dir":"in","msg":{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex_other",'
+              '"primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":1793900000},"secondary":null}}}}',
+          ...lines.skip(at),
+        ].join('\n'),
+      );
+      final limit = usageLimitOf(events.whereType<ConversationFailure>().single)!;
+      expect(limit.resetsAt, DateTime.fromMillisecondsSinceEpoch(1793800000 * 1000, isUtc: true));
     });
 
     test('without a snapshot: still a usage limit, with no reset time', () async {

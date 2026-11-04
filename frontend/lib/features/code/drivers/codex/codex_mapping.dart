@@ -13,7 +13,9 @@ import '../driver_events.dart';
 
 /// What Codex is told for a mode: its approval policy, who answers its
 /// approvals (`approvalsReviewer`), the thread's `sandbox` (a `SandboxMode`
-/// string) and the turn's `sandboxPolicy` (the same as a tagged object).
+/// string, for thread/start and thread/resume) and the turn's
+/// `sandboxPolicy` (a tagged object, which holds for that turn and the ones
+/// after it).
 typedef CodexPolicy = ({
   String approvalPolicy,
   String approvalsReviewer,
@@ -39,22 +41,40 @@ typedef CodexPolicy = ({
 /// fetches planning may approve; it isn't a backstop, since an approved
 /// call that the sandbox blocks runs again without it.
 ///
+/// The thread itself always starts and resumes read-only, in every mode,
+/// and each turn/start carries the mode's sandbox. A thread/start with a cwd
+/// and a writable sandbox makes app-server write `[projects."<cwd>"]
+/// trust_level = "trusted"` into the user's own `~/.codex/config.toml` for a
+/// git checkout or project root (app-server README, "Project trust"; seen in
+/// the 2026-11-04 recordings). Codex loads a trusted project's own `.codex/`
+/// config and hooks, so any repo opened here (a cloned one too) would get to
+/// run them in later Codex sessions without the app's consent. Checked live
+/// with codex-cli 0.166.0 (2026-11-04, signed in): a read-only thread/start
+/// left config.toml as it was, the thread reply said `readOnly`, and a
+/// turn/start with `dangerFullAccess` ran an approved write outside the
+/// repo once, with one approval (the rollout's turn context recorded
+/// `danger-full-access`); thread/resume read-only also wrote nothing.
+///
 /// The reviewer is always the user (here: the app). A user's
 /// `approvals_reviewer = "auto_review"` in their Codex config would
 /// otherwise let Codex's own reviewer answer calls the app must judge.
-CodexPolicy codexPolicy(AgentMode mode) => mode == AgentMode.plan
-    ? (
-        approvalPolicy: 'untrusted',
-        approvalsReviewer: 'user',
-        sandbox: 'read-only',
-        sandboxPolicy: const {'type': 'readOnly', 'networkAccess': true},
-      )
-    : (
-        approvalPolicy: 'untrusted',
-        approvalsReviewer: 'user',
-        sandbox: 'danger-full-access',
-        sandboxPolicy: const {'type': 'dangerFullAccess'},
-      );
+CodexPolicy codexPolicy(AgentMode mode) => (
+  approvalPolicy: 'untrusted',
+  approvalsReviewer: 'user',
+  sandbox: 'read-only',
+  sandboxPolicy: mode == AgentMode.plan
+      ? const {'type': 'readOnly', 'networkAccess': true}
+      : const {'type': 'dangerFullAccess'},
+);
+
+/// Whether usage under an `account/updated` `authMode` is on a plan rather
+/// than billed per token: the modes Codex serves from its own backend
+/// (`AuthMode::uses_codex_backend`, `app-server-protocol/src/protocol/
+/// common.rs` @ rust-v0.166.0: ChatGPT, host-supplied ChatGPT tokens,
+/// headers, agent identity, personal access token). An API key or Bedrock
+/// is billed per token, and no mode (null: signed out) has no plan.
+bool codexAuthOnPlan(Object? authMode) =>
+    const {'chatgpt', 'chatgptAuthTokens', 'headers', 'agentIdentity', 'personalAccessToken'}.contains(authMode);
 
 /// Whether a turn's `codexErrorInfo` says the account ran out: Codex folds
 /// its plan's usage limit, an API key's quota or credits, a plan without
@@ -89,6 +109,24 @@ DateTime? codexLimitResetsAt(Map<String, Object?>? snapshot) {
   }
   if (times.isEmpty) return null;
   return DateTime.fromMillisecondsSinceEpoch(times.reduce((a, b) => a > b ? a : b) * 1000, isUtc: true);
+}
+
+/// When a usage limit lifts, from the rate-limit snapshots by `limitId`
+/// ([byLimit]; recorded snapshots all had `limitId: "codex"`, and
+/// `account/rateLimits/read` has `rateLimitsByLimitId`, so a plan may have
+/// more than one; unverified until a paid-plan recording shows it). The
+/// snapshot updated last ([last]) wins: core sends the one that ran out
+/// just before the error. When it has no used-up window, the latest reset
+/// among the other limits that ran out.
+DateTime? codexLimitResetsAtOf(Map<String, Map<String, Object?>> byLimit, String? last) {
+  if (codexLimitResetsAt(byLimit[last]) case final at?) return at;
+  DateTime? latest;
+  for (final e in byLimit.entries) {
+    if (e.key == last) continue;
+    final at = codexLimitResetsAt(e.value);
+    if (at != null && (latest == null || at.isAfter(latest))) latest = at;
+  }
+  return latest;
 }
 
 /// The script inside `bash -lc '<script>'` (Codex runs commands through
