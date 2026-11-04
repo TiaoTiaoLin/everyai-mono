@@ -1,11 +1,52 @@
 import 'dart:convert';
 
+import 'package:drift/native.dart';
+import 'package:every_ai/core/db/app_database.dart';
+import 'package:every_ai/core/platform/platform_kind.dart';
+import 'package:every_ai/core/preferences.dart';
+import 'package:every_ai/core/providers.dart';
+import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/features/code/code_settings_providers.dart';
+import 'package:every_ai/features/code/drivers/driver.dart';
+import 'package:every_ai/features/code/drivers/driver_process.dart' show notBuiltProblem;
+import 'package:every_ai/features/code/drivers/driver_registry.dart';
+import 'package:every_ai/features/code/harness/events.dart' show ExecutionStatus;
+import 'package:every_ai/features/code/harness/harness.dart';
+import 'package:every_ai/features/code/ui/code_settings_section.dart' show HarnessesSetting, harnessStatusLine;
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/mcp_providers.dart';
 import 'package:every_ai/features/code/permissions_providers.dart';
 import 'package:every_ai/features/skills/skills_providers.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:material_ui/material_ui.dart' as m;
+
+/// A driver whose check the test sets.
+final class _Driver implements HarnessDriver {
+  _Driver(this.info, this.status);
+  @override
+  final DriverInfo info;
+  DriverStatus status;
+  var detects = 0;
+
+  @override
+  Set<DriverCap> get caps => const {};
+  @override
+  Future<DriverStatus> detect() async {
+    detects++;
+    return status;
+  }
+
+  @override
+  Future<List<DriverModel>> models() async => const [];
+  @override
+  Future<HarnessSession> start(SessionSpec spec) => throw UnimplementedError();
+  @override
+  Future<HarnessSession> attach(String conversationId) => throw UnimplementedError();
+  @override
+  Future<Map<String, ExecutionStatus>> statuses(List<String> conversationIds) async => const {};
+}
 
 const _fs = McpServer(name: 'fs', command: 'npx', args: ['-y', 'server-fs']);
 
@@ -106,5 +147,77 @@ void main() {
     expect(crossedBudget(0, 5000000, null), isFalse);
     expect(budgetFill(500000, 2), 0.25);
     expect(budgetFill(5, null), isNull);
+  });
+
+  test('"Use my own installed CLIs" is off by default and kept per CLI', () {
+    const off = StoredCodeSettings();
+    expect(off.ownClis, isEmpty);
+    expect(off.toJson()['global'], isNot(contains('ownClis')));
+    final on = off.withOwnCli('claude-code', true).withOwnCli('gemini', true).withOwnCli('gemini', false);
+    expect(on.ownClis, {'claude-code'});
+    expect(StoredCodeSettings.fromJson(jsonDecode(jsonEncode(on.toJson()))).ownClis, {'claude-code'});
+    // Other edits keep it.
+    expect(on.withTier(HarnessTier.thorough).ownClis, {'claude-code'});
+  });
+
+  test('a harness status reads in plain words', () {
+    expect(harnessStatusLine('everyai', const DriverStatus(installed: true)), 'Built in');
+    expect(harnessStatusLine('codex', const DriverStatus()), 'Not installed');
+    expect(
+      harnessStatusLine('claude-code', const DriverStatus(installed: true, version: '2.1.318', signedIn: true)),
+      '2.1.318 · signed in',
+    );
+    expect(
+      harnessStatusLine('opencode', const DriverStatus(installed: true, version: '2.1.3', problem: notBuiltProblem)),
+      '2.1.3 · Not built yet',
+    );
+  });
+
+  testWidgets('Settings → Code → Harnesses: statuses, the consent switch and Refresh', (tester) async {
+    final db = AppDatabase(NativeDatabase.memory());
+    late Preferences prefs;
+    await tester.runAsync(() async => prefs = await Preferences.load(db));
+    final claude = _Driver(
+      const DriverInfo(id: 'claude-code', label: 'Claude Code', needsConsent: true),
+      const DriverStatus(installed: true, version: '2.1.318', problem: notBuiltProblem),
+    );
+    final codex = _Driver(const DriverInfo(id: 'codex', label: 'Codex'), const DriverStatus());
+    final container = ProviderContainer(
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        preferencesProvider.overrideWithValue(prefs),
+        driverRegistryProvider.overrideWithValue(DriverRegistry({'claude-code': claude, 'codex': codex})),
+      ],
+    );
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: m.MaterialApp(
+          home: EveryThemeScope(
+            theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
+            child: const m.Scaffold(body: SingleChildScrollView(child: HarnessesSetting())),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('2.1.318 · Not built yet'), findsOneWidget);
+    expect(find.text('Not installed'), findsOneWidget);
+    expect(find.textContaining('Claude Code run the copy installed on this computer'), findsOneWidget);
+    // Only the subscription CLI has the switch, and it starts off.
+    expect(find.byKey(const ValueKey('code-settings.own-cli.codex')), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('code-settings.own-cli.claude-code')));
+    await tester.pump();
+    expect(container.read(codeSettingsProvider).ownClis, {'claude-code'});
+
+    codex.status = const DriverStatus(installed: true, version: '0.9');
+    await tester.tap(find.byKey(const ValueKey('code-settings.harnesses.refresh')));
+    await tester.pump();
+    await tester.pump();
+    expect(codex.detects, 2);
+    expect(find.text('0.9'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    container.dispose();
+    await tester.runAsync(db.close);
   });
 }

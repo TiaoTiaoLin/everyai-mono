@@ -272,6 +272,10 @@ enum ExecutionStatus {
   };
 }
 
+/// A [StateChange] key whose value lists call ids a driver let run (see
+/// `approvedEvent`): no longer waiting for an answer, results still to come.
+const approvedCallsKey = 'approved_calls';
+
 final class StateChange extends HarnessEvent {
   const StateChange({required super.id, required super.raw, required this.executionStatus, required this.key});
   final ExecutionStatus executionStatus;

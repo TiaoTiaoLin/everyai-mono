@@ -1,0 +1,27 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// The other requests Codex may send during a turn: an MCP tool approval (an elicitation marked
+// codex_approval_kind = mcp_tool_call, protocol/src/mcp_approval_meta.rs), a URL elicitation, a question for the
+// user, a tool the client would run, extra permissions, and a v1 approval.
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
+{"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Look it up"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"id":10,"method":"mcpServer/elicitation/request","params":{"threadId":"thr_1","turnId":"turn_1","serverName":"docs","mode":"form","message":"Allow docs to run search?","requestedSchema":{"type":"object","properties":{}},"_meta":{"codex_approval_kind":"mcp_tool_call","tool_name":"search","tool_params":{"q":"riverpod"}}}}}
+{"dir":"out","msg":{"id":10,"result":{"action":"accept","content":{}}}}
+{"dir":"in","msg":{"id":11,"method":"mcpServer/elicitation/request","params":{"threadId":"thr_1","turnId":"turn_1","serverName":"docs","mode":"url","elicitationId":"el_1","message":"Sign in","url":"https://example.com/login"}}}
+{"dir":"out","msg":{"id":11,"result":{"action":"decline","content":null}}}
+{"dir":"in","msg":{"id":12,"method":"item/tool/requestUserInput","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"q_1","questions":[]}}}
+{"dir":"out","msg":{"id":12,"result":{"answers":{}}}}
+{"dir":"in","msg":{"id":13,"method":"item/tool/call","params":{"threadId":"thr_1","turnId":"turn_1","callId":"dyn_1","tool":"x","arguments":{}}}}
+{"dir":"out","msg":{"id":13,"error":{"code":-32601,"message":"Not supported by this client"}}}
+{"dir":"in","msg":{"id":14,"method":"item/permissions/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"p_1","permissions":{}}}}
+{"dir":"out","msg":{"id":14,"result":{"permissions":{}}}}
+{"dir":"in","msg":{"id":15,"method":"execCommandApproval","params":{"conversationId":"thr_1","callId":"c_1","command":["ls"],"cwd":"/","parsedCmd":[]}}}
+{"dir":"out","msg":{"id":15,"result":{"decision":"denied"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[],"error":null}}}}

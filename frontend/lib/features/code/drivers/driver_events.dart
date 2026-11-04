@@ -61,3 +61,9 @@ StateChange stateEvent(String id, ExecutionStatus status) => HarnessEvent.decode
   'key': 'execution_status',
   'value': status.wire,
 }) as StateChange;
+
+/// The driver let [callIds] run: they aren't the user's to answer any more,
+/// though their results are still to come (a subagent, a long command).
+StateChange approvedEvent(String id, List<String> callIds) =>
+    HarnessEvent.decode({'kind': 'ConversationStateUpdateEvent', 'id': id, 'key': approvedCallsKey, 'value': callIds})
+        as StateChange;

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'phases.dart';
+import '../drivers/driver_policy.dart' show hostToolOf;
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import 'agent_mode.dart';
@@ -353,6 +354,10 @@ final class TranscriptBuilder {
             _parts.add(tool);
           }
         }
+      case StateChange(key: approvedCallsKey, :final raw):
+        for (final id in raw['value'] as List<Object?>? ?? const []) {
+          _open.remove(id);
+        }
       case StateChange(:final executionStatus) when executionStatus != ExecutionStatus.unknown:
         _status = executionStatus;
       case StateChange():
@@ -438,14 +443,27 @@ final class TranscriptBuilder {
     if (_items[i] case QuestionItem(:final call, :final questions)) _items[i] = QuestionItem(call, questions, answers);
   }
 
+  /// Closes plan card [id] at once, before the agent's result arrives (an
+  /// outside agent's host call answered in the app).
+  void settlePlan(String id, PlanVerdict verdict) {
+    final i = _byAction[id];
+    if (i == null) return;
+    if (_items[i] case PlanProposal(:final call, verdict: null)) _items[i] = PlanProposal(call, verdict: verdict);
+  }
+
+  /// A note the app adds itself (not from the agent).
+  void addNotice(NoticeItem notice) => _items.add(notice);
+
   void _action(ActionCall call) {
     _byToolCall[call.toolCallId] = call.id;
     _open[call.id] = call;
-    if (call.toolName == askUserQuestionTool) {
+    // An outside agent's call to the app's MCP host is the same card.
+    final card = hostToolOf(call) ?? call.toolName;
+    if (card == askUserQuestionTool) {
       _push(call.id, QuestionItem(call, Question.listFrom(call.action)));
       return;
     }
-    if (call.toolName == presentPlanTool) {
+    if (card == presentPlanTool) {
       _push(call.id, PlanProposal(call));
       return;
     }
@@ -585,6 +603,19 @@ final class TranscriptBuilder {
       PlanProposal(:final call, verdict: null) when r.outcome == ToolOutcome.rejected => PlanProposal(
         call,
         verdict: _reason(r).startsWith(planApprovedReason) ? PlanVerdict.approved : PlanVerdict.revised,
+      ),
+      // A host call's result is the answer itself; an error (timed out, the
+      // session ended) closes the card unanswered.
+      QuestionItem(:final call, :final questions, answers: null) when hostToolOf(call) != null => QuestionItem(
+        call,
+        questions,
+        r.outcome == ToolOutcome.ok ? parseAnswers(r.text, questions) ?? const [] : const [],
+      ),
+      PlanProposal(:final call, verdict: null) when hostToolOf(call) != null => PlanProposal(
+        call,
+        verdict: r.outcome == ToolOutcome.ok && r.text.trimLeft().startsWith(planApprovedReason)
+            ? PlanVerdict.approved
+            : PlanVerdict.revised,
       ),
       final other => other,
     };

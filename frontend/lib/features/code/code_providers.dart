@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,7 +17,8 @@ import '../settings/byok_keys.dart' show byokUltraCapProvider;
 import '../settings/domain/byok_providers.dart' show ModelBilling;
 import '../skills/data/skill_import.dart' show findImportCandidates;
 import '../skills/data/skill_store.dart' show folderFiles;
-import '../skills/skills_providers.dart' show codeSkillsFor, installedSkillsProvider;
+import '../skills/domain/skill_catalog.dart' show InstalledSkill;
+import '../skills/skills_providers.dart' show codeInstalledSkillsFor, codeSkillsFor, installedSkillsProvider;
 import '../slash/skills/learn.dart';
 import '../slash/skills/learn_sources.dart';
 import '../slash/skills/skill_draft.dart' show skillDrafterProvider;
@@ -33,6 +35,7 @@ import 'domain/spill.dart';
 import 'domain/phases.dart'
     show
         Phase,
+        bugCheckTool,
         flowLabel,
         isResearchWorker,
         maxResearchAtOnce,
@@ -49,8 +52,13 @@ import 'domain/transcript.dart';
 import 'gateway_key.dart';
 import 'git/git_service.dart';
 import 'domain/transcript_export.dart';
+import 'drivers/briefing/briefing_types.dart' show everyaiServerName;
+import 'drivers/briefing/session_skill.dart';
+import 'drivers/briefing/skill_export.dart';
+import 'drivers/briefing/skill_render.dart' show defuseInlineCommands;
 import 'drivers/driver.dart';
 import 'drivers/driver_policy.dart';
+import 'drivers/driver_process.dart' show closeAllDriverProcesses;
 import 'drivers/driver_registry.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
@@ -58,6 +66,9 @@ import 'harness/fake_harness.dart';
 import 'harness/harness.dart';
 import 'harness/session_processes.dart';
 import 'harness/summarizer.dart';
+import 'host/host.dart';
+import 'host/host_notes.dart';
+import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
 import 'permissions_providers.dart';
@@ -95,6 +106,169 @@ Future<Harness> harnessFor(Ref ref, String workingDir, {String harness = everyai
 /// What a session from the removed OpenHands harness shows instead of its history.
 const removedHarnessNotice =
     'This session ran on the OpenHands harness, which was removed, so it can\'t be reopened. Start a new session.';
+
+/// Whether a session on [harness] in [workingDir] runs on an outside agent
+/// (a coding CLI the app drives) rather than the EveryAI harness or the demo.
+bool isOutsideLead(String harness, String workingDir) =>
+    harness != everyaiHarnessName && harness != openHandsHarnessName && !isDemoPath(workingDir);
+
+/// Why [info] may not run yet: a subscription CLI needs the user's
+/// "Use my own installed CLIs" for it ([ownClis]). Null when it may.
+String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsent && !ownClis.contains(info.id)
+    ? "Turn on 'Use my own installed CLIs' for ${info.label} in Settings → Code to use it."
+    : null;
+
+/// The note a session shows when its outside agent's EveryAI tools expired.
+const hostToolsExpired =
+    "This session's EveryAI tools (question cards, plans, project memory) expired after a long idle time. Start a "
+    'new session to use them again.';
+
+/// Where the app keeps its data (`GitService.dataDir`); outside sessions'
+/// briefings go under `<it>/driver-sessions/<session id>`. Tests point it
+/// at a temporary folder.
+final driverDataDirProvider = Provider<Future<String> Function()>((ref) => GitService.dataDir);
+
+/// The host token of each outside session opened in this run, by session
+/// id. Never stored: tokens die with the app.
+final _hostTokensProvider = Provider<Map<String, String>>((ref) => {});
+
+/// What the session text tells an outside agent about each host tool, in
+/// `hostToolSpecs` order. bug_check is left out until outside agents get Bug
+/// fix mode.
+const _hostToolInfos = <HostToolInfo>[
+  (
+    name: askUserQuestionTool,
+    when:
+        'a decision is the user\'s to make (scope, design, trade-offs) and the code can\'t answer it. The call '
+        'waits while they answer in the app; the answers are its result.',
+  ),
+  (
+    name: presentPlanTool,
+    when:
+        'in Plan mode, once the plan is ready. The call waits while the user reads it; the result says whether they '
+        'approved it (build it then) or want changes.',
+  ),
+  (
+    name: 'memory',
+    when:
+        'you learned something a later session would otherwise rediscover: how to build and test, conventions the '
+        'user stated, pitfalls and their fixes.',
+  ),
+  (name: savedPlansTool, when: 'the task continues earlier work: list and read the plans the user approved before.'),
+];
+
+/// Ends the outside CLIs and the MCP host when the app quits (provider
+/// disposal doesn't run then). The shell listens to it from app start, so
+/// every CLI is covered, however it was spawned.
+final driverShutdownProvider = Provider<void>((ref) {
+  Future<void> closeAll() => closeAllDriverProcesses().timeout(const Duration(seconds: 3), onTimeout: () {});
+  final lifecycle = AppLifecycleListener(
+    onExitRequested: () async {
+      await closeAll();
+      await ref.read(hostServerProvider).stop();
+      return AppExitResponse.exit;
+    },
+    onDetach: () => unawaited(closeAll()),
+  );
+  ref.onDispose(lifecycle.dispose);
+});
+
+/// The lead harness new sessions start on, and the model and effort picked
+/// for each outside one (Preferences `code.lead`). The EveryAI harness's
+/// model stays in `codeAgentProvider`.
+final codeLeadProvider = NotifierProvider<CodeLead, CodeLeadChoice>(CodeLead.new);
+
+@immutable
+final class CodeLeadChoice {
+  const CodeLeadChoice({this.harness = everyaiHarnessName, this.models = const {}});
+
+  /// The driver id (`DriverInfo.id`).
+  final String harness;
+
+  /// Driver id → its model ('' its default) and effort ('' the model's).
+  final Map<String, ({String model, String effort})> models;
+
+  ({String model, String effort}) of(String harness) => models[harness] ?? (model: '', effort: '');
+}
+
+final class CodeLead extends Notifier<CodeLeadChoice> {
+  static const key = 'code.lead';
+
+  @override
+  CodeLeadChoice build() {
+    final raw = ref.read(preferencesProvider)[key];
+    if (raw == null) return const CodeLeadChoice();
+    try {
+      final json = jsonDecode(raw);
+      if (json is! Map<String, Object?>) return const CodeLeadChoice();
+      return CodeLeadChoice(
+        harness: json['harness'] as String? ?? everyaiHarnessName,
+        models: {
+          if (json['models'] case final Map<String, Object?> models)
+            for (final MapEntry(:key, :value) in models.entries)
+              if (value case final Map<String, Object?> m)
+                key: (model: m['model'] as String? ?? '', effort: m['effort'] as String? ?? ''),
+        },
+      );
+    } on FormatException {
+      return const CodeLeadChoice();
+    }
+  }
+
+  void _set(CodeLeadChoice next) {
+    state = next;
+    ref.read(preferencesProvider)[key] = jsonEncode({
+      'harness': next.harness,
+      'models': {
+        for (final MapEntry(:key, :value) in next.models.entries) key: {'model': value.model, 'effort': value.effort},
+      },
+    });
+  }
+
+  void chooseHarness(String harness) => _set(CodeLeadChoice(harness: harness, models: state.models));
+
+  void chooseModel(String harness, String model, String effort) =>
+      _set(CodeLeadChoice(harness: state.harness, models: {...state.models, harness: (model: model, effort: effort)}));
+}
+
+/// An outside driver's own models (empty for the EveryAI harness, whose
+/// models come from the catalog, and while a driver can't list them).
+/// Not kept once unwatched, so a CLI signed in since lists its models.
+final driverModelsProvider = FutureProvider.autoDispose.family<List<DriverModel>, String>((ref, id) async {
+  try {
+    return await ref.read(driverRegistryProvider).resolve(id)?.models() ?? const [];
+  } on Object {
+    return const [];
+  }
+});
+
+/// What an outside session's calls to the host reach: its controller
+/// ([controller], null once the session is gone), after the session is
+/// saved ([ready]); the token is minted before that.
+final class _HostForward implements HostTools {
+  _HostForward(this.controller, this.ready);
+
+  final CodeSessionController? Function() controller;
+  final Future<void> ready;
+
+  @override
+  Future<HostResult> call(HostCall call) async {
+    await ready;
+    final c = controller();
+    if (c == null) return (text: 'Error: this session is closed.', isError: true);
+    return c.call(call);
+  }
+}
+
+/// A host call that waits for the user, and the card (the agent's own row
+/// for the call, by action id) it is answered on.
+final class _HostWait {
+  _HostWait(this.call);
+
+  final HostCall call;
+  final done = Completer<HostResult>();
+  String? row;
+}
 
 /// The EveryAI harness: the agent loop in the app, sessions kept under App
 /// Support.
@@ -222,29 +396,68 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     // to be isolated (then a worktree on its own branch). A remote host's
     // folder can't be branched or snapshotted from here.
     final local = !noLocalFolder(project.path);
+    final runner = await harnessFor(ref, project.path, harness: harness);
+    final driver = runner is HarnessDriver && isOutsideLead(harness, project.path) ? runner : null;
+    // Before anything is made for the session.
+    if (driver != null) {
+      if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
+    }
     final worktree = local && isolated ? await _worktreeFor(project, title, id) : null;
     final baseline = local && worktree == null ? await _baselineFor(project.path) : null;
     final workingDir = worktree?.path ?? project.path;
-    final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
-    final runner = await harnessFor(ref, project.path, harness: harness);
+    tier ??= ref.read(codeSettingsProvider).tier;
+    if (driver != null) {
+      // Max, Ultra and Bug fix need the EveryAI harness's phase control; outside agents get them later.
+      if (tier.phased) tier = HarnessTier.thorough;
+      harnessMode = HarnessMode.build;
+    }
     // The scripted demo answers client tools with new messages, not inside the call.
     final hold = !isDemoPath(project.path);
-    final live = await runner.start(
-      await specFor(
-        sessionId: id,
-        projectDir: project.path,
-        workingDir: workingDir,
-        model: model,
-        mode: mode,
-        effort: effort,
-        holdClientTools: hold,
-        initialMessage: modeNote(mode, first.text),
-        initialImages: first.images,
-        isolated: worktree != null,
-        tier: tier ?? ref.read(codeSettingsProvider).tier,
-        harnessMode: harnessMode,
-      ),
-    );
+    // An outside agent's host calls wait until the session is saved below.
+    final saved = Completer<void>();
+    final HarnessSession live;
+    try {
+      final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
+      final briefing = driver == null
+          ? null
+          : await _brief(
+              id,
+              projectDir: project.path,
+              workingDir: workingDir,
+              driver: driver,
+              model: model,
+              ready: saved.future,
+            );
+      try {
+        live = await runner.start(
+          await specFor(
+            sessionId: id,
+            projectDir: project.path,
+            workingDir: workingDir,
+            model: model,
+            mode: mode,
+            effort: effort,
+            holdClientTools: hold,
+            initialMessage: modeNote(mode, first.text),
+            initialImages: first.images,
+            isolated: worktree != null,
+            tier: tier,
+            harnessMode: harnessMode,
+            harness: harness,
+            briefing: briefing,
+          ),
+        );
+      } on Object {
+        if (briefing != null) await _unbrief(id);
+        rethrow;
+      }
+    } on Object {
+      // A session that didn't start leaves no branch behind.
+      if (worktree != null) await _dropWorktree(worktree);
+      rethrow;
+    } finally {
+      saved.complete();
+    }
     ref.read(_liveProvider)[id] = live;
     final info = CodeSessionInfo(
       id: id,
@@ -261,7 +474,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       harness: harness,
       effort: effort ?? '',
       holdClientTools: hold,
-      tier: tier ?? ref.read(codeSettingsProvider).tier,
+      tier: tier,
       harnessMode: harnessMode,
     );
     state = [info, ...state];
@@ -293,14 +506,18 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     HarnessTier? tier,
     HarnessMode? harnessMode,
     List<String>? researchSites,
+    String? harness,
+    DriverBriefing? briefing,
   }) async {
     final demo = isDemoPath(projectDir);
+    // An outside agent brings its own prompt, model, keys and skill loading: none of the EveryAI harness's parts apply.
+    final outside = isOutsideLead(harness ?? byId(sessionId)?.harness ?? everyaiHarnessName, projectDir);
     // A session's own tier and mode; a new one's come from the caller, else the defaults.
     tier ??= byId(sessionId)?.tier ?? ref.read(codeSettingsProvider).tier;
     harnessMode ??= byId(sessionId)?.harnessMode ?? HarnessMode.build;
     final bugFix = harnessMode == HarnessMode.bugFix;
     // The demo and remote hosts have no local folder: the server's default prompt, no project files.
-    final local = !noLocalFolder(projectDir);
+    final local = !noLocalFolder(projectDir) && !outside;
     final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
     // The agents it may start (a subagent can't start any): built-in, global, and trusted project ones.
     final agents = !local || subagent ? const <AgentDefinition>[] : await _agentsFor(projectId);
@@ -319,16 +536,20 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           );
     // AGENTS.md and friends from the project folder up to the repository root.
     final context = !local ? const <ContextFile>[] : await _startContext(workingDir, projectDir);
-    // MCP servers come from the app's list (global plus this project's), never from repository files.
-    final mcpConfig = !local ? const <String, Object?>{} : ref.read(codeMcpServersProvider).mcpConfigFor(projectId);
+    // MCP servers come from the app's list (global plus this project's), never from repository files. An
+    // outside agent gets them too, except one named like the app's own host.
+    final mcpConfig = noLocalFolder(projectDir)
+        ? const <String, Object?>{}
+        : {...ref.read(codeMcpServersProvider).mcpConfigFor(projectId)};
+    if (outside) mcpConfig.remove(everyaiServerName);
     // Skills likewise: the app's enabled ones, and project skills only once trusted.
     final skills = !local ? const <Map<String, Object?>>[] : await codeSkillsFor(ref, projectId);
     return SessionSpec(
       workingDir: workingDir,
       model: model,
       mode: mode,
-      llmBaseUrl: demo ? '' : gatewayBaseUrl(ref),
-      llmApiKey: demo ? '' : await gatewayKey(ref),
+      llmBaseUrl: demo || outside ? '' : gatewayBaseUrl(ref),
+      llmApiKey: demo || outside ? '' : await gatewayKey(ref),
       sessionTag: sessionTag ?? sessionId,
       initialMessage: initialMessage,
       initialImages: initialImages,
@@ -352,7 +573,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       rolePrompt: rolePrompt,
       researchSites: researchSites,
       // Only a main session runs the Max or Ultra flow.
-      phaseFlow: subagent
+      phaseFlow: subagent || outside
           ? null
           : bugFix
           ? (tier == HarnessTier.ultra ? 'bugfix-ultra' : 'bugfix')
@@ -360,13 +581,119 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           ? tier.name
           : null,
       // Bug fix's second opinion (the mode can be switched on later, so every main session gets one).
-      reviewModel: subagent ? null : bugReviewModel(model, ref.read(libraryProvider).value ?? const []),
+      reviewModel: subagent || outside ? null : bugReviewModel(model, ref.read(libraryProvider).value ?? const []),
       clientTools: clientTools,
       autoCompactAt: ref.read(codeSettingsProvider).autoCompactPercent / 100,
       // run_script and the decider: the tier's limits, or the user's level.
-      script: !demo ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
+      script: !demo && !outside ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
       pathMap: pathMap,
+      briefing: briefing,
     );
+  }
+
+  /// Hands outside session [id] what its agent needs to reach EveryAI: a
+  /// host token for its calls (answered once [ready]), and the briefing
+  /// folder under the app's data (our skills, and the session text with the
+  /// project's notes). Throws when the user hasn't let the app run this CLI.
+  Future<DriverBriefing> _brief(
+    String id, {
+    required String projectDir,
+    required String workingDir,
+    required HarnessDriver driver,
+    required String model,
+    Future<void>? ready,
+  }) async {
+    if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
+    ref.read(driverShutdownProvider);
+    final host = ref.read(hostServerProvider);
+    final tokens = ref.read(_hostTokensProvider);
+    if (tokens.remove(id) case final old?) await host.revoke(old);
+    final token = await host.mint(
+      id,
+      _HostForward(
+        () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
+        ready ?? Future<void>.value(),
+      ),
+    );
+    try {
+      final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
+      final notes = await hostProjectNotes(workingDir);
+      final text = [
+        sessionBriefing(
+          SessionSkillInput(
+            worktree: workingDir,
+            projectRoot: projectDir,
+            lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
+            hostTools: _hostToolInfos,
+          ),
+        ),
+        // Volatile, so last; the memory is text earlier sessions wrote.
+        if (notes.isNotEmpty) defuseInlineCommands(notes),
+      ].join('\n');
+      final export = await exportSkills(await _driverDir(id), await _skillsFor(projectId), sessionText: text);
+      tokens[id] = token.token;
+      return DriverBriefing(
+        mcpUrl: '${token.url}',
+        mcpToken: token.token,
+        skillDir: export.skillDir,
+        sessionSkill: text,
+      );
+    } on Object {
+      await host.revoke(token.token);
+      rethrow;
+    }
+  }
+
+  Future<String> _driverDir(String id) async => '${await ref.read(driverDataDirProvider)()}/driver-sessions/$id';
+
+  Future<List<InstalledSkill>> _skillsFor(String? projectId) async {
+    try {
+      return await codeInstalledSkillsFor(ref, projectId);
+    } on Object {
+      // Unreadable skill folders only lose the skills.
+      return const [];
+    }
+  }
+
+  /// Ends outside session [id]'s host token and deletes its briefing.
+  Future<void> _unbrief(String id) async {
+    ref.read(_hostTokensProvider).remove(id);
+    try {
+      await ref.read(hostServerProvider).revokeSession(id);
+      await removeBriefing(await _driverDir(id));
+    } on Object {
+      // A briefing left behind is only disk space.
+    }
+  }
+
+  /// Reopens [info]'s conversation on its harness. An outside agent gets a
+  /// fresh briefing (the old token died with the app) when its driver can
+  /// take one; otherwise it reopens without EveryAI's tools. A child session
+  /// (subagent, review, fork) started without a briefing, so it reopens without one.
+  Future<HarnessSession> attachSession(CodeSessionInfo info) async {
+    final harness = await harnessFor(ref, info.workingDir, harness: info.harness);
+    if (harness is! HarnessDriver || info.parentId != null || !isOutsideLead(info.harness, info.workingDir)) {
+      return harness.attach(info.conversationId);
+    }
+    if (consentProblem(harness.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
+    if (harness is! AttachesBriefed) return harness.attach(info.conversationId);
+    final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
+    // Whatever token the session had before (a run that ended without its quit hook) ends now.
+    await ref.read(hostServerProvider).revokeSession(info.id);
+    final briefing = await _brief(
+      info.id,
+      projectDir: project?.path ?? info.workingDir,
+      workingDir: info.workingDir,
+      driver: harness,
+      model: info.model,
+    );
+    try {
+      return await (harness as AttachesBriefed).attachBriefed(info.conversationId, briefing);
+    } on Object {
+      ref.read(_hostTokensProvider).remove(info.id);
+      await ref.read(hostServerProvider).revoke(briefing.mcpToken);
+      rethrow;
+    }
   }
 
   Future<List<AgentDefinition>> _agentsFor(String? projectId) async {
@@ -568,6 +895,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         // The parent's, so a fork's prompt (and cache) matches it.
         tier: parent.tier,
         researchSites: researchSites,
+        // The child isn't saved yet, so its harness (the parent's) can't be looked up by id.
+        harness: parent.harness,
       ),
     );
     ref.read(_liveProvider)[id] = live;
@@ -623,6 +952,14 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     );
   }
 
+  static Future<void> _dropWorktree(SessionWorktree w) async {
+    try {
+      await GitService.removeWorktree(w, hooksDir: '${await GitService.dataDir()}/git-hooks');
+    } on Object {
+      // Left behind, it is only disk space and a branch.
+    }
+  }
+
   /// The in-place session's starting point; a snapshot that fails only costs
   /// the Changes view.
   static Future<GitBaseline?> _baselineFor(String dir) async {
@@ -638,13 +975,18 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     _save();
   }
 
-  /// Removes session [id] and the subagents it started.
-  void remove(String id) {
+  /// Removes session [id] and the subagents it started; an outside agent's
+  /// host token ends and its briefing is deleted (done when this completes).
+  Future<void> remove(String id) async {
     final gone = {
       id,
       for (final s in state)
         if (s.parentId == id) s.id,
     };
+    final outside = [
+      for (final s in state)
+        if (gone.contains(s.id) && isOutsideLead(s.harness, s.workingDir)) s.id,
+    ];
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
@@ -654,6 +996,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         if (!gone.contains(s.id)) s,
     ];
     _save();
+    await Future.wait([for (final g in outside) _unbrief(g)]);
   }
 
   static String titleFor(String prompt) {
@@ -767,7 +1110,7 @@ final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeS
   CodeSessionController.new,
 );
 
-final class CodeSessionController extends Notifier<CodeSessionState> with _SessionBuiltins {
+final class CodeSessionController extends Notifier<CodeSessionState> with _SessionBuiltins implements HostTools {
   CodeSessionController(this.sessionId);
   @override
   final String sessionId;
@@ -863,6 +1206,99 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Whether forks left in the background before a restart are watched again.
   bool _resumedBackground = false;
   bool _delivering = false;
+
+  /// An outside agent's host calls that wait for the user (question cards,
+  /// plans), oldest first.
+  final _hostWaits = <_HostWait>[];
+
+  /// An outside agent's call to the app's MCP host. Question cards and plans
+  /// are the agent's own row for the call (see `hostToolOf`), so the card,
+  /// its replay and the remote mirror work as for the EveryAI harness; the
+  /// call waits until the user answers there. Memory and saved plans run in
+  /// the session's folder, like the EveryAI harness's own tools.
+  @override
+  Future<HostResult> call(HostCall call) async {
+    final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
+    if (dir == null) return (text: 'Error: this session is closed.', isError: true);
+    switch (call.name) {
+      case askUserQuestionTool || presentPlanTool:
+        final wait = _HostWait(call);
+        _hostWaits.add(wait);
+        // Given up (timed out, the agent left): its card closes with the agent's error result.
+        unawaited(
+          call.ended.then((_) {
+            _hostWaits.remove(wait);
+            if (!wait.done.isCompleted) wait.done.complete((text: 'Error: no longer waiting.', isError: true));
+          }),
+        );
+        _bindHostWaits();
+        return wait.done.future;
+      case 'memory':
+        return hostMemory(dir, call.args);
+      case savedPlansTool:
+        return hostSavedPlans(dir, call.args);
+      case bugCheckTool:
+        return (text: "Error: bug_check is for Bug fix mode, which this session isn't in.", isError: true);
+      default:
+        return (text: 'Error: there is no EveryAI tool called ${call.name}.', isError: true);
+    }
+  }
+
+  /// Pairs each waiting host call with an open card of its tool, from the
+  /// user's last message on: one with the call's arguments first, newest
+  /// calls with newest cards. The agent's row and its call to the host
+  /// arrive in either order, so this runs on both and pairs afresh each
+  /// time: a call that took a card left open by an earlier run (the app quit
+  /// while it waited) moves to its own card once that arrives.
+  void _bindHostWaits() {
+    if (_hostWaits.isEmpty) return;
+    final items = state.transcript.items;
+    final open = [
+      for (final item in items.skip(items.lastIndexWhere((i) => i is UserTurn) + 1).toList().reversed)
+        if (switch (item) {
+              QuestionItem(:final call, answers: null) || PlanProposal(:final call, verdict: null) => call,
+              _ => null,
+            }
+            case final call? when hostToolOf(call) != null)
+          call,
+    ];
+    final waits = _hostWaits.reversed.toList();
+    for (final w in waits) {
+      w.row = null;
+    }
+    // Matching arguments first, so a call never takes the card another call's arguments match.
+    for (final exact in [true, false]) {
+      for (final wait in waits.where((w) => w.row == null)) {
+        final call = open
+            .where((c) => hostToolOf(c) == wait.call.name && (!exact || _sameArgs(c, wait.call.args)))
+            .firstOrNull;
+        if (call == null) continue;
+        wait.row = call.id;
+        open.remove(call);
+      }
+    }
+  }
+
+  /// Whether the agent's row [call] carries host call arguments [args].
+  static bool _sameArgs(ActionCall call, Map<String, Object?> args) =>
+      args.entries.every((e) => jsonEncode(call.action[e.key]) == jsonEncode(e.value));
+
+  /// The host call card [rowId] answers, if one waits.
+  _HostWait? _hostFor(String rowId) => _hostWaits.where((w) => w.row == rowId && !w.done.isCompleted).firstOrNull;
+
+  void _answerHost(_HostWait wait, String text, {bool isError = false}) {
+    _hostWaits.remove(wait);
+    if (!wait.done.isCompleted) wait.done.complete((text: text, isError: isError));
+  }
+
+  /// A chat message closes every host card still waiting: the call's result
+  /// says the user replied in chat (for a plan, that they want changes), and
+  /// the message follows once the agent's turn ends.
+  void _releaseHostCards() {
+    for (final w in [..._hostWaits]) {
+      _answerHost(w, w.call.name == presentPlanTool ? '$planRevisionLead see their next message.' : repliedInChat);
+    }
+  }
 
   @override
   CodeSessionState build() {
@@ -975,9 +1411,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   Future<void> _connect(CodeSessionInfo info) async {
     try {
       final live = ref.read(_liveProvider);
-      final session = _session =
-          live[sessionId] ??
-          await (await harnessFor(ref, info.workingDir, harness: info.harness)).attach(info.conversationId);
+      final session = _session = live[sessionId] ?? await ref.read(codeSessionsProvider.notifier).attachSession(info);
       live[sessionId] = session;
       await _openContext(info);
       _sub = session.events.listen(_onEvent);
@@ -1033,6 +1467,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       rules: ref.read(codePermissionsProvider).rulesFor(info?.projectId) + _settingsRules,
       session: {..._sessionAllowed},
       workingDir: info == null || isDemoPath(info.workingDir) ? null : info.workingDir,
+      hostTools: info != null && isOutsideLead(info.harness, info.workingDir),
     );
   }
 
@@ -1061,10 +1496,20 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (!_mirror.isClosed) _mirror.add(event);
     final transcript = _builder.snapshot;
     state = state.copyWith(transcript: transcript);
-    // The batch was answered and has moved on: its per-call answers go.
-    if (_decided.isNotEmpty && transcript.pending.isEmpty && transcript.held.isEmpty) {
-      _decided.clear();
-      state = state.copyWith(decided: const {});
+    if (_hostWaits.isNotEmpty) _bindHostWaits();
+    // An answer goes with its call's result, and the rest when the run ends.
+    // Not when the batch moves on: a driver that runs each call once it is
+    // allowed (OpenCode) can ask about the next one while the first still
+    // runs, and that one must not be asked about again.
+    final ended = !transcript.running && transcript.pending.isEmpty && transcript.held.isEmpty;
+    final settled = event is ToolResult ? event.actionId : null;
+    if (_decided.isNotEmpty && (ended || _decided.containsKey(settled))) {
+      if (ended) {
+        _decided.clear();
+      } else {
+        _decided.remove(settled);
+      }
+      state = state.copyWith(decided: Map.unmodifiable(_decided));
     }
     // Edits and commands change files: refresh Changes as they land, not just at turn end.
     if (event is ToolResult && editsFiles(event.toolName)) _refreshGitSoon();
@@ -1415,6 +1860,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (!_withinBudget()) return;
     final out = await _outgoing(text, files);
     if (out == null) return;
+    // An outside agent waiting on a card is mid-turn: free it, so the turn can end and the message go out.
+    _releaseHostCards();
     final t = state.transcript;
     if (t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
       state = state.copyWith(queued: [...state.queued, out]);
@@ -1429,6 +1876,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   Future<void> _sendNow(Outgoing out) async {
     final session = _session;
     if (session == null) return;
+    _releaseHostCards();
+    _touchHost();
     final held = state.transcript.held;
     if (held.isNotEmpty) {
       _answered = [...state.transcript.pending, ...held].map((c) => c.id).join(',');
@@ -1443,12 +1892,27 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     await session.send(_noted(out.text), images: out.images);
   }
 
+  /// Keeps an outside session's host token alive at each turn; one that
+  /// already expired (a long idle time) gets a note, and the session goes on
+  /// without EveryAI's tools.
+  void _touchHost() {
+    final tokens = ref.read(_hostTokensProvider);
+    final token = tokens[sessionId];
+    if (token == null || ref.read(hostServerProvider).touch(token)) return;
+    tokens.remove(sessionId);
+    _builder.addNotice(NoticeItem('host-expired-${_events.length}', hostToolsExpired));
+    state = state.copyWith(transcript: _builder.snapshot);
+  }
+
   /// Interrupts the agent and sends [text] right away.
   Future<void> steer(String text, {List<Attachment> files = const []}) async {
     if (!_withinBudget()) return;
     final out = await _outgoing(text, files);
     final session = _session;
     if (out == null || session == null) return;
+    // An outside agent blocked on a card reads the steer only once the call returns.
+    _releaseHostCards();
+    _touchHost();
     await steerOrResend(
       session,
       _driver.caps,
@@ -1489,6 +1953,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       } finally {
         _compacting = false;
       }
+    }
+    // An outside CLI keeps its own context: a summary through the gateway would bill credits and a fresh
+    // conversation would lose its EveryAI tools.
+    if (isOutsideLead(info.harness, info.workingDir)) {
+      return CompactOutcome.failed('${_driver.info.label} keeps its own context and compacts it on its own.');
     }
     final plan = planCompaction(_events);
     if (plan == null) return const CompactOutcome.nothing();
@@ -1708,6 +2177,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (info == null) return 'The session is gone.';
     final next = info.copyWith(model: model, effort: effort);
     if (next.model == info.model && next.effort == info.effort) return 'Already using that.';
+    if (isOutsideLead(info.harness, info.workingDir) && !_driver.caps.contains(DriverCap.switchModel)) {
+      return "${_driver.info.label} can't change model during a session. Start a new session to use another.";
+    }
     final session = _session;
     if (session == null) return 'The session is not connected yet.';
     final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
@@ -1781,6 +2253,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _doomOpen = false;
     _pauseGoal('Stopped by you. Set the goal again to carry on.');
     state = state.copyWith(queued: const []);
+    for (final w in [..._hostWaits]) {
+      _answerHost(w, denialMessage(DenialKind.cancelled), isError: true);
+    }
     await _stopSubagents();
     final pending = state.transcript.pending;
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
@@ -2462,6 +2937,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Sends the card's answers: as the held call's result when the server is
   /// holding it, else as a new user message.
   Future<void> answer(QuestionItem item, List<QuestionAnswer> answers) async {
+    if (_hostFor(item.call.id) case final wait?) {
+      _answerHost(wait, answersReason(item.questions, answers));
+      _builder.settleLocal(item.call.id, answers);
+      state = state.copyWith(transcript: _builder.snapshot);
+      return;
+    }
     final session = _session;
     if (session == null) return;
     if (item.call.id.startsWith('doom-')) return _answerDoomLoop(item, answers);
@@ -2493,8 +2974,19 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   /// Approves the plan and tells the agent to go; Plan mode moves to Auto-edit.
   Future<void> startBuilding() async {
-    final held = state.transcript.openPlan?.call;
+    final open = state.transcript.openPlan;
+    final held = open?.call;
     if (state.mode == AgentMode.plan) await setMode(AgentMode.autoEdit);
+    // An outside agent's plan: the approval is its host call's result, and the plan is kept with the project.
+    final wait = open == null ? null : _hostFor(open.call.id);
+    if (open != null && wait != null) {
+      final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
+      if (dir != null) hostSavePlan(dir, open.markdown);
+      _answerHost(wait, planApprovedReason);
+      _builder.settlePlan(open.call.id, PlanVerdict.approved);
+      state = state.copyWith(transcript: _builder.snapshot);
+      return;
+    }
     final session = _session;
     if (session != null && held != null && _isHeld(held)) {
       await _replyInCall(session, planApprovedReason);
@@ -2707,6 +3199,7 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
       cached: r.cached,
       ownKey: r.onPlan ? 0 : cost,
       plan: r.onPlan ? cost : 0,
+      onPlan: r.onPlan,
       context: false,
     );
     if (r.contextTokens case final c?) next = next.withContext(c);
@@ -2834,7 +3327,7 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
   Future<void> discard() async {
     final w = _w;
     final data = await GitService.dataDir();
-    ref.read(codeSessionsProvider.notifier).remove(sessionId);
+    await ref.read(codeSessionsProvider.notifier).remove(sessionId);
     await GitService.removeWorktree(w, hooksDir: '$data/git-hooks');
   }
 }
