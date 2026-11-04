@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_pty/flutter_pty.dart';
 
+import '../harness/everyai/shell_io.dart' show ShellEnv;
 import '../harness/session_processes.dart' show sessionEnvVar;
 import 'pty.dart';
 
@@ -26,6 +27,29 @@ ShellPty? startShell({
       arguments: args,
       workingDirectory: Directory(workingDir).existsSync() ? workingDir : null,
       environment: environment,
+      rows: rows,
+      columns: columns,
+    ),
+  );
+}
+
+Future<ShellPty?> startProgram({
+  required String executable,
+  required List<String> args,
+  required String workingDir,
+  required String sessionTag,
+  int rows = 24,
+  int columns = 80,
+  Map<String, String> env = const {},
+}) async {
+  if (!shellSupported) return null;
+  final shell = await ShellEnv.load();
+  return _Pty(
+    Pty.start(
+      executable,
+      arguments: args,
+      workingDirectory: Directory(workingDir).existsSync() ? workingDir : null,
+      environment: programEnv(shell.env, env, sessionTag),
       rows: rows,
       columns: columns,
     ),

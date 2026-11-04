@@ -139,7 +139,6 @@ void main() {
         ClaudeDriver(which: _nowhere),
         CodexDriver(which: _nowhere),
         AcpDriver(id: 'acp:x', label: 'x', command: 'x', which: _nowhere),
-        TerminalDriver(id: 'terminal:x', label: 'x', command: 'x', which: _nowhere),
       ];
       for (final d in stubs) {
         final s = await d.detect();
