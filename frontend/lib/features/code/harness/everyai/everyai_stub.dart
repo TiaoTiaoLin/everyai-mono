@@ -6,7 +6,7 @@ import '../events.dart';
 import '../harness.dart';
 
 /// The EveryAI harness needs a desktop: it runs commands and edits files.
-final class EveryAIHarness implements Harness {
+final class EveryAIHarness implements Harness, ForksSessions {
   EveryAIHarness({required this.dataDir, required this.gatewayKey, http.Client? client});
 
   final Future<String> Function() dataDir;
@@ -17,6 +17,7 @@ final class EveryAIHarness implements Harness {
   @override
   Future<HarnessSession> start(SessionSpec spec) async => _unsupported();
 
+  @override
   Future<HarnessSession> fork(String parentId, SessionSpec spec) async => _unsupported();
 
   @override

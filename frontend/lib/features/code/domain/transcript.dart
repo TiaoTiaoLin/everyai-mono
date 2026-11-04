@@ -403,7 +403,7 @@ final class TranscriptBuilder {
         _result(e);
       case ConversationFailure(:final message):
         _items.add(NoticeItem(e.id, message, error: true));
-      case UnknownEvent() || ConnectionChange():
+      case UnknownEvent() || ConnectionChange() || UsageReport():
         break;
     }
   }

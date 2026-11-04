@@ -66,6 +66,16 @@ sealed class HarnessEvent {
         raw: json,
         message: json['detail'] as String? ?? json['message'] as String? ?? json['code'] as String? ?? 'Error',
       ),
+      'UsageReport' => UsageReport(
+        id: id,
+        raw: json,
+        input: (json['input_tokens'] as num?)?.toInt() ?? 0,
+        output: (json['output_tokens'] as num?)?.toInt() ?? 0,
+        cached: (json['cached_tokens'] as num?)?.toInt() ?? 0,
+        contextTokens: (json['context_tokens'] as num?)?.toInt(),
+        costMicros: (json['cost_micros'] as num?)?.toInt(),
+        onPlan: json['on_plan'] == true,
+      ),
       final kind => UnknownEvent(id: id, raw: json, kind: '$kind'),
     };
   }
@@ -306,6 +316,63 @@ final class ConnectionChange extends HarnessEvent {
   /// Connected to a different server than before: a run that was going on
   /// was cut off. The EveryAI harness never sets it.
   final bool restarted;
+}
+
+/// What one model call (or turn) of an outside driver used, as a delta:
+/// [input] counts cached tokens too ([cached] of them), as in the usage
+/// meter; over a turn it is the sum of its calls. [contextTokens]: how full
+/// the window is now (the latest call's prompt), when the driver knows; the
+/// context ring moves only then. [costMicros]: what it cost, when the driver
+/// says; [onPlan]: paid by the user's subscription, so it shows but isn't
+/// spending. Drivers turn running totals into deltas, and keep [id] stable
+/// when history replays.
+final class UsageReport extends HarnessEvent {
+  const UsageReport({
+    required super.id,
+    required super.raw,
+    required this.input,
+    required this.output,
+    this.cached = 0,
+    this.contextTokens,
+    this.costMicros,
+    this.onPlan = false,
+  });
+
+  /// One with its [raw] filled in, so the remote mirror carries it.
+  factory UsageReport.of({
+    required String id,
+    required int input,
+    required int output,
+    int cached = 0,
+    int? contextTokens,
+    int? costMicros,
+    bool onPlan = false,
+  }) => UsageReport(
+    id: id,
+    raw: {
+      'kind': 'UsageReport',
+      'id': id,
+      'input_tokens': input,
+      'output_tokens': output,
+      'cached_tokens': cached,
+      'context_tokens': ?contextTokens,
+      'cost_micros': ?costMicros,
+      'on_plan': onPlan,
+    },
+    input: input,
+    output: output,
+    cached: cached,
+    contextTokens: contextTokens,
+    costMicros: costMicros,
+    onPlan: onPlan,
+  );
+
+  final int input;
+  final int output;
+  final int cached;
+  final int? contextTokens;
+  final int? costMicros;
+  final bool onPlan;
 }
 
 final class UnknownEvent extends HarnessEvent {

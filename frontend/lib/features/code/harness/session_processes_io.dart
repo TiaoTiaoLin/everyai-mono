@@ -2,18 +2,23 @@ import 'dart:io';
 
 import 'session_processes.dart';
 
-Future<List<int>> killSessionProcesses({required String tag, required String workingDir, required bool ownsDir}) async {
+Future<List<int>> killSessionProcesses({
+  required String tag,
+  required String workingDir,
+  required bool ownsDir,
+  Set<int> roots = const {},
+}) async {
   if (tag.isEmpty || !(Platform.isMacOS || Platform.isLinux)) return const [];
   try {
     final dir = Directory(workingDir).absolute.resolveSymbolicLinksSync();
-    final pids = await _find(tag, dir, ownsDir);
+    final pids = await _find(tag, dir, ownsDir, roots);
     if (pids.isEmpty) return const [];
     for (final p in pids) {
       Process.killPid(p);
     }
     // Whatever ignores SIGTERM gets SIGKILL.
     await Future<void>.delayed(const Duration(milliseconds: 1500));
-    final left = (await _find(tag, dir, ownsDir)).where(pids.contains);
+    final left = (await _find(tag, dir, ownsDir, roots)).where(pids.contains);
     for (final p in left) {
       Process.killPid(p, ProcessSignal.sigkill);
     }
@@ -23,23 +28,28 @@ Future<List<int>> killSessionProcesses({required String tag, required String wor
   }
 }
 
-Future<List<int>> _find(String tag, String dir, bool ownsDir) async => (await _scan(tag, dir, ownsDir)).$2;
+Future<List<int>> _find(String tag, String dir, bool ownsDir, Set<int> roots) async =>
+    (await _scan(tag, dir, ownsDir, roots)).$2;
 
-Future<(ProcessTable, List<int>)> _scan(String tag, String dir, bool ownsDir) async {
+Future<(ProcessTable, List<int>)> _scan(String tag, String dir, bool ownsDir, Set<int> roots) async {
   final table = Platform.isLinux ? _procTable() : await _psTable();
   final cwds = Platform.isLinux ? _procCwds(table.needsCwd()) : await _lsofCwds(table.needsCwd());
-  return (table, table.sessionProcesses(tag: tag, workingDir: dir, ownsDir: ownsDir, cwds: cwds)..remove(pid));
+  return (
+    table,
+    table.sessionProcesses(tag: tag, workingDir: dir, ownsDir: ownsDir, cwds: cwds, roots: roots)..remove(pid),
+  );
 }
 
 Future<(ProcessTable, List<int>)?> findSessionProcesses({
   required String tag,
   required String workingDir,
   required bool ownsDir,
+  Set<int> roots = const {},
 }) async {
   if (!(Platform.isMacOS || Platform.isLinux)) return null;
   try {
     final dir = Directory(workingDir).absolute.resolveSymbolicLinksSync();
-    return await _scan(tag, dir, ownsDir);
+    return await _scan(tag, dir, ownsDir, roots);
   } on Object {
     return null;
   }
