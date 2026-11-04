@@ -2099,8 +2099,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Answers given to the calls waiting now (see [CodeSessionState.decided]).
   final _decided = <String, bool>{};
 
-  /// Commands of an outside harness the floor already advised against: when
-  /// the model runs one again, the user decides (see [outsideVerdict]).
+  /// Floor reasons an outside harness was already advised about: when the
+  /// model hits one again, the user decides (see [outsideVerdict]).
   final _floorAdvised = <String>{};
 
   /// The host-run calls (bug_check, check) the user or the rules allowed in
@@ -2134,17 +2134,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
           [call],
           _driver.info.id == everyaiHarnessName
               ? policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase))
-              : outsideVerdict(
-                  policy,
-                  call,
-                  state.mode,
-                  askMcp: beforeBuild(t.phase?.phase),
-                  advised: _floorAdvised.contains(call.str('command')),
-                ),
+              : outsideVerdict(policy, call, state.mode, askMcp: beforeBuild(t.phase?.phase), advised: _floorAdvised),
         ),
       };
       if (verdict == null) continue;
-      if (verdict.reason?.startsWith(floorAdviceLead) ?? false) _floorAdvised.add(call.str('command'));
       // Over budget: nothing is approved on its own; the run stops instead.
       if (verdict.accept && !_withinBudget()) {
         unawaited(stop());

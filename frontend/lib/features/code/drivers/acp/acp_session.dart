@@ -5,7 +5,7 @@ import 'dart:async';
 import 'package:uuid/uuid.dart';
 
 import '../../domain/agent_mode.dart';
-import '../../domain/floor_advice.dart' show floorAdviceLead;
+import '../../domain/floor_advice.dart' show floorAdviceLead, floorAdviceSubject;
 import '../../domain/permissions.dart' show typedReason;
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
@@ -865,6 +865,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
           if (o['kind'] == kind && o['optionId'] is String) o['optionId']! as String,
       ].firstOrNull;
       if (accept) {
+        // The user allowed what the floor advised against: that advice no longer holds.
+        if (call != null && call.str('command').isNotEmpty) {
+          final quoted = '`${floorAdviceSubject(call)}`';
+          _notes.removeWhere((n) => n.startsWith(floorAdviceLead) && n.contains(quoted));
+        }
         if (option('allow_once') case final id?) {
           a.reply.complete(_selected(id));
           continue;

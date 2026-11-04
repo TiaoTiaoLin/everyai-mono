@@ -661,6 +661,27 @@ void main() {
       await s.close();
     });
 
+    test('floor advice is dropped once the user allows that command', () async {
+      final r = rig(['gemini/floor_then_allow.jsonl']);
+      final s = await r.driver('gemini', 'gemini').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('Clean up.');
+      await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+      final first = seen.calls.single;
+      expect(first.str('command'), 'rm -rf build');
+      await s.respond(accept: false, reason: floorAdvice(first, 'deletes the build'), callIds: [first.id]);
+      await seen.until(() => seen.calls.length == 2 && seen.status == ExecutionStatus.waitingForConfirmation);
+      await s.respond(accept: true, callIds: [seen.calls.last.id]);
+      await seen.untilStatus(ExecutionStatus.finished);
+      await s.resume();
+      await s.send('What next?');
+      await r.channels.single.finished;
+      await seen.until(() => seen.statuses.where((x) => x == ExecutionStatus.finished).length == 2);
+      r.expectPlayed();
+      expect(_prompts(r.channels.single).last, 'What next?');
+      await s.close();
+    });
+
     test('refusing every call at once cancels the turn; resume passes the reason on', () async {
       final r = rig(['gemini/deny_all.jsonl']);
       final s = await r.driver('gemini', 'gemini').start(r.spec());

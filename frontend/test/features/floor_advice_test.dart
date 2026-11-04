@@ -22,14 +22,43 @@ void main() {
     expect(v.reason, contains('ask them'));
   });
 
-  test('once advised, the user decides', () {
-    expect(outsideVerdict(policy, _sh('rm -rf ~'), AgentMode.fullAuto, advised: true), isNull);
+  test('once advised about a floor reason, the user decides, however the retry is worded', () {
+    final advised = <String>{};
+    expect(
+      outsideVerdict(policy, _sh('rm -rf ~'), AgentMode.fullAuto, advised: advised)?.reason,
+      startsWith(floorAdviceLead),
+    );
+    for (final retry in ['rm -rf ~', 'rm  -rf   ~', 'cd /tmp && rm -rf ~']) {
+      expect(outsideVerdict(policy, _sh(retry), AgentMode.fullAuto, advised: advised), isNull, reason: retry);
+    }
+  });
+
+  test('a host-run check that hits the floor is refused outright, with no advice', () {
+    final check = HarnessEvent.decode({
+      'kind': 'ActionEvent',
+      'id': 'b',
+      'tool_name': 'mcp__everyai__bug_check',
+      'action': {'kind': 'MCPToolAction', 'command': 'rm -rf ~'},
+    }) as ActionCall;
+    for (final m in AgentMode.values) {
+      for (final advised in [
+        <String>{},
+        {floorReason('rm -rf ~')!},
+      ]) {
+        final v = outsideVerdict(policy, check, m, advised: advised);
+        expect(v?.accept, isFalse, reason: '$m');
+        expect(v!.reason, isNot(startsWith(floorAdviceLead)), reason: '$m');
+      }
+    }
   });
 
   test('a floor hit is never approved on its own', () {
     for (final m in AgentMode.values) {
       for (final c in ['rm -rf ~', 'sudo rm -rf /usr', 'mkfs.ext4 /dev/sdb1', ':(){ :|:& };:']) {
-        for (final advised in [false, true]) {
+        for (final advised in [
+          <String>{},
+          {floorReason(c) ?? ''},
+        ]) {
           expect(outsideVerdict(policy, _sh(c), m, advised: advised)?.accept, isNot(isTrue), reason: '$m $c');
         }
       }
