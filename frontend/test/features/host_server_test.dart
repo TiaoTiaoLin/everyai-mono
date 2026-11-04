@@ -52,6 +52,7 @@ final class _FakeTools implements HostTools {
   Future<HostResult> call(HostCall call) {
     calls.add(call);
     if (call.name == 'memory') return Future.value((text: 'saved: ${call.args['text']}', isError: false));
+    if (call.name == 'fork') return Future.value((text: 'Started fork f1.', isError: false));
     final c = held[call.id] = Completer();
     if (_waiting.isNotEmpty) {
       _waiting.removeAt(0).complete(call);
@@ -147,6 +148,10 @@ void main() {
         'present_plan',
         'memory',
         'saved_plans',
+        'fork',
+        'check_forks',
+        'answer_fork',
+        'stop_fork',
         'bug_check',
         'check',
         'diff_stats',
@@ -161,6 +166,20 @@ void main() {
     expect(out.text, 'saved: - run make');
     expect(out.isError, isFalse);
     expect(tools.calls.single.sessionId, 's1');
+  });
+
+  test('a fork call reaches the session and returns at once, with no held timer', () async {
+    final c = await McpConnection.open('everyai', {
+      'url': '${tok.url}',
+      'headers': {'Authorization': 'Bearer ${tok.token}'},
+    });
+    addTearDown(c.close);
+    final fork = c.tools.firstWhere((t) => t['name'] == 'fork');
+    expect((fork['inputSchema']! as Map)['required'], ['task']);
+    final out = await c.call('fork', {'task': 'Add the settings page', 'worktree': true});
+    expect(out.text, 'Started fork f1.');
+    expect(tools.calls.single.args, {'task': 'Add the settings page', 'worktree': true});
+    expect(timers.where((t) => t.after == held), isEmpty);
   });
 
   test('the checks: bug_check and check run commands, the rest only read', () async {

@@ -89,6 +89,7 @@ flutter:
     - assets/agents/
     - assets/workflows/
     - assets/skills/draw-diagram/
+    - assets/skills/everyai-max/
     - assets/skills/make-deck/
     - assets/skills/vector-art/
     - assets/skills/write-artifact/

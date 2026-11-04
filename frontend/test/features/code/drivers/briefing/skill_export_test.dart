@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/drivers/briefing/skill_export.dart';
 import 'package:every_ai/features/code/drivers/briefing/skill_render.dart';
-import 'package:every_ai/features/skills/data/skill_store_io.dart' show scan;
+import 'package:every_ai/features/skills/data/skill_store_io.dart' show scan, seedBuiltins;
+import 'package:every_ai/features/skills/domain/builtin_skills.dart';
 import 'package:every_ai/features/skills/domain/skill_catalog.dart';
 import 'package:every_ai/features/skills/domain/skill_format.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +12,8 @@ import 'package:flutter_test/flutter_test.dart';
 import '_fixtures.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   late Directory tmp;
   late Directory src;
   late String session;
@@ -39,6 +42,20 @@ void main() {
     expect(r.skipped.single, startsWith('chat-only'));
     expect(Directory(r.skillDir).listSync().map((e) => e.path.split('/').last).toList()..sort(), ['alpha']);
     expect(read('session.md'), sessionMd);
+  });
+
+  test('the bundled Max skill is off by default and exported for outside harnesses on Max', () async {
+    final lib = '${tmp.path}/library';
+    await seedBuiltins(lib, await loadBuiltinSkills());
+    final all = await scan((library: lib, shared: null, projects: const []));
+    // Off by default: only a session whose workflow is Max gets it.
+    expect(sessionSkills(all, const SkillSettings(), null).map((s) => s.name), isNot(contains(maxSkillName)));
+    final active = sessionSkills(all, const SkillSettings(), null, max: true);
+    final r = await exportSkills(session, active, sessionText: sessionMd);
+    expect(r.names, contains('everyai-max'));
+    final md = read('skills/everyai-max/SKILL.md');
+    expect(parseFrontMatter(md).fields['name'], 'everyai-max');
+    expect(md, contains('present_plan'));
   });
 
   test('SKILL.md round-trips, drops allowed-tools, escapes commands', () async {

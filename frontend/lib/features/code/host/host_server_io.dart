@@ -14,6 +14,7 @@ import 'host.dart';
 import 'host_checks.dart';
 import 'host_script.dart';
 import 'host_prompts.dart';
+import 'host_max_tools.dart' show maxForkSpecs;
 
 // MCP over Streamable HTTP, tools only, stateless (no Mcp-Session-Id), on
 // one endpoint that speaks both eras the spec defines:
@@ -32,13 +33,14 @@ const _metaVersion = 'io.modelcontextprotocol/protocolVersion';
 const _maxBody = 4 << 20;
 
 /// `ask_user_question` and `present_plan` with the held wording (the answer
-/// is the call's result), then memory, saved plans, the checks, and
-/// run_script where Deno is found.
+/// is the call's result), then memory, saved plans, the Max fork tools, the checks,
+/// run_script where Deno is found and run_workflow.
 final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   for (final name in [askUserQuestionTool, presentPlanTool])
     _mcpTool(clientToolSpecs(held: true).firstWhere((s) => s['name'] == name)),
   _mcpTool(memoryToolSpec),
   savedPlansSpec,
+  for (final s in maxForkSpecs) _mcpTool(s),
   hostBugCheckSpec,
   checkSpec,
   diffStatsSpec,
