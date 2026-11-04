@@ -26,7 +26,7 @@ export 'acp_session.dart' show AcpConnect;
 /// agent's session id, the folder, the session tag; nothing secret), the
 /// event journal and the agent's stderr. Models come from the last session
 /// the agent started (no session is started just to ask).
-final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
+final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode, AdoptsNativeSession {
   AcpDriver({
     required this.id,
     required this.label,
@@ -317,6 +317,31 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeM
     }
     return session;
   }
+
+  @override
+  Future<String> adoptNative(
+    String nativeId, {
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+  }) async {
+    // Our own id; the agent's session is loaded by `session/load` on the next message.
+    final id = const Uuid().v7();
+    await writeJsonFile('${await _root()}/$id/meta.json', {
+      'acpSessionId': nativeId,
+      'cwd': cwd,
+      'sessionTag': sessionTag,
+      'mode': mode.name,
+      'mcpServers': const <String>[],
+    });
+    return id;
+  }
+
+  /// A load's replay isn't shown (the journal is the transcript), and an adopted session has no journal.
+  @override
+  bool get replaysNativeHistory => false;
 
   /// Reopens [conversationId]: its transcript at once, the agent itself only
   /// when the next message is sent.

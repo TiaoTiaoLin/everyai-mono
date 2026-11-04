@@ -39,7 +39,8 @@ typedef ClaudeSpawn = Future<LineChannel> Function(
 /// show it after a restart; the CLI keeps the conversation itself and
 /// continues it with `--resume`. It doesn't print history back, so the
 /// journal is the transcript.
-final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume, StartsInNativeMode {
+final class ClaudeDriver
+    implements HarnessDriver, AttachesBriefed, ChecksResume, StartsInNativeMode, AdoptsNativeSession {
   ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run, this.configDir});
 
   /// Replaces the CLI's config folder (tests).
@@ -184,6 +185,23 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed, ChecksResume
     final meta = _Meta(cwd: cwd, sessionTag: sessionTag, model: model, effort: effort, mode: mode, sent: true);
     await writeTextFile('${await _dir()}/$id.json', jsonEncode(meta.toJson()));
   }
+
+  @override
+  Future<String> adoptNative(
+    String nativeId, {
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+  }) async {
+    await adoptImported(nativeId, cwd: cwd, sessionTag: sessionTag, model: model, effort: effort, mode: mode);
+    return nativeId;
+  }
+
+  /// `--resume` prints nothing back: the history comes from the session file.
+  @override
+  bool get replaysNativeHistory => false;
 
   /// Shows the session from its journal; the CLI starts with the next
   /// message, not before. A briefing isn't kept across restarts (its MCP
