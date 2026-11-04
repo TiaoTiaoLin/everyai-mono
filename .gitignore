@@ -168,7 +168,7 @@ htmlcov/
 coverage.xml
 .ipynb_checkpoints/
 
-# Local dev runs (scripts/dev.sh)
+# Local dev runs (scripts/dev.sh, scripts/launch.sh)
 /.dev/
 
 # brand logos and such

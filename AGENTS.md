@@ -375,6 +375,10 @@ owner's local notes (gitignored); the task board is the GitHub Project.
   - OpenHands quirk: the `task` tool (subagents) breaks conversation create in 1.59.0; removed from the tool list.
   - macOS app is **unsandboxed** now (entitlements); the DB moved to Application Support (`core/db/db_location_io.dart` copies the old container DB on first run).
   - Verified live: Ask-mode session on the sample repo with Haiku via the gateway → explore, approve, edits + tests, `dart test` 3/3, Done. Ledger: 7 gateway calls, 58% of prompt tokens cached.
+- **Launcher (no local backend):** `scripts/launch.sh [build] [macos|linux|windows|web|ios-sim|ios|android|<device>]
+  [-- flutter args]` runs or builds the app against the deployed dev server (`EVERYAI_API` overrides it), installing
+  Flutter/CocoaPods with Homebrew when missing; defines in `.dev/defines-launch.json`. `Launch Flutter (macOS).command`
+  = `launch.sh build macos` + open.
 - **Dev runner:** `scripts/dev.sh [macos|web|ios-sim|ios|<device>] [-- flutter args]` starts backend-exp (reuses one on :8080), fetches the agent-server for macOS, writes `.dev/defines-<target>.json` from `config/dev.json` with the right `API_BASE_URL` (LAN IP + backend `HOST=0.0.0.0` for a physical iPhone), and `flutter run`s. New backend setting `HOST` (default 127.0.0.1).
 - **Web/iOS:** web needs `web/sqlite3.wasm` + `web/drift_worker.js` (added, from drift 2.35.3); verified loading the catalog from the backend. iOS Simulator build verified (this Xcode has no Simulator.app; it runs headless, `xcrun simctl io booted screenshot`). The Code switch shows on desktop hosts only.
 - **Type scale:** Cupertino on a desktop host uses desktop sizes (`_desktopCupertinoText`, 14pt body; text fields 14.5); lighter sidebar/headlines.
