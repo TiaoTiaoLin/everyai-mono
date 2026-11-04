@@ -1,6 +1,8 @@
-// UNVERIFIED: hand-built (codex-cli 0.166.0 here is signed out, so no model ran); shapes from its generated
-// schema and the recorded fixtures (probe, models, start, interrupt_early, turn_failed). Replace with a
-// signed-in recording when one can be made.
+// UNVERIFIED: hand-built. A real usage limit was not triggered on purpose. The signed-in recordings (2026-11-04,
+// free plan) confirmed the snapshot: account/rateLimits/updated {rateLimits{limitId "codex", limitName,
+// normalModelSlug, primary{usedPercent, windowDurationMins, resetsAt (epoch s)}, secondary, credits{hasCredits,
+// unlimited, balance}, individualLimit, spendControlReached, planType, rateLimitReachedType}} with no threadId,
+// sent after every thread/tokenUsage/updated (the free plan had one 30-day primary window).
 // A ChatGPT plan's usage limit. Order per openai/codex @ rust-v0.166.0: on UsageLimitReached core first sends the
 // error's rate-limit snapshot (core/src/session/turn.rs 1846-1851), which app-server forwards as
 // account/rateLimits/updated (app-server/src/bespoke_event_handling.rs 1626-1645); then the error with
@@ -11,12 +13,12 @@
 {"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
 {"dir":"out","msg":{"method":"initialized"}}
 {"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
-{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true,"workspaceRouting":null}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus","workspaceName":null},"requiresOpenaiAuth":true,"workspaceRouting":{"chatgptAccountId":"00000000-0000-0000-0000-000000000001","backendOrigin":"https://chatgpt.com","accountRoutingOverride":"NO_CONSTRAINT"}}}}
 {"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"danger-full-access","approvalsReviewer":"user"}}}
 {"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"dangerFullAccess"}}}}
 {"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Run the tests"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","rootTurnId":"turn_1","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}}
 {"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","rootTurnId":"turn_1","items":[],"itemsView":"notLoaded","status":"inProgress","error":null,"startedAt":1793780000,"completedAt":null,"durationMs":null}},"emittedAtMs":1793780000100}}
-{"dir":"in","msg":{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1793800000},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":1794300000},"credits":null,"individualLimit":null,"planType":"plus","rateLimitReachedType":"rate_limit_reached","spendControlReached":null}},"emittedAtMs":1793780001000}}
+{"dir":"in","msg":{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":100,"windowDurationMins":300,"resetsAt":1793800000},"secondary":{"usedPercent":42,"windowDurationMins":10080,"resetsAt":1794300000},"credits":{"hasCredits":false,"unlimited":false,"balance":null},"individualLimit":null,"planType":"plus","rateLimitReachedType":"rate_limit_reached","spendControlReached":null}},"emittedAtMs":1793780001000}}
 {"dir":"in","msg":{"method":"error","params":{"error":{"message":"You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 3:15 PM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"thr_1","turnId":"turn_1"},"emittedAtMs":1793780001001}}
 {"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","rootTurnId":"turn_1","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at 3:15 PM.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"startedAt":1793780000,"completedAt":1793780001,"durationMs":1000}},"emittedAtMs":1793780001002}}

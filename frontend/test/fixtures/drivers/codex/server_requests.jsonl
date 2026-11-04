@@ -1,6 +1,5 @@
-// UNVERIFIED: hand-built (codex-cli 0.166.0 here is signed out, so no model ran); shapes from its generated
-// schema and the recorded fixtures (probe, models, start, interrupt_early, turn_failed). Replace with a
-// signed-in recording when one can be made.
+// UNVERIFIED: hand-built in codex-cli 0.166.0 shapes (no MCP server, question or permissions request was
+// triggered in the signed-in recordings of 2026-11-04).
 // The other requests Codex may send during a turn: an MCP tool approval (an elicitation marked
 // codex_approval_kind = mcp_tool_call, protocol/src/mcp_approval_meta.rs), a URL elicitation, a question for the
 // user, a tool the client would run, extra permissions, and a v1 approval.

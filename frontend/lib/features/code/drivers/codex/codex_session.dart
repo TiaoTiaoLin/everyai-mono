@@ -83,6 +83,9 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   final _held = <String>[];
   final _heldImages = <String>[];
 
+  /// What each agent message has streamed so far, until its item completes.
+  final _streamed = <String, StringBuffer>{};
+
   String? _turnId;
   Completer<void>? _turnDone;
   var _turnsSeen = false;
@@ -129,6 +132,8 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   Future<void> open({List<RpcCall> initRequests = const []}) async {
     _initRequests = initRequests;
     final reply = await codexHandshake(_peer);
+    // Recorded signed in with ChatGPT: `{type: chatgpt, email, planType,
+    // workspaceName}` (a free plan too: its use isn't billed per token).
     _onPlan = switch (reply['account']) {
       {'type': 'chatgpt'} => true,
       _ => false,
@@ -191,6 +196,9 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   Future<void> _revive(Future<LineChannel> Function() again) async {
+    // The saved count Codex sends right after the resume reply (recorded) is
+    // only a baseline, so it must find no turn seen.
+    _turnsSeen = false;
     try {
       _bind(await again());
       await open(initRequests: _initRequests);
@@ -199,8 +207,6 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       if (!_peer.isClosed) await _peer.close();
       throw HarnessError("Codex didn't start again: $e");
     }
-    // The saved count Codex sends after resuming is only a baseline.
-    _turnsSeen = false;
     _state(ExecutionStatus.idle);
   }
 
@@ -493,6 +499,8 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _turnDone?.complete();
     _turnDone = null;
     _turnId = null;
+    if (!_closing) _keepStreamed();
+    _streamed.clear();
     if (!_closing) {
       for (final p in open) {
         _result(rejectedResult(p.call, 'Codex stopped before it was answered.'));
@@ -525,7 +533,9 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       case 'turn/completed':
         _turnCompleted(params['turn'] as Map<String, Object?>? ?? const {});
       case 'item/agentMessage/delta':
-        _emit(StreamDelta(raw: const {}, content: params['delta'] as String? ?? '', reasoning: ''));
+        final delta = params['delta'] as String? ?? '';
+        if (params['itemId'] case final String item) (_streamed[item] ??= StringBuffer()).write(delta);
+        _emit(StreamDelta(raw: const {}, content: delta, reasoning: ''));
       case 'item/reasoning/summaryTextDelta':
         _emit(StreamDelta(raw: const {}, content: '', reasoning: params['delta'] as String? ?? ''));
       case 'item/started':
@@ -543,6 +553,10 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
         );
       case 'thread/tokenUsage/updated':
         _usage(params);
+      case 'account/updated':
+        // Sent before the account/read reply too (recorded); a sign-in or
+        // sign-out later changes how usage counts.
+        if (params['authMode'] case final String mode) _onPlan = mode == 'chatgpt' || mode == 'chatgptAuthTokens';
       case 'account/rateLimits/updated':
         // Sparse: a field left out keeps what came before. Core sends one
         // just before a usage-limit error (core/src/session/turn.rs lines
@@ -574,6 +588,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   void _itemCompleted(Map<String, Object?> item) {
+    if (item['id'] case final String id) _streamed.remove(id);
     if (messageOf(item) case final message?) {
       _emit(message);
       return;
@@ -594,6 +609,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       p.answer.complete(_Decision.cancel);
       _result(rejectedResult(p.call, 'Stopped before it was answered.'));
     }
+    _keepStreamed();
     final status = turn['status'] as String? ?? 'completed';
     final error = switch (turn['error']) {
       {'message': final String m} => m,
@@ -613,6 +629,17 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       default:
         _state(ExecutionStatus.finished);
     }
+  }
+
+  /// A message cut off by Stop never completes (recorded with 0.166.0: the
+  /// interrupted turn's items are empty), so what it streamed is kept as
+  /// the user saw it.
+  void _keepStreamed() {
+    for (final e in _streamed.entries) {
+      final text = e.value.toString();
+      if (text.trim().isNotEmpty) _emit(agentMessage(e.key, text));
+    }
+    _streamed.clear();
   }
 
   HarnessEvent _failure(String message) =>

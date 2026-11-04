@@ -211,7 +211,9 @@ ToolResult rejectedResult(ActionCall call, String reason) => HarnessEvent.decode
 }) as ToolResult;
 
 /// The agent's text a completed item carries: its messages, reasoning
-/// summaries, proposed plans and compaction notes; null for anything else.
+/// summaries, proposed plans and compaction notes; null for anything else,
+/// and for a message with no text (Codex completes empty `commentary`
+/// messages before a tool call: recorded with 0.166.0).
 ChatMessage? messageOf(Map<String, Object?> item) {
   final id = item['id'] as String? ?? '';
   String joined(Object? parts) => [
@@ -219,7 +221,10 @@ ChatMessage? messageOf(Map<String, Object?> item) {
       if (p is String && p.isNotEmpty) p,
   ].join('\n\n');
   return switch (item['type']) {
-    'agentMessage' || 'plan' => agentMessage(id, item['text'] as String? ?? ''),
+    'agentMessage' || 'plan' => switch (item['text']) {
+      final String t when t.isNotEmpty => agentMessage(id, t),
+      _ => null,
+    },
     'reasoning' => switch (joined(item['summary'])) {
       '' => switch (joined(item['content'])) {
         '' => null,

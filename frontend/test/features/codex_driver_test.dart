@@ -1,10 +1,11 @@
 // The Codex driver against `codex app-server` transcripts.
 //
-// RECORDED from codex-cli 0.166.0, signed out (no model could run): probe, models, start, interrupt_early,
-// turn_failed and the head of resume; only our own out lines were edited to the tests' specs (each file says how).
-// UNVERIFIED, hand-built in the 0.166.0 shapes: approve_command, file_change, interrupt, server_requests, turn,
-// usage_limit, models_paged and the tail of resume (approvals, items, token usage and limits need a signed-in
-// Codex). The recording tool and steps are in docs/research/batches/multi-harness/run3/x2-recordings/.
+// RECORDED from codex-cli 0.166.0. Signed out: probe, models, start, interrupt_early, turn_failed. Signed in with
+// ChatGPT (2026-11-04): probe_signed_in, turn, steer, approve_command, decline_command, file_change, interrupt,
+// interrupt_streaming, resume. Only our own out lines were edited to the tests' specs (each file says how).
+// UNVERIFIED, hand-built in the 0.166.0 shapes: turn_extras (picture, reasoning summary, plan),
+// file_change_refused, server_requests, usage_limit and models_paged. The recording tools and steps are described
+// in docs/research/batches/multi-harness/run3/x2.md.
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
@@ -31,7 +32,13 @@ String _upTo(String name, String until) {
   return lines.take(lines.indexWhere((l) => l.contains(until)) + 1).join('\n');
 }
 
-/// thr_1 started, with turn_1 ("Run the tests") running (approve_command.jsonl).
+/// The prompt of approve_command.jsonl (and the first turn of decline_command.jsonl).
+const _lsPrompt = 'Run the shell command `ls` exactly once with your shell tool, then reply DONE.';
+
+/// The story prompt of steer.jsonl and interrupt_streaming.jsonl.
+const _storyPrompt = 'Write a 400-word story about a lighthouse. No tools.';
+
+/// thr_1 started, with turn_1 ([_lsPrompt]) running (approve_command.jsonl).
 String _running() => _upTo('approve_command', '"method":"turn/started"');
 
 /// The text of each turn/start sent so far.
@@ -241,9 +248,9 @@ void main() {
   });
 
   test(
-    'a turn: user message at once, reasoning, plan, steer, streamed text, usage, then the next turn in Plan',
+    'a turn (hand-built): a picture, reasoning, plan, steer, streamed text, usage, then the next turn in Plan',
     () async {
-      final channel = _fixture('turn');
+      final channel = _fixture('turn_extras');
       final s = await _driver(data, [channel]).start(_spec(work));
       final events = _listen(s);
       await s.send('Fix the failing test', images: ['data:image/png;base64,iVBORw0KGgo=']);
@@ -289,17 +296,113 @@ void main() {
     },
   );
 
+  test('a turn (recorded): streamed text, the answer, usage on the ChatGPT plan, finished', () async {
+    final channel = _fixture('turn');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send('reply OK');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(
+      [for (final m in events.whereType<ChatMessage>()) (m.fromUser, m.text)],
+      [(true, 'reply OK'), (false, 'OK')],
+    );
+    expect(events.whereType<StreamDelta>().map((d) => d.content).join(), 'OK');
+    final usage = events.whereType<UsageReport>().single;
+    expect(
+      (usage.id, usage.input, usage.cached, usage.output, usage.contextTokens, usage.onPlan),
+      ('usage-turn_1-12915', 12910, 9728, 5, 12915, true),
+    );
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.finished]);
+    await s.close();
+  });
+
+  test('a steer mid-turn (recorded): sent with the turn id; Codex finishes the answer, then takes it', () async {
+    final channel = _fixture('steer');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send(_storyPrompt);
+    await pumpEventQueue();
+    await (s as SteersRuns).steer('Stop the story. Reply only STEERED.');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    final messages = events.whereType<ChatMessage>().toList();
+    expect([for (final m in messages) m.fromUser], [true, true, false, false]);
+    expect(messages[2].text, startsWith('Every evening, Mara climbed'));
+    expect(messages[3].text, 'STEERED');
+    expect(_turnStarts(channel), [_storyPrompt]);
+    // Two model calls in the turn, each a usage report.
+    expect([for (final u in events.whereType<UsageReport>()) u.output], [559, 7]);
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.finished]);
+    await s.close();
+  });
+
+  test('a command declined by name (recorded): decline, the item comes back declined, the turn goes on', () async {
+    final channel = _fixture('decline_command');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send(_lsPrompt);
+    await pumpEventQueue();
+    await s.respond(accept: true, callIds: ['call_1']);
+    await pumpEventQueue();
+    await s.send(
+      'Run the shell command `ls` exactly once more with your shell tool. If it is refused, reply REFUSED and stop.',
+    );
+    await pumpEventQueue();
+    expect(events.whereType<ActionCall>().map((c) => c.id), ['call_1', 'call_2']);
+    await s.respond(accept: false, callIds: ['call_2']);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(
+      [for (final r in events.whereType<ToolResult>()) (r.actionId, r.outcome)],
+      [('call_1', ToolOutcome.ok), ('call_2', ToolOutcome.rejected)],
+    );
+    // No reason, so no steer; the model answers on its own.
+    expect(channel.sent.where((m) => m['method'] == 'turn/steer'), isEmpty);
+    expect(events.whereType<ChatMessage>().last.text, 'REFUSED');
+    expect(_states(events).last, ExecutionStatus.finished);
+    await s.close();
+  });
+
+  test('an edit (recorded): the fileChange item waits, accept applies it', () async {
+    final channel = _fixture('file_change');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send(
+      'Edit notes.txt with your apply_patch tool so it has a second line `world`. Do not run shell commands. Then reply DONE.',
+    );
+    await pumpEventQueue();
+    final edit = events.whereType<ActionCall>().single;
+    expect((edit.id, edit.actionKind), ('call_1', 'ApplyPatchAction'));
+    expect(edit.action['files'], [
+      {'path': '/work/repo/notes.txt', 'op': 'update'},
+    ]);
+    expect(edit.action['patch'], '@@ -1 +1,2 @@\n hello\n+world\n');
+    expect(_states(events).last, ExecutionStatus.waitingForConfirmation);
+    await s.respond(accept: true, callIds: ['call_1']);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    final result = events.whereType<ToolResult>().single;
+    expect((result.actionId, result.outcome, result.text), ('call_1', ToolOutcome.ok, 'Applied.'));
+    expect([for (final m in events.whereType<ChatMessage>()) m.text].skip(1), [
+      'I’m adding the requested second line to `notes.txt` using `apply_patch`.',
+      'DONE',
+    ]);
+    await s.close();
+  });
+
   test('a command approval: the unwrapped command waits, accept goes back once, never for the session', () async {
     final channel = _fixture('approve_command');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final call = events.whereType<ActionCall>().single;
-    expect(
-      (call.id, call.actionKind, call.str('command'), call.str('cwd')),
-      ('call_1', 'TerminalAction', 'npm test', work),
-    );
+    expect((call.id, call.actionKind, call.str('command'), call.str('cwd')), ('call_1', 'TerminalAction', 'ls', work));
     expect(autoDecidable(call), isTrue);
     expect(_states(events).last, ExecutionStatus.waitingForConfirmation);
     await s.respond(accept: true, callIds: ['call_1']);
@@ -307,7 +410,12 @@ void main() {
     await pumpEventQueue();
     channel.expectFinished();
     final result = events.whereType<ToolResult>().single;
-    expect((result.actionId, result.outcome, result.text), ('call_1', ToolOutcome.ok, '3 passing\nExit code 0'));
+    expect(
+      (result.actionId, result.outcome, result.text),
+      ('call_1', ToolOutcome.ok, 'README.md\nnotes.txt\nExit code 0'),
+    );
+    // The empty commentary message Codex completes before the call isn't shown.
+    expect([for (final m in events.whereType<ChatMessage>()) m.text], [_lsPrompt, 'DONE']);
     expect(_states(events), [
       ExecutionStatus.running,
       ExecutionStatus.waitingForConfirmation,
@@ -319,7 +427,7 @@ void main() {
   });
 
   test('file changes: decline by name with the reason as a steer; refusing them all cancels each', () async {
-    final channel = _fixture('file_change');
+    final channel = _fixture('file_change_refused');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
     await s.send('Rename the helper');
@@ -356,22 +464,43 @@ void main() {
     await s.close();
   });
 
-  test('interrupt: turn/interrupt, the dropped approval is cancelled and a later answer sends nothing', () async {
-    final channel = _fixture('interrupt');
+  test(
+    'interrupt (recorded): turn/interrupt, the dropped approval is cancelled and a later answer sends nothing',
+    () async {
+      final channel = _fixture('interrupt');
+      final s = await _driver(data, [channel]).start(_spec(work));
+      final events = _listen(s);
+      await s.send('Run the shell command `ls` with your shell tool.');
+      await pumpEventQueue();
+      await s.interrupt();
+      await channel.finished;
+      await pumpEventQueue();
+      channel.expectFinished();
+      final sent = channel.sent.length;
+      await s.respond(accept: true);
+      expect(channel.sent, hasLength(sent));
+      final result = events.whereType<ToolResult>().single;
+      expect((result.actionId, result.outcome), ('call_1', ToolOutcome.rejected));
+      expect(_states(events).last, ExecutionStatus.paused);
+      await s.close();
+    },
+  );
+
+  test('Stop while the answer streams (recorded): the cut-off text stays as a message', () async {
+    final channel = _fixture('interrupt_streaming');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Clean up');
+    await s.send(_storyPrompt);
     await pumpEventQueue();
     await s.interrupt();
     await channel.finished;
     await pumpEventQueue();
     channel.expectFinished();
-    final sent = channel.sent.length;
-    await s.respond(accept: true);
-    expect(channel.sent, hasLength(sent));
-    final result = events.whereType<ToolResult>().single;
-    expect((result.actionId, result.outcome), ('call_9', ToolOutcome.rejected));
-    expect(_states(events).last, ExecutionStatus.paused);
+    expect(
+      [for (final m in events.whereType<ChatMessage>()) (m.fromUser, m.text)],
+      [(true, _storyPrompt), (false, 'Every')],
+    );
+    expect(_states(events), [ExecutionStatus.running, ExecutionStatus.paused]);
     await s.close();
   });
 
@@ -382,7 +511,7 @@ void main() {
     final channel = ReplayChannel([...lines.take(cut + 1), '{"dir":"eof"}'].join('\n'));
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final result = events.whereType<ToolResult>().single;
     expect((result.actionId, result.outcome), ('call_1', ToolOutcome.rejected));
@@ -417,7 +546,7 @@ void main() {
   test('attach: thread/resume without turns, the journal replayed, open calls closed, then live', () async {
     final first = _fixture('approve_command');
     final a = await _driver(data, [first]).start(_spec(work));
-    await a.send('Run the tests');
+    await a.send(_lsPrompt);
     await pumpEventQueue();
     await a.close();
 
@@ -441,15 +570,16 @@ void main() {
     // The saved count Codex replays on resume isn't counted again.
     expect(events.whereType<UsageReport>(), isEmpty);
 
-    await s.send('Carry on');
+    await s.send('reply OK again');
     await channel.finished;
     await pumpEventQueue();
     channel.expectFinished();
     final usage = events.whereType<UsageReport>().single;
     expect(
       (usage.id, usage.input, usage.cached, usage.output, usage.contextTokens, usage.onPlan),
-      ('usage-turn_2-7900', 2500, 2000, 100, 2600, false),
+      ('usage-turn_2-25844', 12924, 9728, 5, 12929, true),
     );
+    expect(events.whereType<ChatMessage>().last.text, 'OK');
     final later = _listen(s);
     await pumpEventQueue();
     expect(later.where((e) => e is! StreamDelta).length, events.where((e) => e is! StreamDelta).length);
@@ -467,7 +597,7 @@ ${_running()}
 ''');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final calls = events.whereType<ActionCall>().toList();
     expect(
@@ -503,7 +633,7 @@ ${_running()}
 ''');
     final s = await _driver(data, [channel]).start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     final net = events.whereType<ActionCall>().last;
     expect(
@@ -598,7 +728,7 @@ ${_upTo('resume', '"id":2,"result"')}
     final driver = _driver(data, [dead, channel], spawned);
     final s = await driver.start(_spec(work));
     final events = _listen(s);
-    await s.send('Run the tests');
+    await s.send(_lsPrompt);
     await pumpEventQueue();
     expect(_states(events).last, ExecutionStatus.error);
     expect(await driver.attach('thr_1'), same(s));
@@ -693,14 +823,10 @@ ${dies ? '{"dir":"eof"}' : ''}
       );
     });
 
-    test('signed in with ChatGPT, not signed in (recorded), or the probe failing', () async {
-      final chatgpt = ReplayChannel(
-        File('$_fixtures/probe.jsonl').readAsStringSync().replaceFirst(
-          '"account":null',
-          '"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"}',
-        ),
-      );
+    test('signed in with ChatGPT or not (both recorded), or the probe failing', () async {
+      final chatgpt = _fixture('probe_signed_in');
       final ok = await _driver(data, [chatgpt]).detect();
+      chatgpt.expectFinished();
       expect((ok.installed, ok.path, ok.signedIn, ok.problem), (true, '/bin/echo', true, null));
       final channel = _fixture('probe');
       final out = await _driver(data, [channel]).detect();

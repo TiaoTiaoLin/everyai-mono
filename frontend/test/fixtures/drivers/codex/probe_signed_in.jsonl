@@ -1,0 +1,14 @@
+// RECORDED from codex-cli 0.166.0 app-server, signed in with ChatGPT (free plan), 2026-11-04, in a scratch git repo;
+// model gpt-5.6-luna, effort low. Scrubbed: the repo path -> {{cwd}} and /work/repo, the home folder -> /home/user,
+// email, account, installation ids, host name, terminal in userAgent, git sha, process ids; thread, turn and item
+// ids -> thr_N, turn_N, call_N, msg_N, rs_N, item_u_N.
+// detect(): the handshake and account/read (local, no model call), signed in with ChatGPT. The
+// account/updated notice comes before the reply. Cut after account/read (the rate-limit and usage reads and
+// model/list the recording went on with are in docs/research/batches/multi-harness/run3/x2.md).
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 27.0.0; arm64) (everyai; 0.1.0)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"host.local","installationId":"00000000-0000-0000-0000-000000000000","environmentId":null},"emittedAtMs":1793784542630}}
+{"dir":"in","msg":{"method":"account/updated","params":{"authMode":"chatgpt","planType":"free"},"emittedAtMs":1793784543117}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"free","workspaceName":null},"requiresOpenaiAuth":true,"workspaceRouting":{"chatgptAccountId":"00000000-0000-0000-0000-000000000001","backendOrigin":"https://chatgpt.com","accountRoutingOverride":"NO_CONSTRAINT"}}}}
