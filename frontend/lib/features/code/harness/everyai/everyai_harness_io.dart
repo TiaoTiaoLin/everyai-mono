@@ -34,7 +34,7 @@ import 'tools_io.dart';
 /// permissions and approvals are shared), but the loop, the tools and the
 /// history are ours: questions block inside the call, tool results can be cut
 /// to size, and a session can be forked from another's history.
-final class EveryAIHarness implements Harness {
+final class EveryAIHarness implements Harness, ForksSessions {
   EveryAIHarness({required this.dataDir, required this.gatewayKey, this.client});
 
   /// App Support; sessions are kept under `everyai-sessions/<id>/`.
@@ -63,6 +63,7 @@ final class EveryAIHarness implements Harness {
   /// A new session that starts from [parentId]'s history up to now (a fork):
   /// the same system prompt and tools, so the model's cached prefix holds,
   /// then [spec]'s initial message as the directive.
+  @override
   Future<HarnessSession> fork(String parentId, SessionSpec spec) async {
     final parent = _sessions[parentId] ?? (await attach(parentId)) as EveryAISession;
     final id = const Uuid().v4();

@@ -32,8 +32,12 @@ enum SessionStatus {
   final String label;
 }
 
-/// The stored harness name of sessions on the EveryAI harness (the only one).
+/// The stored harness name of sessions on the EveryAI harness (others are
+/// in `drivers/driver_registry.dart`).
 const everyaiHarnessName = 'everyai';
+
+/// The stored harness name of sessions from the removed OpenHands harness.
+const openHandsHarnessName = 'openHands';
 
 @immutable
 final class CodeSessionInfo {
@@ -84,12 +88,13 @@ final class CodeSessionInfo {
   /// so Changes can show what it did.
   final GitBaseline? baseline;
 
-  /// The harness it ran on: [everyaiHarnessName], or `openHands` for
-  /// sessions from before that harness was removed (they can't reopen).
+  /// The driver it runs on: [everyaiHarnessName], another registered driver's
+  /// id, or [openHandsHarnessName] for sessions from before that harness was
+  /// removed (they can't reopen).
   final String harness;
 
   /// Started on a harness the app no longer has.
-  bool get removedHarness => harness != everyaiHarnessName;
+  bool get removedHarness => harness == openHandsHarnessName;
 
   /// The library agent running the session ('' for the EveryAI agent).
   final String mainAgent;
@@ -187,7 +192,7 @@ final class CodeSessionInfo {
     worktree: json['worktree'] is Map<String, Object?>
         ? SessionWorktree.fromJson(json['worktree']! as Map<String, Object?>)
         : null,
-    harness: json['harness'] as String? ?? 'openHands',
+    harness: json['harness'] as String? ?? openHandsHarnessName,
     mainAgent: json['main_agent'] as String? ?? '',
     baseline: json['baseline'] is Map<String, Object?>
         ? GitBaseline.fromJson(json['baseline']! as Map<String, Object?>)

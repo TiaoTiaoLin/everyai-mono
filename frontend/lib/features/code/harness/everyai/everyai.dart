@@ -14,6 +14,9 @@ Harness everyAIHarness({
 }) => impl.EveryAIHarness(dataDir: dataDir, gatewayKey: gatewayKey, client: client);
 
 /// Starts [spec] as a fork of [parentConversationId] when [harness] can fork
-/// (the EveryAI harness); null otherwise.
+/// (the EveryAI harness, or a driver around it); null otherwise.
 Future<HarnessSession>? forkSession(Harness harness, String parentConversationId, SessionSpec spec) =>
-    harness is impl.EveryAIHarness ? harness.fork(parentConversationId, spec) : null;
+    switch (harness) {
+      final ForksSessions f => f.fork(parentConversationId, spec),
+      _ => null,
+    };

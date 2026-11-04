@@ -3,6 +3,20 @@ import 'package:flutter/foundation.dart';
 import '../domain/agent_mode.dart';
 import 'events.dart';
 
+/// How an outside harness reaches EveryAI from inside its session: the MCP
+/// server that offers our tools ([mcpUrl], with [mcpToken] as its bearer
+/// token), the folder our skills are written to ([skillDir]) and the name of
+/// the skill that explains the session ([sessionSkill]).
+@immutable
+final class DriverBriefing {
+  const DriverBriefing({required this.mcpUrl, required this.mcpToken, this.skillDir, this.sessionSkill});
+
+  final String mcpUrl;
+  final String mcpToken;
+  final String? skillDir;
+  final String? sessionSkill;
+}
+
 /// What a new coding session needs.
 @immutable
 final class SessionSpec {
@@ -35,7 +49,13 @@ final class SessionSpec {
     this.phaseFlow,
     this.script,
     this.reviewModel,
+    this.briefing,
   });
+
+  /// What an outside harness (a coding CLI driven by the app) is handed to
+  /// reach EveryAI's own tools and the session's skill; null for the EveryAI
+  /// harness, which has them built in.
+  final DriverBriefing? briefing;
 
   /// 'max' or 'ultra': the session runs the phase flow (research → questions
   /// → plan → build → verify) the harness enforces. Null: it doesn't.
@@ -236,8 +256,6 @@ abstract interface class AsksAside {
   Future<String> askAside(String question, {int maxTokens = 800});
 }
 
-/// A session that compacts its own history in place (the EveryAI harness):
-/// `/compact` asks it instead of starting a continuation conversation.
 /// A session running the Max or Ultra phase flow (the EveryAI harness).
 abstract interface class PhasedSession {
   /// Moves the flow past the phase it is stuck in.
@@ -258,6 +276,8 @@ abstract interface class RetriesModelCalls {
   void retryNow();
 }
 
+/// A session that compacts its own history in place (the EveryAI harness):
+/// `/compact` asks it instead of starting a continuation conversation.
 abstract interface class CompactsInPlace {
   /// False when there was nothing to summarize or the summary was unusable.
   Future<bool> compact({String focus = ''});
@@ -278,6 +298,21 @@ typedef BackgroundTask = ({
 abstract interface class HasBackgroundShells {
   List<BackgroundTask> get backgroundTasks;
   Future<void> stopBackground(String id);
+}
+
+/// A session that takes a message into the turn that is running, without
+/// stopping it (a harness with native steering). Others are interrupted and
+/// sent the message (see `steerOrResend`).
+abstract interface class SteersRuns {
+  Future<void> steer(String text, {List<String> images = const []});
+}
+
+/// A harness that can start a session from another one's history (the
+/// EveryAI harness).
+abstract interface class ForksSessions {
+  /// A new session that starts from [parentConversationId]'s history up to
+  /// now, then [spec]'s initial message as the directive.
+  Future<HarnessSession> fork(String parentConversationId, SessionSpec spec);
 }
 
 /// Starts and reopens agent sessions.

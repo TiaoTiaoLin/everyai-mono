@@ -49,6 +49,9 @@ import 'domain/transcript.dart';
 import 'gateway_key.dart';
 import 'git/git_service.dart';
 import 'domain/transcript_export.dart';
+import 'drivers/driver.dart';
+import 'drivers/driver_policy.dart';
+import 'drivers/driver_registry.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
 import 'harness/fake_harness.dart';
@@ -80,12 +83,13 @@ bool noLocalFolder(String path) => isDemoPath(path);
 final harnessProvider = Provider<Harness>((ref) => FakeHarness());
 
 /// The harness a session in [workingDir] runs on: the scripted one for demo
-/// projects, else the EveryAI harness. [harness] is the session's stored
-/// harness name; sessions from the removed OpenHands harness can't reopen.
+/// projects, else the driver stored as [harness] (see `driver_registry.dart`).
+/// Sessions from the removed OpenHands harness can't reopen.
 Future<Harness> harnessFor(Ref ref, String workingDir, {String harness = everyaiHarnessName}) async {
   if (isDemoPath(workingDir)) return ref.read(harnessProvider);
-  if (harness != everyaiHarnessName) throw const HarnessError(removedHarnessNotice);
-  return ref.read(everyaiHarnessProvider);
+  if (harness == openHandsHarnessName) throw const HarnessError(removedHarnessNotice);
+  return ref.read(driverRegistryProvider).resolve(harness) ??
+      (throw HarnessError("This session ran on $harness, which this version of the app doesn't have."));
 }
 
 /// What a session from the removed OpenHands harness shows instead of its history.
@@ -209,6 +213,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     bool isolated = false,
     HarnessTier? tier,
     HarnessMode? harnessMode,
+    String harness = everyaiHarnessName,
   }) async {
     final id = const Uuid().v7();
     harnessMode ??= ref.read(codeSettingsProvider).harnessMode;
@@ -221,10 +226,10 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     final baseline = local && worktree == null ? await _baselineFor(project.path) : null;
     final workingDir = worktree?.path ?? project.path;
     final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
-    final harness = await harnessFor(ref, project.path);
+    final runner = await harnessFor(ref, project.path, harness: harness);
     // The scripted demo answers client tools with new messages, not inside the call.
     final hold = !isDemoPath(project.path);
-    final live = await harness.start(
+    final live = await runner.start(
       await specFor(
         sessionId: id,
         projectDir: project.path,
@@ -253,6 +258,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       branch: worktree?.branch ?? baseline?.branch ?? '',
       worktree: worktree,
       baseline: baseline,
+      harness: harness,
       effort: effort ?? '',
       holdClientTools: hold,
       tier: tier ?? ref.read(codeSettingsProvider).tier,
@@ -538,6 +544,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         ref.read(codeProjectsProvider).where((p) => p.id == parent.projectId).firstOrNull?.path ?? parent.workingDir;
     workingDir ??= forkCopy?.path ?? parent.workingDir;
     final harness = await harnessFor(ref, parent.workingDir, harness: parent.harness);
+    // A driver that can't fork can't start one from the parent's history yet.
+    if (harness case final HarnessDriver d when fork && !d.caps.contains(DriverCap.fork)) throw forkUnavailable(d.info);
     Future<HarnessSession> begin(SessionSpec spec) =>
         (fork ? forkSession(harness, parent.conversationId, spec) : null) ?? harness.start(spec);
     final live = await begin(
@@ -639,6 +647,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     };
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
+      ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
     }
     state = [
       for (final s in state)
@@ -1010,7 +1019,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       return;
     }
     if (!ref.mounted) return;
-    _answered = '';
+    // Only a batch still left for the user is decided again: one answered
+    // before the rules arrived keeps its answer (resetting [_answered] here
+    // sent it a second time while it still showed as pending).
     _autoRespond(state.transcript);
   }
 
@@ -1041,8 +1052,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     event = _spilled(event);
     // Live only, like deltas: a retry note is not part of what the session replays.
     if (event is! StreamDelta && event is! RetryState) _events.add(event);
-    // A state change refreshes the meter; the cost lives in our ledger.
+    // A state change refreshes the meter; the cost lives in our ledger, or an outside driver reports it.
     if (event is StateChange) ref.read(codeUsageProvider(sessionId).notifier).refreshSoon();
+    if (event is UsageReport) ref.read(codeUsageProvider(sessionId).notifier).report(event);
     final wasRunning = state.transcript.running;
     _trackContext(event);
     _builder.add(event);
@@ -1210,7 +1222,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       unawaited(session?.respond(accept: false, reason: reason).then((_) => session.resume()));
       return;
     }
-    final verdict = policy.decideAll(waiting, state.mode, askMcp: beforeBuild(t.phase?.phase));
+    final verdict = _gated(waiting, policy.decideAll(waiting, state.mode, askMcp: beforeBuild(t.phase?.phase)));
     if (verdict == null) return;
     // Over budget: nothing is approved on its own; the run stops instead.
     if (verdict.accept && !_withinBudget()) {
@@ -1231,6 +1243,20 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   /// Whether the session takes one answer per pending call.
   bool get perCall => _session is PerCallApprovals;
+
+  /// The driver the session runs on (the demo's is the EveryAI one).
+  HarnessDriver get _driver {
+    final registry = ref.read(driverRegistryProvider);
+    final name = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.harness ?? everyaiHarnessName;
+    return registry.resolve(name) ?? registry.resolve(everyaiHarnessName)!;
+  }
+
+  /// [verdict], except that an outside driver's own tools (kinds the rules
+  /// can't judge) are never approved without the user, even in Full auto.
+  ({bool accept, String? reason})? _gated(List<ActionCall> calls, ({bool accept, String? reason})? verdict) {
+    if (verdict == null || !verdict.accept || _driver.info.id == everyaiHarnessName) return verdict;
+    return calls.every(autoDecidable) ? verdict : null;
+  }
 
   /// Answers given to the calls waiting now (see [CodeSessionState.decided]).
   final _decided = <String, bool>{};
@@ -1253,7 +1279,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (_isSubagent && isHeldTool(call)) continue;
       final verdict = switch (_mustWait([call], t)) {
         final reason? => (accept: false, reason: reason),
-        null => policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase)),
+        null => _gated([call], policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase))),
       };
       if (verdict == null) continue;
       // Over budget: nothing is approved on its own; the run stops instead.
@@ -1421,11 +1447,18 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   Future<void> steer(String text, {List<Attachment> files = const []}) async {
     if (!_withinBudget()) return;
     final out = await _outgoing(text, files);
-    if (out == null) return;
-    await _session?.interrupt();
-    await _stopSubagents();
-    await _checkpoint();
-    await _sendNow(out);
+    final session = _session;
+    if (out == null || session == null) return;
+    await steerOrResend(
+      session,
+      _driver.caps,
+      steer: (s) => s.steer(_noted(out.text), images: out.images),
+      resend: () async {
+        await _stopSubagents();
+        await _checkpoint();
+        await _sendNow(out);
+      },
+    );
   }
 
   /// Shortens the agent's context: old tool output is cleared, the older part
@@ -1527,6 +1560,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final session = _session;
     if (info == null || session == null) return const RewindOutcome.failed('The session is not connected.');
+    // Before anything is stopped or restored.
+    if (rewindRefusal(_driver.info, _driver.caps) case final refusal?) return RewindOutcome.failed(refusal);
     if (_compacting) return const RewindOutcome.busy();
     final turns = state.transcript.items.whereType<UserTurn>().toList();
     if (turn < 1 || turn > turns.length) return const RewindOutcome.nothing();
@@ -2491,10 +2526,7 @@ final class CodeStatuses extends Notifier<Map<String, SessionStatus>> {
     ];
     if (sessions.isEmpty) return;
     try {
-      final byConversation = await ref.read(everyaiHarnessProvider).statuses([
-        for (final s in sessions)
-          if (!s.removedHarness) s.conversationId,
-      ]);
+      final byConversation = await _driverStatuses(ref, sessions);
       if (!ref.mounted) return;
       final before = state;
       state = {
@@ -2520,6 +2552,21 @@ final class CodeStatuses extends Notifier<Map<String, SessionStatus>> {
   };
 }
 
+/// What each of [sessions]' harnesses reports for them, by conversation id
+/// (sessions on a harness the app no longer has are left out).
+Future<Map<String, ExecutionStatus>> _driverStatuses(Ref ref, List<CodeSessionInfo> sessions) async {
+  final registry = ref.read(driverRegistryProvider);
+  final byHarness = <String, List<String>>{};
+  for (final s in sessions) {
+    if (!s.removedHarness) (byHarness[s.harness] ??= []).add(s.conversationId);
+  }
+  final out = <String, ExecutionStatus>{};
+  for (final MapEntry(key: harness, value: ids) in byHarness.entries) {
+    if (registry.resolve(harness) case final driver?) out.addAll(await driver.statuses(ids));
+  }
+  return out;
+}
+
 /// What every session is doing now, by session id: the live state of open
 /// sessions, else what the agent server reports (missing when it can't be reached).
 Future<Map<String, SessionStatus>> sessionStatusesNow(Ref ref, List<CodeSessionInfo> sessions) async {
@@ -2534,10 +2581,7 @@ Future<Map<String, SessionStatus>> sessionStatusesNow(Ref ref, List<CodeSessionI
   }
   if (ask.isEmpty) return out;
   try {
-    final byConversation = await ref.read(everyaiHarnessProvider).statuses([
-      for (final s in ask)
-        if (!s.removedHarness) s.conversationId,
-    ]);
+    final byConversation = await _driverStatuses(ref, ask);
     for (final s in ask) {
       if (byConversation[s.conversationId] case final status?) out[s.id] = CodeStatuses._sessionStatus(status);
     }
@@ -2606,6 +2650,9 @@ bool ownsWorkingDir(CodeSessionInfo info, {CodeSessionInfo? parent}) =>
 bool editsFiles(String toolName) =>
     const {'file_editor', 'terminal', 'str_replace_editor', 'apply_patch'}.contains(toolName);
 
+/// Prefs key prefix of what outside drivers reported per session (see [CodeUsage]).
+const codeUsageReportsPrefix = 'code.usage_reports.';
+
 /// Tokens and spend of a Code session, from the backend's ledger (the gateway
 /// attributes every model call to the session). Demo sessions have none.
 final codeUsageProvider = AsyncNotifierProvider.family<CodeUsage, UsageTotals, String>(CodeUsage.new);
@@ -2615,13 +2662,60 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
   final String sessionId;
   Timer? _debounce;
 
+  /// The backend's reading, and what an outside driver reported itself
+  /// (by event id, so history replayed again isn't counted twice). The
+  /// reported part is kept in prefs: no ledger has it, and a compaction into
+  /// a fresh conversation never replays the old one's reports.
+  UsageTotals _backend = UsageTotals.zero;
+  UsageTotals _reported = UsageTotals.zero;
+  final _reportIds = <String>{};
+
+  String get _reportsKey => '$codeUsageReportsPrefix$sessionId';
+
   @override
   Future<UsageTotals> build() async {
     ref.onDispose(() {
       _debounce?.cancel();
       _later?.cancel();
     });
-    return _fetch();
+    _loadReports();
+    _backend = await _fetch();
+    return _backend + _reported;
+  }
+
+  void _loadReports() {
+    final raw = ref.read(preferencesProvider)[_reportsKey];
+    if (raw == null) return;
+    try {
+      final j = jsonDecode(raw) as Map<String, Object?>;
+      _reported = UsageTotals.fromJson(j['totals'] as Map<String, Object?>? ?? const {});
+      _reportIds.addAll([...?(j['ids'] as List<Object?>?)?.whereType<String>()]);
+    } on Object {
+      // A broken entry counts as none.
+    }
+  }
+
+  /// Adds what a driver says a model call (or turn) used. A cost on the
+  /// user's plan shows apart; one on their own key counts toward the budget.
+  /// The context ring moves only when the report says how full the window is.
+  void report(UsageReport r) {
+    if (r.id.isNotEmpty && !_reportIds.add(r.id)) return;
+    final cost = r.costMicros ?? 0;
+    var next = _reported.addCall(
+      prompt: r.input,
+      completion: r.output,
+      cached: r.cached,
+      ownKey: r.onPlan ? 0 : cost,
+      plan: r.onPlan ? cost : 0,
+      context: false,
+    );
+    if (r.contextTokens case final c?) next = next.withContext(c);
+    _reported = next;
+    ref.read(preferencesProvider)[_reportsKey] = jsonEncode({
+      'totals': _reported.toJson(),
+      'ids': [..._reportIds],
+    });
+    state = AsyncData(_backend + _reported);
   }
 
   Future<UsageTotals> _fetch() async {
@@ -2652,7 +2746,9 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
     if (!ref.mounted) return;
     final next = await AsyncValue.guard(_fetch);
     // Keep the last reading if the server can't be reached.
-    if (ref.mounted && next.hasValue) state = next;
+    if (!ref.mounted || !next.hasValue) return;
+    _backend = next.requireValue;
+    state = AsyncData(_backend + _reported);
   }
 }
 

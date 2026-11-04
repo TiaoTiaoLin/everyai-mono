@@ -12,6 +12,7 @@ final class UsageTotals {
     this.cacheWriteTokens = 0,
     this.chargedMicros = 0,
     this.ownKeyMicros = 0,
+    this.planMicros = 0,
     this.lastPromptTokens = 0,
     this.lastCompletionTokens = 0,
   });
@@ -29,6 +30,7 @@ final class UsageTotals {
       cacheWriteTokens: n('cache_write_tokens'),
       chargedMicros: n('charged_micros'),
       ownKeyMicros: n('byok_cost_micros'),
+      planMicros: n('plan_cost_micros'),
       lastPromptTokens: n('last_prompt_tokens'),
       lastCompletionTokens: n('last_completion_tokens'),
     );
@@ -42,6 +44,7 @@ final class UsageTotals {
     'cache_write_tokens': cacheWriteTokens,
     'charged_micros': chargedMicros,
     if (ownKeyMicros > 0) 'byok_cost_micros': ownKeyMicros,
+    if (planMicros > 0) 'plan_cost_micros': planMicros,
     'last_prompt_tokens': lastPromptTokens,
     'last_completion_tokens': lastCompletionTokens,
   };
@@ -59,6 +62,10 @@ final class UsageTotals {
 
   /// What calls on the user's own keys cost upstream (never charged).
   final int ownKeyMicros;
+
+  /// What calls an outside harness ran on the user's subscription would have
+  /// cost (shown; the plan already paid, so it isn't spending).
+  final int planMicros;
 
   /// All spending, charged or on the user's keys: what a spend cap counts.
   int get spentMicros => chargedMicros + ownKeyMicros;
@@ -83,6 +90,7 @@ final class UsageTotals {
     int cacheWrite = 0,
     int charged = 0,
     int ownKey = 0,
+    int plan = 0,
     bool context = true,
   }) => UsageTotals(
     calls: calls + 1,
@@ -92,8 +100,23 @@ final class UsageTotals {
     cacheWriteTokens: cacheWriteTokens + cacheWrite,
     chargedMicros: chargedMicros + charged,
     ownKeyMicros: ownKeyMicros + ownKey,
+    planMicros: planMicros + plan,
     lastPromptTokens: context ? prompt : lastPromptTokens,
     lastCompletionTokens: context ? completion : lastCompletionTokens,
+  );
+
+  /// The same, with the context window [prompt] + [completion] full.
+  UsageTotals withContext(int prompt, [int completion = 0]) => UsageTotals(
+    calls: calls,
+    promptTokens: promptTokens,
+    completionTokens: completionTokens,
+    cachedTokens: cachedTokens,
+    cacheWriteTokens: cacheWriteTokens,
+    chargedMicros: chargedMicros,
+    ownKeyMicros: ownKeyMicros,
+    planMicros: planMicros,
+    lastPromptTokens: prompt,
+    lastCompletionTokens: completion,
   );
 
   /// Sums; the context reading comes from [other] when it has one.
@@ -105,6 +128,7 @@ final class UsageTotals {
     cacheWriteTokens: cacheWriteTokens + other.cacheWriteTokens,
     chargedMicros: chargedMicros + other.chargedMicros,
     ownKeyMicros: ownKeyMicros + other.ownKeyMicros,
+    planMicros: planMicros + other.planMicros,
     lastPromptTokens: other.lastPromptTokens > 0 ? other.lastPromptTokens : lastPromptTokens,
     lastCompletionTokens: other.lastPromptTokens > 0 ? other.lastCompletionTokens : lastCompletionTokens,
   );
@@ -119,6 +143,7 @@ final class UsageTotals {
       other.cacheWriteTokens == cacheWriteTokens &&
       other.chargedMicros == chargedMicros &&
       other.ownKeyMicros == ownKeyMicros &&
+      other.planMicros == planMicros &&
       other.lastPromptTokens == lastPromptTokens &&
       other.lastCompletionTokens == lastCompletionTokens;
 
@@ -131,6 +156,7 @@ final class UsageTotals {
     cacheWriteTokens,
     chargedMicros,
     ownKeyMicros,
+    planMicros,
     lastPromptTokens,
     lastCompletionTokens,
   );
