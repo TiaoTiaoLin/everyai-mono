@@ -58,12 +58,13 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     : _currentMode = mode,
       _model = model == null || model.isEmpty ? null : model,
       _effort = codexEffort(effort) {
-    _peer = JsonRpcPeer(channel, writeVersion: false, onRequest: _onRequest, onNotify: _onNotify);
-    unawaited(_peer.done.then((_) => _gone()));
+    _bind(channel);
   }
 
   final String cwd;
-  late final JsonRpcPeer _peer;
+  late JsonRpcPeer _peer;
+  var _initRequests = const <RpcCall>[];
+  Future<void>? _reviving;
   AgentMode _currentMode;
   String? _model;
   String? _effort;
@@ -89,8 +90,17 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   var _status = ExecutionStatus.idle;
   var _closing = false;
 
-  /// Runs once the session is closed or its process went away.
+  /// Runs once the session is closed, or its process went away with no
+  /// [respawn] to bring it back.
   void Function()? onClosed;
+
+  /// Starts the process again after it went away on its own, so the next
+  /// send (or Retry) carries on in the same thread.
+  Future<LineChannel> Function()? respawn;
+
+  /// Runs after the mode, model or effort changed, so a reopened session
+  /// starts with them.
+  Future<void> Function()? onChanged;
 
   @override
   String get id => _threadId;
@@ -105,6 +115,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   /// The handshake, then [initRequests] (the briefing's skill roots; a
   /// failure leaves the session without them).
   Future<void> open({List<RpcCall> initRequests = const []}) async {
+    _initRequests = initRequests;
     final reply = await codexHandshake(_peer);
     _onPlan = switch (reply['account']) {
       {'type': 'chatgpt'} => true,
@@ -149,6 +160,35 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   void useJournal(EventJournal journal) => _journal = journal;
+
+  void _bind(LineChannel channel) {
+    final peer = _peer = JsonRpcPeer(channel, writeVersion: false, onRequest: _onRequest, onNotify: _onNotify);
+    unawaited(peer.done.then((_) => _gone(peer)));
+  }
+
+  /// A process that went away on its own is started again and rejoins the
+  /// thread (once, however many callers wait for it).
+  Future<void> _ensureRunning() async {
+    if (!_peer.isClosed) return;
+    if (_closing) throw const HarnessError('This Codex session is closed.');
+    final again = respawn;
+    if (again == null) throw const HarnessError('Codex stopped. Open the session again to carry on.');
+    await (_reviving ??= _revive(again).whenComplete(() => _reviving = null));
+  }
+
+  Future<void> _revive(Future<LineChannel> Function() again) async {
+    try {
+      _bind(await again());
+      await open(initRequests: _initRequests);
+      await resumeThread(_threadId);
+    } on Object catch (e) {
+      if (!_peer.isClosed) await _peer.close();
+      throw HarnessError("Codex didn't start again: $e");
+    }
+    // The saved count Codex sends after resuming is only a baseline.
+    _turnsSeen = false;
+    _state(ExecutionStatus.idle);
+  }
 
   /// What an earlier run of the app saw, then a close for every call it
   /// left open, then idle.
@@ -227,6 +267,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
 
   @override
   Future<void> send(String text, {bool run = true, List<String> images = const []}) async {
+    if (run) await _ensureRunning();
     _emit(userMessage('u-${_newId()}', text));
     _held.add(text);
     _heldImages.addAll(images);
@@ -244,16 +285,34 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       await Future.any([_turnDone!.future, _peer.done]);
       if (_peer.isClosed) return;
     }
+    // Taken before the request, so a send meanwhile waits for this turn.
+    final starting = _turnDone = Completer<void>();
+    void release() {
+      if (identical(_turnDone, starting)) _turnDone = null;
+      if (!starting.isCompleted) starting.complete();
+    }
+
     final p = codexPolicy(_currentMode);
-    final res = await _peer.request('turn/start', {
-      'threadId': _threadId,
-      'input': _input(text, images),
-      'model': ?_model,
-      'effort': ?_effort,
-      'approvalPolicy': p.approvalPolicy,
-      'sandboxPolicy': p.sandboxPolicy,
-    });
-    if (res case {'turn': {'id': final String turn}}) _begin(turn);
+    final Object? res;
+    try {
+      res = await _peer.request('turn/start', {
+        'threadId': _threadId,
+        'input': _input(text, images),
+        'model': ?_model,
+        'effort': ?_effort,
+        'approvalPolicy': p.approvalPolicy,
+        'sandboxPolicy': p.sandboxPolicy,
+      });
+    } on Object {
+      release();
+      rethrow;
+    }
+    final turn = switch (res) {
+      {'turn': {'id': final String t}} => t,
+      _ => null,
+    };
+    if (turn != null) _begin(turn);
+    if (turn == null ? _turnId == null : _ended.contains(turn)) release();
   }
 
   static List<Map<String, Object?>> _input(String text, List<String> images) => [
@@ -264,7 +323,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   void _begin(String turn) {
     if (_turnId == turn || _ended.contains(turn)) return;
     _turnId = turn;
-    _turnDone = Completer<void>();
+    _turnDone ??= Completer<void>();
     _turnsSeen = true;
     _plans = 0;
     _lastError = null;
@@ -282,7 +341,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> steer(String text, {List<String> images = const []}) async {
     final turn = _turnId;
-    if (turn == null) return send(text, images: images);
+    if (turn == null || _peer.isClosed) return send(text, images: images);
     _emit(userMessage('u-${_newId()}', text));
     try {
       await _peer.request('turn/steer', {'threadId': _threadId, 'input': _input(text, images), 'expectedTurnId': turn});
@@ -306,17 +365,29 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> pause() => interrupt();
 
-  /// Refusals don't park a Codex turn, so there is nothing to resume.
+  /// Refusals don't park a Codex turn, so this only starts Codex again
+  /// when it went away (Retry).
   @override
-  Future<void> resume() async {}
+  Future<void> resume() async {
+    try {
+      await _ensureRunning();
+    } on HarnessError catch (e) {
+      _emit(_failure(e.message));
+      _state(ExecutionStatus.error);
+    }
+  }
 
   @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async => _currentMode = mode;
+  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
+    _currentMode = mode;
+    await onChanged?.call();
+  }
 
   @override
   Future<void> switchLlm(SessionSpec spec) async {
     if (spec.model.isNotEmpty) _model = spec.model;
     _effort = codexEffort(spec.effort);
+    await onChanged?.call();
   }
 
   @override
@@ -335,8 +406,10 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   }
 
   /// The process ended: by [close], or on its own (a crash), which the
-  /// transcript shows as a failure.
-  void _gone() {
+  /// transcript shows as a failure. A process started since then is
+  /// someone else's.
+  void _gone(JsonRpcPeer peer) {
+    if (!identical(peer, _peer)) return;
     final open = [..._pending.values];
     _pending.clear();
     for (final p in open) {
@@ -353,7 +426,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
       _emit(_failure(why.isEmpty ? 'Codex stopped.' : 'Codex stopped: ${why.split('\n').last}'));
       _state(ExecutionStatus.error);
     }
-    onClosed?.call();
+    if (_closing || respawn == null) onClosed?.call();
   }
 
   // ---------------------------------------------------------- notifications
@@ -489,31 +562,69 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');
   }
 
-  /// The call an approval request is about: the item's own when it was
-  /// started, else one made from the request (a sub-command, stdin, the
-  /// network), which only the user may approve unless it is a plain command.
+  /// The call an approval request is about. A command is judged on the
+  /// request's exact text: the item's is Codex's history copy, with secrets
+  /// redacted (`[REDACTED_SECRET]` can swallow `;rm -rf ~`), so when they
+  /// differ the exact one becomes a call of its own. A network grant or
+  /// stdin for a running command is a new question, never the command
+  /// again; only the user may approve those.
   ActionCall _approvalCall(String method, Map<String, Object?> p) {
     final itemId = p['itemId'] as String? ?? _newId();
     final approvalId = p['approvalId'] as String?;
     final key = approvalId == null || approvalId.isEmpty ? itemId : '$itemId#$approvalId';
-    if (_calls[key] case final call?) return call;
-    final ActionCall call;
+    final reason = p['reason'] as String?;
+    final exact = switch (p['command']) {
+      final String c => unwrapCommand(c),
+      _ => null,
+    };
+    ActionCall add(ActionCall call) {
+      _call(call);
+      return call;
+    }
+
     if (method == 'item/fileChange/requestApproval') {
-      call = actionEvent(id: key, toolName: 'apply_patch', kind: 'ApplyPatchAction', args: {'reason': ?p['reason']});
-    } else if (p['networkApprovalContext'] case final Map<String, Object?> net) {
-      call = actionEvent(id: key, toolName: 'network', kind: 'CodexNetworkAction', args: {...net});
-    } else if (p['kind'] == 'writeStdin') {
-      call = actionEvent(id: key, toolName: 'shell', kind: 'CodexStdinAction', args: {'command': ?p['command']});
-    } else {
-      call = actionEvent(
-        id: key,
-        toolName: 'shell',
-        kind: 'TerminalAction',
-        args: {if (p['command'] case final String c) 'command': unwrapCommand(c), 'cwd': p['cwd'] as String? ?? cwd},
+      return _calls[key] ??
+          add(actionEvent(id: key, toolName: 'apply_patch', kind: 'ApplyPatchAction', args: {'reason': ?reason}));
+    }
+    if (p['networkApprovalContext'] case final Map<String, Object?> net) {
+      return add(
+        actionEvent(
+          id: _fresh('$key#network'),
+          toolName: 'network',
+          kind: 'CodexNetworkAction',
+          args: {...net, 'command': ?exact, 'reason': ?reason},
+        ),
       );
     }
-    _call(call);
-    return _calls[key]!;
+    if (p['kind'] == 'writeStdin') {
+      return add(
+        actionEvent(
+          id: _fresh('$key#stdin'),
+          toolName: 'shell',
+          kind: 'CodexStdinAction',
+          args: {'command': ?exact, 'reason': ?reason},
+        ),
+      );
+    }
+    final item = _calls[key];
+    if (item != null && (exact == null || item.str('command') == exact)) return item;
+    return add(
+      actionEvent(
+        id: item == null ? key : _fresh('$key#exact'),
+        toolName: 'shell',
+        kind: 'TerminalAction',
+        args: {'command': ?exact, 'cwd': p['cwd'] as String? ?? cwd, 'reason': ?reason},
+      ),
+    );
+  }
+
+  /// [base], or `base#2`, `base#3`, ... when a call has it already.
+  String _fresh(String base) {
+    var id = base;
+    for (var n = 2; _calls.containsKey(id); n++) {
+      id = '$base#$n';
+    }
+    return id;
   }
 
   Future<_Decision> _ask(ActionCall call, String? turnId, {bool? synthetic}) {

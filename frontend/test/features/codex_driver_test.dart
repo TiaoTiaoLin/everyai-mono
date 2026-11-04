@@ -6,6 +6,7 @@
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/permissions.dart' show floorReason;
 import 'package:every_ai/features/code/drivers/codex/codex_driver.dart';
 import 'package:every_ai/features/code/drivers/codex/codex_mapping.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
@@ -20,6 +21,21 @@ import '../support/replay_transport.dart';
 const _fixtures = 'test/fixtures/drivers/codex';
 
 ReplayChannel _fixture(String name) => ReplayChannel.file('$_fixtures/$name.jsonl');
+
+/// The lines of fixture [name] up to and including the first one with [until].
+String _upTo(String name, String until) {
+  final lines = File('$_fixtures/$name.jsonl').readAsLinesSync();
+  return lines.take(lines.indexWhere((l) => l.contains(until)) + 1).join('\n');
+}
+
+/// thr_1 started, with turn_1 ("Run the tests") running (approve_command.jsonl).
+String _running() => _upTo('approve_command', '"method":"turn/started"');
+
+/// The text of each turn/start sent so far.
+List<String> _turnStarts(ReplayChannel c) => [
+  for (final m in c.sent)
+    if (m['method'] == 'turn/start') (((m['params']! as Map)['input'] as List).first as Map)['text'] as String,
+];
 
 typedef _Spawned = ({List<String> args, String cwd, Map<String, String> env, String sessionTag});
 
@@ -72,18 +88,18 @@ void main() {
   tearDown(() => tmp.deleteSync(recursive: true));
 
   group('mapping', () {
-    test('every mode lets Codex ask and the app answer; Plan also gets a read-only sandbox', () {
+    test('every mode lets Codex ask and the app answer; no sandbox outside Plan, Plan read-only with network', () {
       List<Object?> flat(CodexPolicy p) => [p.approvalPolicy, p.sandbox, p.sandboxPolicy];
       expect(flat(codexPolicy(AgentMode.plan)), [
         'untrusted',
         'read-only',
-        {'type': 'readOnly'},
+        {'type': 'readOnly', 'networkAccess': true},
       ]);
       for (final m in [AgentMode.ask, AgentMode.autoEdit, AgentMode.fullAuto]) {
         expect(flat(codexPolicy(m)), [
           'untrusted',
-          'workspace-write',
-          {'type': 'workspaceWrite'},
+          'danger-full-access',
+          {'type': 'dangerFullAccess'},
         ], reason: m.name);
       }
     });
@@ -371,6 +387,168 @@ void main() {
     final later = _listen(s);
     await pumpEventQueue();
     expect(later.where((e) => e is! StreamDelta).length, events.where((e) => e is! StreamDelta).length);
+    await s.close();
+  });
+
+  test('a command whose item text Codex redacted is judged on the exact command in the request', () async {
+    final channel = ReplayChannel('''
+${_running()}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'echo token=[REDACTED_SECRET] -rf ~'","cwd":"{{cwd}}","status":"inProgress"}}}}
+{"dir":"in","msg":{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"call_1","approvalId":null,"kind":"command","command":"/bin/zsh -lc 'echo token=aaaaaaaa;rm -rf ~'","cwd":"{{cwd}}","reason":null}}}
+{"dir":"out","msg":{"id":0,"result":{"decision":"decline"}}}
+{"dir":"in","msg":{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'echo token=[REDACTED_SECRET] -rf ~'","cwd":"{{cwd}}","status":"declined"}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}}}}
+''');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send('Run the tests');
+    await pumpEventQueue();
+    final calls = events.whereType<ActionCall>().toList();
+    expect(
+      [for (final c in calls) (c.id, c.str('command'))],
+      [('call_1', 'echo token=[REDACTED_SECRET] -rf ~'), ('call_1#exact', 'echo token=aaaaaaaa;rm -rf ~')],
+    );
+    final exact = calls.last;
+    expect(autoDecidable(exact), isTrue);
+    expect(floorReason(exact.str('command')), isNotNull);
+    // Allowing the redacted copy decides nothing.
+    final sent = channel.sent.length;
+    await s.respond(accept: true, callIds: ['call_1']);
+    expect(channel.sent, hasLength(sent));
+    await s.respond(accept: false, callIds: ['call_1#exact']);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(
+      [for (final r in events.whereType<ToolResult>()) (r.actionId, r.outcome)],
+      [('call_1#exact', ToolOutcome.rejected), ('call_1', ToolOutcome.rejected)],
+    );
+    await s.close();
+  });
+
+  test('a network grant for a running command is its own call, which only the user may approve', () async {
+    final channel = ReplayChannel('''
+${_running()}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'npm install'","cwd":"{{cwd}}","status":"inProgress"}}}}
+{"dir":"in","msg":{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"call_1","approvalId":null,"kind":"command","command":"/bin/zsh -lc 'npm install'","cwd":"{{cwd}}","reason":"needs the registry","networkApprovalContext":{"host":"registry.npmjs.org","protocol":"https"}}}}
+{"dir":"out","msg":{"id":0,"result":{"decision":"accept"}}}
+{"dir":"in","msg":{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'npm install'","cwd":"{{cwd}}","status":"completed","aggregatedOutput":"added 3 packages","exitCode":0}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[]}}}}
+''');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send('Run the tests');
+    await pumpEventQueue();
+    final net = events.whereType<ActionCall>().last;
+    expect(
+      (net.id, net.actionKind, net.str('host'), net.str('command'), net.str('reason')),
+      ('call_1#network', 'CodexNetworkAction', 'registry.npmjs.org', 'npm install', 'needs the registry'),
+    );
+    expect(autoDecidable(net), isFalse);
+    await s.respond(accept: true, callIds: ['call_1#network']);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(
+      [for (final r in events.whereType<ToolResult>()) (r.actionId, r.outcome)],
+      [('call_1#network', ToolOutcome.ok), ('call_1', ToolOutcome.ok)],
+    );
+    await s.close();
+  });
+
+  test('two sends close together: the second turn/start waits for the first turn', () async {
+    final channel = ReplayChannel('''
+${_upTo('approve_command', '"id":3,"result"')}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"first"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"out","msg":{"id":5,"method":"turn/interrupt","params":{"threadId":"thr_1","turnId":"turn_1"}}}
+{"dir":"in","msg":{"id":5,"result":{}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"interrupted","items":[]}}}}
+{"dir":"out","msg":{"id":6,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"second"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":6,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
+''');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final first = s.send('first');
+    final second = s.send('second');
+    await pumpEventQueue();
+    expect(_turnStarts(channel), ['first']);
+    await s.interrupt();
+    await Future.wait([first, second]);
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(_turnStarts(channel), ['first', 'second']);
+    await s.close();
+  });
+
+  test('a mode, model or effort changed after start is what a reopened session runs with', () async {
+    final s = await _driver(data, [_fixture('approve_command')]).start(_spec(work));
+    await s.switchLlm(
+      const SessionSpec(
+        workingDir: '',
+        model: 'gpt-5.4-mini',
+        effort: 'max',
+        mode: AgentMode.ask,
+        llmBaseUrl: '',
+        llmApiKey: '',
+        sessionTag: '',
+      ),
+    );
+    await s.setMode(AgentMode.plan);
+    await s.close();
+
+    final channel = ReplayChannel('''
+${_upTo('resume', '"id":2,"result"')}
+{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"read-only"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Carry on"}],"model":"gpt-5.4-mini","effort":"xhigh","approvalPolicy":"untrusted","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
+''');
+    final again = await _driver(data, [channel]).attach('thr_1');
+    await again.send('Carry on');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    await again.close();
+  });
+
+  test('Codex going away on its own: the next send starts it again on the same thread', () async {
+    final lines = File('$_fixtures/approve_command.jsonl').readAsLinesSync();
+    final cut = lines.indexWhere((l) => l.contains('requestApproval'));
+    final dead = ReplayChannel([...lines.take(cut + 1), '{"dir":"eof"}'].join('\n'));
+    final channel = ReplayChannel('''
+${_upTo('resume', '"id":2,"result"')}
+{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","cwd":"{{cwd}}","turns":[]}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Try again"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[]}}}}
+''');
+    final spawned = <_Spawned>[];
+    final driver = _driver(data, [dead, channel], spawned);
+    final s = await driver.start(_spec(work));
+    final events = _listen(s);
+    await s.send('Run the tests');
+    await pumpEventQueue();
+    expect(_states(events).last, ExecutionStatus.error);
+    expect(await driver.attach('thr_1'), same(s));
+    await s.send('Try again');
+    await channel.finished;
+    await pumpEventQueue();
+    channel.expectFinished();
+    expect(spawned, hasLength(2));
+    expect((spawned.last.cwd, spawned.last.sessionTag), (work, 'tag-1'));
+    final states = _states(events);
+    expect(states.sublist(states.indexOf(ExecutionStatus.error)), [
+      ExecutionStatus.error,
+      ExecutionStatus.idle,
+      ExecutionStatus.running,
+      ExecutionStatus.finished,
+    ]);
     await s.close();
   });
 

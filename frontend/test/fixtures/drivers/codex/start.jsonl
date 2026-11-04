@@ -8,5 +8,5 @@
 {"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
 {"dir":"out","msg":{"id":3,"method":"skills/extraRoots/set","params":{"extraRoots":["{{any}}"]}}}
 {"dir":"in","msg":{"id":3,"result":{}}}
-{"dir":"out","msg":{"id":4,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"workspace-write","developerInstructions":"You are in an EveryAI session."}}}
-{"dir":"in","msg":{"id":4,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"workspaceWrite"}}}}
+{"dir":"out","msg":{"id":4,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"danger-full-access","developerInstructions":"You are in an EveryAI session."}}}
+{"dir":"in","msg":{"id":4,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"dangerFullAccess"}}}}

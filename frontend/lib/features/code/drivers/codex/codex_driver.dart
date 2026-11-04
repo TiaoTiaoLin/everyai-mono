@@ -143,18 +143,15 @@ final class CodexDriver implements HarnessDriver {
       throw e is HarnessError ? e : HarnessError("Codex didn't start: $e");
     }
     final data = await _data();
-    await writeText(
-      _metaPath(data, session.id),
-      jsonEncode({
-        'cwd': spec.workingDir,
-        'sessionTag': spec.sessionTag,
-        'model': session.model,
-        'effort': session.effort,
-        'mode': spec.mode.name,
-      }),
-    );
+    await _saveMeta(data, session, spec.sessionTag);
     session.useJournal(openEventJournal('$data/journal', session.id));
-    _track(session);
+    _track(
+      session,
+      data: data,
+      tag: spec.sessionTag,
+      respawn: () =>
+          _spawn(found.path!, args: launch.args, cwd: spec.workingDir, env: launch.env, tag: spec.sessionTag),
+    );
     if (spec.initialMessage case final text? when text.isNotEmpty) {
       await session.send(text, run: spec.runInitial, images: spec.initialImages);
     }
@@ -174,8 +171,10 @@ final class CodexDriver implements HarnessDriver {
     final found = await detectCli('codex', which: which);
     if (!found.installed || found.path == null) throw _notInstalled;
     final cwd = meta['cwd'] as String? ?? '';
+    final tag = meta['sessionTag'] as String? ?? '';
+    Future<LineChannel> respawn() => _spawn(found.path!, args: const [], cwd: cwd, env: const {}, tag: tag);
     final session = CodexSession(
-      await _spawn(found.path!, args: const [], cwd: cwd, env: const {}, tag: meta['sessionTag'] as String? ?? ''),
+      await respawn(),
       cwd: cwd,
       mode: AgentMode.values.asNameMap()[meta['mode']] ?? AgentMode.ask,
       model: meta['model'] as String?,
@@ -193,7 +192,7 @@ final class CodexDriver implements HarnessDriver {
     session
       ..useJournal(journal)
       ..replay(history);
-    _track(session);
+    _track(session, data: data, tag: tag, respawn: respawn);
     return session;
   }
 
@@ -204,11 +203,32 @@ final class CodexDriver implements HarnessDriver {
       if (_live[id] case final s?) id: s.status,
   };
 
-  void _track(CodexSession session) {
+  void _track(
+    CodexSession session, {
+    required String data,
+    required String tag,
+    required Future<LineChannel> Function() respawn,
+  }) {
     final id = session.id;
     _live[id] = session;
-    session.onClosed = () => _live.remove(id);
+    session
+      ..onClosed = (() => _live.remove(id))
+      ..onChanged = (() => _saveMeta(data, session, tag))
+      ..respawn = respawn;
   }
+
+  /// What [attach] starts [session] with: its folder, and its mode, model
+  /// and effort as they are now.
+  static Future<void> _saveMeta(String data, CodexSession session, String tag) => writeText(
+    _metaPath(data, session.id),
+    jsonEncode({
+      'cwd': session.cwd,
+      'sessionTag': tag,
+      'model': session.model,
+      'effort': session.effort,
+      'mode': session.mode.name,
+    }),
+  );
 
   Future<String> _home() => (dataDir ?? GitService.dataDir)();
 

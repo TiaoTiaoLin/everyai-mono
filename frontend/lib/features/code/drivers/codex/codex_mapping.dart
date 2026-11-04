@@ -18,13 +18,27 @@ typedef CodexPolicy = ({String approvalPolicy, String sandbox, Map<String, Objec
 /// The policy for [mode]. Codex always asks ("untrusted": every patch and
 /// every command outside its known-safe reads, `core/src/safety.rs`) and
 /// the app's own permission policy answers, as for the EveryAI harness: the
-/// safety floor and deny rules hold in every mode, Full auto included
-/// (Codex's "never" would skip them, and "on-request" lets the model run
-/// commands without asking). Plan also gets a read-only sandbox; the rest
-/// write inside the workspace (the session's worktree).
+/// safety floor, the mode and the rules judge every call Codex asks about,
+/// Full auto included (Codex's "never" would skip them, and "on-request"
+/// lets the model run commands without asking).
+///
+/// Not covered: the reads Codex counts as known-safe (`cat`, `rg`, `sed -n`,
+/// `git log`, ...) run without asking, so deny rules on reads (`Read(.env)`)
+/// don't hold for Codex, and its sandboxes never limit reads.
+///
+/// Outside Plan the sandbox is off, like the EveryAI harness: a call the
+/// app approved runs once, as approved (inside a sandbox Codex runs a
+/// blocked call again without one and without asking, and a network call
+/// just fails). Plan keeps a read-only sandbox with the network on, for the
+/// fetches planning may approve; it isn't a backstop, since an approved
+/// call that the sandbox blocks runs again without it.
 CodexPolicy codexPolicy(AgentMode mode) => mode == AgentMode.plan
-    ? (approvalPolicy: 'untrusted', sandbox: 'read-only', sandboxPolicy: const {'type': 'readOnly'})
-    : (approvalPolicy: 'untrusted', sandbox: 'workspace-write', sandboxPolicy: const {'type': 'workspaceWrite'});
+    ? (
+        approvalPolicy: 'untrusted',
+        sandbox: 'read-only',
+        sandboxPolicy: const {'type': 'readOnly', 'networkAccess': true},
+      )
+    : (approvalPolicy: 'untrusted', sandbox: 'danger-full-access', sandboxPolicy: const {'type': 'dangerFullAccess'});
 
 /// Codex's reasoning effort for ours: it has no `max`, its top is `xhigh`.
 String? codexEffort(String? effort) => effort == 'max' ? 'xhigh' : effort;
