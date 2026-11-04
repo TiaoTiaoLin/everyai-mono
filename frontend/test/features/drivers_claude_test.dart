@@ -389,6 +389,7 @@ void main() {
   group('resume check', () {
     test("a session the CLI no longer holds is reported; one it holds, or never sent, isn't", () async {
       final config = Directory('${tmp.path}/config')..createSync();
+      Directory('${tmp.path}/config/projects').createSync();
       ClaudeDriver again() => ClaudeDriver(dataDir: () async => tmp.path, configDir: config.path);
       final channel = ReplayChannel(_fixture('init_image_turn.jsonl'));
       final session = await driver(_Spawner([channel])).start(_spec());
