@@ -118,9 +118,13 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
     this.caps = const {DriverCap.approvals},
     this.label = 'Test CLI',
     this.status = const DriverStatus(installed: true),
+    this.consentId,
   });
 
   final String id;
+
+  /// Where its consent is stored, when not under [id] (an ACP profile).
+  final String? consentId;
   final FakeLeadSession? session;
   final bool needsConsent;
   final String label;
@@ -144,7 +148,7 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   FakeLeadSession? latest;
 
   @override
-  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent);
+  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent, consentId: consentId);
   @override
   Future<DriverStatus> detect() async => status;
   @override

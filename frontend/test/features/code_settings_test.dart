@@ -6,6 +6,7 @@ import 'package:every_ai/core/platform/platform_kind.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
+import 'package:every_ai/features/code/code_providers.dart' show CodeLead, codeLeadProvider;
 import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_process.dart' show notBuiltProblem;
@@ -229,6 +230,43 @@ void main() {
     expect(reloads, 1);
     expect(find.text('0.9'), findsOneWidget);
     expect(find.textContaining('To install'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    container.dispose();
+    await tester.runAsync(db.close);
+  });
+
+  testWidgets('Settings → Code → Harnesses: the default handoff shows, and Clear forgets it', (tester) async {
+    final db = AppDatabase(NativeDatabase.memory());
+    late Preferences prefs;
+    await tester.runAsync(() async => prefs = await Preferences.load(db));
+    prefs[CodeLead.key] = jsonEncode({'harness': 'everyai', 'handoff': 'codex'});
+    final codex = _Driver(const DriverInfo(id: 'codex', label: 'Codex'), const DriverStatus(installed: true));
+    final container = ProviderContainer(
+      overrides: [
+        databaseProvider.overrideWithValue(db),
+        preferencesProvider.overrideWithValue(prefs),
+        driverRegistryProvider.overrideWithValue(DriverRegistry({'codex': codex})),
+        driverStatusesProvider.overrideWith(() => DriverStatuses(loadShell: () async {}, reloadShell: () async {})),
+      ],
+    );
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: m.MaterialApp(
+          home: EveryThemeScope(
+            theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
+            child: const m.Scaffold(body: SingleChildScrollView(child: HarnessesSetting())),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Default handoff: Codex'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('code-settings.handoff-default.clear')));
+    await tester.pump();
+    expect(container.read(codeLeadProvider).handoff, '');
+    expect((jsonDecode(prefs[CodeLead.key]!) as Map<String, Object?>)['handoff'], '');
+    expect(find.byKey(const ValueKey('code-settings.handoff-default')), findsNothing);
     await tester.pumpWidget(const SizedBox());
     container.dispose();
     await tester.runAsync(db.close);

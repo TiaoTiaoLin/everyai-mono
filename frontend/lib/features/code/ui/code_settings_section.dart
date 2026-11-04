@@ -560,6 +560,7 @@ class HarnessesSetting extends ConsumerWidget {
       for (final d in drivers)
         if (d.info.needsConsent) d.info.label,
     ];
+    final handoff = ref.watch(codeLeadProvider.select((l) => l.handoff));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -614,6 +615,28 @@ class HarnessesSetting extends ConsumerWidget {
             style: theme.type.caption.tint(theme.textMuted),
           ),
         ],
+        // Where a usage limit moves on to by itself (picked on the "switch to:" card).
+        if (handoff.isNotEmpty)
+          Padding(
+            key: const ValueKey('code-settings.handoff-default'),
+            padding: const EdgeInsets.only(top: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Default handoff: ${ref.read(driverRegistryProvider).resolve(handoff)?.info.label ?? handoff}',
+                    style: theme.type.callout.tint(theme.text),
+                  ),
+                ),
+                AdaptiveButton(
+                  key: const ValueKey('code-settings.handoff-default.clear'),
+                  label: 'Clear',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: ref.read(codeLeadProvider.notifier).clearHandoff,
+                ),
+              ],
+            ),
+          ),
         const SizedBox(height: 8),
         Row(
           children: [

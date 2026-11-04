@@ -57,6 +57,7 @@ import 'handoff/handoff.dart';
 import 'handoff/handoff_git.dart';
 import 'handoff/handoff_store.dart';
 import 'handoff/lead_timeline.dart';
+import 'handoff/native_import.dart';
 import 'git/git_service.dart';
 import 'domain/transcript_export.dart';
 import 'drivers/acp/acp_driver.dart' show AcpDriver;
@@ -143,8 +144,24 @@ List<DriverInfo> readyLeads(
 }) => [
   for (final d in listed)
     if (d.info.id != current &&
-        leadBlocked(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.id)) == null)
+        leadBlocked(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.consentId)) == null)
       d.info,
+];
+
+/// What the "your limit ran out, switch to:" picker lists: every harness
+/// found here ([offeredAsLead]) but the one on now ([current]) and the one
+/// that ran out ([ranOut]), each with what is in the way and how to fix it
+/// ([leadFix]; null when it is ready).
+List<({DriverInfo info, String? blocked})> handoffChoices(
+  Iterable<HarnessDriver> listed,
+  Map<String, DriverStatus>? statuses,
+  Set<String> ownClis, {
+  required String current,
+  required String ranOut,
+}) => [
+  for (final d in listed)
+    if (d.info.id != current && d.info.id != ranOut && offeredAsLead(d.info, statuses?[d.info.id], current: current))
+      (info: d.info, blocked: leadFix(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.consentId))),
 ];
 
 /// The note a session shows when its outside agent's EveryAI tools expired.
@@ -209,10 +226,14 @@ final codeLeadProvider = NotifierProvider<CodeLead, CodeLeadChoice>(CodeLead.new
 
 @immutable
 final class CodeLeadChoice {
-  const CodeLeadChoice({this.harness = everyaiHarnessName, this.models = const {}});
+  const CodeLeadChoice({this.harness = everyaiHarnessName, this.models = const {}, this.handoff = ''});
 
   /// The driver id (`DriverInfo.id`).
   final String harness;
+
+  /// The driver a session moves to on its own when its lead hits a usage
+  /// limit, or '' to ask each time (the "make this my default handoff" pick).
+  final String handoff;
 
   /// Driver id → its model ('' its default) and effort ('' the model's).
   final Map<String, ({String model, String effort})> models;
@@ -232,6 +253,7 @@ final class CodeLead extends Notifier<CodeLeadChoice> {
       if (json is! Map<String, Object?>) return const CodeLeadChoice();
       return CodeLeadChoice(
         harness: json['harness'] as String? ?? everyaiHarnessName,
+        handoff: json['handoff'] as String? ?? '',
         models: {
           if (json['models'] case final Map<String, Object?> models)
             for (final MapEntry(:key, :value) in models.entries)
@@ -248,16 +270,28 @@ final class CodeLead extends Notifier<CodeLeadChoice> {
     state = next;
     ref.read(preferencesProvider)[key] = jsonEncode({
       'harness': next.harness,
+      'handoff': next.handoff,
       'models': {
         for (final MapEntry(:key, :value) in next.models.entries) key: {'model': value.model, 'effort': value.effort},
       },
     });
   }
 
-  void chooseHarness(String harness) => _set(CodeLeadChoice(harness: harness, models: state.models));
+  void chooseHarness(String harness) =>
+      _set(CodeLeadChoice(harness: harness, models: state.models, handoff: state.handoff));
 
-  void chooseModel(String harness, String model, String effort) =>
-      _set(CodeLeadChoice(harness: state.harness, models: {...state.models, harness: (model: model, effort: effort)}));
+  void chooseModel(String harness, String model, String effort) => _set(
+    CodeLeadChoice(
+      harness: state.harness,
+      models: {...state.models, harness: (model: model, effort: effort)},
+      handoff: state.handoff,
+    ),
+  );
+
+  void chooseHandoff(String harness) =>
+      _set(CodeLeadChoice(harness: state.harness, models: state.models, handoff: harness));
+
+  void clearHandoff() => chooseHandoff('');
 }
 
 /// An outside driver's own models (empty for the EveryAI harness, whose
@@ -1178,6 +1212,8 @@ final class CodeSessionState {
     this.decided = const {},
     this.waited = '',
     this.switching = false,
+    this.handoffProblem = '',
+    this.changing,
   });
 
   final Transcript transcript;
@@ -1188,6 +1224,13 @@ final class CodeSessionState {
   /// The usage-limit notice the user chose Wait on: its offer to carry on
   /// with another harness stays closed.
   final String waited;
+
+  /// Why the last usage limit didn't move on to the default handoff on its
+  /// own (shown on the picker), or ''.
+  final String handoffProblem;
+
+  /// The picker the user reopened with Change on an automatic handoff, or null.
+  final LimitPick? changing;
 
   /// Answers given so far to the calls waiting for approval (action id →
   /// allowed), for sessions that take one answer per call: their rows on the
@@ -1236,8 +1279,13 @@ final class CodeSessionState {
     Map<String, bool>? decided,
     String? waited,
     bool? switching,
+    String? handoffProblem,
+    LimitPick? changing,
+    bool clearChanging = false,
   }) => CodeSessionState(
     switching: switching ?? this.switching,
+    handoffProblem: handoffProblem ?? this.handoffProblem,
+    changing: clearChanging ? null : changing ?? this.changing,
     decided: decided ?? this.decided,
     waited: waited ?? this.waited,
     transcript: transcript ?? this.transcript,
@@ -1276,6 +1324,15 @@ enum CompactKind {
   busy,
   failed,
 }
+
+/// The "your limit ran out, switch to:" picker: the [limit], the harness
+/// that ran out ([ranOut], left out of the choices), why the automatic
+/// handoff didn't happen ([problem], or ''), and whether the user reopened
+/// it with Change after an automatic handoff ([change]).
+typedef LimitPick = ({UsageLimit limit, String ranOut, String problem, bool change});
+
+/// The native importer for a driver id ([nativeImporterFor]); tests swap in fakes.
+final nativeImporterProvider = Provider<NativeImporter? Function(String)>((ref) => nativeImporterFor);
 
 /// How [CodeSessionController.switchLead] went.
 @immutable
@@ -1803,6 +1860,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _deliver();
     _goalTick(turnEnded: wasRunning && !transcript.running);
     _sendQueued();
+    if (_live && event is ConversationFailure) {
+      _autoLimit = event.id;
+      if (state.handoffProblem.isNotEmpty) state = state.copyWith(handoffProblem: '');
+    }
+    unawaited(_maybeHandOff());
   }
 
   /// Sends the next queued message once nothing runs or waits (and no lead switch is under way).
@@ -2384,23 +2446,96 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     return ref.mounted && !state.transcript.running;
   }
 
-  /// The usage limit the lead stopped on, while the session offers to carry
-  /// on with another harness: the last thing shown is the limit, nothing
-  /// runs, and the user hasn't chosen Wait.
-  UsageLimit? get leadOffer {
+  /// The "your limit ran out, switch to:" picker, while it shows: the last
+  /// thing shown is the limit, nothing runs or switches, and the user hasn't
+  /// chosen Wait. Or the one the user reopened with Change on an automatic
+  /// handoff (`state.changing`).
+  LimitPick? get limitPick {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
-    if (info == null || info.isSubagent || isDemoPath(info.workingDir) || _busy) return null;
+    if (info == null || info.isSubagent || isDemoPath(info.workingDir)) return null;
+    if (state.changing case final change?) return change;
+    if (_busy || _switching) return null;
     return switch (state.transcript.items.lastOrNull) {
-      NoticeItem(:final key, :final limit?) when key != state.waited => limit,
+      NoticeItem(:final key, :final limit?) when key != state.waited => (
+        limit: limit,
+        ranOut: info.harness,
+        problem: state.handoffProblem,
+        change: false,
+      ),
       _ => null,
     };
   }
 
-  /// "Wait" on the offer: the session stays on its lead.
+  /// "Wait" on the picker: the session stays on its lead.
   void waitForLimit() {
     if (state.transcript.items.lastOrNull case NoticeItem(:final key, limit: _?)) {
       state = state.copyWith(waited: key);
     }
+  }
+
+  /// Change on an automatic handoff away from [ranOut]: the picker again.
+  void changeHandoff(String ranOut) {
+    final limit = state.transcript.items.reversed.whereType<NoticeItem>().map((n) => n.limit).nonNulls.firstOrNull;
+    state = state.copyWith(
+      changing: (limit: limit ?? const UsageLimit(message: ''), ranOut: ranOut, problem: '', change: true),
+    );
+  }
+
+  /// "Keep" (the current lead) on the reopened picker: it closes.
+  void keepLead() => state = state.copyWith(clearChanging: true);
+
+  /// The limit notice that arrived live and may hand off on its own once
+  /// the run settles (one try each; never one replayed on reopen).
+  String _autoLimit = '';
+
+  /// A usage limit moves on to the default handoff by itself
+  /// (`CodeLeadChoice.handoff`) when it is installed, signed in and allowed,
+  /// and isn't the harness that ran out. Otherwise the picker shows, with
+  /// the reason. Nothing is asked of a model.
+  Future<void> _maybeHandOff() async {
+    if (_autoLimit.isEmpty) return;
+    final pick = limitPick;
+    if (pick == null || pick.change) return;
+    final key = (state.transcript.items.last as NoticeItem).key;
+    if (key != _autoLimit) return;
+    _autoLimit = '';
+    final to = ref.read(codeLeadProvider).handoff;
+    if (to.isEmpty) return;
+    String problem(String why) => 'Your default handoff, ${_leadLabel(to)}, $why';
+    final driver = ref.read(driverRegistryProvider).resolve(to);
+    if (driver == null) {
+      state = state.copyWith(handoffProblem: problem("isn't in this version of the app."));
+      return;
+    }
+    if (to == pick.ranOut) {
+      state = state.copyWith(handoffProblem: problem('is the one that ran out.'));
+      return;
+    }
+    Map<String, DriverStatus> statuses;
+    try {
+      statuses = await ref.read(driverStatusesProvider.future);
+    } on Object {
+      statuses = const {};
+    }
+    if (!ref.mounted) return;
+    final own = ref.read(codeSettingsProvider).ownClis;
+    if (leadFix(driver.info, statuses[to], consented: own.contains(driver.info.consentId)) case final why?) {
+      state = state.copyWith(handoffProblem: '${driver.info.label}: $why');
+      return;
+    }
+    final from = _leadLabel(pick.ranOut);
+    final notice = NoticeItem(
+      'handoff-auto-$key',
+      'Your $from limit ran out; continuing on ${driver.info.label}',
+      handedOffFrom: pick.ranOut,
+    );
+    final outcome = await switchLead(to, run: true, notice: notice);
+    if (!ref.mounted || !outcome.busy && !outcome.failed) return;
+    state = state.copyWith(
+      handoffProblem: outcome.busy
+          ? problem("wasn't started: work is still running in the background.")
+          : '${driver.info.label}: ${outcome.message}',
+    );
   }
 
   /// The model and effort [harness] leads with: what it ran on in this
@@ -2424,7 +2559,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// user agreed). The worktree, mode and permissions stay the session's.
   /// The handoff costs nothing: it is built from the session and the
   /// repository, with no model call (see `buildHandoff`).
-  Future<LeadSwitchOutcome> switchLead(String to, {required bool run, bool stopFirst = false}) async {
+  /// [notice] goes in the transcript once the switch is made (the automatic handoff's).
+  Future<LeadSwitchOutcome> switchLead(
+    String to, {
+    required bool run,
+    bool stopFirst = false,
+    NoticeItem? notice,
+  }) async {
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = sessions.byId(sessionId);
     if (info == null || _session == null) return const LeadSwitchOutcome.failed('The session is not connected.');
@@ -2458,7 +2599,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         await _stopEveryaiChildren();
       }
       if (!ref.mounted) return const LeadSwitchOutcome.failed('The session was closed.');
-      final outcome = await _switchLead(sessions.byId(sessionId) ?? info, target, run: run);
+      final outcome = await _switchLead(sessions.byId(sessionId) ?? info, target, run: run, notice: notice);
       started = run && !outcome.failed;
       return outcome;
     } finally {
@@ -2471,7 +2612,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
   }
 
-  Future<LeadSwitchOutcome> _switchLead(CodeSessionInfo info, HarnessDriver target, {required bool run}) async {
+  Future<LeadSwitchOutcome> _switchLead(
+    CodeSessionInfo info,
+    HarnessDriver target, {
+    required bool run,
+    NoticeItem? notice,
+  }) async {
     final sessions = ref.read(codeSessionsProvider.notifier);
     final old = _session!;
     final from = info.harness;
@@ -2502,11 +2648,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     // The whole conversation as a file the new lead may read (and summarise for itself).
     final now = DateTime.now();
     var transcript = noLocalFolder(info.workingDir) ? '' : handoffTranscriptPath(now, to);
+    final stints = [
+      for (final s in _timeline) (lead: _leadLabel(s.harness), conversationId: s.conversationId, events: s.events),
+      (lead: fromLabel, conversationId: info.conversationId, events: current),
+    ];
     if (transcript.isNotEmpty) {
-      final stints = [
-        for (final s in _timeline) (lead: _leadLabel(s.harness), conversationId: s.conversationId, events: s.events),
-        (lead: fromLabel, conversationId: info.conversationId, events: current),
-      ];
       try {
         if (!await writeHandoffTranscript(info.workingDir, transcript, handoffTranscript(stints, title: info.title))) {
           transcript = '';
@@ -2539,6 +2685,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     HarnessSession? live;
     final Handoff handoff;
     var carryOn = '';
+    // The conversation was written into the new lead's own session format.
+    ImportedSession? imported;
     try {
       // Its old conversation is tried first: a delta needs it.
       if (handoffScope(record, since: since, resumable: resumable).kind == HandoffKind.delta) {
@@ -2566,6 +2714,23 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         transcript: transcript,
       );
       carryOn = carryOnMessage(fromLabel, cut: handoff.cut != null);
+      // Not on a return to a conversation it can reopen (the delta is less).
+      if (live == null) {
+        try {
+          imported = await ref
+              .read(nativeImporterProvider)(to)
+              ?.write(NativeImportSource(stints: stints, handoff: handoff, cwd: info.workingDir, title: info.title));
+          if (imported != null) {
+            live = await sessions.attachSession(
+              info.copyWith(harness: to, conversationId: imported.nativeId, model: pick.model, effort: pick.effort),
+              keepCurrent: true,
+            );
+          }
+        } on Object {
+          // The facts and the transcript file instead.
+          imported = null;
+        }
+      }
       live ??= await sessions._startLead(
         info,
         harness: to,
@@ -2637,7 +2802,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       leads: leads,
       tier: tier,
       harnessMode: harnessMode,
-      pendingHandoff: run ? '' : message,
+      // An imported conversation already holds everything.
+      pendingHandoff: run || imported != null ? '' : message,
     );
     sessions.update(next);
 
@@ -2651,12 +2817,14 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     // It is at work from the start: messages typed meanwhile wait for its turn to end.
     if (run) _builder.add(_statusEvent('running'));
     _builder.lead = target.info.label;
+    if (notice != null) _builder.addNotice(notice);
+    if (imported?.note case final note?) _builder.addNotice(NoticeItem('handoff-import-${live.id}', note));
     _carried = _builder.snapshot.items;
     _answered = '';
     _doom.reset();
     _doomOpen = false;
     _freshLead = true;
-    state = state.copyWith(transcript: _builder.snapshot, waited: '');
+    state = state.copyWith(transcript: _builder.snapshot, waited: '', handoffProblem: '', clearChanging: true);
     if (ref.exists(codeUsageProvider(sessionId))) ref.read(codeUsageProvider(sessionId).notifier).leadChanged();
     await _openContext(next);
     if (!ref.mounted) {
@@ -2667,7 +2835,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _sub = live.events.listen(_onEvent);
     ready.complete();
     if (!outside) _syncFlow();
-    if (run && handoff.kind == HandoffKind.delta) {
+    if (run && imported != null) {
+      await live.send(_noted(carryOn));
+    } else if (run && handoff.kind == HandoffKind.delta) {
       await live.send(_noted('$message\n\n$carryOn'));
     } else if (run) {
       // It started with the whole note.

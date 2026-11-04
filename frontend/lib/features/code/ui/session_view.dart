@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../../core/ui/brand.dart';
 
 import 'package:flutter/widgets.dart';
@@ -104,17 +106,25 @@ class CodeSessionScreen extends ConsumerWidget {
       ),
     );
 
-    // The lead ran out: carry on with another harness that is ready, or wait.
-    final limit = controller.leadOffer;
-    final offer = limit == null
+    // The lead ran out: carry on with another harness, or wait. Reopened
+    // with Change after an automatic handoff, it shows below the run.
+    final pick = controller.limitPick;
+    final offer = pick == null
         ? null
         : LeadOfferCard(
-            lead: _label(ref, info.harness),
-            limit: limit,
-            credits: !isOutsideLead(info.harness, info.workingDir),
-            choices: _leadChoices(ref, info, controller),
-            onSwitch: (harness) => _switchLead(context, ref, harness, run: true),
-            onWait: controller.waitForLimit,
+            key: ValueKey('lead-offer-${pick.change}'),
+            lead: _label(ref, pick.ranOut),
+            current: _label(ref, info.harness),
+            limit: pick.limit,
+            credits: !isOutsideLead(pick.ranOut, info.workingDir),
+            change: pick.change,
+            problem: pick.problem,
+            choices: _leadChoices(ref, info, controller, ranOut: pick.ranOut),
+            onSwitch: (harness, makeDefault) {
+              if (makeDefault) ref.read(codeLeadProvider.notifier).chooseHandoff(harness);
+              unawaited(_switchLead(context, ref, harness, run: true));
+            },
+            onWait: pick.change ? controller.keepLead : controller.waitForLimit,
           );
 
     // How far the mode holds on an outside lead, in one line under the bar.
@@ -182,7 +192,9 @@ class CodeSessionScreen extends ConsumerWidget {
                       onRetry: controller.retry,
                       sessionId: sessionId,
                       workingDir: info.workingDir,
-                      offer: offer,
+                      offer: pick?.change ?? true ? null : offer,
+                      trailing: [if (pick?.change ?? false) offer!],
+                      onChangeHandoff: controller.changeHandoff,
                       showLeads: info.leads.isNotEmpty,
                     ),
                   ),
@@ -332,22 +344,35 @@ class CodeSessionScreen extends ConsumerWidget {
   static String _label(WidgetRef ref, String harness) =>
       ref.read(driverRegistryProvider).resolve(harness)?.info.label ?? harness;
 
-  /// The harnesses the session can move to now: connected, signed in and
-  /// allowed, each with the model it would use and how that is paid.
-  static List<LeadChoice> _leadChoices(WidgetRef ref, CodeSessionInfo info, CodeSessionController controller) {
+  /// The harnesses found here the session can move to (not the one on now,
+  /// nor [ranOut]), each with the model it would use and how that is paid;
+  /// one that isn't signed in or allowed says how to fix it.
+  static List<LeadChoice> _leadChoices(
+    WidgetRef ref,
+    CodeSessionInfo session,
+    CodeSessionController controller, {
+    required String ranOut,
+  }) {
     final statuses = ref.watch(driverStatusesProvider).value;
     final own = ref.watch(codeSettingsProvider.select((s) => s.ownClis));
     final catalog = ref.watch(modelCatalogProvider);
     return [
-      for (final d in readyLeads(ref.read(driverRegistryProvider).listed, statuses, own, current: info.harness))
-        if (controller.leadModelFor(d.id) case (:final model, effort: _))
+      for (final (:info, :blocked) in handoffChoices(
+        ref.read(driverRegistryProvider).listed,
+        statuses,
+        own,
+        current: session.harness,
+        ranOut: ranOut,
+      ))
+        if (controller.leadModelFor(info.id) case (:final model, effort: _))
           (
-            id: d.id,
-            label: d.label,
-            subtitle: isOutsideLead(d.id, info.workingDir)
+            id: info.id,
+            label: info.label,
+            subtitle: isOutsideLead(info.id, session.workingDir)
                 ? '${model.isEmpty ? 'Default model' : model} · on your plan'
                 : '${catalog[ModelId(model)]?.name ?? model.split('/').last} · '
                       '${ref.read(modelBillingProvider).ownKey(ModelId(model)) ? 'your own key' : 'credits'}',
+            blocked: blocked,
           ),
     ];
   }
@@ -470,8 +495,12 @@ class TranscriptList extends StatelessWidget {
     this.workingDir = '',
     this.trailing = const [],
     this.offer,
+    this.onChangeHandoff,
     this.showLeads = false,
   });
+
+  /// Change on an automatic handoff away from a driver id (its notice).
+  final ValueChanged<String>? onChangeHandoff;
 
   /// Shown at the end in place of the "stopped" notice: the offer to carry
   /// on with another harness after a usage limit.
@@ -593,7 +622,10 @@ class TranscriptList extends StatelessWidget {
       onRevise: onRevisePlan,
     ),
     FilesDelivered() => FilesCard(item: item, workingDir: workingDir, sessionId: sessionId),
-    NoticeItem() => NoticeView(item: item),
+    NoticeItem(:final handedOffFrom) => NoticeView(
+      item: item,
+      onChange: handedOffFrom.isEmpty || onChangeHandoff == null ? null : () => onChangeHandoff!(handedOffFrom),
+    ),
   };
 }
 

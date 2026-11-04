@@ -197,7 +197,14 @@ const planApprovedReason =
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';
 
 final class NoticeItem extends TranscriptItem {
-  const NoticeItem(super.key, this.message, {this.error = false, this.detail = '', this.limit});
+  const NoticeItem(
+    super.key,
+    this.message, {
+    this.error = false,
+    this.detail = '',
+    this.limit,
+    this.handedOffFrom = '',
+  });
   final String message;
   final bool error;
 
@@ -207,6 +214,10 @@ final class NoticeItem extends TranscriptItem {
   /// The lead stopped on a usage limit (its plan, or EveryAI credits): the
   /// session offers to carry on with another harness.
   final UsageLimit? limit;
+
+  /// An automatic handoff away from this driver id after its usage limit:
+  /// the row offers Change (the picker again), or ''.
+  final String handedOffFrom;
 }
 
 /// Whether an error is the account running out of EveryAI credits (the
