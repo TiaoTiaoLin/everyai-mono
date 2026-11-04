@@ -1,0 +1,31 @@
+{
+  "sessionId": "3f1c2a9e-0000-4000-8000-000000000001",
+  "projectHash": "__HASH__",
+  "startTime": "2026-11-01T10:00:00.000Z",
+  "lastUpdated": "2026-11-01T10:05:00.000Z",
+  "kind": "main",
+  "messages": [
+    {"id": "m1", "type": "user", "timestamp": "2026-11-01T10:00:00.000Z", "content": [{"text": "Add a greeting to hello.txt\nand keep it short"}]},
+    {"id": "m2", "type": "info", "timestamp": "2026-11-01T10:00:01.000Z", "content": "Using model gemini-3.5-flash"},
+    {
+      "id": "m3", "type": "gemini", "timestamp": "2026-11-01T10:00:05.000Z", "model": "gemini-3.5-flash",
+      "content": "I'll look at the file first.",
+      "thoughts": [{"subject": "Reading", "description": "Check what hello.txt holds.", "timestamp": "2026-11-01T10:00:02.000Z"}],
+      "tokens": {"input": 10, "output": 5, "cached": 0, "thoughts": 2, "tool": 0, "total": 17},
+      "toolCalls": [
+        {"id": "read_file-1", "name": "read_file", "displayName": "ReadFile", "description": "hello.txt", "args": {"absolute_path": "__DIR__/hello.txt"},
+         "status": "success", "timestamp": "2026-11-01T10:00:03.000Z", "resultDisplay": "", "renderOutputAsMarkdown": true,
+         "result": [{"functionResponse": {"id": "read_file-1", "name": "read_file", "response": {"output": "hi"}}}]},
+        {"id": "run_shell_command-2", "name": "run_shell_command", "displayName": "Shell", "description": "list files", "args": {"command": "ls"},
+         "status": "success", "timestamp": "2026-11-01T10:00:04.000Z", "resultDisplay": "hello.txt", "renderOutputAsMarkdown": false, "result": []},
+        {"id": "write_todos-3", "name": "write_todos", "displayName": "WriteTodos", "description": "", "args": {"todos": [{"description": "Edit hello.txt", "status": "in_progress"}, {"description": "Check it", "status": "pending"}]},
+         "status": "success", "timestamp": "2026-11-01T10:00:04.500Z", "resultDisplay": "", "renderOutputAsMarkdown": true, "result": []},
+        {"id": "replace-4", "name": "replace", "displayName": "Edit", "description": "hello.txt", "args": {"file_path": "__DIR__/hello.txt", "old_string": "hi", "new_string": "hello there"},
+         "status": "error", "timestamp": "2026-11-01T10:00:04.800Z", "resultDisplay": "", "renderOutputAsMarkdown": true,
+         "result": [{"functionResponse": {"id": "replace-4", "name": "replace", "response": {"error": "old_string not found"}}}]}
+      ]
+    },
+    {"id": "m4", "type": "user", "timestamp": "2026-11-01T10:04:00.000Z", "content": [{"text": "thanks"}]},
+    {"id": "m5", "type": "gemini", "timestamp": "2026-11-01T10:05:00.000Z", "model": "gemini-3.5-pro", "content": "Done.", "thoughts": [], "toolCalls": []}
+  ]
+}
