@@ -25,6 +25,28 @@ Future<DriverProcess> spawnDriver({
 }) =>
     impl.spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
 
+/// [spawnDriver] for a CLI that needs a terminal of its own (Grok Build
+/// opens `/dev/tty` and exits without one): it runs under a pty, which is
+/// its controlling terminal, while its stdin and stdout are named pipes in
+/// [logPath]'s folder (`acp.in`, `acp.out`), so the JSON lines never pass
+/// through the terminal (no echo, no line-length cap). What it writes to the
+/// terminal goes to [logPath]. macOS and Linux only.
+Future<DriverProcess> spawnDriverTty({
+  required String executable,
+  required List<String> args,
+  required String cwd,
+  required String sessionTag,
+  required String logPath,
+  Map<String, String> env = const {},
+}) => impl.spawnDriverTty(
+  executable: executable,
+  args: args,
+  cwd: cwd,
+  sessionTag: sessionTag,
+  logPath: logPath,
+  env: env,
+);
+
 final _closers = <Future<void> Function()>{};
 
 /// Registers [close] to run when the app quits (processes that don't come from [spawnDriver], e.g. a pty).

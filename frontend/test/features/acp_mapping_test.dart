@@ -1,4 +1,6 @@
+import 'package:every_ai/features/code/domain/transcript.dart' show planApprovedReason, planRevisionLead;
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_cursor.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
 import 'package:every_ai/features/code/drivers/json_rpc.dart';
@@ -479,11 +481,175 @@ void main() {
       expect(oc.args, ['acp']);
     });
 
+    test('each listed agent runs with its ACP flags, and flags that skip asking are stripped', () {
+      final cases = <(String, List<String>, List<String>)>[
+        ('copilot', ['--yolo', '--allow-tool', 'shell(rm)', '-m', 'x'], ['--acp', '--stdio', '-m', 'x']),
+        ('copilot', ['--allow-all', '--allow-url=example.com'], ['--acp', '--stdio']),
+        ('droid', ['--auto', 'high', '--skip-permissions-unsafe'], ['exec', '--output-format', 'acp-daemon']),
+        ('droid', ['--auto=medium'], ['exec', '--output-format', 'acp-daemon']),
+        (
+          'kiro-cli',
+          ['--agent-engine=v2', '--trust-tools', 'fs_write'],
+          ['acp', '--agent-engine=v3', '--auth-method=cli'],
+        ),
+        ('kiro-cli', ['--agent-engine', 'v2', '--trust-all-tools'], ['acp', '--agent-engine=v3', '--auth-method=cli']),
+        ('cline', ['--auto-approve', 'true', '-y'], ['--acp', '--auto-approve', 'false']),
+        ('cline', ['--zen', '-z'], ['--acp', '--auto-approve', 'false']),
+        ('qwen', ['--yolo', '--approval-mode=yolo'], ['--acp', '--approval-mode', 'default']),
+        ('agy', [], ['acp']),
+        ('/opt/homebrew/bin/goose', [], ['acp']),
+        ('vibe-acp', [], []),
+        ('kimi', ['-y'], ['acp']),
+        ('auggie', [], ['--acp']),
+      ];
+      for (final (cmd, own, want) in cases) {
+        expect(acpCommand(cmd, own).args, want, reason: '$cmd $own');
+      }
+      expect(acpCommand('qwen', const []).profile.agent, AcpAgent.qwen);
+      expect(acpCommand('kiro-cli', const []).profile.agent, AcpAgent.kiro);
+      expect(acpCommand('goose', const []).profile.askMode, 'approve');
+      expect(
+        (acpCommand('cline', const []).profile.askMode, acpCommand('cline', const []).profile.planMode),
+        ('act', 'plan'),
+      );
+    });
+
+    test('auto-update stays off and goose starts in its asking mode', () {
+      expect(acpProfileOf('droid').env(null), {
+        'DROID_DISABLE_AUTO_UPDATE': 'true',
+        'FACTORY_DROID_AUTO_UPDATE_ENABLED': 'false',
+      });
+      expect(acpProfileOf('auggie').env(null), {'AUGMENT_DISABLE_AUTO_UPDATE': '1'});
+      expect(acpProfileOf('goose').env(null), {'GOOSE_MODE': 'approve'});
+      expect(
+        acpProfileOf('goose').env((
+          args: const <String>[],
+          env: const {'X': '1'},
+          initRequests: const [],
+          instructions: null,
+          firstPrompt: null,
+        )),
+        {'GOOSE_MODE': 'approve', 'X': '1'},
+      );
+      expect(acpProfileOf('gemini').env(null), isEmpty);
+    });
+
+    test('an agent older than its profile needs shows the version problem; an odd line never blocks', () {
+      final agy = acpProfileOf('agy');
+      expect(
+        acpVersionProblem(agy, 'Antigravity CLI', 'agy 1.4.11'),
+        'Antigravity CLI 1.4.11 is too old: update to 1.5.0 or later.',
+      );
+      expect(acpVersionProblem(agy, 'Antigravity CLI', '1.5.0'), isNull);
+      expect(acpVersionProblem(agy, 'Antigravity CLI', 'agy version 1.10.2 (abc)'), isNull);
+      expect(acpVersionProblem(agy, 'Antigravity CLI', 'weird'), isNull);
+      expect(acpVersionProblem(agy, 'Antigravity CLI', null), isNull);
+      expect(acpVersionProblem(acpProfileOf('kiro-cli'), 'Kiro CLI', 'kiro-cli 2.35.9'), contains('2.36.0'));
+      expect(acpVersionProblem(acpProfileOf('kiro-cli'), 'Kiro CLI', 'kiro-cli 2.37.1'), isNull);
+      expect(acpVersionProblem(acpProfileOf('goose'), 'goose', '0.0.1'), isNull);
+    });
+
+    test('sign-in checks make no model call: a key in the environment, or Kiro whoami', () async {
+      expect(kiroSignedInFrom(1, '{"account":null}'), isFalse);
+      expect(kiroSignedInFrom(0, '{"accountType":"Social","email":"a@b.c"}'), isTrue);
+      expect(kiroSignedInFrom(2, ''), isNull);
+      for (final (cmd, key) in [('vibe-acp', 'MISTRAL_API_KEY'), ('droid', 'FACTORY_API_KEY')]) {
+        final p = acpProfileOf(cmd);
+        expect(await p.signedIn(cmd, env: {key: 'k'}), isTrue, reason: cmd);
+        expect(await p.signedIn(cmd, env: {key: ' '}), isNull, reason: cmd);
+        expect(await p.signedIn(cmd, env: const {}), isNull, reason: cmd);
+      }
+      // A Kiro key counts before whoami would run.
+      expect(await acpProfileOf('kiro-cli').signedIn('kiro-cli', env: const {'KIRO_API_KEY': 'k'}), isTrue);
+    });
+
     test("OpenCode's permission rules go into its inline config, next to the briefing's", () {
       final env = withOpenCodePermissions({'OPENCODE_CONFIG_CONTENT': '{"mcp":{"servers":{}}}', 'X': '1'});
       expect(env['X'], '1');
       expect(env['OPENCODE_CONFIG_CONTENT'], contains('"mcp"'));
       expect(env['OPENCODE_CONFIG_CONTENT'], contains('"permission":{"*":"ask"'));
+    });
+  });
+  group('Cursor', () {
+    test('both of its names get its profile: `acp` pinned, skip-approval flags dropped, never its ask mode', () {
+      for (final exe in ['agent', 'cursor-agent', '/Users/me/.local/bin/agent']) {
+        final p = acpProfileOf(exe);
+        expect(p.agent, AcpAgent.cursor, reason: exe);
+        expect((p.askMode, p.planMode, p.needsConsent, p.mcpInConfig), ('agent', 'plan', true, false));
+      }
+      expect(acpCommand('cursor-agent', ['--force', '-f', '--yolo', '--model', 'gpt-6']).args, [
+        'acp',
+        '--model',
+        'gpt-6',
+      ]);
+      expect(acpCommand('agent acp', const []).args, ['acp']);
+    });
+
+    test('to-dos: merge updates or adds by id, otherwise the list is replaced', () {
+      var todos = cursorTodos({}, {
+        'merge': false,
+        'todos': [
+          {'id': 'a', 'content': 'A', 'status': 'pending'},
+          {'id': 'b', 'content': 'B', 'status': 'pending'},
+        ],
+      });
+      todos = cursorTodos(todos, {
+        'merge': true,
+        'todos': [
+          {'id': 'b', 'status': 'completed'},
+          {'id': 'c', 'content': 'C', 'status': 'in_progress'},
+        ],
+      });
+      expect(
+        [for (final t in todos.values) (t['content'], t['status'])],
+        [('A', 'pending'), ('B', 'completed'), ('C', 'in_progress')],
+      );
+      expect(cursorTodos(todos, {'todos': <Object?>[]}), isEmpty);
+      final (call, result) = cursorTodoEvents(todos, id: 'x');
+      expect((call.toolName, call.actionKind, result.actionId), ('acp:update_todos', 'TaskTrackerAction', 'x'));
+    });
+
+    test('plan replies: approved, changes with the words, anything else cancelled', () {
+      expect(cursorPlanReply((text: planApprovedReason, isError: false)), {
+        'outcome': {'outcome': 'accepted'},
+      });
+      expect(cursorPlanReply((text: '$planRevisionLead Smaller.', isError: false)), {
+        'outcome': {'outcome': 'rejected', 'reason': '$planRevisionLead Smaller.'},
+      });
+      expect(cursorPlanReply((text: planApprovedReason, isError: true)), cursorCancelled);
+      expect(cursorPlanReply((text: 'Something else', isError: false)), cursorCancelled);
+      expect(cursorPlanArgs(const {})['title'], 'Plan');
+    });
+
+    test("a question card's answer that isn't an answers message goes back as skipped with its text", () {
+      const params = {
+        'questions': [
+          {
+            'id': 'q',
+            'prompt': 'Go?',
+            'options': [
+              {'id': 'y', 'label': 'Yes'},
+            ],
+          },
+        ],
+      };
+      expect(cursorAnswerReply(params, (text: 'Whatever', isError: false)), cursorSkipped('Whatever'));
+      expect(cursorQuestionProblem(params), isNull);
+      expect(cursorQuestionProblem(const {}), isNotNull);
+    });
+
+    test('a subagent of a custom type, and its duration', () {
+      final call = cursorTaskCall({
+        'description': 'Review',
+        'prompt': 'Look',
+        'subagentType': {'custom': 'reviewer'},
+        'model': 'fast',
+      }, id: 't');
+      expect((call.actionKind, call.str('agent'), call.str('model')), ('TaskAction', 'reviewer', 'fast'));
+      expect(
+        [cursorTaskDone(4200), cursorTaskDone(65000), cursorTaskDone(null)],
+        ['Done in 4.2 s.', 'Done in 65 s.', 'Done.'],
+      );
     });
   });
 }

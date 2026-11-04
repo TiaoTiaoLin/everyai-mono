@@ -33,20 +33,33 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     required this.command,
     this.args = const [],
     this.needsConsent = false,
+    this.consentId,
+    this.installHint,
     this.which,
     Future<String> Function()? dataDir,
     AcpConnect? connect,
+    AcpConnect? ttyConnect,
+    Future<Map<String, String>> Function()? loginEnv,
     this.signedIn,
     this.initTimeout = const Duration(seconds: 60),
     this.replayQuiet = const Duration(milliseconds: 300),
   }) : _dataDir = dataDir ?? GitService.dataDir,
-       _connect = connect ?? _spawn;
+       _connect = connect ?? _spawn,
+       _ttyConnect = ttyConnect ?? _spawnTty,
+       _loginEnv = loginEnv ?? shellLoginEnv;
 
   final String id;
   final String label;
   final String command;
   final List<String> args;
   final bool needsConsent;
+
+  /// Whose consent it runs on, when not its own [id]: an `acp:<command>`
+  /// driver shares the listed entry's for the same command.
+  final String? consentId;
+
+  /// How to install it, as one line ([DriverInfo.installHint]).
+  final String? installHint;
 
   /// Replaces the PATH lookup in [detect] and at start (tests).
   final Future<String?> Function(String command)? which;
@@ -64,7 +77,15 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   final Future<String> Function() _dataDir;
   final AcpConnect _connect;
+
+  /// [_connect] under a terminal of its own ([AcpProfile.ttyFallback]).
+  final AcpConnect _ttyConnect;
+  final Future<Map<String, String>> Function() _loginEnv;
   final _live = <String, AcpSession>{};
+
+  /// The agent exited for want of a terminal once: from then on, this app
+  /// run starts it under one.
+  var _tty = false;
 
   /// What runs: the executable, its arguments and its profile.
   late final AcpCommand resolved = acpCommand(command, args);
@@ -78,8 +99,56 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     required Map<String, String> env,
   }) => spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
 
+  static Future<LineChannel> _spawnTty({
+    required String executable,
+    required List<String> args,
+    required String cwd,
+    required String sessionTag,
+    required String logPath,
+    required Map<String, String> env,
+  }) =>
+      spawnDriverTty(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
+
+  Future<LineChannel> _start({
+    required String executable,
+    required List<String> args,
+    required String cwd,
+    required String sessionTag,
+    required String logPath,
+    required Map<String, String> env,
+  }) async {
+    final tty = _tty;
+    final channel = await (tty ? _ttyConnect : _connect)(
+      executable: executable,
+      args: args,
+      cwd: cwd,
+      sessionTag: sessionTag,
+      logPath: logPath,
+      env: env,
+    );
+    if (!tty) _piped[channel] = true;
+    return channel;
+  }
+
+  /// The channels started on plain pipes.
+  final _piped = Expando<bool>();
+
+  /// Moves later starts under a terminal; false when [channel] already
+  /// had one (another session may have switched meanwhile).
+  bool _switchToTty(LineChannel channel) {
+    if (_piped[channel] != true) return false;
+    _tty = true;
+    return true;
+  }
+
   @override
-  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent);
+  DriverInfo get info => DriverInfo(
+    id: id,
+    label: label,
+    needsConsent: needsConsent || resolved.profile.needsConsent,
+    consentId: consentId,
+    installHint: installHint,
+  );
 
   /// No steering (ACP has none) and no fork or rewind yet.
   @override
@@ -87,7 +156,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   @override
   Future<DriverStatus> detect() async {
-    final s = await detectCli(resolved.executable, which: which);
+    final s = await detectCli(resolved.executable, which: (_) => _find());
     if (!s.installed || s.path == null) return s;
     final signed = await (signedIn ?? () => resolved.profile.signedIn(s.path!))();
     final hint = resolved.profile.signIn.isEmpty ? 'Sign in to it in a terminal' : resolved.profile.signIn;
@@ -96,7 +165,11 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       path: s.path,
       version: s.version,
       signedIn: signed,
-      problem: s.problem ?? (signed == false ? 'Not signed in. $hint.' : null),
+      problem:
+          s.problem ??
+          acpForeignProblem(resolved.profile, s.version, path: s.path) ??
+          acpVersionProblem(resolved.profile, label, s.version) ??
+          (signed == false ? 'Not signed in. $hint.' : null),
     );
   }
 
@@ -129,8 +202,19 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     });
   }
 
+  /// The executable's path: its own name, else the other names the CLI
+  /// installs under ([AcpProfile.alsoNamed]).
+  Future<String?> _find() async {
+    final find = which ?? whichCommand;
+    final exe = resolved.executable;
+    for (final name in {exe, if (!exe.contains('/')) ...resolved.profile.alsoNamed}) {
+      if (await find(name) case final path?) return path;
+    }
+    return null;
+  }
+
   Future<String> _executable() async {
-    final path = await (which ?? whichCommand)(resolved.executable);
+    final path = await _find();
     if (path == null) throw HarnessError("$label isn't installed: `${resolved.executable}` wasn't found on your PATH.");
     return path;
   }
@@ -140,7 +224,9 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     caps: caps,
     command: resolved,
     resolve: _executable,
-    connect: _connect,
+    connect: _start,
+    switchToTty: _switchToTty,
+    loginEnv: _loginEnv,
     initTimeout: initTimeout,
     replayQuiet: replayQuiet,
     offered: _offered,

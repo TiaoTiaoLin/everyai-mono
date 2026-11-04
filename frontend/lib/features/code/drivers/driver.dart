@@ -55,11 +55,25 @@ enum DriverCap {
 /// vendor's terms before the app drives it (a subscription CLI).
 @immutable
 final class DriverInfo {
-  const DriverInfo({required this.id, required this.label, this.needsConsent = false});
+  const DriverInfo({
+    required this.id,
+    required this.label,
+    this.needsConsent = false,
+    this._consentId,
+    this.installHint,
+  });
 
   final String id;
   final String label;
   final bool needsConsent;
+
+  /// The id the user's consent is stored under: [id], or the listed driver's
+  /// for the same program (an `acp:gemini` runs on Gemini CLI's switch).
+  String get consentId => _consentId ?? id;
+  final String? _consentId;
+
+  /// How to install it, as one line (a command, usually), or null.
+  final String? installHint;
 }
 
 /// Whether a driver can run on this computer: its program was found at

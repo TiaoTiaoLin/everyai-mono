@@ -1,0 +1,9 @@
+// Derived from Cursor's ACP doc (cursor.com/docs/cli/acp, read 2026-11-04), not recorded: unverified against a real `agent acp`.
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "everyai", "title": "EveryAI", "version": "0.1.0"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "authMethods": [{"id": "cursor_login", "name": "Cursor Login", "description": "Run `agent login` in a terminal"}], "agentCapabilities": {"loadSession": true, "promptCapabilities": {"embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/load", "id": 2, "params": {"sessionId": "cur-old", "cwd": "{{cwd}}", "mcpServers": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 2, "error": {"code": -32602, "message": "Session not found"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/new", "id": 3, "params": {"cwd": "{{cwd}}", "mcpServers": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "result": {"sessionId": "cur-1"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/prompt", "id": 4, "params": {"sessionId": "cur-1", "prompt": [{"type": "text", "text": "Hello"}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 4, "result": {"stopReason": "end_turn"}}}
