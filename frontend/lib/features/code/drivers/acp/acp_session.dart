@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:uuid/uuid.dart';
 
 import '../../domain/agent_mode.dart';
+import '../../domain/permissions.dart' show typedReason;
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
 import '../briefing/briefing_types.dart';
@@ -37,6 +38,7 @@ final class AcpLauncher {
     required this.resolve,
     required this.connect,
     required this.initTimeout,
+    required this.replayQuiet,
     required this.offered,
     required this.closed,
   });
@@ -49,6 +51,10 @@ final class AcpLauncher {
   final Future<String> Function() resolve;
   final AcpConnect connect;
   final Duration initTimeout;
+
+  /// How long a late `session/load` replay must stay quiet before the first
+  /// prompt goes ([AcpProfile.lateReplay]).
+  final Duration replayQuiet;
 
   /// A `session/new` or `session/load` reply, for the models list.
   final Future<void> Function(Map<String, Object?> reply) offered;
@@ -73,6 +79,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     required this._mode,
     this.briefing,
     this.mcpConfig = const {},
+    this.rememberedMcp = const [],
     this._acpSessionId,
     List<HarnessEvent> history = const [],
   }) : _journal = openEventJournal(dir, 'events') {
@@ -89,6 +96,10 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   final String sessionTag;
   final DriverBriefing? briefing;
   final Map<String, Object?> mcpConfig;
+
+  /// The user's MCP servers a reopened conversation had (names from
+  /// `meta.json`; their settings can hold keys, so they aren't kept).
+  final List<String> rememberedMcp;
 
   final AcpLauncher _launcher;
   final EventJournal _journal;
@@ -113,6 +124,14 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   /// Updates are the agent's replay of a reopened conversation until the
   /// next prompt; the journal already shows it.
   var _replaying = false;
+
+  /// Loaded, and nothing of the new turn seen yet: a tool call that first
+  /// shows up finished is the tail of a late replay.
+  var _afterLoad = false;
+
+  /// Waiting for a late replay to go quiet; each update restarts the timer.
+  Completer<void>? _quiet;
+  Timer? _quietTimer;
   var _status = ExecutionStatus.idle;
   Future<void> _turns = Future.value();
   Future<void>? _turn;
@@ -124,15 +143,18 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   final _text = StringBuffer();
   final _reasoning = StringBuffer();
 
-  /// Tool calls by ACP id, merged; which were shown, which finished.
+  /// Tool calls by ACP id, merged while open; which were shown, which the
+  /// agent asked about, which finished.
   final _calls = <String, Map<String, Object?>>{};
   final _shown = <String, ActionCall>{};
+  final _asked = <String>{};
   final _done = <String>{};
 
   /// Permission requests waiting for an answer, by action id.
   final _asking = <String, ({Completer<Object?> reply, List<Object?> options, String callId})>{};
 
-  /// Why calls were refused, for the next prompt (ACP has no reason field).
+  /// What the user typed when refusing calls, for the next prompt (ACP has
+  /// no reason field).
   final _notes = <String>[];
 
   /// Messages sent with `run: false`, for the next prompt.
@@ -174,6 +196,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     ];
     final last = _history.whereType<StateChange>().lastOrNull?.executionStatus;
     _status = last ?? ExecutionStatus.idle;
+    // The agent's cost is a running total for its session: go on from the last one.
+    _cost = [
+      for (final u in _history.whereType<UsageReport>())
+        if (u.raw['acp_total'] case final num t) t.toDouble(),
+    ].lastOrNull;
     for (final c in open) {
       _emit(resultEvent(id: '${c.id}-x', actionId: c.id, toolName: c.toolName, text: 'Stopped when the app closed.'));
     }
@@ -189,6 +216,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   Future<void> _connect({required bool fresh}) async {
     final exe = await _launcher.resolve();
+    if (await _profile.preflight(cwd) case final problem?) throw HarnessError(problem);
     final delivery = await _delivery();
     final cmd = _launcher.command;
     final channel = await _launcher.connect(
@@ -226,11 +254,18 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         try {
           reply = _map(await peer.request('session/load', {'sessionId': known, 'cwd': cwd, 'mcpServers': mcp}));
         } on JsonRpcError catch (e) {
-          if (e.code != -32602 || peer.isClosed) rethrow;
+          // An unknown session is -32602 on OpenCode, -32603 on Gemini; any
+          // refusal but sign-in starts a fresh one.
+          if (e.code == -32000 || peer.isClosed) rethrow;
+        }
+        if (reply != null) {
+          _afterLoad = true;
+          if (_profile.lateReplay) await _replayQuieted();
         }
       }
       if (reply == null) {
         _replaying = false;
+        _cost = null;
         reply = _map(await peer.request('session/new', {'cwd': cwd, 'mcpServers': mcp}));
         _acpSessionId = reply['sessionId'] as String?;
         if (_acpSessionId == null) throw HarnessError("$_label didn't start a session.");
@@ -244,8 +279,27 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
           );
         }
       }
+      if (!fresh) {
+        final lost = [
+          for (final n in rememberedMcp)
+            if (!mcpConfig.containsKey(n)) n,
+        ];
+        if (lost.isNotEmpty) {
+          _emit(
+            acpNotice(
+              _next('n'),
+              '$_label reopened without your MCP servers ${lost.join(', ')}. Start a new session to use them again.',
+            ),
+          );
+        }
+      }
       _absorb(reply);
-      await _launcher.offered(reply);
+      // The models list is a cache: failing to write it doesn't stop the session.
+      try {
+        await _launcher.offered(reply);
+      } on Object {
+        // Left as it was.
+      }
       await _saveMeta();
       await _pinMode();
       if (_llm case final l?) await _applyLlm(l.model, l.effort, strict: false);
@@ -302,11 +356,37 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     return [...ours, ...theirs];
   }
 
+  /// Waits until the agent's replay has stopped for [AcpLauncher.replayQuiet]
+  /// (at most 5 s).
+  Future<void> _replayQuieted() async {
+    final quiet = _quiet = Completer<void>();
+    _rearmQuiet();
+    try {
+      await quiet.future.timeout(const Duration(seconds: 5), onTimeout: () {});
+    } finally {
+      _quietTimer?.cancel();
+      _quiet = null;
+    }
+  }
+
+  void _rearmQuiet() {
+    final quiet = _quiet;
+    if (quiet == null) return;
+    _quietTimer?.cancel();
+    _quietTimer = Timer(_launcher.replayQuiet, () {
+      if (!quiet.isCompleted) quiet.complete();
+    });
+  }
+
   Future<void> _saveMeta() => writeJsonFile('$dir/meta.json', {
     'acpSessionId': _acpSessionId,
     'cwd': cwd,
     'sessionTag': sessionTag,
     'mode': _mode.name,
+    'mcpServers': [
+      for (final n in mcpConfig.isNotEmpty ? mcpConfig.keys : rememberedMcp)
+        if (n != everyaiServerName) n,
+    ],
   });
 
   void _absorb(Map<String, Object?> reply) {
@@ -464,6 +544,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     _setStatus(ExecutionStatus.running);
     try {
       final reply = _map(await peer.request('session/prompt', {'sessionId': _acpSessionId, 'prompt': blocks}));
+      _afterLoad = false;
       _flush();
       if (acpTurnUsage(reply['usage'], id: _next('usage')) case final u?) _emit(u);
       final stop = reply['stopReason'];
@@ -506,16 +587,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   Future<void> interrupt() async {
     final turn = _turn;
     if (_status != ExecutionStatus.running && _status != ExecutionStatus.waitingForConfirmation) return;
-    _cancel();
-    for (final entry in _asking.entries.toList()) {
-      entry.value.reply.complete(_cancelledOutcome);
-      _cancelledResult(entry.value.callId);
-    }
-    _asking.clear();
-    _flush();
-    for (final callId in _shown.keys.toList()) {
-      if (!_done.contains(callId)) _cancelledResult(callId);
-    }
+    _stopTurn();
     if (turn == null) return;
     // The agent replies `cancelled`; one that doesn't is ended.
     await turn.timeout(
@@ -525,6 +597,21 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         _setStatus(ExecutionStatus.paused);
       },
     );
+  }
+
+  /// Cancels the turn: what waits for an answer is answered `cancelled`, and
+  /// the open calls but [running] (one that already runs) are closed.
+  void _stopTurn({String? running}) {
+    _cancel();
+    for (final entry in _asking.entries.toList()) {
+      entry.value.reply.complete(_cancelledOutcome);
+      _cancelledResult(entry.value.callId);
+    }
+    _asking.clear();
+    _flush();
+    for (final callId in _shown.keys.toList()) {
+      if (!_done.contains(callId) && callId != running) _cancelledResult(callId);
+    }
   }
 
   void _cancel() {
@@ -591,8 +678,13 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       final refuse = option('reject_once');
       a.reply.complete(all || refuse == null ? _cancelledOutcome : _selected(refuse));
       final why = reason ?? (accept ? 'Only "always allow" was offered.' : 'Refused.');
-      if (reason != null) _notes.add('The app refused ${_quoted(title)}: $reason');
+      // The agent already got the refusal; only words the user typed are worth a line in the next prompt.
+      if (typedReason(reason) case final said?) {
+        final note = 'The app refused ${_quoted(title)}: $said';
+        if (_notes.length < 5 && !_notes.contains(note)) _notes.add(note);
+      }
       _done.add(a.callId);
+      _calls.remove(a.callId);
       _emit(
         acpRejectedEvent(
           id: 'tr-${a.callId}',
@@ -624,9 +716,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final p = _map(params);
     final tc = _map(p['toolCall']);
     final callId = tc['toolCallId'] as String? ?? _next('perm');
-    final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, tc);
     // Asked about a call that already finished or was cancelled: nobody waits for it.
     if (_done.contains(callId) || _cancelled || _closed) return _cancelledOutcome;
+    final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, tc);
+    _asked.add(callId);
+    _afterLoad = false;
     final options = p['options'] as List<Object?>? ?? const [];
     final shown = _shown[callId] ?? _show(callId, call, options: options);
     final reply = Completer<Object?>();
@@ -642,11 +736,14 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final p = _map(params);
     if (p['sessionId'] case final String s when _acpSessionId != null && s != _acpSessionId) return;
     final u = _map(p['update']);
+    _rearmQuiet();
     switch (u['sessionUpdate']) {
       case 'current_mode_update':
         _modes?['currentModeId'] = u['currentModeId'];
       case 'config_option_update':
         if (u['configOptions'] case final List<Object?> c) _config = c;
+      case 'usage_update' when _replaying:
+        _cost = acpUsageTotal(u) ?? _cost;
       case _ when _replaying:
         break;
       case 'agent_message_chunk':
@@ -675,22 +772,58 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   void _toolUpdate(Map<String, Object?> u) {
     final callId = u['toolCallId'];
-    if (callId is! String) return;
+    if (callId is! String || _done.contains(callId)) return;
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, u);
-    if (_done.contains(callId)) return;
     final status = call['status'] as String? ?? 'pending';
+    final finished = status == 'completed' || status == 'failed';
+    if (_afterLoad && finished && !_shown.containsKey(callId)) {
+      // Replayed after the load reply (Gemini): the journal has it already.
+      _done.add(callId);
+      _calls.remove(callId);
+      return;
+    }
+    _afterLoad = false;
     // A pending call's input may still be streaming: shown once it runs or asks.
     if (status == 'pending') return;
     final shown = _shown[callId] ?? _show(callId, call);
-    if (status == 'completed' || status == 'failed') {
+    if (!_asked.contains(callId)) _unasked(callId, shown);
+    if (finished) {
       _done.add(callId);
+      _calls.remove(callId);
       _emit(acpResultEvent(call, id: 'tr-$callId', actionId: shown.id, toolName: shown.toolName));
     }
   }
 
+  /// A call that changes things ran without a permission request: the
+  /// agent's own settings let it past the app. The user is told; in Plan the
+  /// turn is stopped.
+  void _unasked(String callId, ActionCall call) {
+    if (!_gated.contains(call.actionKind) || AgentMode.isReadOnly(call) || !_asked.add(callId)) return;
+    final plan = _mode == AgentMode.plan;
+    _emit(
+      acpNotice(
+        _next('n'),
+        '$_label ran ${_quoted(call.summary)} without asking the app first, so its own settings allow it.'
+        '${plan ? ' Plan mode stopped the turn.' : ''}',
+      ),
+    );
+    if (plan) _stopTurn(running: callId);
+  }
+
+  static const _gated = {
+    'TerminalAction',
+    'FileEditorAction',
+    'EditAction',
+    'ApplyPatchAction',
+    'AcpExecuteAction',
+    'AcpEditAction',
+    'AcpDeleteAction',
+    'AcpMoveAction',
+  };
+
   ActionCall _show(String callId, Map<String, Object?> call, {List<Object?> options = const []}) {
     _flush();
-    final e = acpActionEvent(call, id: 'tc-$callId', mcpServers: _mcpNames, options: options);
+    final e = acpActionEvent(call, id: 'tc-$callId', mcpServers: _mcpNames, options: options, cwd: cwd);
     _shown[callId] = e;
     _emit(e);
     return e;
@@ -698,6 +831,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   void _cancelledResult(String callId) {
     if (!_done.add(callId)) return;
+    _calls.remove(callId);
     final shown = _shown[callId];
     if (shown == null) return;
     _emit(
@@ -738,6 +872,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _quietTimer?.cancel();
     for (final a in _asking.values) {
       a.reply.complete(_cancelledOutcome);
     }

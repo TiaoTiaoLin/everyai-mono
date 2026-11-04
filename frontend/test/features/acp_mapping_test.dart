@@ -30,6 +30,36 @@ void main() {
       expect(autoDecidable(c), isFalse);
     });
 
+    test('a command run in another folder keeps a kind of its own; one inside the project is judged', () {
+      ActionCall run(String dir) => acpActionEvent(
+        {
+          'toolCallId': 'c1',
+          'kind': 'execute',
+          'name': 'bash',
+          'rawInput': {'command': "echo 'x' >> .zshrc", 'workdir': dir},
+        },
+        id: 'tc-c1',
+        cwd: '/w/repo',
+      );
+      for (final dir in ['/Users/me', '/w/repo/../other', '~', '/w/repo2']) {
+        expect(run(dir).actionKind, 'AcpExecuteAction', reason: dir);
+      }
+      for (final dir in ['/w/repo', '/w/repo/sub/', 'sub']) {
+        expect(run(dir).actionKind, 'TerminalAction', reason: dir);
+      }
+    });
+
+    test("OpenCode's web search is a lookup the rules decide", () {
+      final c = _call({
+        'kind': 'other',
+        'name': 'websearch',
+        'title': 'websearch',
+        'rawInput': {'query': 'acp spec'},
+      });
+      expect((c.actionKind, c.str('query')), ('WebSearchAction', 'acp spec'));
+      expect(autoDecidable(c), isTrue);
+    });
+
     test('an edit with a diff names its file and shows only the changed lines', () {
       final old = [for (var i = 0; i < 50; i++) 'line $i'].join('\n');
       final c = _call({
@@ -261,6 +291,8 @@ void main() {
         'cost': {'amount': 0.012, 'currency': 'USD'},
       }, id: 'a');
       expect((first.contextTokens, first.costMicros, total), (5000, 12000, 0.012));
+      // The running total stays with the report, for a reopened session.
+      expect(HarnessEvent.decode(first.raw).raw['acp_total'], 0.012);
       final (second, _) = acpUsageUpdate(
         {
           'used': 7000,

@@ -29,6 +29,7 @@ final class AcpProfile {
     this.dropped = const [],
     this.askMode,
     this.planMode,
+    this.lateReplay = false,
   });
 
   final AcpAgent agent;
@@ -51,6 +52,10 @@ final class AcpProfile {
   /// What the user does to sign in, as an instruction.
   final String signIn;
 
+  /// Whether its `session/load` replay can still be streaming after the
+  /// reply (Gemini doesn't wait for it), so the first prompt waits for quiet.
+  final bool lateReplay;
+
   /// How the session's briefing reaches it (`drivers/briefing/recipes.dart`).
   Delivery deliver(BriefingInput i, List<({String name, String description})> skills) => switch (agent) {
     AcpAgent.gemini => recipes.gemini(i, skills: skills),
@@ -67,6 +72,13 @@ final class AcpProfile {
   /// Whether the session's MCP server goes in the agent's config ([env])
   /// rather than in `session/new`.
   bool get mcpInConfig => agent == AcpAgent.openCode;
+
+  /// Why it must not start in [cwd] (project files that would let it act
+  /// without asking), or null.
+  Future<String?> preflight(String cwd) => switch (agent) {
+    AcpAgent.gemini => geminiWorkspaceProblem(cwd),
+    _ => Future.value(),
+  };
 
   /// Whether it is signed in, without a model call; null when it can't tell.
   Future<bool?> signedIn(String executable) => switch (agent) {
@@ -91,6 +103,7 @@ const _gemini = AcpProfile._(
   caps: {..._shared, DriverCap.mcp, DriverCap.images, DriverCap.switchModel, DriverCap.skills},
   askMode: 'default',
   signIn: 'Run `gemini` in a terminal and sign in',
+  lateReplay: true,
 );
 
 const _openCode = AcpProfile._(
@@ -180,15 +193,29 @@ List<String> addArgs(List<String> base, List<String> extra) {
 /// OpenCode's permission rules for a session: every tool asks, so commands,
 /// edits, fetches and MCP calls reach the app's approvals; its to-do list,
 /// subagents and skills run without asking (their own tool calls still ask).
-/// Inline config outranks the project's and the user's.
 const openCodePermissions = {'*': 'ask', 'todowrite': 'allow', 'todoread': 'allow', 'task': 'allow', 'skill': 'allow'};
 
-/// [env] with [openCodePermissions] merged into `OPENCODE_CONFIG_CONTENT`.
+/// The agents [openCodePermissions] are pinned on as well. OpenCode applies
+/// the last matching rule, and puts every config's agent rules after all the
+/// top-level ones (2.1.3), so an `agent.build.permission` in the user's
+/// config would otherwise win over ours.
+const openCodeAgents = ['build', 'plan', 'general', 'explore'];
+
+/// [env] with [openCodePermissions] merged into `OPENCODE_CONFIG_CONTENT`
+/// (top level and per agent), and the project's own OpenCode config turned
+/// off: a cloned repository's `opencode.json` or `.opencode/` could allow
+/// tools, define agents or run plugins, and the app takes no settings from
+/// repository files.
 Map<String, String> withOpenCodePermissions(Map<String, String> env) {
   final config = <String, Object?>{};
   if (env['OPENCODE_CONFIG_CONTENT'] case final s?) {
     if (jsonDecode(s) case final Map<String, Object?> m) config.addAll(m);
   }
   config['permission'] = openCodePermissions;
-  return {...env, 'OPENCODE_CONFIG_CONTENT': jsonEncode(config)};
+  final agents = <String, Object?>{...?(config['agent'] as Map<String, Object?>?)};
+  for (final a in openCodeAgents) {
+    agents[a] = {...?(agents[a] as Map<String, Object?>?), 'permission': openCodePermissions};
+  }
+  config['agent'] = agents;
+  return {...env, 'OPENCODE_CONFIG_CONTENT': jsonEncode(config), 'OPENCODE_DISABLE_PROJECT_CONFIG': '1'};
 }

@@ -18,10 +18,13 @@ Future<Map<String, Object?>?> readJsonFile(String path) async {
   }
 }
 
+var _writes = 0;
+
 Future<void> writeJsonFile(String path, Object? json) async {
   final f = File(path);
   await f.parent.create(recursive: true);
-  final tmp = File('$path.tmp');
+  // A temporary name of its own, so two writers of one file don't collide.
+  final tmp = File('$path.$pid.${_writes++}.tmp');
   await tmp.writeAsString(jsonEncode(json), flush: true);
   await tmp.rename(path);
 }
@@ -78,20 +81,48 @@ Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async {
 }
 
 Future<bool?> openCodeSignedIn(String executable) async {
+  Process? proc;
   try {
     final shell = await ShellEnv.load();
-    final res = await Process.run(executable, const [
+    final p = proc = await Process.start(executable, const [
       'auth',
       'list',
       '--standalone',
       '--format',
       'json',
-    ], environment: shell.env).timeout(const Duration(seconds: 10));
-    if (res.exitCode != 0) return null;
-    final list = jsonDecode('${res.stdout}');
+    ], environment: shell.env);
+    unawaited(p.stderr.drain<void>());
+    final out = p.stdout.transform(utf8.decoder).join();
+    // `--standalone` starts a private server: one that hangs is ended, not left behind.
+    final code = await p.exitCode.timeout(const Duration(seconds: 10));
+    if (code != 0) return null;
+    final list = jsonDecode(await out);
     if (list is! List<Object?>) return null;
     return list.any((p) => p is Map<String, Object?> && (p['connections'] as List<Object?>? ?? const []).isNotEmpty);
+  } on TimeoutException {
+    proc?.kill(ProcessSignal.sigkill);
+    return null;
   } on Object {
     return null;
   }
 }
+
+Future<String?> geminiWorkspaceProblem(String cwd) async {
+  final found = <String>[];
+  final settings = await readJsonFile('$cwd/.gemini/settings.json');
+  for (final MapEntry(:key, :value) in (settings ?? const <String, Object?>{}).entries) {
+    final harmless =
+        _geminiHarmless.contains(key) ||
+        (key == 'context' && value is Map<String, Object?> && value['includeDirectories'] == null);
+    if (!harmless) found.add('settings.json "$key"');
+  }
+  for (final d in const ['policies', 'extensions']) {
+    if (await Directory('$cwd/.gemini/$d').exists()) found.add('$d/');
+  }
+  if (found.isEmpty) return null;
+  return "This project's .gemini folder can let Gemini CLI act without asking the app (${found.join(', ')}). "
+      'Remove those, or add MCP servers in Settings → Code → MCP servers instead, then try again.';
+}
+
+/// `.gemini/settings.json` keys that can't widen what Gemini does unasked.
+const _geminiHarmless = {r'$schema', 'ui', 'general', 'model', 'privacy', 'telemetry', 'output', 'accessibility'};

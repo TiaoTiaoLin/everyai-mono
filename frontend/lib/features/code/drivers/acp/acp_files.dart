@@ -26,3 +26,9 @@ Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) => impl.g
 /// Whether OpenCode has at least one provider connected
 /// (`opencode auth list --standalone --format json`, no model call).
 Future<bool?> openCodeSignedIn(String executable) => impl.openCodeSignedIn(executable);
+
+/// Why Gemini CLI must not start in [cwd], or null. It counts as headless
+/// under the app, so it trusts the folder and reads its `.gemini/settings.json`
+/// and policies; those can allow tools ahead of time or start MCP commands,
+/// which would never reach the app's approvals.
+Future<String?> geminiWorkspaceProblem(String cwd) => impl.geminiWorkspaceProblem(cwd);

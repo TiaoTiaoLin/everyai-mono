@@ -30,7 +30,13 @@ typedef AcpShape = ({String kind, String toolName, Map<String, Object?> args});
 /// [call] (an ACP `ToolCall`, merged) as one of the app's action kinds.
 /// [mcpServers] are the servers the session configured; [options] are the
 /// permission request's, which name the server for Gemini's MCP calls.
-AcpShape acpShape(Map<String, Object?> call, {Set<String> mcpServers = const {}, List<Object?> options = const []}) {
+/// [cwd] is the session's folder: a command run elsewhere keeps its own kind.
+AcpShape acpShape(
+  Map<String, Object?> call, {
+  Set<String> mcpServers = const {},
+  List<Object?> options = const [],
+  String? cwd,
+}) {
   if (_mcp(call, mcpServers, options) case final m?) return m;
   final kind = _str(call['kind']) ?? 'other';
   final toolName = '$acpToolPrefix${_str(call['name']) ?? kind}';
@@ -38,12 +44,21 @@ AcpShape acpShape(Map<String, Object?> call, {Set<String> mcpServers = const {},
   final paths = _paths(call, raw);
   AcpShape shape(String k, Map<String, Object?> args) => (kind: k, toolName: toolName, args: {...raw, ...args});
   final own = (kind: 'Acp${_pascal(kind)}Action', toolName: toolName, args: raw);
+  // OpenCode's web search (kind `other`) is a lookup the rules decide.
+  if (_str(call['name']) == 'websearch') {
+    final query = _str(raw['query']);
+    return query == null ? own : shape('WebSearchAction', {'query': query});
+  }
   switch (kind) {
     case 'execute':
       // Gemini sends only a title for its shell; read as a command it could
-      // pass rules it doesn't meet, so the user decides.
+      // pass rules it doesn't meet, so the user decides. So does a command
+      // run in another folder (OpenCode's `workdir`): the rules read its
+      // paths as the project's.
       final command = _str(raw['command']) ?? _str(raw['cmd']);
-      return command == null ? own : shape('TerminalAction', {'command': command});
+      final dir = _str(raw['workdir']) ?? _str(raw['cwd']);
+      if (command == null || (dir != null && !_inside(dir, cwd))) return own;
+      return shape('TerminalAction', {'command': command});
     case 'edit' || 'delete' || 'move':
       if (paths.length > 1) return shape('ApplyPatchAction', {'paths': paths});
       if (paths.isEmpty) return own;
@@ -78,8 +93,9 @@ ActionCall acpActionEvent(
   required String id,
   Set<String> mcpServers = const {},
   List<Object?> options = const [],
+  String? cwd,
 }) {
-  final s = acpShape(call, mcpServers: mcpServers, options: options);
+  final s = acpShape(call, mcpServers: mcpServers, options: options, cwd: cwd);
   final base = actionEvent(
     id: id,
     toolName: s.toolName,
@@ -239,24 +255,42 @@ UsageReport? acpTurnUsage(Object? usage, {required String id}) {
 }
 
 /// A `usage_update`: how full the context is, and what was spent since
-/// [lastCost] (the agent reports a running total, in its currency; only USD
-/// is counted). Returns the report and the new running total.
+/// [lastCost] (the agent reports a running total for the whole session, in
+/// its currency; only USD is counted). Returns the report, which keeps the
+/// total as `acp_total` so a reopened session goes on from it, and the new
+/// running total.
 (UsageReport, double?) acpUsageUpdate(Map<String, Object?> update, {required String id, double? lastCost}) {
+  final total = acpUsageTotal(update);
+  final delta = total == null ? null : ((total - (lastCost ?? 0)) * 1e6).round();
+  final r = UsageReport.of(
+    id: id,
+    input: 0,
+    output: 0,
+    contextTokens: (update['used'] as num?)?.toInt(),
+    costMicros: delta == null || delta < 0 ? null : delta,
+    onPlan: true,
+  );
+  return (
+    total == null
+        ? r
+        : UsageReport(
+            id: id,
+            raw: {...r.raw, 'acp_total': total},
+            input: 0,
+            output: 0,
+            contextTokens: r.contextTokens,
+            costMicros: r.costMicros,
+            onPlan: true,
+          ),
+    total ?? lastCost,
+  );
+}
+
+/// The running total in USD a `usage_update` reports, or null.
+double? acpUsageTotal(Map<String, Object?> update) {
   final cost = _map(update['cost']);
   final amount = (cost?['amount'] as num?)?.toDouble();
-  final usd = amount != null && '${cost?['currency']}'.toUpperCase() == 'USD';
-  final delta = usd ? ((amount - (lastCost ?? 0)) * 1e6).round() : null;
-  return (
-    UsageReport.of(
-      id: id,
-      input: 0,
-      output: 0,
-      contextTokens: (update['used'] as num?)?.toInt(),
-      costMicros: delta == null || delta < 0 ? null : delta,
-      onPlan: true,
-    ),
-    usd ? amount : lastCost,
-  );
+  return amount != null && '${cost?['currency']}'.toUpperCase() == 'USD' ? amount : null;
 }
 
 /// One choice of a select config option.
@@ -376,6 +410,16 @@ AcpShape? _mcp(Map<String, Object?> call, Set<String> servers, List<Object?> opt
 
 AcpShape _mcpShape(String server, String tool, Map<String, Object?> args) =>
     (kind: 'MCPToolAction', toolName: '${server}__$tool', args: {...args, 'server': server, 'tool': tool});
+
+/// Whether [dir] is [cwd] or inside it (a relative one without `..`).
+bool _inside(String dir, String? cwd) {
+  if (dir.split('/').contains('..') || dir.startsWith('~')) return false;
+  if (!dir.startsWith('/')) return true;
+  if (cwd == null) return false;
+  final root = cwd.endsWith('/') ? cwd.substring(0, cwd.length - 1) : cwd;
+  final d = dir.endsWith('/') ? dir.substring(0, dir.length - 1) : dir;
+  return d == root || d.startsWith('$root/');
+}
 
 List<Map<String, Object?>> _diffs(Map<String, Object?> call) => [
   for (final c in (call['content'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>())

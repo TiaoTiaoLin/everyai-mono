@@ -38,6 +38,7 @@ final class AcpDriver implements HarnessDriver {
     AcpConnect? connect,
     this.signedIn,
     this.initTimeout = const Duration(seconds: 60),
+    this.replayQuiet = const Duration(milliseconds: 300),
   }) : _dataDir = dataDir ?? GitService.dataDir,
        _connect = connect ?? _spawn;
 
@@ -56,6 +57,10 @@ final class AcpDriver implements HarnessDriver {
   /// How long the agent may take to answer `initialize` (Gemini blocks there
   /// when its Google sign-in has gone stale).
   final Duration initTimeout;
+
+  /// How long Gemini's replay of a reopened conversation must stay quiet
+  /// before the first prompt goes (it streams on after its load reply).
+  final Duration replayQuiet;
 
   final Future<String> Function() _dataDir;
   final AcpConnect _connect;
@@ -137,6 +142,7 @@ final class AcpDriver implements HarnessDriver {
     resolve: _executable,
     connect: _connect,
     initTimeout: initTimeout,
+    replayQuiet: replayQuiet,
     offered: _offered,
     closed: _live.remove,
   );
@@ -173,11 +179,19 @@ final class AcpDriver implements HarnessDriver {
   Future<HarnessSession> attach(String conversationId) => _attach(conversationId, null);
 
   /// [attach] with a new briefing (the old session's MCP token died with the
-  /// app), so the reopened agent reaches EveryAI's tools again.
-  Future<HarnessSession> attachBriefed(String conversationId, DriverBriefing briefing) =>
-      _attach(conversationId, briefing);
+  /// app), so the reopened agent reaches EveryAI's tools again, and the
+  /// user's approved MCP servers ([mcpConfig]; `meta.json` keeps only names).
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) => _attach(conversationId, briefing, mcpConfig);
 
-  Future<HarnessSession> _attach(String conversationId, DriverBriefing? briefing) async {
+  Future<HarnessSession> _attach(
+    String conversationId,
+    DriverBriefing? briefing, [
+    Map<String, Object?> mcpConfig = const {},
+  ]) async {
     if (_live[conversationId] case final s?) return s;
     final dir = '${await _root()}/$conversationId';
     final meta = await readJsonFile('$dir/meta.json');
@@ -191,6 +205,8 @@ final class AcpDriver implements HarnessDriver {
       launcher: _launcher,
       mode: AgentMode.values.where((m) => m.name == meta['mode']).firstOrNull ?? AgentMode.ask,
       briefing: briefing,
+      mcpConfig: mcpConfig,
+      rememberedMcp: [...?(meta['mcpServers'] as List<Object?>?)?.whereType<String>()],
       acpSessionId: meta['acpSessionId'] as String?,
       history: history,
     )..reopened();

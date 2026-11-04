@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
@@ -40,6 +41,7 @@ final class _Rig {
     which: (c) async => '/usr/local/bin/$c',
     dataDir: () async => dataDir,
     initTimeout: initTimeout ?? const Duration(seconds: 60),
+    replayQuiet: Duration.zero,
     connect:
         ({
           required String executable,
@@ -112,6 +114,22 @@ List<String> _prompts(ReplayChannel c) => [
     if (m['method'] == 'session/prompt') (((m['params']! as Map)['prompt']! as List).first as Map)['text']! as String,
 ];
 
+/// A stored conversation `conv` for [r], as the driver leaves one.
+Directory _stored(
+  _Rig r,
+  String conv,
+  String acpSessionId, {
+  List<String> mcp = const [],
+  List<Map<String, Object?>> events = const [],
+}) {
+  final dir = Directory('${r.dataDir}/acp-sessions/$conv')..createSync(recursive: true);
+  File('${dir.path}/meta.json').writeAsStringSync(
+    jsonEncode({'acpSessionId': acpSessionId, 'cwd': r.work, 'sessionTag': 's1', 'mode': 'ask', 'mcpServers': mcp}),
+  );
+  if (events.isNotEmpty) File('${dir.path}/events.jsonl').writeAsStringSync('${events.map(jsonEncode).join('\n')}\n');
+  return dir;
+}
+
 void main() {
   late Directory tmp;
   setUp(() async {
@@ -141,6 +159,7 @@ void main() {
         'cwd': r.work,
         'sessionTag': 's1',
         'mode': 'plan',
+        'mcpServers': <Object?>[],
       });
       final models = await d.models();
       expect(models, hasLength(4));
@@ -269,6 +288,141 @@ void main() {
     });
   });
 
+  group('review fixes', () {
+    test("OpenCode's rules are pinned per agent too, and the project's own config is off", () async {
+      final r = rig(['opencode/handshake.jsonl']);
+      final s = await r.driver('acp:opencode', 'opencode').start(r.spec(mode: AgentMode.plan));
+      final env = r.spawns.single.env;
+      expect(env['OPENCODE_DISABLE_PROJECT_CONFIG'], '1');
+      final config = jsonDecode(env['OPENCODE_CONFIG_CONTENT']!) as Map<String, Object?>;
+      final agents = config['agent']! as Map<String, Object?>;
+      expect(agents.keys, containsAll(['build', 'plan', 'general', 'explore']));
+      for (final a in agents.values) {
+        expect(((a! as Map)['permission']! as Map)['*'], 'ask');
+      }
+      await s.close();
+    });
+
+    test("Gemini doesn't start in a project whose .gemini settings allow tools ahead of time", () async {
+      final r = rig(const []);
+      Directory('${r.work}/.gemini').createSync();
+      File('${r.work}/.gemini/settings.json').writeAsStringSync('{"ui":{"theme":"x"}}');
+      expect(await geminiWorkspaceProblem(r.work), isNull);
+      File('${r.work}/.gemini/settings.json')
+          .writeAsStringSync('{"ui":{},"tools":{"allowed":["run_shell_command"]},"mcpServers":{"x":{"command":"sh"}}}');
+      await expectLater(
+        r.driver('gemini', 'gemini').start(r.spec()),
+        throwsA(
+          isA<HarnessError>().having(
+            (e) => e.message,
+            'message',
+            contains('settings.json "tools", settings.json "mcpServers"'),
+          ),
+        ),
+      );
+      expect(r.spawns, isEmpty);
+    });
+
+    test('a Gemini conversation it no longer has (-32603) starts fresh, with a notice', () async {
+      final r = rig(['gemini/load_unknown.jsonl']);
+      _stored(r, 'g1', 'gemini-old');
+      final s = await r.driver('gemini', 'gemini').attach('g1');
+      final seen = _Seen(s);
+      await s.send('Hello');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.notices.single, contains("couldn't reopen its conversation"));
+    });
+
+    test("Gemini's replay after its load reply stays out of the new turn", () async {
+      final r = rig(['gemini/load_late_replay.jsonl']);
+      _stored(
+        r,
+        'g2',
+        'gemini-old',
+        events: [
+          {
+            'kind': 'MessageEvent',
+            'id': 'old-u1',
+            'source': 'user',
+            'llm_message': {'role': 'user', 'content': 'Earlier'},
+          },
+        ],
+      );
+      final s = await r.driver('gemini', 'gemini').attach('g2');
+      final seen = _Seen(s);
+      await s.send('Next');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect([for (final m in seen.messages) m.text], ['Earlier', 'Next', 'New reply.']);
+      expect(seen.calls, isEmpty);
+    });
+
+    test('a reopened OpenCode session counts only what it spent since, and says which MCP servers it lost', () async {
+      final r = rig(['opencode/usage_reopen.jsonl']);
+      _stored(
+        r,
+        'o1',
+        'ses_e5ad81ff1ffeGaamwMA9ctbrrE',
+        mcp: ['github'],
+        events: [
+          UsageReport.of(id: 'old-usage', input: 0, output: 0, costMicros: 400000, onPlan: true).raw
+            ..['acp_total'] = 0.40,
+        ],
+      );
+      final s = await r.driver('acp:opencode', 'opencode').attach('o1');
+      final seen = _Seen(s);
+      await s.send('Hi');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final fresh = seen.all.whereType<UsageReport>().where((u) => u.id != 'old-usage').single;
+      expect(fresh.costMicros, 30000);
+      expect(seen.notices.single, contains('without your MCP servers github'));
+      final meta = jsonDecode(File('${r.dataDir}/acp-sessions/o1/meta.json').readAsStringSync()) as Map;
+      expect(meta['mcpServers'], ['github']);
+    });
+
+    test('a command that ran without asking is shown with a notice; in Plan it stops the turn', () async {
+      final r = rig(['opencode/unasked_plan.jsonl']);
+      final s = await r.driver('acp:opencode', 'opencode').start(r.spec(mode: AgentMode.plan));
+      final seen = _Seen(s);
+      await s.send('Plan it.');
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      expect(
+        seen.notices.single,
+        'OpenCode ran "rm -rf build" without asking the app first, so its own settings allow it. '
+        'Plan mode stopped the turn.',
+      );
+      expect(seen.results.single.text, isNot('Cancelled.'));
+      await s.close();
+    });
+
+    test('a refusal without typed words adds nothing to the next prompt', () async {
+      final r = rig(['gemini/deny_one_plain.jsonl']);
+      final s = await r.driver('gemini', 'gemini').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('Clean up.');
+      await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+      await s.respond(accept: false, reason: denialMessage(DenialKind.denied), callIds: [seen.calls.single.id]);
+      await seen.untilStatus(ExecutionStatus.finished);
+      await s.send('What next?');
+      await r.channels.single.finished;
+      await seen.until(() => seen.statuses.where((x) => x == ExecutionStatus.finished).length == 2);
+      r.expectPlayed();
+      await s.close();
+    });
+
+    test('two writers of one JSON file both land', () async {
+      final path = '${tmp.path}/data/models.json';
+      await Future.wait([
+        writeJsonFile(path, {'a': 1}),
+        writeJsonFile(path, {'a': 2}),
+      ]);
+      expect((await readJsonFile(path))?['a'], anyOf(1, 2));
+    });
+  });
+
   group('Gemini CLI (derived from its source)', () {
     test('a turn: its asking mode pinned, a shell call to approve once, its output, the reply', () async {
       final r = rig(['gemini/turn.jsonl']);
@@ -304,7 +458,11 @@ void main() {
       final seen = _Seen(s);
       await s.send('Clean up.');
       await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
-      await s.respond(accept: false, reason: 'Not now.', callIds: [seen.calls.single.id]);
+      await s.respond(
+        accept: false,
+        reason: denialMessage(DenialKind.denied, reason: 'Not now.'),
+        callIds: [seen.calls.single.id],
+      );
       await seen.untilStatus(ExecutionStatus.finished);
       expect(seen.statuses, contains(ExecutionStatus.running));
       expect((seen.results.single.outcome, seen.results.length), (ToolOutcome.rejected, 1));
@@ -322,7 +480,7 @@ void main() {
       final seen = _Seen(s);
       await s.send('Clean up.');
       await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
-      await s.respond(accept: false, reason: 'Stop that.');
+      await s.respond(accept: false, reason: denialMessage(DenialKind.denied, reason: 'Stop that.'));
       await seen.untilStatus(ExecutionStatus.paused);
       await s.resume();
       await seen.untilStatus(ExecutionStatus.finished);

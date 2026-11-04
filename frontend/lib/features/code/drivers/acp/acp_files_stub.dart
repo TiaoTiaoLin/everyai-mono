@@ -11,3 +11,5 @@ Future<String?> whichCommand(String command) async => null;
 Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async => null;
 
 Future<bool?> openCodeSignedIn(String executable) async => null;
+
+Future<String?> geminiWorkspaceProblem(String cwd) async => null;
