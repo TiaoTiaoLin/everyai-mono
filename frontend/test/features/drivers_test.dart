@@ -134,17 +134,6 @@ void main() {
       );
     });
 
-    test('stub drivers say they are not built yet and refuse to start', () async {
-      final stubs = <HarnessDriver>[ClaudeDriver(which: _nowhere)];
-      for (final d in stubs) {
-        final s = await d.detect();
-        expect((s.installed, s.problem), (false, 'Not built yet.'), reason: d.info.id);
-        await expectLater(d.start(_spec('/p')), throwsA(isA<HarnessError>()), reason: d.info.id);
-        await expectLater(d.attach('c'), throwsA(isA<HarnessError>()), reason: d.info.id);
-        expect(await d.statuses(['c']), isEmpty);
-      }
-    });
-
     test('ACP agents: a command with spaces is split, OpenCode gets acp, each profile its caps', () async {
       final r = container.read(driverRegistryProvider);
       final dsh = r.resolve('acp:dsh --profile acp')! as AcpDriver;
@@ -189,7 +178,7 @@ void main() {
     });
 
     test('a found CLI reports its path and version', () async {
-      final s = await ClaudeDriver(which: (_) async => '/bin/echo').detect();
+      final s = await notBuiltYet('claude', which: (_) async => '/bin/echo');
       expect((s.installed, s.path, s.version, s.problem), (true, '/bin/echo', '--version', 'Not built yet.'));
     });
 

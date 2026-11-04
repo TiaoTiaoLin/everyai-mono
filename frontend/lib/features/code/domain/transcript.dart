@@ -353,6 +353,10 @@ final class TranscriptBuilder {
             _parts.add(tool);
           }
         }
+      case StateChange(key: approvedCallsKey, :final raw):
+        for (final id in raw['value'] as List<Object?>? ?? const []) {
+          _open.remove(id);
+        }
       case StateChange(:final executionStatus) when executionStatus != ExecutionStatus.unknown:
         _status = executionStatus;
       case StateChange():
