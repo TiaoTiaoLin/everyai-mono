@@ -9,6 +9,7 @@ import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/floor_advice.dart';
 import 'package:every_ai/features/code/domain/rewind.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
@@ -252,12 +253,62 @@ void main() {
     return a;
   }
 
-  test('the safety floor holds for an outside driver in Full auto', () async {
-    await open(AgentMode.fullAuto);
+  Future<List<ActionCall>> pending() async {
+    final p = await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s.transcript.pending),
+      (List<ActionCall> p) => p.isNotEmpty,
+    );
+    await pumpEventQueue();
+    return p;
+  }
+
+  test('Full auto: an outside floor hit gets advice, then the user decides', () async {
+    // Every outside driver with approvals answers per call.
+    session = _PerCallSession();
+    final controller = await open(AgentMode.fullAuto);
     session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
     final a = await answered();
     expect(a.accept, isFalse);
+    expect(a.reason, startsWith(floorAdviceLead));
     expect(a.reason, contains(floorReason('rm -rf ~')!));
+    // The model asks the user and runs it again: now it waits on the card, with the warning.
+    session.forgetAnswers();
+    session.add(resultEvent(id: 'r1', actionId: 'a1', toolName: 'Bash', text: a.reason!));
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final waiting = await pending();
+    expect(session.answers, isEmpty);
+    final state = container.read(codeSessionProvider('s1'));
+    expect(approvalFlags(controller.policy, waiting, state.mode), {waiting.single.id: floorReason('rm -rf ~')});
+    await controller.approve(ApprovalScope.once, [waiting.single.id]);
+    expect((await answered()).accept, isTrue);
+  });
+
+  test('Ask: an outside floor hit waits on the card with a warning', () async {
+    session = _PerCallSession();
+    final controller = await open(AgentMode.ask);
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final waiting = await pending();
+    expect(session.answers, isEmpty);
+    expect(approvalFlags(controller.policy, waiting, AgentMode.ask).values, [floorReason('rm -rf ~')]);
+  });
+
+  test('a deny rule still refuses an outside floor hit outright', () async {
+    session = _PerCallSession();
+    await open(AgentMode.fullAuto, deny: ['rm *']);
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final a = await answered();
+    expect(a.accept, isFalse);
+    expect(a.reason, contains('`rm *` forbids it'));
+  });
+
+  test('the EveryAI harness keeps the hard floor in Full auto', () async {
+    session = _PerCallSession();
+    await open(AgentMode.fullAuto, harness: everyaiHarnessName);
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final a = await answered();
+    expect(a.accept, isFalse);
+    expect(a.reason, contains('never runs'));
   });
 
   test('Plan mode refuses an outside driver\'s changes', () async {

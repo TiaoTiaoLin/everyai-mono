@@ -26,6 +26,7 @@ import '../usage/usage_totals.dart';
 import 'domain/agent_mode.dart';
 import 'domain/code_session.dart';
 import 'domain/compaction.dart';
+import 'domain/floor_advice.dart';
 import 'domain/doom_loop.dart';
 import 'domain/git_commands.dart';
 import 'domain/goal.dart';
@@ -2098,6 +2099,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Answers given to the calls waiting now (see [CodeSessionState.decided]).
   final _decided = <String, bool>{};
 
+  /// Commands of an outside harness the floor already advised against: when
+  /// the model runs one again, the user decides (see [outsideVerdict]).
+  final _floorAdvised = <String>{};
+
   /// The host-run calls (bug_check, check) the user or the rules allowed in
   /// this run, which the host may run once each (see [hostRunRefusal]).
   /// Kept by arguments, not row: a driver may close its approval row before
@@ -2125,9 +2130,21 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (_isSubagent && isHeldTool(call)) continue;
       final verdict = switch (_mustWait([call], t)) {
         final reason? => (accept: false, reason: reason),
-        null => _gated([call], policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase))),
+        null => _gated(
+          [call],
+          _driver.info.id == everyaiHarnessName
+              ? policy.decideAll([call], state.mode, askMcp: beforeBuild(t.phase?.phase))
+              : outsideVerdict(
+                  policy,
+                  call,
+                  state.mode,
+                  askMcp: beforeBuild(t.phase?.phase),
+                  advised: _floorAdvised.contains(call.str('command')),
+                ),
+        ),
       };
       if (verdict == null) continue;
+      if (verdict.reason?.startsWith(floorAdviceLead) ?? false) _floorAdvised.add(call.str('command'));
       // Over budget: nothing is approved on its own; the run stops instead.
       if (verdict.accept && !_withinBudget()) {
         unawaited(stop());

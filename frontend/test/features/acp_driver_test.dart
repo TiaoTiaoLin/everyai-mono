@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/floor_advice.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
@@ -617,6 +618,46 @@ void main() {
       await r.channels.single.finished;
       await seen.until(() => seen.statuses.where((x) => x == ExecutionStatus.finished).length == 2);
       r.expectPlayed();
+      await s.close();
+    });
+
+    test('floor advice opens the next prompt (ACP has no message on a reject)', () async {
+      const advice = '$floorAdviceLead `rm -rf build` deletes the build. Reconsider.';
+      final text = File('$_fixtures/gemini/deny_one.jsonl').readAsStringSync().replaceFirst(
+        r'The app refused \"rm -rf build [current working directory] (Clean up)\": Not now.',
+        jsonEncode(advice).substring(1, jsonEncode(advice).length - 1),
+      );
+      final r = rig([]);
+      final s = await r
+          .driver(
+            'gemini',
+            'gemini',
+            connect:
+                ({
+                  required String executable,
+                  required List<String> args,
+                  required String cwd,
+                  required String sessionTag,
+                  required String logPath,
+                  required Map<String, String> env,
+                }) async {
+                  final c = ReplayChannel(text);
+                  r.channels.add(c);
+                  return c;
+                },
+          )
+          .start(r.spec());
+      final seen = _Seen(s);
+      await s.send('Clean up.');
+      await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+      await s.respond(accept: false, reason: advice, callIds: [seen.calls.single.id]);
+      await seen.untilStatus(ExecutionStatus.finished);
+      await s.resume();
+      await s.send('What next?');
+      await r.channels.single.finished;
+      await seen.until(() => seen.statuses.where((x) => x == ExecutionStatus.finished).length == 2);
+      r.expectPlayed();
+      expect(_prompts(r.channels.single).last, '$advice\n\nWhat next?');
       await s.close();
     });
 
