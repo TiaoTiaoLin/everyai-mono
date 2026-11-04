@@ -192,6 +192,8 @@ const _phasedRules =
     'what gets built, with your recommendation first.\n'
     '- plan: write the plan to .everyai/scratch/plan.md (what to build, in which parts, which research it uses, '
     'how each part is checked), then present_plan.\n'
+    '- When the flow is done, follow-ups to that work (tweaks, fixes, questions) run without phases. A new task '
+    'starts the flow over, and a phase note says so; the earlier plan then no longer stands.\n'
     '- build and verify: build the plan';
 
 /// The rules of Bug fix mode: blind bugs, issues and pull requests alike.

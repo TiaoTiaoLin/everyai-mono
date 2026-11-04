@@ -115,8 +115,10 @@ final class PhaseFlow {
     this.askedUser = false,
     Map<String, String>? reproFiles,
     Map<String, String>? forks,
+    String? run,
   }) : reproFiles = reproFiles ?? {},
        forks = forks ?? {},
+       run = run ?? newRunId(),
        phase = phase ?? (bugfix ? Phase.reproduce : Phase.research),
        researchers = researchers ?? {};
 
@@ -131,6 +133,13 @@ final class PhaseFlow {
 
   /// Research runs as a workflow the harness starts (the Ultra tier).
   final bool ultra;
+
+  /// Names this research round (a new task, or Bug fix going back to
+  /// research, starts another): an Ultra workflow's workers carry it, so a
+  /// later round never mistakes an earlier round's reports for its own.
+  String run;
+
+  static String newRunId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 
   /// Bug fix mode: reproduce → triage → (research) → plan → fix → verify.
   final bool bugfix;
@@ -230,6 +239,8 @@ final class PhaseFlow {
     final bugfix = j['bugfix'] == true;
     return PhaseFlow(
       ultra: j['ultra'] == true,
+      // Flows saved before runs had ids: their workers are named research-N.
+      run: j['run'] as String? ?? '',
       bugfix: bugfix,
       phase: j['phase'] == null ? null : Phase.parse(j['phase']),
       nudges: (j['nudges'] as num?)?.toInt() ?? 0,
@@ -250,6 +261,7 @@ final class PhaseFlow {
 
   Map<String, Object?> toJson() => {
     'ultra': ultra,
+    'run': run,
     if (bugfix) 'bugfix': true,
     'phase': phase.name,
     'nudges': nudges,
@@ -264,6 +276,35 @@ final class PhaseFlow {
     if (reproFiles.isNotEmpty) 'repro_files': reproFiles,
     if (forks.isNotEmpty) 'forks': forks,
   };
+
+  /// This flow on the other tier (Max ↔ Ultra), where it is: switching tier
+  /// mid-flow keeps the research, answers and plan already done.
+  PhaseFlow withUltra(bool on) => PhaseFlow.fromJson({...toJson(), 'ultra': on});
+
+  /// A new task in the same session: the flow starts over from its first
+  /// phase, with a new research round.
+  void restart() {
+    phase = bugfix ? Phase.reproduce : Phase.research;
+    nudges = 0;
+    researchers.clear();
+    researchReports = 0;
+    researchPending = 0;
+    reproCommand = '';
+    reproExpect = '';
+    reproByUser = false;
+    failedFixes = 0;
+    askedUser = false;
+    reproFiles.clear();
+    forkAsking = false;
+    run = newRunId();
+  }
+
+  /// Whether [text] came from the user rather than from the app on the
+  /// flow's behalf (a fork's report or question, the research workflow).
+  static bool fromUser(String text) =>
+      parseTaskNotification(text) == null &&
+      !text.contains('<fork-question') &&
+      !text.trimLeft().startsWith('<$researchWorkflowTag');
 
   /// Why [tool] with [args] may not run now, or null. [inScratch] says
   /// whether a path argument is under `.everyai/scratch/`.
@@ -375,7 +416,7 @@ final class PhaseFlow {
 
   /// The note that opens [phase], kept in the conversation.
   String note({bool stuck = false}) =>
-      '<everyai-phase flow="$name" phase="${phase.name}"${stuck ? ' stuck="true"' : ''}>\n'
+      '<everyai-phase flow="$name" phase="${phase.name}" run="$run"${stuck ? ' stuck="true"' : ''}>\n'
       '${stuck ? 'The $flowName flow is stuck at the ${phase.label.toLowerCase()} phase.' : 'Phase: ${phase.label}.'} '
       'Next: ${next()}\n</everyai-phase>';
 
@@ -432,10 +473,14 @@ final class PhaseFlow {
   /// a message moves plan on.
   bool onMessage(String text) {
     if (text.contains('<fork-question')) forkAsking = true;
+    // The user stepped in: the nudges start over, so a flow that was stuck
+    // gets its two nudges again instead of pausing at the next turn end.
+    if (fromUser(text)) nudges = 0;
     // "Start building" for a plan that wasn't held (or was closed by a reply)
     // comes as a message; it approves the plan as much as the held answer does.
     if (phase == Phase.plan && text.contains(planApprovedMessage)) return _advanceFrom(Phase.plan);
-    if (ultra && text.trimLeft().startsWith('<$researchWorkflowTag')) {
+    // Also after a switch to Max while the workflow ran: its reports are this round's research.
+    if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
       researchReports++;
       return _advanceFrom(Phase.research);
     }
@@ -483,6 +528,8 @@ final class PhaseFlow {
     if (failedFixes % missesBeforeResearch != 0) return false;
     phase = Phase.research;
     nudges = 0;
+    researchReports = 0;
+    run = newRunId();
     return true;
   }
 
@@ -533,12 +580,18 @@ final class PhaseFlow {
 }
 
 /// The phase note at the start of [text], or null: (flow, phase, stuck, body).
-({String flow, Phase phase, bool stuck, String body})? parsePhaseNote(String text) {
-  final m = RegExp(r'^<everyai-phase flow="([\w-]+)" phase="(\w+)"( stuck="true")?>\n([\s\S]*?)\n</everyai-phase>')
-      .firstMatch(text.trimLeft());
+({String flow, Phase phase, String run, bool stuck, String body})? parsePhaseNote(String text) {
+  final m = RegExp(
+    r'^<everyai-phase flow="([\w-]+)" phase="(\w+)"(?: run="([\w-]*)")?( stuck="true")?>\n([\s\S]*?)\n</everyai-phase>',
+  ).firstMatch(text.trimLeft());
   if (m == null) return null;
-  return (flow: m[1]!, phase: Phase.parse(m[2]), stuck: m[3] != null, body: m[4]!);
+  return (flow: m[1]!, phase: Phase.parse(m[2]), run: m[3] ?? '', stuck: m[4] != null, body: m[5]!);
 }
+
+/// Whether [callId] names a worker of the Ultra research round [run] (rounds
+/// saved before runs had ids named theirs research-N).
+bool isResearchWorker(String callId, String run) =>
+    run.isEmpty ? RegExp(r'^research-\d+$').hasMatch(callId) : callId.startsWith('$researchCallPrefix$run-');
 
 /// What a flow is called in the app, from its name.
 String flowLabel(String flow) => flow.startsWith('bugfix') ? 'Bug fix' : (flow == 'ultra' ? 'Ultra' : 'Max');

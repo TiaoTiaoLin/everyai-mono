@@ -239,7 +239,7 @@ final class Transcript {
   final String streamingReasoning;
 
   /// Where a Max or Ultra flow is (its latest phase note), or null.
-  final ({String flow, Phase phase, bool stuck})? phase;
+  final ({String flow, Phase phase, String run, bool stuck})? phase;
 
   /// The reply being written in order: text (String) and the tool calls
   /// being written between it ([StreamingTool]).
@@ -297,7 +297,7 @@ final class TranscriptBuilder {
   final _streaming = StringBuffer();
   final _reasoning = StringBuffer();
   final _parts = <Object>[];
-  ({String flow, Phase phase, bool stuck})? _phase;
+  ({String flow, Phase phase, String run, bool stuck})? _phase;
   var _status = ExecutionStatus.idle;
   var _plan = const <PlanTask>[];
   AgentMode? _notedMode;
@@ -378,7 +378,7 @@ final class TranscriptBuilder {
         }
         // Shown by the phase strip above the composer (stuck too), not in the transcript.
         if (parsePhaseNote(text) case final p?) {
-          _phase = (flow: p.flow, phase: p.phase, stuck: p.stuck);
+          _phase = (flow: p.flow, phase: p.phase, run: p.run, stuck: p.stuck);
           return;
         }
         if (parseTaskNotification(text) case final n?) {

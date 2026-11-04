@@ -84,6 +84,33 @@ void main() {
     expect(f.nudges, 0);
   });
 
+  test('a new task restarts the flow in a new round; a tier switch keeps where it is', () {
+    final f = PhaseFlow(ultra: true)
+      ..phase = Phase.done
+      ..researchReports = 3
+      ..nudges = 1;
+    final run = f.run;
+    f.restart();
+    expect((f.phase, f.researchReports, f.nudges), (Phase.research, 0, 0));
+    expect(f.run, isNot(run));
+    expect(parsePhaseNote(f.note())?.run, f.run);
+    final built = PhaseFlow()..phase = Phase.build;
+    final up = built.withUltra(true);
+    expect((up.ultra, up.phase, up.run), (true, Phase.build, built.run));
+    expect(isResearchWorker('research-${f.run}-2', f.run), isTrue);
+    expect(isResearchWorker('research-old-2', f.run), isFalse);
+    expect(isResearchWorker('research-2', ''), isTrue, reason: 'rounds saved before runs had ids');
+  });
+
+  test('the user stepping in gives a stuck flow its nudges back; app messages do not', () {
+    final f = PhaseFlow()..nudges = PhaseFlow.maxNudges;
+    f.onMessage(taskNotification('k', 'x', const SubagentReport(SubagentStatus.completed, 'ok')));
+    expect(f.nudges, PhaseFlow.maxNudges);
+    f.onMessage('<everyai-mode name="ask">Ask.</everyai-mode>\n\nStart with the parser.');
+    expect(f.nudges, 0);
+    expect(f.onTurnEnd(), isA<Nudge>());
+  });
+
   test('the flow survives a restart, and its notes parse back', () {
     final f = PhaseFlow(ultra: true)..onCall(taskTool, {'role': 'researcher', 'description': 'X'});
     final back = PhaseFlow.fromJson(f.toJson());

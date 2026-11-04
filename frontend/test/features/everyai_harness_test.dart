@@ -34,6 +34,12 @@ final class FakeGateway {
   /// How long a streamed reply takes to start (a slow model call).
   var delay = Duration.zero;
 
+  /// What `/aux/decide` answers, by question id ("unsure" for the rest).
+  final decisions = <String, Object?>{};
+
+  /// The decider's requests.
+  final decided = <Map<String, Object?>>[];
+
   static Future<FakeGateway> start() async => FakeGateway._(await HttpServer.bind(InternetAddress.loopbackIPv4, 0));
 
   String get baseUrl => 'http://127.0.0.1:${_server.port}/v1';
@@ -46,6 +52,20 @@ final class FakeGateway {
 
   Future<void> _handle(HttpRequest req) async {
     final body = jsonDecode(await utf8.decoder.bind(req).join()) as Map<String, Object?>;
+    if (req.uri.path.endsWith('/aux/decide')) {
+      decided.add(body);
+      req.response.headers.contentType = ContentType.json;
+      req.response.write(
+        jsonEncode({
+          'answers': [
+            for (final q in (body['questions'] as List<Object?>).cast<Map<String, Object?>>())
+              {'id': q['id'], 'value': decisions[q['id']] ?? 'unsure'},
+          ],
+        }),
+      );
+      await req.response.close();
+      return;
+    }
     requests.add(body);
     if (body['stream'] != true) {
       // A plain call: the compaction summary.
@@ -815,6 +835,19 @@ for line in sys.stdin:
     // The first model call already had the research note after the task.
     final first = gateway.requests.first['messages']! as List<Object?>;
     expect((first.last! as Map)['content'], contains('phase="research"'));
+    final dir = '${tmp.path}/data/everyai-sessions/${session.id}';
+    Map<String, Object?> read(String f) => jsonDecode(File('$dir/$f').readAsStringSync()) as Map<String, Object?>;
+    expect(read('state.json')['approved_plan'], isNotEmpty);
+    // A follow-up runs without phases; a new task starts the flow over, and the old plan no longer stands.
+    await session.send('Make the port configurable', run: false);
+    expect(read('phases.json')['phase'], 'done');
+    gateway.decisions['new_task'] = true;
+    final run = read('phases.json')['run'];
+    await session.send('Now write a Python client for it', run: false);
+    expect(read('phases.json')['phase'], 'research');
+    expect(read('phases.json')['run'], isNot(run));
+    expect(read('state.json')['approved_plan'], '');
+    expect(gateway.decided.last['text'], allOf(contains('<finished-task>'), contains('Python client')));
   });
 
   test('Bug fix: the harness runs the repro itself, refuses a fake fix, and verifies the real one', () async {

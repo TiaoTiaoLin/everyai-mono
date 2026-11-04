@@ -31,7 +31,14 @@ import 'domain/review.dart';
 import 'domain/rewind.dart';
 import 'domain/spill.dart';
 import 'domain/phases.dart'
-    show Phase, flowLabel, parseResearchAngles, researchAnglesQuestion, researchCallPrefix, researchWorkflowMessage;
+    show
+        Phase,
+        flowLabel,
+        isResearchWorker,
+        parseResearchAngles,
+        researchAnglesQuestion,
+        researchCallPrefix,
+        researchWorkflowMessage;
 import 'domain/fork_files.dart';
 import 'domain/subagents.dart';
 import 'domain/questions.dart';
@@ -1853,13 +1860,20 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   final _researchSubs = <String, ProviderSubscription<CodeSessionState>>{};
   final _researchReports = <String, ({String title, SubagentReport report})>{};
-  bool _researchStarting = false;
-  bool _researchSent = false;
 
-  /// The session's Ultra research workers (started earlier, maybe before a restart).
+  /// The research round (`PhaseFlow.run`) whose workflow is starting, and
+  /// the last one whose reports went out: one workflow per round.
+  String? _researchStarting;
+  String? _researchSent;
+
+  /// The research round the workers below belong to.
+  String _researchRun = '';
+
+  /// This round's Ultra research workers (started earlier, maybe before a
+  /// restart); an earlier round's (an earlier task's) are not.
   List<CodeSessionInfo> get _researchers => [
     for (final s in ref.read(codeSessionsProvider))
-      if (s.parentId == sessionId && s.parentCallId.startsWith(researchCallPrefix)) s,
+      if (s.parentId == sessionId && isResearchWorker(s.parentCallId, _researchRun)) s,
   ];
 
   /// An Ultra session at research: start its workflow of 10–12 researchers
@@ -1868,7 +1882,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   void _ultraResearch(Transcript t) {
     final p = t.phase;
     final workflow = p != null && (p.flow == 'ultra' || p.flow == 'bugfix-ultra');
-    if (!workflow || p.phase != Phase.research || _researchStarting || _researchSent) return;
+    if (!workflow || p.phase != Phase.research || _researchStarting == p.run || _researchSent == p.run) return;
+    if (_researchRun != p.run) {
+      // A new round: the last one's watchers and reports are done with.
+      for (final sub in _researchSubs.values) {
+        sub.close();
+      }
+      _researchSubs.clear();
+      _researchReports.clear();
+      _researchRun = p.run;
+    }
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = sessions.byId(sessionId);
     if (info == null || info.isSubagent) return;
@@ -1881,7 +1904,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
     final session = _session;
     if (session is! AsksAside) return;
-    _researchStarting = true;
+    _researchStarting = p.run;
     unawaited(() async {
       try {
         // The orchestrator picks how many researchers and each one's model, from the user's models.
@@ -1896,7 +1919,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         final angles = parseResearchAngles(reply);
         for (final (i, a) in angles.indexed) {
           if (!ref.mounted) return;
-          final callId = '$researchCallPrefix${i + 1}';
+          final callId = '$researchCallPrefix${p.run}-${i + 1}';
           final child = await sessions.startTask(
             parent: info,
             task: SubagentTask(description: a.title, prompt: a.question, agent: 'researcher'),
@@ -1910,7 +1933,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       } on Object catch (e) {
         if (ref.mounted) state = state.copyWith(error: "The research workflow couldn't start: $e");
       } finally {
-        _researchStarting = false;
+        _researchStarting = null;
       }
       // Some may have finished while the rest were starting.
       if (ref.mounted) _researchMaybeDone();
@@ -1928,10 +1951,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   void _researchMaybeDone() {
-    if (_researchSent || _researchStarting) return;
+    if (_researchSent == _researchRun || _researchStarting != null) return;
     final all = _researchers;
     if (all.isEmpty || all.any((r) => !_researchReports.containsKey(r.parentCallId))) return;
-    _researchSent = true;
+    _researchSent = _researchRun;
     final reports = [for (final r in all) _researchReports[r.parentCallId]!];
     unawaited(_session?.send(researchWorkflowMessage(reports)).catchError((Object _) {}));
   }

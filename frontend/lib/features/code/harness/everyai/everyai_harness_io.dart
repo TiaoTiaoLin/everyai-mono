@@ -234,7 +234,14 @@ final class EveryAISession
   @override
   Future<void> setPhaseFlow(String? flow) async {
     final had = _flow;
-    _flow = had != null && had.name == flow ? had : PhaseFlow.named(flow);
+    final next = PhaseFlow.named(flow);
+    _flow = switch ((had, next)) {
+      (final h?, final n?) when h.name == n.name => h,
+      // Max ↔ Ultra (or the Bug fix pair) mid-flow: same flow, other tier;
+      // what was researched, answered and approved stands.
+      (final h?, final n?) when h.bugfix == n.bugfix => h.withUltra(n.ultra),
+      _ => next,
+    };
     _spec = _withSpec(phaseFlow: flow ?? '');
     _writeSpec();
     if (_flow != null && _flow != had) {
@@ -717,7 +724,8 @@ final class EveryAISession
       'llm_message': {'role': 'user', 'content': content},
     });
     final message = {'role': 'user', 'content': images.isEmpty ? text : content, '_eid': eid};
-    final moved = _flow?.onMessage(text) ?? false;
+    final restarted = await _newTask(text);
+    final moved = (_flow?.onMessage(text) ?? false) || restarted;
     if (_looping) {
       // Steering: read before the next model call. A message right after a
       // stop (Option-Enter) is a new instruction, so the run carries on.
@@ -731,6 +739,56 @@ final class EveryAISession
     _append(message);
     if (moved) _notePhase();
     if (run) unawaited(_run());
+  }
+
+  /// A message after the flow finished: when it is a new task rather than a
+  /// follow-up to the finished one (the decider tells them apart), the flow
+  /// starts over, and the old plan no longer stands. True when it restarted.
+  Future<bool> _newTask(String text) async {
+    final f = _flow;
+    if (f == null || f.phase != Phase.done || !PhaseFlow.fromUser(text)) return false;
+    final said = userTextOf(text).trim();
+    if (said.isEmpty) return false;
+    final finished = _approvedPlan.isNotEmpty ? _approvedPlan : _firstTask();
+    String cut(String s, int n) => s.length > n ? '${s.substring(0, n)}…' : s;
+    try {
+      final a = await _gateway.decide(
+        '<finished-task>\n${cut(finished, 3000)}\n</finished-task>\n<new-message>\n${cut(said, 3000)}\n</new-message>',
+        const [
+          {
+            'id': 'new_task',
+            'kind': 'bool',
+            'prompt':
+                'An agent finished the task above. Is the new message a different task that needs its own research '
+                'and plan (true), or a follow-up to the finished work: a tweak, fix, extension, question or test of '
+                'it (false)?',
+          },
+        ],
+        sessionTag: _spec.sessionTag,
+        job: 'flow',
+      );
+      if (a['new_task'] != true) return false;
+    } on Object {
+      // Unsure or unreachable: a follow-up, which runs without phases.
+      return false;
+    }
+    f.restart();
+    _approvedPlan = '';
+    _saveState();
+    return true;
+  }
+
+  /// The session's first task, as the user wrote it.
+  String _firstTask() {
+    final task = _messages.firstWhere((m) => m['role'] == 'user', orElse: () => const {})['content'];
+    return userTextOf(switch (task) {
+      final String t => t,
+      final List<Object?> parts => [
+        for (final p in parts)
+          if (p case {'type': 'text', 'text': final String t}) t,
+      ].join('\n'),
+      _ => '',
+    });
   }
 
   @override
