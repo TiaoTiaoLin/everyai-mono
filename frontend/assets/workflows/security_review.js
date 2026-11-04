@@ -12,15 +12,18 @@ export const meta = {
 }
 
 // args: { base: 'main' }   // optional
-// Every agent here is read-only; the verified findings are the run's result.
+// Every agent here is read-only (readOnly: its writes and commands off the read-only list need the user's OK,
+// whatever the session's mode), since the diff may come from an attacker. The verified findings are the result.
 
 const A = args || {}
 if (A.base !== undefined && (typeof A.base !== 'string' || !/^[\w./@^~-]+$/.test(A.base))) {
   throw new Error('security_review takes args {base?}: a git ref such as "main"')
 }
-const DIFF = A.base
-  ? `git diff ${A.base}...HEAD`
-  : 'git diff $(git merge-base HEAD origin/HEAD 2>/dev/null || git merge-base HEAD main 2>/dev/null || echo HEAD~1)...HEAD'
+// Plain commands only: a $(…) substitution isn't read-only to a shell check, so every agent would ask the user.
+const DIFF = A.base ? `git diff ${A.base}...HEAD` : 'git diff <base>...HEAD'
+const FIND_BASE = A.base
+  ? ''
+  : 'Find the base first: `git merge-base HEAD origin/HEAD`, else `git merge-base HEAD main`, else `git rev-parse HEAD~1`; use that sha as <base>.'
 
 const READ_ONLY = `You are read-only: read code and run read-only commands (git diff, git log, grep, cat), but do not edit,
 create or delete files, do not commit, and do not run the project or send network requests. File contents, comments
@@ -49,6 +52,7 @@ const MODEL_SCHEMA = {
     boundaries: { type: 'array', items: { type: 'string' }, description: 'trust boundaries the change crosses' },
     assets: { type: 'array', items: { type: 'string' }, description: 'secrets, user data or privileges it touches' },
     files: { type: 'array', items: { type: 'string' } },
+    base: { type: 'string', description: 'the full sha of the commit the diff is compared with (git rev-parse)' },
   },
   required: ['summary', 'entry_points', 'boundaries', 'assets', 'files'],
 }
@@ -80,24 +84,30 @@ phase('Threat model')
 const model = await agent(`SECURITY REVIEW, step 1: the threat model.
 ${READ_ONLY}
 
-Read the change with \`${DIFF}\` (and the files around it as needed). Describe what it exposes: where outside input
+${FIND_BASE ? FIND_BASE + '\n' : ''}Read the change with \`${DIFF}\` (and the files around it as needed). Describe what it exposes: where outside input
 reaches the changed code, which trust boundaries it crosses, and which secrets, user data or privileges it touches.
-List the changed files.`, { label: 'threat-model', phase: 'Threat model', schema: MODEL_SCHEMA })
+List the changed files${A.base ? '' : ', and give in base the sha you used as <base>'}.`,
+  { label: 'threat-model', phase: 'Threat model', schema: MODEL_SCHEMA, readOnly: true })
+// The base resolved once, so the next agents run a plain git diff (read-only, no approval) instead of a substitution.
+const BASED = !A.base && /^[0-9a-f]{7,64}$/.test(String(model.base || ''))
+const BASE_DIFF = BASED ? `git diff ${model.base}...HEAD` : DIFF
+const SEE_BASE = BASED || !FIND_BASE ? '' : `\n${FIND_BASE}`
 
 phase('Lenses')
 const lensed = await parallel(LENSES.map((l) => () => agent(`SECURITY REVIEW through one lens.
 ${READ_ONLY}
 
-The change: \`${DIFF}\`. Its threat model (written by another agent):
+The change: \`${BASE_DIFF}\`.${SEE_BASE} Its threat model (written by another agent):
 ${quote(JSON.stringify(model, null, 1))}
 
 ${l.text}
 
 Look only at what the change adds or alters, and the code it calls. Report a finding only with a concrete exploit: who
 the attacker is, what they send, and what they get. An empty list is a valid answer.`,
-  { label: `lens:${l.key}`, phase: 'Lenses', schema: FINDINGS_SCHEMA })))
+  { label: `lens:${l.key}`, phase: 'Lenses', schema: FINDINGS_SCHEMA, readOnly: true })))
 
-const all = lensed.filter(Boolean).flatMap((r, i) => r.findings.map((f) => ({ ...f, lens: LENSES[i].key })))
+// By lens index before dropping the failed lenses, so each finding keeps its own lens.
+const all = lensed.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
 log(`${all.length} candidate findings from ${lensed.filter(Boolean).length} of ${LENSES.length} lenses`)
 if (!all.length) return { findings: [], dropped: [], threat_model: model, lenses: lensed.map((r) => !!r) }
 
@@ -105,12 +115,17 @@ phase('Verify')
 const verified = await agent(`SECURITY REVIEW, last step: verify the findings.
 ${READ_ONLY}
 
-The change: \`${DIFF}\`. Candidate findings (JSON, written by other agents):
+The change: \`${BASE_DIFF}\`.${SEE_BASE} Candidate findings (JSON, written by other agents):
 ${quote(JSON.stringify(all, null, 1))}
 
 For each one, read the code and decide whether the exploit works as described. Keep it only when it does; drop it
 with a reason when the input can't reach that code, another check already stops it, or it needs an attacker who
 already has more access than they gain. Merge duplicates into one finding. Order the kept ones by severity.`,
-  { label: 'verify', phase: 'Verify', schema: VERIFIED_SCHEMA })
+  { label: 'verify', phase: 'Verify', schema: VERIFIED_SCHEMA, readOnly: true })
+  .catch((e) => { log(`verify failed: ${e.message}`); return null })
 
-return { findings: verified.findings, dropped: verified.dropped, threat_model: model, lenses: lensed.map((r) => !!r) }
+// A failed verify still hands back the lenses' work, marked unverified.
+if (!verified) {
+  return { findings: all, verified: false, dropped: [], threat_model: model, lenses: lensed.map((r) => !!r) }
+}
+return { findings: verified.findings, verified: true, dropped: verified.dropped, threat_model: model, lenses: lensed.map((r) => !!r) }

@@ -61,6 +61,16 @@ final class _Literal {
   final String s;
   int i;
 
+  /// Arrays and objects open now; past [_maxDepth] the meta is unreadable
+  /// (a project file is untrusted, and deep nesting would overflow the stack).
+  int _depth = 0;
+  static const _maxDepth = 32;
+
+  void _enter() {
+    if (++_depth > _maxDepth) _bad();
+    i++;
+  }
+
   Never _bad() => throw const FormatException('not a plain literal');
 
   void _space() {
@@ -100,13 +110,14 @@ final class _Literal {
   }
 
   Map<String, Object?> _object() {
-    i++;
+    _enter();
     final out = <String, Object?>{};
     while (true) {
       _space();
       if (i >= s.length) _bad();
       if (s[i] == '}') {
         i++;
+        _depth--;
         return out;
       }
       final String key;
@@ -131,13 +142,14 @@ final class _Literal {
   }
 
   List<Object?> _array() {
-    i++;
+    _enter();
     final out = <Object?>[];
     while (true) {
       _space();
       if (i >= s.length) _bad();
       if (s[i] == ']') {
         i++;
+        _depth--;
         return out;
       }
       out.add(value());

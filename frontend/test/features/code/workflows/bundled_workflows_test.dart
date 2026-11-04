@@ -37,6 +37,8 @@ final class _Agents implements AgentLauncher {
     final answer = answers.entries.where((e) => call.label.startsWith(e.key)).firstOrNull?.value;
     if (answer == null) return (text: '', error: 'no answer for ${call.label}', spentMicros: null);
     final v = answer(call);
+    // null: this agent fails.
+    if (v == null) return (text: '', error: '${call.label} failed', spentMicros: null);
     return (text: v is String ? v : 'Done.\n```json\n${jsonEncode(v)}\n```', error: null, spentMicros: null);
   }
 
@@ -181,8 +183,38 @@ void main() {
       expect(end.status, WorkflowStatus.done);
       expect(agents.labels, isNot(contains('refix:a')));
       expect(agents.byLabel('review:a:correctness').model, isNull);
-      expect((end.result! as Map)['reviewed_on'], "the lead's model");
+      expect((end.result! as Map)['reviewed_on'], "a fresh agent on the lead's model");
     }, skip: skip);
+
+    test(
+      'a failed review keeps the other lens on its findings; a failed refix and integration keep the work',
+      () async {
+        final agents = _Agents({
+          // Before the spread: answers match by the first prefix that fits.
+          'review:a:cost-simplicity': (_) => _review('fix-then-ship', const [_finding]),
+          ...answers(),
+          // The correctness review fails: the other lens's finding must still be its own.
+          'review:a:correctness': (_) => null,
+          'refix:': (_) => null,
+          'integrate': (_) => null,
+        });
+        final end = await run('ultra', {
+          'items': [
+            {'id': 'a', 'spec': 'Build A'},
+          ],
+        }, agents);
+        expect(end.error, isNull);
+        expect(end.status, WorkflowStatus.done);
+        final result = end.result! as Map;
+        final item = (result['items'] as List).single as Map;
+        expect([for (final f in item['findings'] as List) (f as Map)['lens']], ['cost-simplicity']);
+        expect(item['commits'], ['abc impl:a']);
+        expect((item['refix'] as Map)['failed'], isNotNull);
+        expect(result['integration'], isNull);
+        expect(result['integration_error'], isNotNull);
+      },
+      skip: skip,
+    );
 
     test('missing items fail with a readable error', () async {
       final end = await run('ultra', {}, _Agents({}));
@@ -201,7 +233,7 @@ void main() {
       'commits': ['f00 $label'],
     };
 
-    test('one fixer proves its steps with bug_check, another model reviews, a refix follows a finding', () async {
+    test('one fixer proves its steps with commands, the review model reviews, a refix follows a finding', () async {
       final agents = _Agents({
         'fix': (c) => fix(c.label),
         'review': (_) => _review('fix-then-ship', const [_finding]),
@@ -220,9 +252,10 @@ void main() {
       expect(end.phases, ['Fix', 'Review', 'Refix']);
       final fixer = agents.byLabel('fix');
       expect(fixer.worktree, isTrue);
-      expect(fixer.prompt, contains('bug_check'));
+      // Workflow agents have no EveryAI host, so the proof is the commands' quoted output, and says so.
+      expect(fixer.prompt, isNot(contains('bug_check')));
       expect(fixer.prompt, contains('The last item is missing'));
-      for (final step in ['"reproduced"', '"triage"', '"verify"']) {
+      for (final step in ['Reproduce', 'Verify', 'quote their output']) {
         expect(fixer.prompt, contains(step));
       }
       final review = agents.byLabel('review');
@@ -235,6 +268,7 @@ void main() {
       expect(result['verified'], isTrue);
       expect(result['commits'], ['f00 fix', 'f00 refix']);
       expect((result['review'] as Map)['verdict'], 'fix-then-ship');
+      expect(result['proof'], 'self-reported');
     }, skip: skip);
 
     test('a ship verdict skips the refix', () async {
@@ -290,6 +324,7 @@ void main() {
       expect(agents.labels.last, 'verify');
       for (final c in agents.calls) {
         expect(c.worktree, isFalse, reason: c.label);
+        expect(c.readOnly, isTrue, reason: c.label);
         expect(c.prompt, contains('You are read-only'), reason: c.label);
         expect(c.prompt, contains('git diff main...HEAD'), reason: c.label);
       }
@@ -298,6 +333,36 @@ void main() {
       final result = end.result! as Map;
       expect([for (final f in result['findings'] as List) (f as Map)['summary']], ['fetches loopback addresses']);
       expect((result['dropped'] as List).single, containsPair('summary', 'no size limit'));
+      expect(result['verified'], isTrue);
+    }, skip: skip);
+
+    test('a failed lens leaves the others\' labels right; a failed verify returns the findings unverified', () async {
+      final agents = _Agents({
+        'threat-model': (_) => {
+          'summary': 's',
+          'entry_points': <String>[],
+          'boundaries': <String>[],
+          'assets': <String>[],
+          'files': <String>[],
+          'base': 'abc1234def',
+        },
+        'lens:secrets': (_) => null,
+        'lens:injection': (_) => {
+          'findings': [finding('sql', 'builds SQL from input')],
+        },
+        'lens:': (_) => {'findings': <Object>[]},
+        'verify': (_) => null,
+      });
+      final end = await run('security_review', {}, agents);
+      expect(end.error, isNull);
+      final result = end.result! as Map;
+      expect(result['verified'], isFalse);
+      expect([for (final f in result['findings'] as List) (f as Map)['lens']], ['injection']);
+      // The base the threat model found: a plain diff, no substitution for the others.
+      for (final c in agents.calls.skip(1)) {
+        expect(c.prompt, contains('git diff abc1234def...HEAD'), reason: c.label);
+        expect(c.prompt, isNot(contains(r'$(')), reason: c.label);
+      }
     }, skip: skip);
 
     test('no candidate findings skips the verify step; a bad base is refused', () async {

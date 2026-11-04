@@ -80,6 +80,19 @@ return await agent('draft')
     expect(lib.locked.single.note, contains("Can't replace the built-in ultra workflow"));
   });
 
+  test("a deeply nested meta is unreadable, and doesn't hide the other workflows", () async {
+    // Untrusted, and read before the trust check: nesting this deep used to overflow the stack.
+    write('deep.js', 'export const meta = ${'[' * 200000}');
+    write('fine.js', mine);
+    expect(parseWorkflowMeta('export const meta = ${'[' * 200000}'), isNull);
+    expect(parseWorkflowMeta('export const meta = { a: ${'[' * 30}${']' * 30} }'), isNotNull);
+    final project0 = await loadProjectWorkflows(project.path);
+    expect(project0.map((w) => w.id), ['deep', 'fine']);
+    expect(project0.first.title, 'deep');
+    final all = await activeWorkflows(project.path, const WorkflowTrust());
+    expect([for (final w in all) w.id], bundledWorkflowIds);
+  });
+
   test('ids are normalised from the file name', () {
     expect(workflowId('My Flow!.v2'), 'my-flow-v2');
     expect(workflowId('--A_b--'), 'a_b');

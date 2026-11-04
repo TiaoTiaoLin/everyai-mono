@@ -89,11 +89,16 @@ Future<List<WorkflowEntry>> loadBundledWorkflows([AssetBundle? bundle]) async {
 /// [projectDir]'s own workflows, by id. The id is the file's stem, never
 /// its meta's, so a file can't pass itself off as a bundled one.
 Future<List<WorkflowEntry>> loadProjectWorkflows(String projectDir) async {
-  final out = [
-    for (final f in await files.projectWorkflowFiles(projectDir))
-      if (workflowId(f.stem) case final id when id.isNotEmpty)
-        _entry(f.source, id, WorkflowOrigin.project, projectDir: projectDir, path: f.path),
-  ];
+  final out = <WorkflowEntry>[];
+  for (final f in await files.projectWorkflowFiles(projectDir)) {
+    final id = workflowId(f.stem);
+    if (id.isEmpty) continue;
+    try {
+      out.add(_entry(f.source, id, WorkflowOrigin.project, projectDir: projectDir, path: f.path));
+    } on Object {
+      // One bad file is left out; it never hides the others.
+    }
+  }
   return out..sort((a, b) => a.id.compareTo(b.id));
 }
 
@@ -151,8 +156,17 @@ WorkflowLibrary workflowLibrary(List<WorkflowEntry> bundled, List<WorkflowEntry>
 }
 
 /// The workflows [projectDir] can run now (bundled, then trusted project ones).
-Future<List<WorkflowEntry>> activeWorkflows(String projectDir, WorkflowTrust trust, {AssetBundle? bundle}) async =>
-    workflowLibrary(await loadBundledWorkflows(bundle), await loadProjectWorkflows(projectDir), trust).active;
+/// An unreadable project folder leaves the bundled ones.
+Future<List<WorkflowEntry>> activeWorkflows(String projectDir, WorkflowTrust trust, {AssetBundle? bundle}) async {
+  final bundled = await loadBundledWorkflows(bundle);
+  List<WorkflowEntry> project;
+  try {
+    project = await loadProjectWorkflows(projectDir);
+  } on Object {
+    project = const [];
+  }
+  return workflowLibrary(bundled, project, trust).active;
+}
 
 /// Which project workflows are trusted. Preferences `code.workflows`.
 final workflowTrustProvider = NotifierProvider<WorkflowTrustNotifier, WorkflowTrust>(WorkflowTrustNotifier.new);

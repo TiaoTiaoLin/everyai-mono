@@ -26,6 +26,7 @@ final class WorkflowAgentCall {
     this.model,
     this.effort,
     this.worktree = false,
+    this.readOnly = false,
     this.schema,
   });
 
@@ -43,6 +44,11 @@ final class WorkflowAgentCall {
 
   /// It works in its own worktree, merged back when it finishes.
   final bool worktree;
+
+  /// It may only read, whatever the lead's mode: its edits and commands off
+  /// the read-only list wait for the user. For agents that read code an
+  /// attacker may have written.
+  final bool readOnly;
   final Map<String, Object?>? schema;
 
   /// What the child is sent: the prompt, and with a schema how to answer.
@@ -349,6 +355,7 @@ final class WorkflowEngine {
     final prompt = '${a['prompt'] ?? ''}';
     final schema = (a['schema'] as Map?)?.cast<String, Object?>();
     final worktree = a['worktree'] == true;
+    final readOnly = a['readOnly'] == true;
     final base = sha256
         .convert(
           utf8.encode(
@@ -361,6 +368,8 @@ final class WorkflowEngine {
               str('model'),
               str('effort'),
               worktree,
+              // Left out when off, so calls journalled before it existed keep their keys.
+              if (readOnly) 'readOnly',
             ]),
           ),
         )
@@ -377,6 +386,7 @@ final class WorkflowEngine {
       model: str('model'),
       effort: str('effort'),
       worktree: worktree,
+      readOnly: readOnly,
       schema: schema,
     );
   }

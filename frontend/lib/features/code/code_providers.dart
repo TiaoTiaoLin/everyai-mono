@@ -316,12 +316,16 @@ final driverModelsProvider = FutureProvider.autoDispose.family<List<DriverModel>
 
 /// What an outside session's calls to the host reach: its controller
 /// ([controller], null once the session is gone), after the session is
-/// saved ([ready]); the token is minted before that.
+/// saved ([ready]); the token is minted before that. The prompts list
+/// ([prompts]) doesn't wait: an agent may list them before its session
+/// start returns (Gemini over ACP does, inside `session/new`), and that
+/// start is what [ready] waits for.
 final class _HostForward implements HostTools, HostPrompts {
-  _HostForward(this.controller, this.ready);
+  _HostForward(this.controller, this.ready, this.prompts);
 
   final CodeSessionController? Function() controller;
   final Future<void> ready;
+  final Future<List<WorkflowPrompt>> Function() prompts;
 
   @override
   Future<HostResult> call(HostCall call) async {
@@ -332,11 +336,16 @@ final class _HostForward implements HostTools, HostPrompts {
   }
 
   @override
-  Future<List<WorkflowPrompt>> workflowPrompts() async {
-    await ready;
-    return await controller()?.workflowPrompts() ?? const [];
-  }
+  Future<List<WorkflowPrompt>> workflowPrompts() => prompts();
 }
+
+/// [projectDir]'s workflows as MCP prompts.
+Future<List<WorkflowPrompt>> _workflowPromptsIn(Ref ref, String projectDir) async => [
+  for (final w in await _workflowsOfIn(ref, projectDir)) _promptOf(w),
+];
+
+WorkflowPrompt _promptOf(WorkflowEntry w) =>
+    (id: w.id, title: w.title, description: w.description, whenToUse: w.whenToUse, args: w.args);
 
 /// A host call that waits for the user, and the card (the agent's own row
 /// for the call, by action id) it is answered on.
@@ -694,6 +703,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     final forward = _HostForward(
       () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
       ready ?? Future<void>.value(),
+      () => _workflowPromptsIn(ref, projectDir),
     );
     final token = await host.mint(id, forward);
     try {
@@ -738,9 +748,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           projectRoot: projectDir,
           lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
           hostTools: _hostToolInfos,
+          // The bundled ones only: they are fixed per app version, so a resumed
+          // conversation's prompt stays the same when the user trusts a project
+          // workflow. Those show in prompts/list and run_workflow's errors.
           workflows: [
             for (final w in await _workflowsOfIn(ref, projectDir))
-              (id: w.id, when: w.whenToUse.isEmpty ? w.title : w.whenToUse),
+              if (w.origin == WorkflowOrigin.bundled) (id: w.id, when: w.whenToUse.isEmpty ? w.title : w.whenToUse),
           ],
         ),
       ),
@@ -1958,7 +1971,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends the next queued message once nothing runs or waits (and no lead switch is under way).
   void _sendQueued() {
     final t = state.transcript;
-    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty || state.queued.isEmpty) return;
+    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
+    // A workflow's result first: the app made it, so Stop and the user's queue don't touch it.
+    if (_workflowResults.isNotEmpty && _session != null) {
+      unawaited(_session!.send(_workflowResults.removeAt(0)).catchError((Object _) {}));
+      return;
+    }
+    if (state.queued.isEmpty) return;
     final [next, ...rest] = state.queued;
     state = state.copyWith(queued: rest);
     if (_withinBudget()) unawaited(_checkpoint().then((_) => _sendNow(next)));
@@ -3702,6 +3721,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Workflow runs going on in this session, by run id.
   final _workflows = <String, WorkflowEngine>{};
 
+  /// Runs from start to end (also while their script starts, before
+  /// [_workflows] has them), and the reservation of a run_workflow call.
+  final _activeRuns = <String>{};
+
+  /// Ended runs' results the agent hasn't been sent yet (see [_toLead]).
+  final _workflowResults = <String>[];
+
   /// Runs the workflow [source] (a `.js` file's text, called [name]) with
   /// [args]: its agents are child sessions of this one, and what it returns
   /// comes back to this session as one message. [ctx] (and the run id) is
@@ -3741,10 +3767,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   @override
-  Future<List<WorkflowPrompt>> workflowPrompts() async => [
-    for (final w in await _workflowEntries())
-      (id: w.id, title: w.title, description: w.description, whenToUse: w.whenToUse, args: w.args),
-  ];
+  Future<List<WorkflowPrompt>> workflowPrompts() async => [for (final w in await _workflowEntries()) _promptOf(w)];
 
   /// run_workflow from the agent: starts the run and answers at once (a run
   /// outlasts every client's tool timeout); the result comes as a message.
@@ -3767,19 +3790,33 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (info == null) return (text: 'Error: this session is closed.', isError: true);
     // A workflow's own agents would nest runs past its caps.
     if (info.parentId != null) return (text: 'Error: only the lead session starts workflows.', isError: true);
-    // A review on another vendor's model only when this session spends on EveryAI already.
-    final review = info.harness == everyaiHarnessName
-        ? bugReviewModel(info.model, ref.read(libraryProvider).value ?? const [])
-        : null;
-    final runId = await runWorkflow(
-      entry.title,
-      entry.source,
-      args: args,
-      ctx: {
-        'lead': {'harness': info.harness, 'model': info.model},
-        'review': review == null ? null : {'harness': everyaiHarnessName, 'model': review},
-      },
-    );
+    // One at a time, or an agent could multiply every run's caps by starting many.
+    if (_activeRuns.isNotEmpty) {
+      final running = _activeRuns.firstWhere((r) => r != _reserved, orElse: () => '');
+      return (
+        text:
+            'Error: a workflow is already running in this session${running.isEmpty ? '' : ' (run $running)'}. Wait '
+            'for its <workflow-result> before starting another.',
+        isError: true,
+      );
+    }
+    // Only outside leads reach this (the host serves them), and a review on
+    // EveryAI's models would spend in their session: the workflow's review
+    // runs on a fresh agent of the lead's harness.
+    _activeRuns.add(_reserved);
+    final String runId;
+    try {
+      runId = await runWorkflow(
+        entry.title,
+        entry.source,
+        args: args,
+        ctx: {
+          'lead': {'harness': info.harness, 'model': info.model},
+        },
+      );
+    } finally {
+      _activeRuns.remove(_reserved);
+    }
     return (
       text:
           'Started ${entry.title} (run $runId). It runs in the app, where the user follows it. Its result will '
@@ -3788,14 +3825,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     );
   }
 
-  /// [text] to the agent now, or after the turn that is running.
+  /// A workflow's result [text] to the agent now, or once nothing runs.
+  /// Kept apart from the user's queue, which Stop and a reset clear (and a
+  /// spent budget skips): the run's journal is retired by now, so this is
+  /// the only copy.
   void _toLead(String text) {
-    final t = state.transcript;
-    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
-      state = state.copyWith(queued: [...state.queued, Outgoing(text)]);
-      return;
-    }
-    unawaited(_session?.send(text).catchError((Object _) {}));
+    _workflowResults.add(text);
+    _sendQueued();
   }
 
   /// A workflow agent (by call id) waits for the user: this session shows it needs input.
@@ -3826,6 +3862,24 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   Future<void> _runWorkflow(
+    String runId,
+    String name,
+    String source,
+    Map<String, Object?> args,
+    WorkflowJournal journal,
+  ) async {
+    _activeRuns.add(runId);
+    try {
+      await _runWorkflowSteps(runId, name, source, args, journal);
+    } finally {
+      _activeRuns.remove(runId);
+    }
+  }
+
+  /// A run_workflow call holds this in [_activeRuns] while its run starts.
+  static const _reserved = '';
+
+  Future<void> _runWorkflowSteps(
     String runId,
     String name,
     String source,
@@ -4640,8 +4694,14 @@ final class _WorkflowLauncher implements AgentLauncher {
       );
     }
     // A writer in its own worktree may edit even when the lead is planning
-    // (its work isn't merged until the lead builds; see [finish]).
-    final mode = _mode() == AgentMode.plan && copy != null ? AgentMode.ask : _mode();
+    // (its work isn't merged until the lead builds; see [finish]). A
+    // read-only agent asks before any write or command, even in Full auto.
+    final lead = _mode();
+    final mode = call.readOnly
+        ? (lead == AgentMode.plan ? AgentMode.plan : AgentMode.ask)
+        : lead == AgentMode.plan && copy != null
+        ? AgentMode.ask
+        : lead;
     final info = await _sessions.startChild(
       parent: parent,
       title: call.label,

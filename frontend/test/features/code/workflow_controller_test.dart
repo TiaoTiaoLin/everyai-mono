@@ -186,26 +186,70 @@ void main() {
     expect(ctx['lead'], {'harness': 'test', 'model': ''});
     expect(ctx['review'], isNull);
 
-    // The lead is mid-turn when the run ends: the result goes after it.
+    // One run at a time: a second call is refused while this one runs.
+    r = await c.call(
+      runCall({
+        'id': 'bugfix',
+        'args': {'bug': 'x'},
+      }),
+    );
+    expect(r.isError, isTrue);
+    expect(r.text, contains('already running in this session (run ${ctx['runId']})'));
+
+    // The lead is mid-turn when the run ends: the result goes after it, not into the user's queue.
     final before = lead.sent.length;
     lead.add(stateEvent('busy', ExecutionStatus.running));
     await whenValue(container, codeSessionProvider(c.sessionId).select((s) => s.transcript.running), (bool b) => b);
     bridge.finish({'findings': <Object>[]});
-    final queued = await whenValue(
-      container,
-      codeSessionProvider(c.sessionId).select((s) => s.queued),
-      (List<Outgoing> q) => q.isNotEmpty,
-    );
-    expect(queued.single.text, startsWith('<workflow-result name="Security review" status="done">'));
-    expect(lead.sent.length, before);
-    lead.add(stateEvent('idle', ExecutionStatus.finished));
-    await whenValue(
-      container,
-      codeSessionProvider(c.sessionId).select((s) => s.queued),
-      (List<Outgoing> q) => q.isEmpty,
-    );
     await pumpEventQueue();
+    expect(container.read(codeSessionProvider(c.sessionId)).queued, isEmpty);
+    expect(lead.sent.length, before);
+    // Stop clears the user's queue; the result stays and goes once the lead is idle.
+    await c.stop();
+    lead.add(stateEvent('idle', ExecutionStatus.finished));
+    for (var i = 0; i < 50 && !lead.sent.any((m) => m.contains('<workflow-result')); i++) {
+      await pumpEventQueue();
+    }
     expect(lead.sent.where((m) => m.contains('<workflow-result')), hasLength(1));
+    expect(lead.sent.last, startsWith('<workflow-result name="Security review" status="done">'));
+    // The run ended, so another may start.
+    r = await c.call(
+      runCall({
+        'id': 'bugfix',
+        'args': {'bug': 'x'},
+      }),
+    );
+    expect(r.isError, isFalse);
+  });
+
+  test('a read-only agent asks before writes and commands, even when the lead is in Full auto', () async {
+    final c = await open();
+    await c.setMode(AgentMode.fullAuto);
+    await c.runWorkflow('demo', 'source');
+    unawaited(bridge.agent('Review', {'harness': 'fake2', 'readOnly': true}).catchError((Object _) => null));
+    expect((await child()).mode, AgentMode.ask);
+  });
+
+  test("an agent can list the workflow prompts before its session's start returns", () async {
+    final gate = drivers['test']!.startGate = Completer<void>();
+    final starting = container
+        .read(codeSessionsProvider.notifier)
+        .start(
+          project: container.read(codeProjectsProvider).single,
+          prompt: 'Lead the work',
+          model: '',
+          mode: AgentMode.autoEdit,
+          harness: 'test',
+        );
+    final host = container.read(hostServerProvider) as FakeHost;
+    for (var i = 0; i < 50 && host.tools.isEmpty; i++) {
+      await pumpEventQueue();
+    }
+    // Gemini over ACP lists prompts inside session/new, which is what the start waits for.
+    final prompts = await (host.tools.values.single as HostPrompts).workflowPrompts();
+    expect([for (final p in prompts) p.id], ['ultra', 'bugfix', 'security_review']);
+    gate.complete();
+    await starting;
   });
 
   test('a schema reply that misses gets its repair message in the same child', () async {

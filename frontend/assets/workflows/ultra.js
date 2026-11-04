@@ -153,7 +153,8 @@ ${l.text}
 
 Report only real, concrete findings, each with a failure scenario. An empty list is a valid answer.`,
     { label: `review:${it.id}:${l.key}`, phase: 'Review', schema: REVIEW_SCHEMA, ...reviewOpts })))
-  const findings = reviews.filter(Boolean).flatMap((r, i) => r.findings.map((f) => ({ ...f, lens: LENSES[i].key })))
+  // By lens index before dropping the failed reviews, so each finding keeps its own lens.
+  const findings = reviews.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
   const actionable = findings.filter((f) => f.severity !== 'nit')
   let refix = null
   if (actionable.length) {
@@ -166,6 +167,8 @@ ${quote(JSON.stringify(actionable, null, 1))}
 For each finding: check it against the code, fix the real ones, and reject the wrong ones with a concrete reason. Add a
 test for every real correctness bug. Run the checks and the touched tests again, and commit.`,
       { label: `refix:${it.id}`, phase: 'Refix', schema: REFIX_SCHEMA, worktree: true })
+      // The implementation's commits merged already; a failed refix only loses its own round.
+      .catch((e) => { log(`${it.id}: refix failed: ${e.message}`); return { failed: e.message, commits: [] } })
   }
   log(`${it.id}: ${impl.status}, ${actionable.length} findings to fix, refix ${refix ? 'done' : 'skipped'}`)
   return {
@@ -185,6 +188,7 @@ const items = await pipeline(ITEMS, async (it, _, i) => notes[i]
   : { id: it.id, status: 'failed', error: 'research failed', commits: [], findings: [], refix: null })
 
 phase('Integrate')
+let integrationError = null
 const summary = items.map((r, i) => r || { id: ITEMS[i].id, status: 'failed', commits: [] })
 const integration = await agent(`${COMMON}
 INTEGRATE: every item's worktree has merged back into this folder. Run the project's full checks and the whole test
@@ -196,5 +200,12 @@ ${quote(JSON.stringify(summary.map((r) => ({ id: r.id, status: r.status, commits
 
 Reply with what ran, the pass and fail counts, and anything that still fails.`,
   { label: 'integrate', phase: 'Integrate' })
+  // The items' work is merged and paid for: report it even when this last step fails.
+  .catch((e) => { log(`integration failed: ${e.message}`); integrationError = e.message; return null })
 
-return { items: summary, integration, reviewed_on: REVIEW ? REVIEW.model : 'the lead\'s model' }
+return {
+  items: summary,
+  integration,
+  ...(integrationError ? { integration_error: integrationError } : {}),
+  reviewed_on: REVIEW ? REVIEW.model : 'a fresh agent on the lead\'s model',
+}
