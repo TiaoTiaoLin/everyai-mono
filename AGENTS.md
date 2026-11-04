@@ -637,7 +637,12 @@ owner's local notes (gitignored); the task board is the GitHub Project.
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
 0. **Every harness in one workspace** (`TODO-multi-harness.md`, plan `~/.claude/plans/multi-harness.md`): Stages 1–2
-   are built (PR #1) and await live testing; Stages 3–6 come next. Claude Code and Gemini sit behind a consent setting until the owner's ToS check.
+   are built (PR #1) and await live testing; Stage 3 (handoff) is run 3. Claude Code and Gemini sit behind a consent setting until the owner's ToS check.
+   **Re-planned 2026-11-04** (read the Direction section of `TODO-multi-harness.md` before touching `PhaseFlow` or the
+   drivers): outside harnesses keep their native feel (native slash commands and modes, our floor as advice) plus our
+   increments; EveryAI spends nothing in their sessions; Ultra, Bug fix and Security review become `workflow.js` files
+   run in Deno, Max an approach skill + MCP tools; Lead Mode with the EveryAI harness as the only lead; local LLMs and
+   BYOK are the EveryAI harness's focus; billing is parked.
    EveryAI harness upgrades are in `TODO-harness.md` (split from TODO.md 2026-11-04).
 1. **Current plan (`~/.claude/plans/few-tasks-in-your-parsed-piglet.md`)**: §1–3 bug fixes done; next §4 tiered agent models (`/v1/agents`, effort), §5 git worktrees (App Support, squash merge), §6 agent evals, §7 `docs/CODE_ROADMAP.md`.
 1. **Phase B, the Code workspace** (desktop; see the plan file for the full spec):
