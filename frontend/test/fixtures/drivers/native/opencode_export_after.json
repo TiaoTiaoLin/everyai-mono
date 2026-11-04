@@ -1,0 +1,273 @@
+{
+ "data": {
+  "info": {
+   "id": "ses_000000000012xxxxxxxxxxxxxx",
+   "projectID": "proj_1",
+   "model": {
+    "id": "model-x",
+    "providerID": "provider-x",
+    "variant": "default"
+   },
+   "cost": 0,
+   "tokens": {
+    "input": 7536,
+    "output": 39,
+    "reasoning": 0,
+    "cache": {
+     "read": 1536,
+     "write": 0
+    }
+   },
+   "outcome": "succeeded",
+   "time": {
+    "created": 1793822345724,
+    "updated": 1793822424753,
+    "idle": 1793822424755
+   },
+   "title": "Imported spike",
+   "location": {
+    "directory": "/work/repo"
+   }
+  },
+  "messages": [
+   {
+    "id": "msg_000000000000xxxxxxxxxxxxxxpf",
+    "time": {
+     "created": 1793822345724
+    },
+    "text": "Please create hello.txt containing the word PINEAPPLE.",
+    "type": "user"
+   },
+   {
+    "id": "msg_000000000001xxxxxxxxxxxxxxLz",
+    "time": {
+     "created": 1793822345725,
+     "completed": 1793822345725
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "big-pickle",
+     "providerID": "opencode"
+    },
+    "content": [
+     {
+      "type": "tool",
+      "id": "call_imp_1",
+      "name": "write",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "path": "/work/repo/hello.txt",
+        "content": "PINEAPPLE\n"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "Wrote file successfully."
+        }
+       ],
+       "metadata": {}
+      },
+      "time": {
+       "created": 1793822345725,
+       "completed": 1793822345725
+      }
+     }
+    ],
+    "finish": "tool-calls"
+   },
+   {
+    "id": "msg_000000000002xxxxxxxxxxxxxxkQ",
+    "time": {
+     "created": 1793822345726,
+     "completed": 1793822345726
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "big-pickle",
+     "providerID": "opencode"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "Created hello.txt with PINEAPPLE."
+     }
+    ],
+    "finish": "stop"
+   },
+   {
+    "id": "msg_000000000003xxxxxxxxxxxxxxwc",
+    "time": {
+     "created": 1793822345727
+    },
+    "text": "Now make bye.txt containing MANGO, then commit both files.",
+    "type": "user"
+   },
+   {
+    "id": "msg_000000000004xxxxxxxxxxxxxxKD",
+    "time": {
+     "created": 1793822345728,
+     "completed": 1793822345728
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "big-pickle",
+     "providerID": "opencode"
+    },
+    "content": [
+     {
+      "type": "tool",
+      "id": "call_imp_2",
+      "name": "shell",
+      "executed": false,
+      "state": {
+       "status": "completed",
+       "input": {
+        "command": "echo MANGO > bye.txt"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "(no output)"
+        }
+       ],
+       "metadata": {}
+      },
+      "time": {
+       "created": 1793822345728,
+       "completed": 1793822345728
+      }
+     }
+    ],
+    "finish": "tool-calls"
+   },
+   {
+    "id": "msg_000000000005xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822405823
+    },
+    "text": "Answer without using any tools, in one line: which word is in hello.txt, which command did you run for bye.txt, and what part of my last request is still not done?",
+    "type": "user"
+   },
+   {
+    "id": "msg_000000000006xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822405831,
+     "completed": 1793822406254
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "big-pickle",
+     "providerID": "opencode",
+     "variant": "default"
+    },
+    "content": [],
+    "snapshot": {
+     "start": "e58f16c7df32f667942fe79a610b9fac36cf114e",
+     "end": "e58f16c7df32f667942fe79a610b9fac36cf114e",
+     "files": []
+    },
+    "finish": "error",
+    "error": {
+     "type": "provider.auth",
+     "message": "This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store. Signing in again will not renew this key.",
+     "status": 401,
+     "response": {
+      "body": "{\"error\":{\"type\":\"authentication_error\",\"code\":\"api_key_expired\",\"message\":\"This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store. Signing in again will not renew this key.\"}}"
+     }
+    }
+   },
+   {
+    "id": "msg_000000000007xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822406256
+    },
+    "type": "idle",
+    "outcome": "failed",
+    "error": {
+     "type": "provider.auth",
+     "message": "This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store. Signing in again will not renew this key.",
+     "status": 401,
+     "response": {
+      "body": "{\"error\":{\"type\":\"authentication_error\",\"code\":\"api_key_expired\",\"message\":\"This API key has expired. Create a new API key in OpenCode Console and replace it in your client or secret store. Signing in again will not renew this key.\"}}"
+     }
+    }
+   },
+   {
+    "id": "msg_000000000008xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822423067
+    },
+    "type": "model-switched",
+    "model": {
+     "id": "model-x",
+     "providerID": "provider-x"
+    },
+    "previous": {
+     "id": "big-pickle",
+     "providerID": "opencode",
+     "variant": "default"
+    }
+   },
+   {
+    "id": "msg_000000000009xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822423084
+    },
+    "text": "Answer without using any tools, in one line: which word is in hello.txt, which command did you run for bye.txt, and what part of my request before this one is still not done?",
+    "type": "user"
+   },
+   {
+    "id": "msg_000000000010xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822423092,
+     "streamed": 1793822424730,
+     "completed": 1793822424753
+    },
+    "type": "assistant",
+    "agent": "build",
+    "model": {
+     "id": "model-x",
+     "providerID": "provider-x",
+     "variant": "default"
+    },
+    "content": [
+     {
+      "type": "text",
+      "text": "PINEAPPLE is in hello.txt; I ran `echo MANGO > bye.txt` for bye.txt; and the still-undone part is the commit of both files."
+     }
+    ],
+    "snapshot": {
+     "start": "e58f16c7df32f667942fe79a610b9fac36cf114e",
+     "end": "e58f16c7df32f667942fe79a610b9fac36cf114e",
+     "files": []
+    },
+    "finish": "stop",
+    "rawFinish": "end_turn",
+    "cost": 0,
+    "tokens": {
+     "input": 7536,
+     "output": 39,
+     "reasoning": 0,
+     "cache": {
+      "read": 1536,
+      "write": 0
+     }
+    }
+   },
+   {
+    "id": "msg_000000000011xxxxxxxxxxxxxx",
+    "time": {
+     "created": 1793822424755
+    },
+    "type": "idle",
+    "outcome": "succeeded"
+   }
+  ]
+ }
+}

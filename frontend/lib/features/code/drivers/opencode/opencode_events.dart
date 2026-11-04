@@ -112,6 +112,8 @@ final class OpenCodeMapper {
     var last = ExecutionStatus.idle;
     Map<String, Object?>? failure;
     for (final m in messages.whereType<Map<String, Object?>>()) {
+      // Imported history (`opencode_import.dart`) is the app's own record already.
+      if (_map(_map(m['metadata'])?['everyai'])?['imported'] == true) continue;
       final id = _str(m['id']);
       switch (m['type']) {
         case 'user':

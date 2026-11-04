@@ -160,6 +160,21 @@ final class ClaudeDriver implements HarnessDriver, AttachesBriefed {
     return session;
   }
 
+  /// Makes [id], a conversation written into Claude's own files (a native
+  /// import), a session of this driver: [attach] then opens it and the first
+  /// message continues it with `--resume`.
+  Future<void> adoptImported(
+    String id, {
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+  }) async {
+    final meta = _Meta(cwd: cwd, sessionTag: sessionTag, model: model, effort: effort, mode: mode, sent: true);
+    await writeTextFile('${await _dir()}/$id.json', jsonEncode(meta.toJson()));
+  }
+
   /// Shows the session from its journal; the CLI starts with the next
   /// message, not before. A briefing isn't kept across restarts (its MCP
   /// token was in memory), so a reopened session runs without our tools;

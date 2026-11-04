@@ -128,14 +128,13 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
       final id = data is Map ? '${data['id'] ?? ''}' : '';
       if (id.isEmpty) throw const HarnessError("OpenCode didn't start a session.");
       await session.bind(id);
-      await writeTextFile(
-        _recordPath(dir, id),
-        jsonEncode({
-          'workingDir': spec.workingDir,
-          'sessionTag': spec.sessionTag,
-          'model': spec.model,
-          'effort': spec.effort,
-        }),
+      await _saveRecord(
+        dir,
+        id,
+        workingDir: spec.workingDir,
+        sessionTag: spec.sessionTag,
+        model: spec.model,
+        effort: spec.effort,
       );
       _live[id] = session;
       if (spec.initialMessage case final text? when text.isNotEmpty) {
@@ -147,6 +146,49 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
       await (session?.close() ?? server.close());
       rethrow;
     }
+  }
+
+  /// Imports a conversation (`opencode_import.dart`): [session] and
+  /// [messages] in OpenCode's export format go to a private server's
+  /// `POST /api/experimental/session/import`, and the session becomes one of
+  /// this driver's ([attach] opens it). Its id, or null when this OpenCode
+  /// has no such route. Nothing runs a model.
+  Future<String?> importSession({
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required Map<String, Object?> session,
+    required List<Map<String, Object?>> messages,
+  }) async {
+    final exe = await _executable();
+    final dir = await _dataDir();
+    final server = await _launch(
+      executable: exe,
+      cwd: cwd,
+      sessionTag: sessionTag,
+      logPath: '$dir/driver-sessions/opencode/$sessionTag.log',
+    );
+    try {
+      await server.call(
+        'POST',
+        '/api/experimental/session/import',
+        body: {
+          'info': session,
+          'messages': messages,
+          'location': {'directory': cwd},
+        },
+      );
+    } on OpenCodeHttpError catch (e) {
+      // No such route (an older or newer OpenCode; unknown paths may get the web page).
+      if (e.status == 404 || e.status == 405 || e.status < 400) return null;
+      rethrow;
+    } finally {
+      await server.close();
+    }
+    final id = '${session['id']}';
+    await _saveRecord(dir, id, workingDir: cwd, sessionTag: sessionTag, model: model, effort: effort);
+    return id;
   }
 
   /// Reopens a session after a restart: a new server in its folder, its
@@ -257,6 +299,19 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
     if (!status.installed || path == null) throw const HarnessError('OpenCode is not installed.');
     return _path = path;
   }
+
+  /// What [attach] needs besides the id.
+  static Future<void> _saveRecord(
+    String dir,
+    String id, {
+    required String workingDir,
+    required String sessionTag,
+    required String model,
+    String? effort,
+  }) => writeTextFile(
+    _recordPath(dir, id),
+    jsonEncode({'workingDir': workingDir, 'sessionTag': sessionTag, 'model': model, 'effort': effort}),
+  );
 
   static String _recordPath(String dir, String id) =>
       '$dir/driver-sessions/opencode/${id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')}.json';
