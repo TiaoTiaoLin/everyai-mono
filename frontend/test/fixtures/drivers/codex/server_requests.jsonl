@@ -1,6 +1,5 @@
-// UNVERIFIED: hand-built (codex-cli 0.166.0 here is signed out, so no model ran); shapes from its generated
-// schema and the recorded fixtures (probe, models, start, interrupt_early, turn_failed). Replace with a
-// signed-in recording when one can be made.
+// UNVERIFIED: hand-built in codex-cli 0.166.0 shapes (no MCP server, question or permissions request was
+// triggered in the signed-in recordings of 2026-11-04).
 // The other requests Codex may send during a turn: an MCP tool approval (an elicitation marked
 // codex_approval_kind = mcp_tool_call, protocol/src/mcp_approval_meta.rs), a URL elicitation, a question for the
 // user, a tool the client would run, extra permissions, and a v1 approval.
@@ -9,7 +8,7 @@
 {"dir":"out","msg":{"method":"initialized"}}
 {"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
 {"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true,"workspaceRouting":null}}}
-{"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"danger-full-access","approvalsReviewer":"user"}}}
+{"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"read-only","approvalsReviewer":"user"}}}
 {"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"dangerFullAccess"}}}}
 {"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Look it up"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"},"approvalsReviewer":"user"}}}
 {"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
