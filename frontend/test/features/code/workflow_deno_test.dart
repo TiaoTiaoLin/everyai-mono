@@ -50,7 +50,7 @@ void main() {
       if (call.prompt.startsWith('s2-x')) s2x.complete();
       if (call.prompt == 's1-y') await s2x.future;
     };
-    final bridge = await startWorkflowBridge(dir: '${dir.path}/run', source: _script, args: {'n': 3});
+    final bridge = await startWorkflowBridge(dir: '${dir.path}/s/run', source: _script, args: {'n': 3});
     final lines = <String>[];
     final end = await WorkflowEngine(
       runId: 'r',
@@ -74,12 +74,15 @@ void main() {
     expect(end.phases, ['Research', 'Build']);
     expect(end.logs.map((l) => l.text), containsAll(['starting {"n":3}', 'notes 3']));
     expect(end.agents.firstWhere((a) => a.label == 'A').phase, 'Research');
+    // The run's files go when it ends; the Deno cache is shared.
+    expect(Directory('${dir.path}/s/run').existsSync(), isFalse);
+    expect(Directory('${dir.path}/cache').existsSync(), isTrue);
   }, skip: deno == null ? 'no deno (set DENO_BIN)' : false);
 
   test('a script that throws ends the run as failed with its message', () async {
     final dir = await Directory.systemTemp.createTemp('workflow-deno');
     addTearDown(() => dir.delete(recursive: true));
-    final bridge = await startWorkflowBridge(dir: '${dir.path}/run', source: 'throw new Error("bad args")', args: {});
+    final bridge = await startWorkflowBridge(dir: '${dir.path}/s/run', source: 'throw new Error("bad args")', args: {});
     final end = await WorkflowEngine(
       runId: 'r',
       name: 'demo',

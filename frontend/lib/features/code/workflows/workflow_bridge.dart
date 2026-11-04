@@ -19,8 +19,9 @@ abstract interface class WorkflowBridge {
   void kill();
 }
 
-/// Starts [source] (a workflow `.js`) with [args] in Deno, its files and
-/// cache in [dir]. Throws a [StateError] when there is no Deno here.
+/// Starts [source] (a workflow `.js`) with [args] in Deno, its files in
+/// [dir] (removed when it exits; the Deno cache is shared by every run).
+/// Throws a [StateError] when there is no Deno here.
 Future<WorkflowBridge> startWorkflowBridge({
   required String dir,
   required String source,
@@ -33,5 +34,9 @@ Future<String> readJournalFile(String path) => impl.readJournalFile(path);
 /// Appends [line] to the journal at [path], creating it.
 Future<void> appendJournalFile(String path, String line) => impl.appendJournalFile(path, line);
 
-/// The journals in [dir] (`*.jsonl`), oldest first.
+/// The journals of unfinished runs in [dir] (`*.jsonl`), oldest first.
 Future<List<String>> listJournalFiles(String dir) => impl.listJournalFiles(dir);
+
+/// The run of the journal at [path] ended: it becomes `<run>.done.jsonl`,
+/// kept to look at but no longer read when the session opens.
+Future<void> retireJournalFile(String path) => impl.retireJournalFile(path);

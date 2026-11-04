@@ -110,9 +110,13 @@ final class FakeLauncher implements AgentLauncher {
     }
   }
 
+  /// Children watched as reattached (started before a restart).
+  final reattached = <String>[];
+
   @override
-  Future<WorkflowAgentResult> watch(String childId) {
+  Future<WorkflowAgentResult> watch(String childId, {bool reattached = false}) {
     watched.add(childId);
+    if (reattached) this.reattached.add(childId);
     return _turn(childId);
   }
 

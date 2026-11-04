@@ -76,22 +76,43 @@ String _typeOf(Object? v) => switch (v) {
 
 String _clip(String s) => s.length > 60 ? '${s.substring(0, 60)}…' : s;
 
-/// The JSON object an agent's reply ends with: the last ```json fence, else
-/// the last balanced `{…}`. Null when there is none that parses.
+/// The JSON value an agent's reply ends with: the last ```json (or
+/// untagged) fenced block, else the last balanced `{…}` or `[…]`. Null when
+/// there is none that parses.
 Object? lastJson(String text) {
-  final fences = RegExp(r'```(?:json)?[ \t]*\n([\s\S]*?)```').allMatches(text).toList();
-  for (final m in fences.reversed) {
+  // Fences pair up line by line: an opener is a line starting with ```, its
+  // closer the next line that is exactly ```. A tagged block (```bash) is
+  // skipped whole, so its closer never opens a new block.
+  final lines = const LineSplitter().convert(text);
+  final blocks = <String>[];
+  for (var i = 0; i < lines.length; i++) {
+    final open = lines[i].trimLeft();
+    if (!open.startsWith('```')) continue;
+    final tag = open.substring(3).trim().toLowerCase();
+    final start = i + 1;
+    var end = start;
+    while (end < lines.length && lines[end].trim() != '```') {
+      end++;
+    }
+    if (tag.isEmpty || tag == 'json') blocks.add(lines.sublist(start, end).join('\n'));
+    i = end;
+  }
+  for (final b in blocks.reversed) {
     try {
-      return jsonDecode(m[1]!.trim());
+      return jsonDecode(b.trim());
     } on FormatException {
       // An older fence may still be the answer.
     }
   }
-  final end = text.lastIndexOf('}');
+  return _lastBalanced(text, '{', '}') ?? _lastBalanced(text, '[', ']');
+}
+
+/// From the innermost [open] before the last [close] outwards: the first
+/// that parses up to that [close] is the value the reply ends with.
+Object? _lastBalanced(String text, String open, String close) {
+  final end = text.lastIndexOf(close);
   if (end < 0) return null;
-  // From the innermost opening brace outwards: the first that parses up to
-  // the last closing brace is the object the reply ends with.
-  for (var i = text.lastIndexOf('{', end); i >= 0; i = i == 0 ? -1 : text.lastIndexOf('{', i - 1)) {
+  for (var i = text.lastIndexOf(open, end); i >= 0; i = i == 0 ? -1 : text.lastIndexOf(open, i - 1)) {
     try {
       return jsonDecode(text.substring(i, end + 1));
     } on FormatException {

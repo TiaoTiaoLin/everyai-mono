@@ -4,13 +4,14 @@ import 'dart:async';
 import 'dart:convert';
 
 /// What a finished agent() call answered: [value] when [ok], else [error].
-typedef JournalledAgent = ({bool ok, Object? value, String? error});
+/// [spentMicros]: what it cost EveryAI (null on an outside harness).
+typedef JournalledAgent = ({bool ok, Object? value, String? error, int? spentMicros});
 
 /// One workflow run's steps, one JSON object per line, so a run the app
 /// quit in the middle of can carry on (`workflows/<session>/<run>.jsonl`):
-/// - `{t:"start", name, source, args}`
+/// - `{t:"start", name, source, args, at}` (`at`: epoch milliseconds)
 /// - `{t:"spawn", key, child}`: the agent's child session started
-/// - `{t:"agent", key, ok, value|error}`: it finished
+/// - `{t:"agent", key, ok, value|error, spent?}`: it finished
 /// - `{t:"phase", title}`
 /// - `{t:"end", status, result?, error?}`
 ///
@@ -53,7 +54,12 @@ final class WorkflowJournal {
       case 'spawn':
         spawns['${m['key']}'] = '${m['child']}';
       case 'agent':
-        agents['${m['key']}'] = (ok: m['ok'] == true, value: m['value'], error: m['error'] as String?);
+        agents['${m['key']}'] = (
+          ok: m['ok'] == true,
+          value: m['value'],
+          error: m['error'] as String?,
+          spentMicros: m['spent'] is int ? m['spent'] as int : null,
+        );
       case 'phase':
         phases.add('${m['title']}');
       case 'end':

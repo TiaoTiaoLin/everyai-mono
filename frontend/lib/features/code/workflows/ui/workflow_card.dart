@@ -9,6 +9,7 @@ import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/brand.dart';
 import '../../code_providers.dart';
+import '../../domain/code_session.dart' show SessionStatus;
 import '../workflow_engine.dart';
 import '../workflow_runs.dart';
 
@@ -131,14 +132,21 @@ class WorkflowCard extends StatelessWidget {
   };
 }
 
-class _AgentRow extends StatelessWidget {
+class _AgentRow extends ConsumerWidget {
   const _AgentRow({required this.agent});
   final WorkflowAgentView agent;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = EveryTheme.of(context);
+    final child = agent.childId;
+    // A running agent may be waiting on an approval in its own session.
+    final waits =
+        agent.status == WorkflowAgentStatus.running &&
+        child != null &&
+        ref.watch(codeSessionProvider(child).select((s) => s.status == SessionStatus.needsInput));
     final color = switch (agent.status) {
+      _ when waits => theme.warning,
       WorkflowAgentStatus.queued => theme.border,
       WorkflowAgentStatus.running => theme.accent,
       WorkflowAgentStatus.done => theme.success,
@@ -163,11 +171,13 @@ class _AgentRow extends StatelessWidget {
               style: theme.type.caption.tint(theme.text),
             ),
           ),
-          if (where.isNotEmpty) Text(where, maxLines: 1, style: theme.type.caption.tint(theme.textMuted)),
+          if (waits)
+            Text('Needs you · open', maxLines: 1, style: theme.type.caption.tint(theme.warning))
+          else if (where.isNotEmpty)
+            Text(where, maxLines: 1, style: theme.type.caption.tint(theme.textMuted)),
         ],
       ),
     );
-    final child = agent.childId;
     if (child == null) return row;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,

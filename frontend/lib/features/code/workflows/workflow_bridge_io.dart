@@ -9,8 +9,7 @@ import 'workflow_bridge.dart';
 import 'workflow_prelude.dart';
 
 // The Deno process and its line protocol, as ScriptRunner.run runs them
-// (same flags, no permissions, an empty environment, the cache in the run's
-// folder). TODO: make ScriptRunner use this bridge once run_script's own
+// (same flags, no permissions, an empty environment, one shared cache). TODO: make ScriptRunner use this bridge once run_script's own
 // changes have landed, so there is one copy.
 
 /// One printed line's most characters (a log row, not a file).
@@ -30,13 +29,14 @@ Future<WorkflowBridge> startWorkflowBridge({
     ['run', '--no-prompt', '--no-config', '--no-lock', '--no-remote', '--no-npm', '--quiet', 'prelude.js'],
     workingDirectory: runDir.path,
     includeParentEnvironment: false,
-    environment: {'DENO_DIR': '${runDir.path}/cache', 'DENO_NO_UPDATE_CHECK': '1', 'NO_COLOR': '1'},
+    // `workflows/cache`, next to the session folders.
+    environment: {'DENO_DIR': '${runDir.parent.parent.path}/cache', 'DENO_NO_UPDATE_CHECK': '1', 'NO_COLOR': '1'},
   );
-  return _DenoBridge(process);
+  return _DenoBridge(process, runDir);
 }
 
 final class _DenoBridge implements WorkflowBridge {
-  _DenoBridge(this._process) {
+  _DenoBridge(this._process, Directory runDir) {
     // Writes after the script ended fail; nothing waits on them.
     unawaited(_process.stdin.done.catchError((_) {}));
     String clip(String l) => l.length > _maxLine ? '${l.substring(0, _maxLine)}…' : l;
@@ -59,6 +59,8 @@ final class _DenoBridge implements WorkflowBridge {
       unawaited(_process.stdin.close().catchError((_) {}));
       await _requests.close();
       await _output.close();
+      // Its files were only for this run; the journal is kept apart.
+      await runDir.delete(recursive: true).catchError((Object _) => runDir);
       return code;
     });
   }
@@ -103,6 +105,15 @@ Future<void> appendJournalFile(String path, String line) async {
 Future<List<String>> listJournalFiles(String dir) async {
   final d = Directory(dir);
   if (!await d.exists()) return const [];
-  final files = await d.list().where((e) => e is File && e.path.endsWith('.jsonl')).map((e) => e.path).toList();
+  final files = await d
+      .list()
+      .where((e) => e is File && e.path.endsWith('.jsonl') && !e.path.endsWith('.done.jsonl'))
+      .map((e) => e.path)
+      .toList();
   return files..sort();
+}
+
+Future<void> retireJournalFile(String path) async {
+  final f = File(path);
+  if (await f.exists()) await f.rename(path.replaceFirst(RegExp(r'\.jsonl$'), '.done.jsonl'));
 }

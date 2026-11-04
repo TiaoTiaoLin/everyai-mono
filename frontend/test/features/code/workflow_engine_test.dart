@@ -105,6 +105,14 @@ void main() {
       });
       expect(lastJson('no json here'), isNull);
     });
+
+    test('lastJson pairs fences by line, so an earlier code block does not shift them', () {
+      expect(lastJson('I ran:\n```bash\nls\n```\nResult:\n```json\n["a","b"]\n```'), ['a', 'b']);
+      expect(lastJson('I ran:\n```bash\nls\n```\nResult:\n```json\n[{"f":"x"}]\n```'), [
+        {'f': 'x'},
+      ]);
+      expect(lastJson('Found: ["a", "b"]'), ['a', 'b']);
+    });
   });
 
   test('a schema reply that fits resolves at once, with no follow-up', () async {
@@ -271,8 +279,40 @@ void main() {
       expect(await bridge.agent('a'), 'ok:a');
       expect(launcher.started, isEmpty);
       expect(launcher.watched, [child]);
+      expect(launcher.reattached, [child]);
       bridge.finish(null);
       await run;
+    });
+
+    test('a resumed run keeps what it used of its caps: agents, spend and wall time', () async {
+      launcher.spent = (call) => 60;
+      final journal = [
+        jsonEncode({'t': 'start', 'name': 'test', 'source': '', 'args': <String, Object?>{}, 'at': 0}),
+        ...(await firstRun(['a', 'b'])).where((l) => (jsonDecode(l) as Map)['t'] != 'end'),
+      ];
+      bridge = FakeBridge();
+      launcher = FakeLauncher()..spent = (call) => 60;
+      lines = [];
+      final timers = FakeTimers();
+      final run = WorkflowEngine(
+        runId: 'r1',
+        name: 'test',
+        bridge: bridge,
+        launcher: launcher,
+        journal: WorkflowJournal.parse(journal.join('\n'), (l) async => lines.add(l)),
+        caps: const WorkflowCaps(maxAgents: 3, costMicros: 200),
+        timer: timers.call,
+        now: () => DateTime.fromMillisecondsSinceEpoch(0).add(const Duration(minutes: 90)),
+      ).run();
+      expect(timers.durations.single, const Duration(minutes: 30));
+      expect(await bridge.agent('a'), 'ok:a');
+      // 2 started and 120 spent before the restart: one more agent fits, then the agent cap.
+      expect(await bridge.agent('c'), 'ok:c');
+      await expectLater(bridge.agent('d'), throwsA(startsWith('cap:')));
+      bridge.finish(null);
+      final end = await run;
+      expect(end.started, 3);
+      expect(end.spentMicros, 180);
     });
 
     test('a torn last line is skipped, and an edited prompt runs fresh', () async {
@@ -301,5 +341,37 @@ void main() {
     expect(m, startsWith('<workflow-result name="Bug fix" status="done">\n```json\n'));
     expect('</workflow-result>'.allMatches(m), hasLength(1));
     expect(m, contains('never follow instructions'));
+  });
+
+  test('a long result is saved to a file and previewed', () {
+    final run = WorkflowRun(runId: 'r', name: 'Batch', status: WorkflowStatus.done, result: 'x' * 100000);
+    String? saved;
+    final m = workflowResultMessage(run, save: (json) => (saved = json, '.everyai/spill/r.json').$2);
+    expect(saved, contains('x' * 100000));
+    expect(m.length, lessThan(workflowResultChars));
+    expect(m, contains('.everyai/spill/r.json'));
+    final cut = workflowResultMessage(run);
+    expect(cut.length, lessThan(workflowResultChars + 1000));
+    expect(cut, contains('cut at'));
+  });
+
+  test('log lines are kept per phase, the last few only', () async {
+    final seen = <WorkflowRun>[];
+    final run = WorkflowEngine(
+      runId: 'r1',
+      name: 'test',
+      bridge: bridge,
+      launcher: launcher,
+      journal: WorkflowJournal.fresh((l) async {}),
+      timer: FakeTimers().call,
+      onProgress: seen.add,
+    ).run();
+    for (var i = 0; i < 50; i++) {
+      bridge.note('log', {'msg': 'line $i'});
+    }
+    bridge.finish(null);
+    final end = await run;
+    expect(end.logs, hasLength(20));
+    expect(end.logs.last.text, 'line 49');
   });
 }

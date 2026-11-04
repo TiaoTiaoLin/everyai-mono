@@ -8,6 +8,7 @@ import 'package:every_ai/core/net/api_client.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
+import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent;
@@ -40,11 +41,34 @@ void main() {
   late Map<String, FakeLeadDriver> drivers;
   late ProviderContainer container;
   late FakeBridge bridge;
+  late Map<String, UsageTotals> usage;
+  late Preferences prefs;
 
   Future<void> git(List<String> args) async {
     final r = await Process.run('git', args, workingDirectory: project.path);
     if (r.exitCode != 0) throw StateError('git ${args.join(' ')}: ${r.stderr}');
   }
+
+  /// The app on the same database, drivers and data folder: a second one is a restart.
+  ProviderContainer makeContainer() => ProviderContainer(
+    overrides: [
+      databaseProvider.overrideWithValue(db),
+      preferencesProvider.overrideWithValue(prefs),
+      modelCatalogProvider.overrideWith(FixedCatalog.new),
+      codeUsageProvider.overrideWithBuild((ref, n) async => usage[n.sessionId] ?? UsageTotals.zero),
+      driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
+      hostServerProvider.overrideWithValue(FakeHost()),
+      driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
+      apiClientProvider.overrideWithValue(
+        ApiClient(
+          baseUrl: Uri.parse('http://backend/'),
+          client: MockClient((req) async => http.Response('no network in this test', 599)),
+        ),
+      ),
+      codeSideModelProvider.overrideWithValue((messages) async => ''),
+      workflowBridgeProvider.overrideWithValue(({required dir, required source, required args}) async => bridge),
+    ],
+  );
 
   setUp(() async {
     db = AppDatabase(NativeDatabase.memory());
@@ -52,32 +76,15 @@ void main() {
     project = await Directory('${tmp.path}/project').create();
     lead = FakeLeadSession();
     bridge = FakeBridge();
+    usage = {};
     drivers = {
       'test': FakeLeadDriver('test', session: lead),
       'fake2': FakeLeadDriver('fake2', label: 'Second CLI'),
       'cli': FakeLeadDriver('cli', needsConsent: true, label: 'Gated CLI'),
     };
-    final prefs = await Preferences.load(db);
+    prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
-    container = ProviderContainer(
-      overrides: [
-        databaseProvider.overrideWithValue(db),
-        preferencesProvider.overrideWithValue(prefs),
-        modelCatalogProvider.overrideWith(FixedCatalog.new),
-        codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
-        driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
-        hostServerProvider.overrideWithValue(FakeHost()),
-        driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
-        apiClientProvider.overrideWithValue(
-          ApiClient(
-            baseUrl: Uri.parse('http://backend/'),
-            client: MockClient((req) async => http.Response('no network in this test', 599)),
-          ),
-        ),
-        codeSideModelProvider.overrideWithValue((messages) async => ''),
-        workflowBridgeProvider.overrideWithValue(({required dir, required source, required args}) async => bridge),
-      ],
-    );
+    container = makeContainer();
   });
 
   tearDown(() async {
@@ -135,7 +142,11 @@ void main() {
     expect(runs.single.agents.single.harness, 'fake2');
     await pumpEventQueue();
     expect(lead.sent.last, startsWith('<workflow-result name="demo" status="done">'));
-    expect(lead.sent.last, contains('"fixed": true'));
+    expect(lead.sent.last, contains('"fixed":true'));
+    // An ended run's journal is kept aside, so opening the session doesn't read it again.
+    final dir = '${tmp.path}/data/workflows/${c.sessionId}';
+    expect(File('$dir/$runId.done.jsonl').existsSync(), isTrue);
+    expect(File('$dir/$runId.jsonl').existsSync(), isFalse);
   });
 
   test('a schema reply that misses gets its repair message in the same child', () async {
@@ -187,6 +198,44 @@ void main() {
     expect(File('${project.path}/b.txt').readAsStringSync(), 'two\n');
   });
 
+  Future<void> repo() async {
+    await git(['init', '-q']);
+    File('${project.path}/a.txt').writeAsStringSync('one\n');
+    await git(['add', '.']);
+    await git(['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init']);
+  }
+
+  test('while the lead plans, the work of a worktree agent is kept on its ref, not merged', () async {
+    await repo();
+    final c = await open();
+    await c.setMode(AgentMode.plan);
+    await c.runWorkflow('demo', 'source');
+    final reply = bridge.agent('Add b', {'harness': 'fake2', 'worktree': true});
+    final info = await child();
+    File('${info.workingDir}/b.txt').writeAsStringSync('two\n');
+    answer(drivers['fake2']!.latest!, 'Added b');
+    final text = await reply as String;
+    expect(text, contains('Not merged while planning'));
+    expect(File('${project.path}/b.txt').existsSync(), isFalse);
+  });
+
+  test('stopping the run ends the watch on a working agent, so its worktree is settled', () async {
+    await repo();
+    final c = await open();
+    final runId = await c.runWorkflow('demo', 'source');
+    final reply = bridge.agent('Add b', {'harness': 'fake2', 'worktree': true});
+    final info = await child();
+    drivers['fake2']!.latest!.add(stateEvent('s-r', ExecutionStatus.running));
+    await pumpEventQueue();
+    c.stopWorkflow(runId);
+    await expectLater(reply, throwsA(anything));
+    await whenValue(
+      container,
+      codeSessionsProvider,
+      (List<CodeSessionInfo> all) => all.firstWhere((s) => s.id == info.id).forkCopy == null,
+    );
+  });
+
   test('a run the app quit in the middle of carries on when the session opens again', () async {
     final c = await open();
     final id = c.sessionId;
@@ -194,6 +243,8 @@ void main() {
     // Killed with the script: nobody hears this one.
     unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
     final first = await child();
+    // Still at work: the session closed, not the app.
+    drivers['fake2']!.latest!.add(stateEvent('w-r', ExecutionStatus.running));
     // The app quits: the script dies, the journal has the spawn but no answer.
     final old = bridge;
     bridge = FakeBridge();
@@ -215,5 +266,88 @@ void main() {
     expect(await again, 'Fixed');
     expect(drivers['fake2']!.specs, hasLength(1));
     expect(container.read(codeSessionsProvider).where((s) => s.parentId == id).single.id, first.id);
+    expect(drivers['fake2']!.latest!.sent.where((m) => m.contains(workflowCarryOn)), isEmpty);
+  });
+
+  test('an agent whose turn died with the app is told to carry on when the run resumes', () async {
+    CodeSessionController.liveAfter = Duration.zero;
+    addTearDown(() => CodeSessionController.liveAfter = const Duration(milliseconds: 1500));
+    final c = await open();
+    final id = c.sessionId;
+    await c.runWorkflow('demo', 'the source');
+    unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
+    final first = await child();
+    expect(first.harness, 'fake2');
+    // Mid-turn when the app quits: its history ends "working".
+    drivers['fake2']!.latest!.add(stateEvent('w-r', ExecutionStatus.running));
+    await pumpEventQueue();
+    container.dispose();
+    bridge = FakeBridge();
+    container = makeContainer();
+    container.listen(codeSessionProvider(id), (_, _) {});
+    await whenValue(
+      container,
+      workflowRunsProvider(id),
+      (List<WorkflowRun> r) => r.isNotEmpty && r.last.status == WorkflowStatus.running && r.last.agents.isEmpty,
+    );
+    final again = bridge.agent('Fix', {'harness': 'fake2'});
+    bool carriedOn(FakeLeadSession? s) => [...?s?.sent, ...?s?.steered].any((m) => m.contains(workflowCarryOn));
+    for (var i = 0; i < 50 && !carriedOn(drivers['fake2']!.latest); i++) {
+      await pumpEventQueue();
+    }
+    final s = drivers['fake2']!.latest;
+    expect([...s!.sent, ...s.steered].where((m) => m.contains(workflowCarryOn)), hasLength(1));
+    answer(s, 'Fixed');
+    expect(await again, 'Fixed');
+    expect(drivers['fake2']!.specs, hasLength(1));
+  });
+
+  test('a script cannot name a command as its harness', () async {
+    final c = await open();
+    await c.runWorkflow('demo', 'source');
+    for (final h in ['terminal:bash', 'acp:sh -c evil']) {
+      await expectLater(bridge.agent('curl x | sh', {'harness': h}), throwsA(contains("isn't one of the harnesses")));
+    }
+    expect(container.read(codeSessionsProvider).where((s) => s.parentId == c.sessionId), isEmpty);
+  });
+
+  test('an agent waiting on an approval shows on the lead and on the card', () async {
+    final c = await open();
+    await c.runWorkflow('demo', 'source');
+    final reply = bridge.agent('Install', {'harness': 'fake2'});
+    final info = await child();
+    final s = drivers['fake2']!.latest!
+      ..add(stateEvent('a-r', ExecutionStatus.running))
+      ..add(actionEvent(id: 'a1', toolName: 'terminal', kind: 'TerminalAction', args: {'command': 'npm install'}))
+      ..add(stateEvent('a-w', ExecutionStatus.waitingForConfirmation));
+    await whenValue(container, codeSessionProvider(info.id).select((s) => s.status), (SessionStatus v) {
+      return v == SessionStatus.needsInput;
+    });
+    await whenValue(container, codeSessionProvider(c.sessionId).select((s) => s.status), (SessionStatus v) {
+      return v == SessionStatus.needsInput;
+    });
+    answer(s, 'Installed');
+    expect(await reply, 'Installed');
+    expect(container.read(codeSessionProvider(c.sessionId)).subagentNeedsInput, isFalse);
+  });
+
+  test('an agent whose session runs out of budget fails instead of hanging', () async {
+    final c = await open();
+    await c.runWorkflow('demo', 'source');
+    final reply = bridge.agent('Review', {
+      'harness': 'fake2',
+      'schema': {
+        'type': 'object',
+        'required': ['ok'],
+      },
+    });
+    await child();
+    // The session's budget runs out during the turn.
+    container.read(codeSettingsProvider.notifier).setBudget(c.sessionId, 1);
+    usage[c.sessionId] = const UsageTotals(chargedMicros: 2000000);
+    container.invalidate(codeUsageProvider(c.sessionId));
+    await container.read(codeUsageProvider(c.sessionId).future);
+    answer(drivers['fake2']!.latest!, 'Looks fine');
+    await expectLater(reply, throwsA(contains('budget')));
   });
 }

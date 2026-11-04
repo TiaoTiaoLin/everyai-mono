@@ -11,3 +11,4 @@ Future<WorkflowBridge> startWorkflowBridge({
 Future<String> readJournalFile(String path) async => '';
 Future<void> appendJournalFile(String path, String line) async {}
 Future<List<String>> listJournalFiles(String dir) async => const [];
+Future<void> retireJournalFile(String path) async {}

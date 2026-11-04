@@ -69,6 +69,7 @@ import 'drivers/driver.dart';
 import 'drivers/driver_policy.dart';
 import 'drivers/driver_process.dart' show closeAllDriverProcesses;
 import 'drivers/driver_registry.dart';
+import 'drivers/terminal/terminal_driver.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
 import 'harness/fake_harness.dart';
@@ -87,7 +88,8 @@ import 'settings/settings.dart';
 import 'session_notifications.dart';
 import 'spill/spill.dart';
 import 'uploads/uploads.dart';
-import 'workflows/workflow_bridge.dart' show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile;
+import 'workflows/workflow_bridge.dart'
+    show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile, retireJournalFile;
 import 'workflows/workflow_engine.dart';
 import 'workflows/workflow_journal.dart';
 import 'workflows/workflow_runs.dart';
@@ -1250,6 +1252,8 @@ final class CodeSessionState {
     final t when t.openQuestion != null || t.openPlan != null => SessionStatus.needsInput,
     // The call (or the turn) waits on subagents; the session is still at work.
     Transcript(openSubagents: [_, ...]) => subagentNeedsInput ? SessionStatus.needsInput : SessionStatus.running,
+    // A workflow's or a background agent waits for the user.
+    _ when subagentNeedsInput => SessionStatus.needsInput,
     Transcript(status: ExecutionStatus.running) => SessionStatus.running,
     Transcript(status: ExecutionStatus.error || ExecutionStatus.stuck) => SessionStatus.failed,
     Transcript(status: ExecutionStatus.finished) => SessionStatus.done,
@@ -1433,6 +1437,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   /// Events before this are history being replayed, which never raise a loop card.
   bool _live = false;
+
+  /// Completes once [_live] is set (or connecting failed).
+  final _historyIn = Completer<void>();
+
+  /// The harness session was attached afresh (not found running in this
+  /// app), so a turn it was in when the app quit is over.
+  bool _attachedFresh = false;
 
   /// How long after attaching the session's events count as live (the
   /// history a reattached harness replays comes first).
@@ -1706,6 +1717,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       if (info.leads.isNotEmpty) await _loadTimeline(info);
       _builder.lead = _leadLabel(info.harness);
       final live = ref.read(_liveProvider);
+      _attachedFresh = live[sessionId] == null;
       final session = _session = live[sessionId] ?? await ref.read(codeSessionsProvider.notifier).attachSession(info);
       live[sessionId] = session;
       await _openContext(info);
@@ -1714,12 +1726,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       _sub = session.events.listen(_onEvent);
       Timer(liveAfter, () {
         _live = true;
+        if (!_historyIn.isCompleted) _historyIn.complete();
         // Calls still waiting after the history replayed (an app restart).
         if (ref.mounted) _syncSubagents();
       });
       state = state.copyWith(connected: true);
       await _loadSettingsRules(info);
     } on Object catch (e) {
+      if (!_historyIn.isCompleted) _historyIn.complete();
+      // Closed while it connected (the app quit): nothing is left to tell.
+      if (!ref.mounted) return;
       state = state.copyWith(error: '$e');
     }
   }
@@ -2235,29 +2251,31 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
   }
 
-  /// Sends [text] (and [files], saved into the project), or queues it while the agent is busy.
+  /// Sends [text] (and [files], saved into the project), or queues it while
+  /// the agent is busy. False when nothing went out or was queued (the
+  /// budget is spent, no session, attachments that couldn't be saved).
   @override
-  Future<void> send(String text, {List<Attachment> files = const []}) async {
-    if (!_withinBudget()) return;
+  Future<bool> send(String text, {List<Attachment> files = const []}) async {
+    if (!_withinBudget()) return false;
     final out = await _outgoing(text, files);
-    if (out == null) return;
+    if (out == null) return false;
     // An outside agent waiting on a card is mid-turn: free it, so the turn can end and the message go out.
     _releaseHostCards();
     final t = state.transcript;
     // During a lead switch it waits for the new lead.
     if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
       state = state.copyWith(queued: [...state.queued, out]);
-      return;
+      return true;
     }
     await _checkpoint();
-    await _sendNow(out);
+    return _sendNow(out);
   }
 
   /// Sends [out]. A card or plan still held for the user is closed first: the
   /// call's result says the user replied in chat, and the message follows.
-  Future<void> _sendNow(Outgoing out) async {
+  Future<bool> _sendNow(Outgoing out) async {
     final session = _session;
-    if (session == null) return;
+    if (session == null) return false;
     _releaseHostCards();
     _touchHost();
     final held = state.transcript.held;
@@ -2278,6 +2296,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (pending.isNotEmpty) {
       if (sessions.byId(sessionId) case final info?) sessions.update(info.copyWith(pendingHandoff: ''));
     }
+    return true;
   }
 
   /// Keeps an outside session's host token alive at each turn; one that
@@ -3207,7 +3226,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// and would stop a plain re-run at once.
   Future<void> retry() async {
     if (!_withinBudget()) return;
-    if (state.transcript.status == ExecutionStatus.stuck) return send('Carry on from where you stopped.');
+    if (state.transcript.status == ExecutionStatus.stuck) {
+      await send('Carry on from where you stopped.');
+      return;
+    }
     await _session?.resume();
   }
 
@@ -3655,12 +3677,26 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final runId = const Uuid().v7();
     final path = '${await _workflowDir()}/$runId.jsonl';
     final journal = WorkflowJournal.fresh((line) => appendJournalFile(path, line));
-    await journal.write({'t': 'start', 'name': name, 'source': source, 'args': args});
+    await journal.write({
+      't': 'start',
+      'name': name,
+      'source': source,
+      'args': args,
+      'at': DateTime.now().millisecondsSinceEpoch,
+    });
     unawaited(_runWorkflow(runId, name, source, args, journal));
     return runId;
   }
 
   void stopWorkflow(String runId) => _workflows[runId]?.stop();
+
+  /// A workflow agent (by call id) waits for the user: this session shows it needs input.
+  void _workflowChildWaiting(String callId, bool waiting) {
+    if (!ref.mounted) return;
+    if (waiting ? _childWaiting.add(callId) : _childWaiting.remove(callId)) {
+      state = state.copyWith(subagentNeedsInput: _childWaiting.isNotEmpty);
+    }
+  }
 
   Future<String> _workflowDir() async => '${await ref.read(driverDataDirProvider)()}/workflows/$sessionId';
 
@@ -3689,6 +3725,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     WorkflowJournal journal,
   ) async {
     final runs = ref.read(workflowRunsProvider(sessionId).notifier);
+    final journalPath = '${await _workflowDir()}/$runId.jsonl';
     final WorkflowBridge bridge;
     try {
       bridge = await ref.read(workflowBridgeProvider)(
@@ -3700,6 +3737,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       final why = e is StateError ? e.message : '$e';
       runs.put(WorkflowRun(runId: runId, name: name, status: WorkflowStatus.failed, error: why));
       await journal.write({'t': 'end', 'status': WorkflowStatus.failed.name, 'error': why});
+      await retireJournalFile(journalPath);
       return;
     }
     if (!ref.mounted) return bridge.kill();
@@ -3707,7 +3745,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       runId: runId,
       name: name,
       bridge: bridge,
-      launcher: _WorkflowLauncher(ref, sessionId, 'wf-$runId', () => state.mode),
+      launcher: _WorkflowLauncher(ref, sessionId, 'wf-$runId', () => state.mode, _workflowChildWaiting),
       journal: journal,
       onProgress: (run) {
         if (ref.mounted) runs.put(run);
@@ -3715,8 +3753,15 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     );
     final end = await engine.run();
     _workflows.remove(runId);
+    // Detached (the session closed mid-run): the journal stays for the resume.
+    if (journal.ended) await retireJournalFile(journalPath);
     if (!ref.mounted || end.status == WorkflowStatus.stopped) return;
-    unawaited(_session?.send(workflowResultMessage(end)).catchError((Object _) {}));
+    final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
+    final message = workflowResultMessage(
+      end,
+      save: dir == null || noLocalFolder(dir) ? null : (json) => saveSpill(dir, 'workflow-$runId.json', json),
+    );
+    unawaited(_session?.send(message).catchError((Object _) {}));
   }
 
   // ------------------------------------------------------ orchestrating forks
@@ -4321,6 +4366,13 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
     _debounce = Timer(delay, _read);
   }
 
+  /// Reads the ledger now and returns the totals (the last reading when
+  /// the server can't be reached).
+  Future<UsageTotals> refreshNow() async {
+    await _read();
+    return _total;
+  }
+
   Future<void> _read() async {
     if (!ref.mounted) return;
     final next = await AsyncValue.guard(_fetch);
@@ -4426,13 +4478,23 @@ String checkpointRef(SessionWorktree w, int turn) => 'refs/everyai/${w.slug}/tur
 /// (never forks, so any driver will do) on the harness and model each call
 /// names, in their own worktree when asked, watched until their turn ends.
 final class _WorkflowLauncher implements AgentLauncher {
-  _WorkflowLauncher(this._ref, this._sessionId, this._prefix, this._mode);
+  _WorkflowLauncher(this._ref, this._sessionId, this._prefix, this._mode, this._waiting);
   final Ref _ref;
   final String _sessionId;
 
   /// Every child's call id starts with it (`wf-<run>`), the rest is its key.
   final String _prefix;
   final AgentMode Function() _mode;
+
+  /// A child (by call id) waits for the user, or no longer does.
+  final void Function(String callId, bool waiting) _waiting;
+
+  /// Turns being watched, by child id, so a stop can end them.
+  final _watching = <String, Completer<WorkflowAgentResult>>{};
+
+  /// What each harness reported this run (asked once, not per agent).
+  final _detected = <String, Future<DriverStatus>>{};
+  final _models = <String, Future<List<DriverModel>>>{};
 
   CodeSessions get _sessions => _ref.read(codeSessionsProvider.notifier);
 
@@ -4445,10 +4507,18 @@ final class _WorkflowLauncher implements AgentLauncher {
       return (childId: s.id, harness: s.harness, model: s.model, note: null);
     }
     final harness = call.harness ?? parent.harness;
+    // Only a harness the user set up: a script must not name a command
+    // (`acp:<cmd>`, `terminal:<cmd>`) and have the app run it.
+    final registry = _ref.read(driverRegistryProvider);
+    if (harness != parent.harness && !registry.listed.any((d) => d.info.id == harness)) {
+      throw HarnessError("$harness isn't one of the harnesses set up in this app.");
+    }
     final runner = await harnessFor(_ref, parent.workingDir, harness: harness);
     if (runner is HarnessDriver) {
+      // A terminal agent can't say when its turn ends, so nothing could wait for it.
+      if (runner is TerminalDriver) throw HarnessError("Workflow agents can't run in ${runner.info.label}.");
       if (consentProblem(runner.info, _ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
-      if (harness != parent.harness && !(await runner.detect()).installed) {
+      if (harness != parent.harness && !(await (_detected[harness] ??= runner.detect())).installed) {
         throw HarnessError("${runner.info.label} isn't installed on this computer.");
       }
     }
@@ -4461,7 +4531,8 @@ final class _WorkflowLauncher implements AgentLauncher {
         slug: sessionSlug(call.label, const Uuid().v7()),
       );
     }
-    // A writer in its own worktree may edit even when the lead is planning.
+    // A writer in its own worktree may edit even when the lead is planning
+    // (its work isn't merged until the lead builds; see [finish]).
     final mode = _mode() == AgentMode.plan && copy != null ? AgentMode.ask : _mode();
     final info = await _sessions.startChild(
       parent: parent,
@@ -4488,7 +4559,8 @@ final class _WorkflowLauncher implements AgentLauncher {
     String harness,
     CodeSessionInfo parent,
   ) async {
-    final own = runner is HarnessDriver ? await runner.models() : const <DriverModel>[];
+    if (asked == null && harness == parent.harness) return (model: parent.model, note: null);
+    final own = runner is HarnessDriver ? await (_models[harness] ??= runner.models()) : const <DriverModel>[];
     final ids = own.isNotEmpty
         ? [for (final m in own) m.id]
         : harness == everyaiHarnessName
@@ -4521,40 +4593,90 @@ final class _WorkflowLauncher implements AgentLauncher {
   }
 
   @override
-  Future<WorkflowAgentResult> watch(String childId) => _turnEnd(childId, null);
+  Future<WorkflowAgentResult> watch(String childId, {bool reattached = false}) async {
+    if (!reattached) return _turnEnd(childId, null);
+    // Its history replays first. A child the app had to attach afresh lost
+    // its turn with the app, so it is told to carry on (a steer: a replayed
+    // "working" state would hold a plain message back), and that turn is watched.
+    final child = codeSessionProvider(childId);
+    final keep = _ref.listen(child, (_, _) {});
+    try {
+      final controller = _ref.read(child.notifier);
+      await controller._historyIn.future;
+      final now = _ref.read(child);
+      if (!controller._attachedFresh || subagentOutcome(now.transcript, error: now.error) != null) {
+        return await _turnEnd(childId, null);
+      }
+      final before = _texts(now.transcript);
+      await controller.steer(workflowCarryOn);
+      return await _turnEnd(childId, before);
+    } finally {
+      keep.close();
+    }
+  }
 
   @override
   Future<WorkflowAgentResult> followUp(String childId, String text) async {
     final before = _texts(_ref.read(codeSessionProvider(childId)).transcript);
-    await _ref.read(codeSessionProvider(childId).notifier).send(text);
+    final sent = await _ref.read(codeSessionProvider(childId).notifier).send(text);
+    if (!sent) {
+      final why = _ref.read(codeSessionProvider(childId)).error;
+      return (
+        text: '',
+        error: "The message couldn't be sent to the agent${why == null ? '' : ': $why'}.",
+        spentMicros: await _spentOf(childId),
+      );
+    }
     return _turnEnd(childId, before);
   }
 
   static int _texts(Transcript t) => t.items.whereType<AgentText>().length;
 
   /// The child's turn end: any ended turn, or after a follow-up ([after]
-  /// replies so far) one that ran or said something new.
+  /// replies so far) one that ran or said something new. While it waits for
+  /// the user the lead shows that it needs input.
   Future<WorkflowAgentResult> _turnEnd(String childId, int? after) {
-    final done = Completer<WorkflowAgentResult>();
+    final done = _watching[childId] = Completer<WorkflowAgentResult>();
+    final callId = _sessions.byId(childId)?.parentCallId ?? childId;
     var busy = false;
+    var ending = false;
     final sub = _ref.listen(codeSessionProvider(childId), (_, next) {
-      if (done.isCompleted) return;
+      if (done.isCompleted || ending) return;
+      _waiting(callId, next.status == SessionStatus.needsInput);
       final outcome = subagentOutcome(next.transcript, error: next.error);
       if (outcome == null) {
         busy = true;
         return;
       }
-      if (after != null && !busy && _texts(next.transcript) <= after) return;
       final ok = outcome.status == SubagentStatus.completed;
-      done.complete((text: outcome.text, error: ok ? null : outcome.text, spentMicros: _spentOf(childId)));
+      // The turn before a follow-up ended well, so a failure is this turn's.
+      if (after != null && ok && !busy && _texts(next.transcript) <= after) return;
+      ending = true;
+      unawaited(
+        _spentOf(childId).then((spent) {
+          if (!done.isCompleted) {
+            done.complete((text: outcome.text, error: ok ? null : outcome.text, spentMicros: spent));
+          }
+        }),
+      );
     }, fireImmediately: true);
-    return done.future.whenComplete(sub.close);
+    return done.future.whenComplete(() {
+      sub.close();
+      _waiting(callId, false);
+      if (_watching[childId] == done) _watching.remove(childId);
+    });
   }
 
   /// What the child cost EveryAI: only one on the EveryAI harness spends.
-  int? _spentOf(String childId) {
+  /// Read again now, as the last reading may be from the turn's start.
+  Future<int?> _spentOf(String childId) async {
     if (_sessions.byId(childId)?.harness != everyaiHarnessName) return null;
-    return _ref.exists(codeUsageProvider(childId)) ? _ref.read(codeUsageProvider(childId)).value?.spentMicros : null;
+    final usage = _ref.read(codeUsageProvider(childId).notifier);
+    try {
+      return (await usage.refreshNow()).spentMicros;
+    } on Object {
+      return _ref.read(codeUsageProvider(childId)).value?.spentMicros;
+    }
   }
 
   @override
@@ -4562,12 +4684,15 @@ final class _WorkflowLauncher implements AgentLauncher {
     final info = _sessions.byId(childId);
     final copy = info?.forkCopy;
     if (info == null || copy == null) return null;
+    // While the lead plans nothing lands in the user's folder: the work waits on its ref.
+    final planning = _mode() == AgentMode.plan;
     try {
       final m = await CodeSessionController._mergeOneAtATime(
-        () => GitService.mergeFork(copy, slug: copy.root.split('/').last, merge: ok),
+        () => GitService.mergeFork(copy, slug: copy.root.split('/').last, merge: ok && !planning),
       );
       _sessions.update(info.copyWith(merged: true));
       if (!ok) return 'Not merged into your folder; its work is kept at ${m.ref}.';
+      if (planning) return 'Not merged while planning; its work is kept at ${m.ref}. Merge it once you build.';
       final note = withMergeNote(const SubagentReport(SubagentStatus.completed, ''), m).text.trim();
       return note.isEmpty ? null : note;
     } on Object catch (e) {
@@ -4576,5 +4701,14 @@ final class _WorkflowLauncher implements AgentLauncher {
   }
 
   @override
-  void stop(String childId) => unawaited(_ref.read(_liveProvider)[childId]?.interrupt());
+  void stop(String childId) {
+    final turn = _watching.remove(childId);
+    if (turn != null && !turn.isCompleted) turn.complete((text: '', error: 'Stopped.', spentMicros: null));
+    unawaited(_ref.read(_liveProvider)[childId]?.interrupt());
+  }
 }
+
+/// Sent to a workflow agent whose turn the app's restart cut off.
+const workflowCarryOn =
+    'The app restarted while you were working, which stopped your turn. Carry on with your task from where you left '
+    'off, and finish with the answer it asks for.';
