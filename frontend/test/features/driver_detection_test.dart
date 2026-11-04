@@ -48,12 +48,15 @@ ProviderContainer _container(
     overrides: [
       driverRegistryProvider.overrideWithValue(DriverRegistry(drivers)),
       preferencesProvider.overrideWithValue(prefs ?? Preferences.inMemory()),
-      if (notifier != null) driverStatusesProvider.overrideWith(notifier),
+      driverStatusesProvider.overrideWith(notifier ?? () => DriverStatuses(loadShell: _noShell)),
     ],
   );
   addTearDown(c.dispose);
   return c;
 }
+
+/// The login shell is never read in these tests.
+Future<void> _noShell() async {}
 
 String _cache(Map<String, DriverStatus> statuses, {DateTime? at}) => jsonEncode({
   'v': 1,
@@ -70,12 +73,80 @@ void main() {
         'b': _Fake('b', () async => const DriverStatus()),
         'c': _Fake('c', () async => throw StateError('broken')),
         'd': _Fake('d', () => never.future),
-      }, notifier: () => DriverStatuses(timeout: Duration.zero));
+      }, notifier: () => DriverStatuses(loadShell: _noShell, timeout: Duration.zero));
       final s = await c.read(driverStatusesProvider.future);
       expect((s['a']!.installed, s['a']!.version), (true, '1.2'));
       expect(s['b']!.installed, isFalse);
       expect((s['c']!.installed, s['c']!.problem), (false, "Couldn't check: Bad state: broken"));
-      expect((s['d']!.installed, s['d']!.problem), (true, noAnswerProblem));
+      // Nothing known and no answer: not offered on a guess.
+      expect((s['d']!.installed, s['d']!.problem), (false, noAnswerProblem));
+    });
+
+    test('the login shell is read before any driver starts, on the launch scan too', () async {
+      final shell = Completer<void>();
+      final a = _Fake('a', () async => const DriverStatus(installed: true));
+      final c = _container({'a': a}, notifier: () => DriverStatuses(loadShell: () => shell.future));
+      final done = c.read(driverStatusesProvider.future);
+      await pumpEventQueue();
+      expect(a.detects, 0);
+      shell.complete();
+      expect((await done)['a']!.installed, isTrue);
+    });
+
+    test('a reload asked for during a scan without one runs one more scan after it', () async {
+      var reloads = 0;
+      var gate = Completer<DriverStatus>();
+      final a = _Fake('a', () => gate.future);
+      final c = _container({
+        'a': a,
+      }, notifier: () => DriverStatuses(loadShell: _noShell, reloadShell: () async => reloads++));
+      final first = c.read(driverStatusesProvider.future);
+      final n = c.read(driverStatusesProvider.notifier);
+      final again = n.refresh(reloadShell: true);
+      final same = n.refresh(reloadShell: true);
+      gate.complete(const DriverStatus());
+      await first;
+      gate = Completer<DriverStatus>();
+      await pumpEventQueue();
+      gate.complete(const DriverStatus(installed: true, version: 'new'));
+      final r = await again;
+      expect(identical(await same, r), isTrue);
+      expect((reloads, a.detects, r['a']!.version), (1, 2, 'new'));
+      // A plain refresh now shares nothing and checks once more.
+      gate = Completer<DriverStatus>()..complete(const DriverStatus(installed: true));
+      await n.refresh();
+      expect((reloads, a.detects), (1, 3));
+    });
+
+    testWidgets('a check that ran out keeps its slot until it settles', (tester) async {
+      final hung = Completer<DriverStatus>();
+      final a = _Fake('a', () => hung.future);
+      final b = _Fake('b', () async => const DriverStatus(installed: true));
+      final c = _container({
+        'a': a,
+        'b': b,
+      }, notifier: () => DriverStatuses(loadShell: _noShell, timeout: const Duration(seconds: 30), concurrency: 1));
+      Map<String, DriverStatus>? s;
+      unawaited(c.read(driverStatusesProvider.future).then((v) => s = v));
+      await tester.pump(const Duration(seconds: 31));
+      // a ran out, but its processes may still run: b waits.
+      expect((a.detects, b.detects, s), (1, 0, null));
+      hung.complete(const DriverStatus(installed: true));
+      await tester.pump();
+      expect(b.detects, 1);
+      expect((s!['a']!.problem, s!['b']!.installed), (noAnswerProblem, true));
+      // One that never settles frees its slot one more timeout later.
+      final never = _Fake('n', () => Completer<DriverStatus>().future);
+      final d = _Fake('d', () async => const DriverStatus(installed: true));
+      final c2 = _container({
+        'n': never,
+        'd': d,
+      }, notifier: () => DriverStatuses(loadShell: _noShell, timeout: const Duration(seconds: 30), concurrency: 1));
+      unawaited(c2.read(driverStatusesProvider.future));
+      await tester.pump(const Duration(seconds: 31));
+      expect(d.detects, 0);
+      await tester.pump(const Duration(seconds: 30));
+      expect(d.detects, 1);
     });
 
     test('checks at most four drivers at once', () async {
@@ -124,7 +195,10 @@ void main() {
       final drivers = {
         for (var i = 0; i < 5; i++) 'd$i': _Fake('d$i', () async => const DriverStatus(installed: true)),
       };
-      final c = _container(drivers, notifier: () => DriverStatuses(reloadShell: () async => reloads++));
+      final c = _container(
+        drivers,
+        notifier: () => DriverStatuses(loadShell: _noShell, reloadShell: () async => reloads++),
+      );
       await c.read(driverStatusesProvider.future);
       expect(reloads, 0);
       await c.read(driverStatusesProvider.notifier).refresh(reloadShell: true);
@@ -174,11 +248,12 @@ void main() {
       final c = _container(
         {'a': _Fake('a', () => Completer<DriverStatus>().future)},
         prefs: prefs,
-        notifier: () => DriverStatuses(timeout: Duration.zero),
+        notifier: () => DriverStatuses(loadShell: _noShell, timeout: Duration.zero),
       );
       await c.read(driverStatusesProvider.future);
       final s = await c.read(driverStatusesProvider.notifier).refresh();
-      expect((s['a']!.version, s['a']!.problem), ('3', noAnswerProblem));
+      // Kept as it was: no answer is not a reason to grey it out.
+      expect((s['a']!.version, s['a']!.problem), ('3', null));
     });
 
     test('a recent check is not repeated when the app comes back', () async {
@@ -216,7 +291,7 @@ void main() {
       );
     });
 
-    test('the usual install directories, only the ones that exist', () {
+    test('the usual install directories, made yet or not', () {
       final dirs = {
         '/opt/homebrew/bin',
         '/h/.bun/bin',
@@ -228,7 +303,19 @@ void main() {
       final files = {'/h/.npmrc': 'color=true\nprefix = ~/.npm-pkgs\n'};
       List<String> list(String d) => d == '/h/.nvm/versions/node' ? ['v9.0.0', 'v18.2.0', 'v20.11.1', 'junk'] : [];
       final found = commonDirs('/h', const {}, exists: dirs.contains, read: (f) => files[f], list: list);
-      expect(found, ['/opt/homebrew/bin', '/h/.npm-pkgs/bin', '/h/.nvm/versions/node/v20.11.1/bin', '/h/.bun/bin']);
+      expect(found, [
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/h/.local/bin',
+        '/h/.npm-global/bin',
+        '/h/.npm-pkgs/bin',
+        '/h/.nvm/versions/node/v20.11.1/bin',
+        '/h/.bun/bin',
+        '/h/.cargo/bin',
+        '/h/.volta/bin',
+        '/h/.deno/bin',
+        '/h/.cursor/bin',
+      ]);
       // nvm's default alias wins over the newest version.
       files['/h/.nvm/alias/default'] = '18.2.0\n';
       expect(
@@ -250,7 +337,7 @@ void main() {
         windows: true,
         exists: (d) => d != r'C:\Users\u\scoop\shims',
       );
-      expect(found, [r'C:\AppData\npm', r'C:\Users\u\.local\bin', r'C:\Users\u\.bun\bin']);
+      expect(found, [r'C:\AppData\npm', r'C:\Users\u\.local\bin', r'C:\Users\u\.bun\bin', r'C:\Users\u\scoop\shims']);
     });
 
     test('the login PATH comes first and each directory appears once', () {

@@ -85,9 +85,11 @@ final class ShellEnv {
 /// Where CLIs are usually installed, for an app started from the Dock whose
 /// login shell doesn't put them on PATH: Homebrew, npm's global prefix
 /// (`NPM_CONFIG_PREFIX` or `prefix=` in `~/.npmrc`), nvm's default or newest
-/// Node, bun, cargo, volta, deno, Cursor's and the user's own bin. Only the
-/// ones that exist ([exists]); [read] and [list] read a file and a
-/// directory's entries (null or empty when missing). No process runs.
+/// Node, bun, cargo, volta, deno, Cursor's and the user's own bin. Kept
+/// whether they exist yet or not, since the env is kept for the whole run
+/// and an installer may make one later (`~/.local/bin`); [exists] only
+/// picks nvm's version. [read] and [list] read a file and a directory's
+/// entries (null or empty when missing). No process runs.
 List<String> commonDirs(
   String home,
   Map<String, String> env, {
@@ -121,7 +123,7 @@ List<String> commonDirs(
       if (nonEmpty(env['APPDATA']) case final a?) '$a\\npm',
       if (nonEmpty(env['LOCALAPPDATA']) case final l?) ...['$l\\Programs\\nodejs', '$l\\Volta\\bin', '$l\\pnpm'],
       if (nonEmpty(env['USERPROFILE']) case final u?) ...['$u\\.local\\bin', '$u\\.bun\\bin', '$u\\scoop\\shims'],
-    ].where(has).toList();
+    ];
   }
   String expand(String p) => p.startsWith('~/') ? '$home${p.substring(1)}' : p;
   String? npmPrefix() {
@@ -166,7 +168,7 @@ List<String> commonDirs(
     '$home/.volta/bin',
     '$home/.deno/bin',
     '$home/.cursor/bin',
-  ].where(has).toList();
+  ];
 }
 
 /// [path] with [extra] directories after it, each kept once (the first

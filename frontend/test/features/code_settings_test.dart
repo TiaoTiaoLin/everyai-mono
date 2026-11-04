@@ -191,7 +191,9 @@ void main() {
         databaseProvider.overrideWithValue(db),
         preferencesProvider.overrideWithValue(prefs),
         driverRegistryProvider.overrideWithValue(DriverRegistry({'claude-code': claude, 'codex': codex})),
-        driverStatusesProvider.overrideWith(() => DriverStatuses(reloadShell: () async => reloads++)),
+        driverStatusesProvider.overrideWith(
+          () => DriverStatuses(loadShell: () async {}, reloadShell: () async => reloads++),
+        ),
       ],
     );
     await tester.pumpWidget(

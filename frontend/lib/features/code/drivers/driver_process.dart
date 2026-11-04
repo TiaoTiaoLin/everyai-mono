@@ -51,11 +51,14 @@ Future<DriverStatus> detectCli(
 /// (the user installed something since the app started).
 Future<void> reloadShellEnv() => impl.reloadShellEnv();
 
+/// Reads the login shell's PATH if this app run hasn't yet (kept after).
+Future<void> loadShellEnv() => impl.loadShellEnv();
+
 /// The problem a driver whose sessions aren't built yet reports.
 const notBuiltProblem = 'Not built yet.';
 
 /// The problem a driver whose check ran out of time reports.
-const noAnswerProblem = "Didn't answer in 8 s.";
+const noAnswerProblem = "Didn't answer in 30 s.";
 
 /// [detectCli] for a driver whose sessions aren't built yet.
 Future<DriverStatus> notBuiltYet(String command, {Future<String?> Function(String command)? which}) async =>

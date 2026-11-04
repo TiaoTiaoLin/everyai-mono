@@ -343,6 +343,15 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             ].join(' · '),
             trailing: widget.onHarness == null ? null : more,
             onTap: widget.onHarness == null ? null : () => setState(() => _page = _Page.harness),
+          )
+        // Only EveryAI is found: no Harness page to open, but the user may
+        // be about to install one, so the check stays in reach.
+        else if (widget.onHarness != null && widget.onCheckAgain != null)
+          PopoverRow(
+            key: const ValueKey('agent-menu.find-harnesses'),
+            title: 'Find installed harnesses',
+            subtitle: 'Claude Code, Codex, OpenCode and others',
+            onTap: widget.onCheckAgain,
           ),
         PopoverRow(
           key: const ValueKey('agent-menu.harness-mode'),

@@ -388,7 +388,8 @@ void main() {
       expect(leadOptions([everyai, codex], null, const {}, current: 'everyai'), hasLength(1));
     });
 
-    testWidgets('with only EveryAI there is no Harness row', (tester) async {
+    testWidgets('with only EveryAI there is no Harness row, but the check stays in reach', (tester) async {
+      var checks = 0;
       await tester.pumpWidget(
         _host(
           SizedBox(
@@ -402,13 +403,16 @@ void main() {
               close: () {},
               leads: const [(info: everyai, blocked: null, detail: '')],
               onHarness: (_) {},
-              onCheckAgain: () {},
+              onCheckAgain: () => checks++,
             ),
           ),
         ),
       );
       expect(find.byKey(const ValueKey('agent-menu.harness')), findsNothing);
       expect(find.byKey(const ValueKey('agent-menu.model')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.find-harnesses')));
+      await tester.pump();
+      expect(checks, 1);
     });
 
     testWidgets('Check again looks for harnesses again', (tester) async {

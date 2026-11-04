@@ -125,6 +125,8 @@ const versionTimeout = Duration(seconds: 4);
 
 Future<void> reloadShellEnv() => ShellEnv.reload();
 
+Future<void> loadShellEnv() => ShellEnv.load();
+
 Future<String?> _which(String command) async =>
     findOnPath(command, (await ShellEnv.load()).env[Platform.isWindows ? _windowsPathKey : 'PATH'] ?? '');
 

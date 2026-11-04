@@ -22,3 +22,5 @@ Future<DriverStatus> detectCli(
 Future<void> closeAllDriverProcesses() async {}
 
 Future<void> reloadShellEnv() async {}
+
+Future<void> loadShellEnv() async {}
