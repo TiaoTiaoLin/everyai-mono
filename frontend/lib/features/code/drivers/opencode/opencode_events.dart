@@ -2,6 +2,7 @@
 
 import '../../harness/events.dart';
 import '../driver_events.dart';
+import '../usage_limit.dart';
 
 /// Turns one OpenCode 2.x session's server events ([live]) and its message
 /// list ([history], [requests]) into the app's [HarnessEvent]s. Both paths
@@ -16,12 +17,14 @@ import '../driver_events.dart';
 /// then `read`) gets a fresh id `<call>#<request>`, so it is decided again.
 /// Calls the rules allow show once they finish.
 final class OpenCodeMapper {
-  OpenCodeMapper({required this.workingDir, bool Function(String providerId)? onPlan})
-    : _onPlan = onPlan ?? ((_) => false);
+  OpenCodeMapper({required this.workingDir, bool Function(String providerId)? onPlan, DateTime Function()? now})
+    : _onPlan = onPlan ?? ((_) => false),
+      _now = now ?? DateTime.now;
 
   /// The session's folder; OpenCode's relative paths are made absolute against it.
   final String workingDir;
   final bool Function(String providerId) _onPlan;
+  final DateTime Function() _now;
 
   final _seen = <String>{};
   final _names = <String, String>{};
@@ -94,7 +97,7 @@ final class OpenCodeMapper {
       case 'session.execution.succeeded':
         _end(out, ExecutionStatus.finished);
       case 'session.execution.failed':
-        _end(out, ExecutionStatus.error, error: _map(d['error']));
+        _end(out, ExecutionStatus.error, error: _map(d['error']), live: true);
       case 'session.execution.interrupted':
         _end(out, ExecutionStatus.idle);
     }
@@ -287,17 +290,33 @@ final class OpenCodeMapper {
   }
 
   /// The run ended: whatever was still waiting can't be answered any more.
-  void _end(List<HarnessEvent> out, ExecutionStatus to, {Map<String, Object?>? error, bool emitState = true}) {
+  ///
+  /// A failure typed `provider.quota` / `provider.free-limit` (OpenCode 2.1.3
+  /// `Session.StructuredError`; it never retries those) is a usage limit.
+  /// `provider.rate-limit` was retried by OpenCode already: a plain failure.
+  /// Only a [live] event can date the reset (`retryAfterMs` from now).
+  void _end(
+    List<HarnessEvent> out,
+    ExecutionStatus to, {
+    Map<String, Object?>? error,
+    bool emitState = true,
+    bool live = false,
+  }) {
     _pending.clear();
     if (to == ExecutionStatus.error) {
       final id = '$_lastMessage/failed';
       if (_seen.add(id)) {
+        final message = _str(error?['message']).isEmpty ? 'OpenCode stopped with an error.' : _str(error?['message']);
+        final type = error?['type'];
+        final after = error?['retryAfterMs'];
         out.add(
-          HarnessEvent.decode({
-            'kind': 'ConversationErrorEvent',
-            'id': id,
-            'detail': _str(error?['message']).isEmpty ? 'OpenCode stopped with an error.' : _str(error?['message']),
-          }),
+          type == 'provider.quota' || type == 'provider.free-limit'
+              ? usageLimitEvent(
+                  id,
+                  message,
+                  resetsAt: live && after is num ? _now().add(Duration(milliseconds: after.round())) : null,
+                )
+              : HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': id, 'detail': message}),
         );
       }
     }

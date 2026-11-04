@@ -5,6 +5,7 @@ import 'dart:convert';
 import '../../harness/events.dart';
 import '../driver.dart';
 import '../driver_events.dart';
+import '../json_rpc.dart';
 
 // Agent Client Protocol messages as the app's events, as pure functions
 // (agentclientprotocol.com: protocol/tool-calls, protocol/prompt-turn,
@@ -228,6 +229,33 @@ StreamDelta acpDelta({String content = '', String reasoning = ''}) =>
 ConversationFailure acpNotice(String id, String message) =>
     HarnessEvent.decode({'kind': 'ConversationErrorEvent', 'id': id, 'source': 'environment', 'detail': message})
         as ConversationFailure;
+
+/// Whether a failed `session/prompt` says the agent's plan or key ran out
+/// (switching harness helps), with when it resets if the agent said; null
+/// for any other error, a rate limit included (the agent retried it already).
+///
+/// - opencode acp 2.1.3 sends the run's error type as `data.errorName`:
+///   `provider.quota` / `provider.free-limit` are limits,
+///   `provider.rate-limit` isn't.
+/// - gemini-cli 0.33.2 drops its error types at the ACP boundary (a
+///   `TerminalQuotaError` arrives as code 500 with only the message), so its
+///   quota messages are matched: "You have exhausted your daily quota on this
+///   model." and "…exhausted your capacity… Your quota will reset after
+///   19h14m47s." Its code 429 "Rate limit exceeded" and "Suggested retry
+///   after 60s." are the retryable kind.
+({DateTime? resetsAt})? acpUsageLimit(JsonRpcError e, {required DateTime now}) {
+  if (e.data case {'errorName': final Object name}) {
+    return name == 'provider.quota' || name == 'provider.free-limit' ? (resetsAt: null) : null;
+  }
+  if (!_geminiQuota.hasMatch(e.message)) return null;
+  final after = _resetAfter.firstMatch(e.message);
+  if (after == null || [1, 2, 3].every((i) => after.group(i) == null)) return (resetsAt: null);
+  int part(int i) => int.tryParse(after.group(i) ?? '') ?? 0;
+  return (resetsAt: now.add(Duration(hours: part(1), minutes: part(2), seconds: part(3))));
+}
+
+final _geminiQuota = RegExp(r'exhausted your (daily quota|capacity)|quota will reset after', caseSensitive: false);
+final _resetAfter = RegExp(r'reset after (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?', caseSensitive: false);
 
 /// The text of a content chunk (`{type: text, text}`), '' for anything else.
 String acpChunkText(Object? content) => _blockText(content);

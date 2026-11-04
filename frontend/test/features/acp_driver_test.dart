@@ -7,6 +7,7 @@ import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -578,6 +579,19 @@ void main() {
         [for (final x in seen.results) (x.actionId, x.text)],
         [('tc-run_shell_command-3', 'Cancelled.'), ('tc-read_file-1', 'Cancelled.')],
       );
+      await s.close();
+    });
+
+    test('a spent quota ends the turn as a usage limit', () async {
+      final r = rig(['gemini/quota.jsonl']);
+      final s = await r.driver('gemini', 'gemini').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('Go on.');
+      await seen.untilStatus(ExecutionStatus.error);
+      r.expectPlayed();
+      final limit = seen.all.map(usageLimitOf).nonNulls.single;
+      expect(limit.message, startsWith('Gemini CLI: You have exhausted your capacity'));
+      expect(limit.resetsAt, isNotNull);
       await s.close();
     });
 

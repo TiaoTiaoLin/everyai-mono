@@ -15,6 +15,7 @@ import '../driver_events.dart';
 import '../driver_policy.dart' show rewindRefusal;
 import '../event_journal.dart';
 import '../json_rpc.dart';
+import '../usage_limit.dart';
 import 'acp_agents.dart';
 import 'acp_files.dart';
 import 'acp_mapping.dart';
@@ -563,7 +564,12 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _setStatus(stop == 'cancelled' ? ExecutionStatus.paused : ExecutionStatus.finished);
     } on JsonRpcError catch (e) {
       _flush();
-      _emit(acpNotice(_next('n'), _errorText(e, closed: peer.isClosed)));
+      final limit = peer.isClosed ? null : acpUsageLimit(e, now: DateTime.now());
+      _emit(
+        limit == null
+            ? acpNotice(_next('n'), _errorText(e, closed: peer.isClosed))
+            : usageLimitEvent(_next('n'), '$_label: ${e.message}', resetsAt: limit.resetsAt),
+      );
       _setStatus(ExecutionStatus.error);
     }
   }
