@@ -16,6 +16,8 @@ import '../core/theme/every_theme.dart';
 import '../core/ui/adaptive.dart' show AdaptiveButton, AdaptiveProgress, GlassSurface, GlassLevel, showAdaptiveToast;
 import '../features/code/code_providers.dart' show driverShutdownProvider;
 import '../features/history/ui/sidebar.dart';
+import '../features/onboarding/onboarding_providers.dart';
+import '../features/onboarding/ui/onboarding_screen.dart';
 import '../features/remote/remote_providers.dart' show remoteHostingProvider;
 import '../features/settings/byok_keys.dart' show modelBillingProvider;
 import '../features/settings/settings_registry.dart';
@@ -119,6 +121,14 @@ class _AppShellState extends ConsumerState<AppShell> {
     ref.listen(pendingSettingsProvider, (_, next) {
       if (next != null) _openPendingSettings();
     });
+
+    // The pre-alpha entry screen, once per build version, before anything else.
+    if (!ref.watch(onboardingAcceptedProvider)) {
+      const tour = OnboardingScreen();
+      return theme.design == DesignLanguage.material || theme.design == DesignLanguage.adwaita
+          ? m.Material(color: theme.background, child: tour)
+          : tour;
+    }
 
     Widget body = _SplitView(
       compact: compact,

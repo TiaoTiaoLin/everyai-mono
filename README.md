@@ -233,7 +233,8 @@ On a Mac you can also double-click **`Launch Flutter (macOS).command`**: it inst
 CocoaPods if missing, builds the app and opens it. Windows and Linux builds come from the
 [Dev builds](.github/workflows/dev-builds.yml) workflow (push a `builds/*` branch or run it from the Actions tab;
 download from the run's Artifacts). The app waits for the server while it wakes up ("Waking up the EveryAI
-server…"). Then add a key in **Settings → API keys**.
+server…"). The first launch walks you through a short pre-alpha tour: what to expect, adding a key (checked live),
+the coding agents found on your computer, and the [Dev Build Terms](TERMS-DEV.md).
 
 ### Everything locally (backend + app)
 

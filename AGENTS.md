@@ -647,6 +647,11 @@ owner's local notes (gitignored); the task board is the GitHub Project.
     up the EveryAI server…" (`serverStatusProvider`). `scripts/launch.sh` runs or builds the app against the server
     (detects the OS; web, ios-sim, ios, android, `build <target>`); `Launch Flutter (macOS).command` builds and opens
     the macOS app. Windows/Linux builds: `.github/workflows/dev-builds.yml` (push `builds/*` or run it by hand).
+  - Entry screen (`features/onboarding/`): a five-step tour shown once per `appVersion` (`core/config/version.dart`,
+    kept equal to pubspec by a test): welcome, expect bugs (GitHub issue link with the version), add a key (live
+    `keyCheckProvider`, rejected keys not saved), Code agents found here (`driverStatusesProvider`, consent buttons;
+    remote-control text off desktop), accept the Dev Build Terms (`TERMS-DEV.md`, same text as `devBuildTerms`).
+    Headlines type themselves out (`TypewriterText`). Gate: `onboardingAcceptedProvider` in the shell.
   - Unsigned macOS Release: `keychain-access-groups` removed from `Release.entitlements` (needs a team); add it back
     for the signed release. macOS shows the version as 0.1.0 (Flutter drops the pre-release part there).
 
