@@ -668,10 +668,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
 
   /// Reopens [info]'s conversation on its harness. An outside agent gets a
   /// fresh briefing (the old token died with the app) when its driver can
-  /// take one; otherwise it reopens without EveryAI's tools.
+  /// take one; otherwise it reopens without EveryAI's tools. A child session
+  /// (subagent, review, fork) started without a briefing, so it reopens without one.
   Future<HarnessSession> attachSession(CodeSessionInfo info) async {
     final harness = await harnessFor(ref, info.workingDir, harness: info.harness);
-    if (harness is! HarnessDriver || !isOutsideLead(info.harness, info.workingDir)) {
+    if (harness is! HarnessDriver || info.parentId != null || !isOutsideLead(info.harness, info.workingDir)) {
       return harness.attach(info.conversationId);
     }
     if (consentProblem(harness.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
@@ -894,6 +895,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         // The parent's, so a fork's prompt (and cache) matches it.
         tier: parent.tier,
         researchSites: researchSites,
+        // The child isn't saved yet, so its harness (the parent's) can't be looked up by id.
+        harness: parent.harness,
       ),
     );
     ref.read(_liveProvider)[id] = live;

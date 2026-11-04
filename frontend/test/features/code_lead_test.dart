@@ -560,6 +560,23 @@ void main() {
     expect(drivers['test']!.specs.single.briefing!.mcpToken, 'tok1');
   });
 
+  test('a reopened child of an outside session gets no briefing, as it started', () async {
+    final parent = await start();
+    final child = await container
+        .read(codeSessionsProvider.notifier)
+        .startChild(parent: parent, title: 'Review', brief: 'Review the diff', mode: AgentMode.ask, callId: 'r1');
+    // Started like its parent: no briefing, and no EveryAI gateway key or prompt.
+    expect(drivers['test']!.specs.last.briefing, isNull);
+    expect(drivers['test']!.specs.last.llmApiKey, isEmpty);
+    final prefs = container.read(preferencesProvider);
+    container.dispose();
+    container = make(prefs);
+    await open(child.id);
+    expect(drivers['test']!.reopened, isEmpty);
+    expect(host.minted, isNot(contains(child.id)));
+    expect(host.revokedSessions, isNot(contains(child.id)));
+  });
+
   test('an EveryAI session still asks for the gateway key and gets no host token', () async {
     final prefs = container.read(preferencesProvider);
     container.dispose();
