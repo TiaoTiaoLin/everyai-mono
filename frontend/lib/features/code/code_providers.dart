@@ -1624,10 +1624,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     ],
   );
 
-  /// Answers [question] off to the side with a cheap model that reads the
-  /// session so far (`/btw`). The agent is neither interrupted nor told: the
-  /// call is separate, and the answer shows as an aside card. Billed to the
-  /// session. [summarizer] replaces the gateway call (tests).
+  /// Answers [question] off to the side, on the session's own model (the one
+  /// picked in the composer), reading the session so far (`/btw`). The agent
+  /// is neither interrupted nor told: the call is separate, and the answer
+  /// shows as an aside card. Billed to the session (or the model's key).
+  /// [summarizer] replaces the gateway call (tests).
   Future<void> askAside(String question, {Summarizer? summarizer}) async {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final aside = Aside(id: ++_asideIds, kind: AsideKind.btw, question: question.trim(), busy: true);
@@ -1643,7 +1644,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
             baseUrl: gatewayBaseUrl(ref),
             apiKey: await gatewayKey(ref),
             sessionTag: info.id,
-            model: asideModel,
+            model: info.model,
             onUnauthorized: (k) => remintGatewayKey(ref, k),
           );
       final answer = await ask(btwRequest(record: renderSessionRecord(_events), question: question));

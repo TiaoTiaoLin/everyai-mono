@@ -3,8 +3,9 @@ import 'package:flutter/foundation.dart';
 import '../agent_models.dart' show AgentChoice;
 import 'compaction.dart' show compactionModel;
 
-/// The cheap model that answers `/btw` side questions (the summaries' model
-/// until a routing table picks one per task).
+/// The cheap model for side jobs such as the goal judge and commit messages
+/// (the summaries' model until a routing table picks one per task). `/btw`
+/// answers on the session's own model instead.
 const asideModel = compactionModel;
 
 /// Reasoning efforts a Code session can run at.
