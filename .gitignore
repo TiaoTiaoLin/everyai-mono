@@ -2,7 +2,6 @@
 # Don't add nested .gitignore files; scope rules here with a path prefix instead.
 
 # ---- Agent / local notes (kept out of git on purpose) ----
-AGENTS.md
 CLAUDE.md
 TODO.md
 TODO-*.md
