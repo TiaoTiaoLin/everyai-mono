@@ -357,6 +357,10 @@ class CodeSessionScreen extends ConsumerWidget {
     final controller = ref.read(codeSessionProvider(sessionId).notifier);
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     if (info == null) return;
+    if (ref.read(codeSessionProvider(sessionId)).switching) {
+      showAdaptiveToast(context, 'The session is already switching harness.');
+      return;
+    }
     final t = ref.read(codeSessionProvider(sessionId)).transcript;
     final busy = t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty;
     final from = _label(ref, info.harness);

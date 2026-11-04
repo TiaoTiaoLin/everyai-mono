@@ -46,6 +46,9 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
   var closed = false;
   var interrupts = 0;
 
+  /// [close] throws (the CLI's exit failed).
+  var closeFails = false;
+
   /// What [interrupt] plays (an agent that stops).
   List<HarnessEvent> onInterrupt = const [];
 
@@ -91,7 +94,10 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
   @override
   Future<void> rewindTo(String? head) async {}
   @override
-  Future<void> close() async => closed = true;
+  Future<void> close() async {
+    closed = true;
+    if (closeFails) throw const HarnessError('It would not exit.');
+  }
 }
 
 /// A driver over fake sessions. Given [session], every start and attach
@@ -120,6 +126,12 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   final conversations = <String, FakeLeadSession>{};
   var attachFails = false;
 
+  /// [start] throws (the CLI didn't start).
+  var startFails = false;
+
+  /// [start] waits for it (a slow start, to act while a switch is under way).
+  Completer<void>? startGate;
+
   /// The newest conversation started or reopened.
   FakeLeadSession? latest;
 
@@ -132,6 +144,8 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   @override
   Future<HarnessSession> start(SessionSpec spec) async {
     specs.add(spec);
+    if (startGate case final gate?) await gate.future;
+    if (startFails) throw const HarnessError('It failed to start.');
     if (session case final s?) return s;
     final s = latest = FakeLeadSession(id: '$id-c${conversations.length + 1}', replays: true);
     conversations[s.id] = s;

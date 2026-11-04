@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,6 +12,7 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent, userMessageEvent;
+import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart' show sessionFileName;
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
@@ -151,8 +153,9 @@ void main() {
     expect((now.harness, now.conversationId), ('beta', 'beta-c1'));
     expect(now.leads['alpha']?.conversationId, 'alpha-c1');
     expect(d('alpha').latest!.closed, isTrue);
-    // Beta is briefed with Alpha on its roster.
-    expect(b.specs.single.briefing!.sessionSkill, contains('Alpha'));
+    // Beta's briefing names only Beta: it is fixed for its conversation (the handoff names Alpha).
+    expect(b.specs.single.briefing!.sessionSkill, contains('Beta'));
+    expect(b.specs.single.briefing!.sessionSkill, isNot(contains('Alpha')));
     await turn(b.latest!, 'b1', 'Picked it up.');
     final items = transcriptOf(info.id).items;
     final turns = items.whereType<UserTurn>().toList();
@@ -242,6 +245,107 @@ void main() {
       'user@Beta',
       'Picked it up.',
     ]);
+  });
+
+  test('a lead left before its handoff went out gets everything when it comes back', () async {
+    final info = await start();
+    final c = await open(info.id);
+    await turn(d('alpha').latest!, 'a1', 'Added the toggle.');
+    // Beta from the menu: its handoff waits for a message that never comes.
+    await c.switchLead('beta', run: false);
+    await c.switchLead('alpha', run: false);
+    expect(infoOf(info.id).leads['beta']?.conversationId, '');
+    final outcome = await c.switchLead('beta', run: true);
+    expect(outcome.kind, HandoffKind.full);
+    expect(d('beta').attached, isEmpty);
+    expect(d('beta').specs.last.initialMessage, contains('Added the toggle.'));
+  });
+
+  test('a switch that fails leaves the old lead its token and briefing', () async {
+    final (info, c) = await limited();
+    final briefing = File('${tmp.path}/data/driver-sessions/${info.id}/briefing/$sessionFileName');
+    expect(host.live[info.id], {'tok1'});
+    d('beta').startFails = true;
+    final outcome = await c.switchLead('beta', run: true);
+    expect(outcome.failed, isTrue);
+    final now = infoOf(info.id);
+    expect((now.harness, now.conversationId), ('alpha', 'alpha-c1'));
+    expect(now.leads, isEmpty);
+    // Alpha still reaches EveryAI; only Beta's token went.
+    expect(host.live[info.id], {'tok1'});
+    expect(host.revokedSessions, isEmpty);
+    expect(briefing.readAsStringSync(), contains('Alpha'));
+    expect(briefing.readAsStringSync(), isNot(contains('Beta')));
+    expect(d('alpha').latest!.closed, isFalse);
+  });
+
+  test('the old token goes once the new outside lead is up', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    expect(host.live[info.id], {'tok2'});
+    expect(host.revoked, ['tok1']);
+  });
+
+  test('messages and edits during a switch wait for the new lead', () async {
+    final (info, c) = await limited();
+    final gate = d('beta').startGate = Completer<void>();
+    final switching = c.switchLead('beta', run: true);
+    await pumpEventQueue();
+    expect(container.read(codeSessionProvider(info.id)).switching, isTrue);
+    await c.send('Please also update the README');
+    await c.steer('And the changelog');
+    expect((await c.compact()).kind, CompactKind.busy);
+    expect(d('alpha').latest!.sent.where((m) => m.contains('README') || m.contains('changelog')), isEmpty);
+    expect(container.read(codeSessionProvider(info.id)).queued, hasLength(2));
+    gate.complete();
+    expect((await switching).kind, HandoffKind.full);
+    final b = d('beta').latest!;
+    expect(b.sent.single, isNot(contains('README')));
+    expect(container.read(codeSessionProvider(info.id)).switching, isFalse);
+    // Beta's first turn ends; the queued messages follow, one per turn.
+    await turn(b, 'b1', 'Picked it up.');
+    expect(b.sent.last, endsWith('Please also update the README'));
+  });
+
+  test('a message queued during a menu switch goes to the new lead with the handoff', () async {
+    final info = await start();
+    final c = await open(info.id);
+    await turn(d('alpha').latest!, 'a1', 'Added the toggle.');
+    final gate = d('beta').startGate = Completer<void>();
+    final switching = c.switchLead('beta', run: false);
+    await pumpEventQueue();
+    await c.send('Now the docs');
+    gate.complete();
+    await switching;
+    await pumpEventQueue();
+    final sent = d('beta').latest!.sent.single;
+    expect(sent, contains('$handoffOpen from="alpha"'));
+    expect(sent, endsWith('Now the docs'));
+    expect(d('alpha').latest!.sent.where((m) => m.contains('Now the docs')), isEmpty);
+  });
+
+  test('a failed close of the old lead still completes the switch', () async {
+    final (info, c) = await limited();
+    d('alpha').latest!.closeFails = true;
+    final outcome = await c.switchLead('beta', run: true);
+    expect(outcome.kind, HandoffKind.full);
+    expect(infoOf(info.id).harness, 'beta');
+    await turn(d('beta').latest!, 'b1', 'Picked it up.');
+    expect(transcriptOf(info.id).items.whereType<AgentText>().map((t) => t.text), contains('Picked it up.'));
+  });
+
+  test('a device that starts mirroring gets every lead\'s turns, once', () async {
+    final (info, c) = await limited();
+    await c.switchLead('beta', run: true);
+    await turn(d('beta').latest!, 'b1', 'Wrote the tests.');
+    List<String> said() => [
+      for (final e in c.mirrorEvents)
+        if (e case ChatMessage(fromUser: false, :final text)) text,
+    ];
+    expect(said(), ['Added the toggle.', 'Wrote the tests.']);
+    await c.switchLead('alpha', run: true);
+    await pumpEventQueue();
+    expect(said(), ['Added the toggle.', 'Wrote the tests.']);
   });
 
   test('the session model round-trips, and old sessions load with one lead', () {
