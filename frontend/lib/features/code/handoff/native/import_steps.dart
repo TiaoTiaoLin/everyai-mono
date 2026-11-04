@@ -62,6 +62,9 @@ final class CallStep extends ImportStep {
   final bool isError;
 
   String str(String key) => args[key] as String? ?? '';
+
+  CallStep withResult(String text) =>
+      CallStep(kind: kind, tool: tool, args: args, result: text, finished: finished, isError: isError);
 }
 
 /// A call no tool of the CLI stands for, as the agent's text.
@@ -120,9 +123,17 @@ List<ImportStep>? importSteps(NativeImportSource source, {required String into})
   final head = UserStep(
     ours: true,
     'This conversation was led by ${leads.isEmpty ? 'another agent' : leads.join(', ')} until now and was moved '
-    "into $into. Earlier tool calls use $into's tool names where one matches; the others are written as text.",
+    "into $into. Earlier tool calls use $into's tool names where one matches; the others are written as text."
+    "${source.handoff.cut == null ? '' : ' The last request was stopped by a usage limit before it was done: the calls made for it so far are the last ones in this history.'}",
   );
-  final tail = UserStep(handoffMessage(source.handoff, fromName: lastLead.isEmpty ? null : lastLead), ours: true);
+  // The facts without what the history here already holds: the latest
+  // turns and the cut turn's calls (its request stays, so the carry-on's
+  // "see <cut-turn>" still reads right).
+  final tail = UserStep(
+    handoffMessage(_withoutHistory(source.handoff), fromName: lastLead.isEmpty ? null : lastLead),
+    ours: true,
+  );
+  final where = source.handoff.transcript.isEmpty ? '' : '; the whole conversation is in ${source.handoff.transcript}';
   // The newest turns are kept; the oldest give way first (the newest one stays).
   var size = _size(head) + _size(tail) + turns.fold(0, (n, t) => n + t.fold(0, (m, s) => m + _size(s)));
   var dropped = 0;
@@ -130,14 +141,67 @@ List<ImportStep>? importSteps(NativeImportSource source, {required String into})
     size -= turns[dropped].fold(0, (m, s) => m + _size(s));
     dropped++;
   }
-  final where = source.handoff.transcript.isEmpty ? '' : '; the whole conversation is in ${source.handoff.transcript}';
+  final kept = <ImportStep?>[for (final t in turns.skip(dropped)) ...t];
+  // Still too big (one long turn): the oldest results give way, then the
+  // oldest calls with the agent's text before them, as in the facts' cut
+  // turn. The requests and the newest call stay.
+  final calls = [
+    for (final (i, s) in kept.indexed)
+      if (s is CallStep) i,
+  ];
+  final older = calls.isEmpty ? const <int>[] : calls.sublist(0, calls.length - 1);
+  for (final i in older) {
+    if (size <= nativeImportMaxChars) break;
+    final c = kept[i]! as CallStep;
+    final short = c.withResult('(result left out to keep this short$where.)');
+    size += _size(short) - _size(c);
+    kept[i] = short;
+  }
+  var callsLeftOut = 0;
+  for (final i in older) {
+    if (size <= nativeImportMaxChars) break;
+    for (var j = i; j >= 0 && kept[j] != null && kept[j] is! UserStep; j--) {
+      size -= _size(kept[j]!);
+      kept[j] = null;
+    }
+    callsLeftOut++;
+  }
+  // Requests alone too big for it: the facts handoff is used instead.
+  if (size > nativeImportMaxChars) return null;
+  final note = AgentStep('($callsLeftOut earlier calls are left out to keep this short$where.)');
   return [
     head,
     if (dropped > 0) UserStep('($dropped earlier turns are left out to keep this short$where.)', ours: true),
-    for (final t in turns.skip(dropped)) ...t,
+    for (final (i, s) in kept.indexed)
+      if (s != null) s else if (i + 1 < kept.length && kept[i + 1] != null) note,
     tail,
   ];
 }
+
+/// [h] without its latest turns and the cut turn's calls, which a native
+/// import writes as history.
+Handoff _withoutHistory(Handoff h) => Handoff(
+  fromHarness: h.fromHarness,
+  fromConversation: h.fromConversation,
+  toHarness: h.toHarness,
+  createdAt: h.createdAt,
+  kind: h.kind,
+  coverage: h.coverage,
+  since: h.since,
+  staleReason: h.staleReason,
+  approvedPlan: h.approvedPlan,
+  proposedPlan: h.proposedPlan,
+  todos: h.todos,
+  openQuestions: h.openQuestions,
+  lastRequest: h.lastRequest,
+  files: h.files,
+  git: h.git,
+  cut: switch (h.cut) {
+    final c? => HandoffCut(request: c.request, earlier: c.earlier, callsLeftOut: c.callsLeftOut + c.calls.length),
+    null => null,
+  },
+  transcript: h.transcript,
+);
 
 /// How many of the user's requests [steps] hold.
 int importedTurns(List<ImportStep> steps) => steps.whereType<UserStep>().where((s) => !s.ours).length;

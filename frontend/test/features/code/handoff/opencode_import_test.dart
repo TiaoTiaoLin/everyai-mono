@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:every_ai/features/code/drivers/opencode/opencode_driver.dart';
+import 'package:every_ai/features/code/drivers/opencode/opencode_session.dart' show openCodeSessionRules;
 import 'package:every_ai/features/code/drivers/opencode/opencode_server.dart';
 import 'package:every_ai/features/code/handoff/native/opencode_import.dart';
 import 'package:every_ai/features/code/harness/events.dart';
@@ -48,7 +49,9 @@ void main() {
     final spike = _json('opencode_import_body.json');
     expect(body.keys.toSet(), spike.keys.toSet());
     final info = body['info']! as Map<String, Object?>;
-    expect(info.keys.toSet(), (spike['info']! as Map).keys.toSet());
+    // The spike's body had no rules; the app's permission rules go in too, as at `start`.
+    expect(info.keys.toSet(), {...(spike['info']! as Map).keys, 'permissions'});
+    expect(info['permissions'], openCodeSessionRules);
     expect(info['model'], (spike['info']! as Map)['model']);
     expect(body['location'], {'directory': cwd});
     expect(imported?.nativeId, info['id']);

@@ -3,7 +3,7 @@
 import 'dart:math';
 
 import '../../drivers/opencode/opencode_driver.dart';
-import '../../drivers/opencode/opencode_session.dart' show openCodeModelRef;
+import '../../drivers/opencode/opencode_session.dart' show openCodeModelRef, openCodeSessionRules;
 import '../native_import.dart';
 import 'import_steps.dart';
 import 'native_files.dart';
@@ -162,6 +162,9 @@ final class OpenCodeImporter implements NativeImporter {
       'time': {'created': start, 'updated': at},
       'location': {'directory': cwd},
       'title': title,
+      // The rules a new session gets (see `OpenCodeDriver.start`): without
+      // them OpenCode's own defaults would decide every call.
+      'permissions': openCodeSessionRules,
     },
     messages: messages,
   );
