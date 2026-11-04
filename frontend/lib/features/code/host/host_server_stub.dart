@@ -18,11 +18,11 @@ final class _NoHost implements HostServer {
   const _NoHost();
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools) =>
+  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) =>
       throw UnsupportedError('EveryAI can host tools on desktop only.');
 
   @override
-  void touch(String token) {}
+  bool touch(String token) => false;
 
   @override
   Future<void> revoke(String token) async {}

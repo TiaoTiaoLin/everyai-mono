@@ -6,8 +6,10 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../domain/agent_mode.dart' show askUserQuestionTool, clientToolSpecs, presentPlanTool;
-import '../domain/phases.dart' show bugCheckSpec;
+import '../domain/phases.dart' show bugCheckSpec, bugCheckTool;
 import '../harness/everyai/project_notes_io.dart' show memoryToolSpec;
 import 'host.dart';
 
@@ -34,8 +36,15 @@ final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
     _mcpTool(clientToolSpecs(held: true).firstWhere((s) => s['name'] == name)),
   _mcpTool(memoryToolSpec),
   savedPlansSpec,
-  _mcpTool(bugCheckSpec),
+  // It runs the agent's repro command, so a client must not auto-allow it as harmless.
+  {
+    ..._mcpTool(bugCheckSpec),
+    'annotations': {'readOnlyHint': false, 'destructiveHint': true},
+  },
 ]);
+
+/// [hostToolSpecs] without bug_check, for sessions that aren't fixing a bug.
+final List<Map<String, Object?>> _plainSpecs = List.unmodifiable(hostToolSpecs.where((t) => t['name'] != bugCheckTool));
 
 /// An OpenAI-style spec (flat or `{function: …}`) in MCP's shape.
 Map<String, Object?> _mcpTool(Map<String, Object?> spec) {
@@ -54,15 +63,26 @@ HostServer createHostServer({
   required Duration keepAlive,
   DateTime Function()? now,
   HostTimer? timer,
-}) => _HostServer(idleLimit, heldLimit, keepAlive, now ?? DateTime.now, timer ?? Timer.new);
+  @visibleForTesting Future<HttpServer> Function()? bind,
+}) => _HostServer(
+  idleLimit,
+  heldLimit,
+  keepAlive,
+  now ?? DateTime.now,
+  timer ?? Timer.new,
+  bind ?? () => HttpServer.bind(InternetAddress.loopbackIPv4, 0),
+);
 
 /// A live token. Stage 5's grants for outside agents would be a second kind
 /// of this record, with their own tool list.
 final class _Grant {
-  _Grant(this.token, this.sessionId, this.tools, this.lastUsed);
+  _Grant(this.token, this.sessionId, this.tools, this.specs, this.lastUsed);
   final String token;
   final String sessionId;
   final HostTools tools;
+
+  /// What tools/list shows and tools/call accepts, fixed at mint.
+  final List<Map<String, Object?>> specs;
   DateTime lastUsed;
   final pending = <_Pending>{};
 }
@@ -84,43 +104,60 @@ final class _Pending {
 }
 
 final class _HostServer implements HostServer {
-  _HostServer(this.idleLimit, this.heldLimit, this.keepAlive, this.now, this.timer);
+  _HostServer(this.idleLimit, this.heldLimit, this.keepAlive, this.now, this.timer, this.bind);
 
   final Duration idleLimit;
   final Duration heldLimit;
   final Duration keepAlive;
   final DateTime Function() now;
   final HostTimer timer;
+  final Future<HttpServer> Function() bind;
 
   final _grants = <_Grant>[];
   final _random = Random.secure();
   HttpServer? _server;
   Future<void> _lifecycle = Future.value();
+  Timer? _expiry;
   var _calls = 0;
 
   static const _ended = (text: 'Error: the EveryAI session ended.', isError: true);
 
-  /// Binds and closes in order, so a mint racing the last revoke is safe.
-  Future<void> _serial(Future<void> Function() step) => _lifecycle = _lifecycle.then((_) => step());
+  /// Binds and closes in order, so a mint racing the last revoke is safe. A
+  /// failed step fails only its caller, never the steps after it.
+  Future<void> _serial(Future<void> Function() step) {
+    final run = _lifecycle.then((_) => step());
+    _lifecycle = run.then((_) {}, onError: (Object _) {});
+    return run;
+  }
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools) async {
+  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
     _sweep();
     final token = 'eai_host_${base64Url.encode(List.generate(32, (_) => _random.nextInt(256))).replaceAll('=', '')}';
-    final grant = _Grant(token, sessionId, tools, now());
+    final grant = _Grant(token, sessionId, tools, bugFix ? hostToolSpecs : _plainSpecs, now());
     _grants.add(grant);
-    await _serial(() async {
-      if (_server != null || !_grants.contains(grant)) return;
-      final server = _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      server.listen((req) => unawaited(_handle(server.port, req)));
-    });
+    try {
+      await _serial(() async {
+        if (_server != null || !_grants.contains(grant)) return;
+        final server = _server = await bind();
+        server.listen((req) => unawaited(_handle(server.port, req)));
+      });
+    } on Object {
+      _grants.remove(grant);
+      rethrow;
+    }
     final port = _server?.port;
     if (port == null) throw StateError('The token was revoked while the server started.');
+    _used(grant);
     return (url: Uri.parse('http://127.0.0.1:$port/mcp'), token: token);
   }
 
   @override
-  void touch(String token) => _find(token)?.lastUsed = now();
+  bool touch(String token) {
+    final grant = _find(token);
+    if (grant != null) _used(grant);
+    return grant != null;
+  }
 
   @override
   Future<void> revoke(String token) => _drop(_grants.where((g) => g.token == token).toList());
@@ -143,15 +180,39 @@ final class _HostServer implements HostServer {
 
   Future<void> _closeIfIdle() => _serial(() async {
     if (_grants.isNotEmpty) return;
+    _expiry?.cancel();
     final server = _server;
     _server = null;
     await server?.close(force: true);
   });
 
-  /// Drops tokens idle past [idleLimit]; a pending call keeps its token.
+  /// Drops tokens idle for [idleLimit]; a pending call keeps its token.
   void _sweep() {
     final at = now();
-    _grants.removeWhere((g) => g.pending.isEmpty && at.difference(g.lastUsed) > idleLimit);
+    _grants.removeWhere((g) => g.pending.isEmpty && at.difference(g.lastUsed) >= idleLimit);
+  }
+
+  void _used(_Grant grant) {
+    grant.lastUsed = now();
+    _scheduleExpiry();
+  }
+
+  /// One timer for the next token to expire, so the server closes with the
+  /// last one even when no request comes.
+  void _scheduleExpiry() {
+    _expiry?.cancel();
+    final idle = _grants.where((g) => g.pending.isEmpty);
+    if (idle.isEmpty) return;
+    final next = idle.map((g) => g.lastUsed).reduce((a, b) => a.isBefore(b) ? a : b).add(idleLimit);
+    final wait = next.difference(now());
+    _expiry = timer(wait.isNegative ? Duration.zero : wait, () {
+      _sweep();
+      if (_grants.isEmpty) {
+        unawaited(_closeIfIdle());
+      } else {
+        _scheduleExpiry();
+      }
+    });
   }
 
   _Grant? _find(String token) {
@@ -190,11 +251,8 @@ final class _HostServer implements HostServer {
     }
     final auth = req.headers.value('authorization') ?? '';
     final grant = auth.startsWith('Bearer ') ? _find(auth.substring(7).trim()) : null;
-    if (grant == null) {
-      req.response.headers.set('www-authenticate', 'Bearer error="invalid_token"');
-      return _reply(req, 401, _error(null, -32600, 'Missing, expired or revoked token'));
-    }
-    grant.lastUsed = now();
+    if (grant == null) return _unauthorized(req);
+    _used(grant);
     if (req.method != 'POST') {
       req.response.headers.set('allow', 'POST');
       return _reply(req, 405, _error(null, -32600, 'Only POST is served here'));
@@ -205,6 +263,8 @@ final class _HostServer implements HostServer {
       bytes.add(chunk);
       if (bytes.length > _maxBody) return _reply(req, 413, _error(null, -32600, 'Body too large'));
     }
+    // Revoked while the body was read: run nothing for it.
+    if (!_grants.contains(grant)) return _unauthorized(req);
     final Object? msg;
     try {
       msg = jsonDecode(utf8.decode(bytes.takeBytes()));
@@ -215,8 +275,15 @@ final class _HostServer implements HostServer {
       return _reply(req, 400, _error(null, -32600, 'Send one JSON-RPC message per request'));
     }
     final id = msg['id'];
-    final method = msg['method'] as String?;
-    final params = (msg['params'] as Map<String, Object?>?) ?? const {};
+    final method = msg['method'];
+    final params = switch (msg['params']) {
+      null => const <String, Object?>{},
+      final Map<String, Object?> p => p,
+      _ => null,
+    };
+    if (method is! String? || params == null) {
+      return _reply(req, 400, _error(id, -32600, 'method must be a string and params an object'));
+    }
     final header = req.headers.value('mcp-protocol-version');
 
     final modern = switch (params['_meta']) {
@@ -292,13 +359,18 @@ final class _HostServer implements HostServer {
       case 'ping':
         return _reply(req, 200, done({}));
       case 'tools/list':
-        return _reply(req, 200, done({'tools': hostToolSpecs, if (modern != null) ...cached}));
+        return _reply(req, 200, done({'tools': grant.specs, if (modern != null) ...cached}));
       case 'tools/call':
         final name = params['name'];
-        if (name is! String || !hostToolSpecs.any((t) => t['name'] == name)) {
+        if (name is! String || !grant.specs.any((t) => t['name'] == name)) {
           return _reply(req, 200, _error(id, -32602, 'Unknown tool: $name'));
         }
-        final args = (params['arguments'] as Map<String, Object?>?) ?? const {};
+        final args = switch (params['arguments']) {
+          null => const <String, Object?>{},
+          final Map<String, Object?> a => a,
+          _ => null,
+        };
+        if (args == null) return _reply(req, 200, _error(id, -32602, 'arguments must be an object'));
         final progress = switch (params['_meta']) {
           {'progressToken': final Object t} => t,
           _ => null,
@@ -354,9 +426,20 @@ final class _HostServer implements HostServer {
       },
       cancelOnError: true,
     );
+    // Revoked while the socket was detached: answer, but run nothing.
+    if (!_grants.contains(grant)) {
+      pending.finish(_ended, HostEnd.sessionClosed);
+      send('event: message\ndata: ${jsonEncode(reply(_ended))}\n\n');
+      try {
+        await socket.flush();
+      } on Object {
+        // Gone.
+      }
+      socket.destroy();
+      return;
+    }
     grant.pending.add(pending);
-    // Revoked while the request was read.
-    if (!_grants.contains(grant)) pending.finish(_ended, HostEnd.sessionClosed);
+    _scheduleExpiry();
     var ticks = 0;
     Timer? beat;
     void schedule() => beat = timer(keepAlive, () {
@@ -375,12 +458,7 @@ final class _HostServer implements HostServer {
     schedule();
     final limit = heldHostTools.contains(name)
         ? timer(heldLimit, () {
-            pending.finish((
-              text:
-                  'Error (timeout): the user did not answer this $name call within ${heldLimit.inSeconds} s. '
-                  'Carry on without its result.',
-              isError: true,
-            ), HostEnd.timedOut);
+            pending.finish((text: _timeoutText(name), isError: true), HostEnd.timedOut);
           })
         : null;
     unawaited(
@@ -391,7 +469,7 @@ final class _HostServer implements HostServer {
     beat?.cancel();
     limit?.cancel();
     grant.pending.remove(pending);
-    grant.lastUsed = now();
+    if (_grants.contains(grant)) _used(grant);
     send('event: message\ndata: ${jsonEncode(reply(result))}\n\n');
     try {
       await socket.flush();
@@ -399,6 +477,17 @@ final class _HostServer implements HostServer {
       // Gone.
     }
     socket.destroy();
+  }
+
+  /// What the agent hears when the user didn't answer in time. A plan that
+  /// timed out is not approved, so nothing may be built on it.
+  String _timeoutText(String name) {
+    final head = 'Error (timeout): the user did not answer this $name call within ${heldLimit.inSeconds} s.';
+    return name == presentPlanTool
+        ? '$head The plan is NOT approved: do not start building it. End your turn and wait for the user; present '
+              'the plan again when they reply.'
+        : '$head Go on only where one choice is clearly safe, and say which answer you assumed; otherwise end your '
+              'turn and ask again when the user replies.';
   }
 }
 
@@ -414,6 +503,11 @@ Map<String, Object?> _error(Object? id, int code, String message, [Object? data]
   'id': id,
   'error': {'code': code, 'message': message, 'data': ?data},
 };
+
+Future<void> _unauthorized(HttpRequest req) {
+  req.response.headers.set('www-authenticate', 'Bearer error="invalid_token"');
+  return _reply(req, 401, _error(null, -32600, 'Missing, expired or revoked token'));
+}
 
 Future<void> _reply(HttpRequest req, int status, Map<String, Object?> body) {
   req.response

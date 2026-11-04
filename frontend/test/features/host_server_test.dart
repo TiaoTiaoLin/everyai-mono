@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/harness/everyai/mcp_io.dart';
 import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/code/host/host_server_io.dart' as io;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
@@ -65,15 +66,20 @@ void main() {
   late HostServer server;
   late _FakeTools tools;
   late HostToken tok;
+  void Function()? onNow;
   const held = Duration(seconds: 300);
 
   setUp(() async {
     clock = DateTime(2026, 11, 4);
     timers = [];
+    onNow = null;
     server = createHostServer(
       idleLimit: const Duration(hours: 1),
       heldLimit: held,
-      now: () => clock,
+      now: () {
+        onNow?.call();
+        return clock;
+      },
       timer: (after, fire) {
         final t = _FakeTimer(after, fire);
         timers.add(t);
@@ -123,16 +129,39 @@ void main() {
       'headers': {'Authorization': 'Bearer ${tok.token}'},
     });
     addTearDown(c.close);
-    expect(
-      [for (final t in c.tools) t['name']],
-      ['ask_user_question', 'present_plan', 'memory', 'saved_plans', 'bug_check'],
-    );
+    expect([for (final t in c.tools) t['name']], ['ask_user_question', 'present_plan', 'memory', 'saved_plans']);
     expect(c.tools.first['description'], contains('come back as the result of this call'));
     expect(c.tools.first['inputSchema'], isA<Map<String, Object?>>());
     final out = await c.call('memory', {'action': 'add', 'text': '- run make'});
     expect(out.text, 'saved: - run make');
     expect(out.isError, isFalse);
     expect(tools.calls.single.sessionId, 's1');
+  });
+
+  test('bug_check is listed and callable only for a Bug fix session', () async {
+    final r = await post(rpc('tools/call', {'name': 'bug_check', 'arguments': <String, Object?>{}}));
+    expect(errorCode(r), -32602);
+    final fix = await server.mint('s2', tools, bugFix: true);
+    final c = await McpConnection.open('everyai', {
+      'url': '${fix.url}',
+      'headers': {'Authorization': 'Bearer ${fix.token}'},
+    });
+    addTearDown(c.close);
+    final bug = c.tools.last;
+    expect(bug['name'], 'bug_check');
+    expect(bug['annotations'], containsPair('destructiveHint', true));
+  });
+
+  test('params, method or arguments of the wrong type get a JSON-RPC error', () async {
+    var r = await post({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list', 'params': <Object?>[]});
+    expect(r.statusCode, 400);
+    expect(errorCode(r), -32600);
+    r = await post({'jsonrpc': '2.0', 'id': 1, 'method': 3});
+    expect(r.statusCode, 400);
+    r = await post(rpc('tools/call', {'name': 'memory', 'arguments': <Object?>[]}));
+    expect(r.statusCode, 200);
+    expect(errorCode(r), -32602);
+    expect(tools.calls, isEmpty);
   });
 
   test('initialize negotiates the version and never starts a session', () async {
@@ -174,10 +203,49 @@ void main() {
     server.touch(tok.token);
     clock = clock.add(const Duration(minutes: 50));
     expect((await post(rpc('ping'))).statusCode, 200);
-    final keep = await server.mint('s3', tools); // keeps the server up
     clock = clock.add(const Duration(minutes: 61));
-    server.touch(keep.token);
     await rejected(await post(rpc('ping')));
+  });
+
+  test('touch says when the token already expired', () async {
+    clock = clock.add(const Duration(minutes: 61));
+    expect(server.touch(tok.token), isFalse);
+  });
+
+  test('the server closes when the last token expires without any request', () async {
+    final port = tok.url.port;
+    clock = clock.add(const Duration(hours: 1));
+    timers.lastWhere((t) => t.isActive && t.after == const Duration(hours: 1)).fire();
+    await server.revoke('none'); // waits for the close queued before it
+    await expectLater(Socket.connect(InternetAddress.loopbackIPv4, port), throwsA(isA<SocketException>()));
+  });
+
+  test('a failed bind fails only its own mint', () async {
+    var fail = true;
+    final s = io.createHostServer(
+      idleLimit: const Duration(hours: 1),
+      heldLimit: held,
+      keepAlive: const Duration(seconds: 15),
+      bind: () {
+        if (fail) {
+          fail = false;
+          throw const SocketException('no free port');
+        }
+        return HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      },
+    );
+    addTearDown(s.stop);
+    await expectLater(s.mint('a', tools), throwsA(isA<SocketException>()));
+    final t = await s.mint('b', tools);
+    final r = await http.post(
+      t.url,
+      headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ${t.token}'},
+      body: jsonEncode(rpc('ping')),
+    );
+    expect(r.statusCode, 200);
+    // The failed mint left no token behind, so the last revoke closes the server.
+    await s.revoke(t.token);
+    await expectLater(Socket.connect(InternetAddress.loopbackIPv4, t.url.port), throwsA(isA<SocketException>()));
   });
 
   test('a foreign Host or Origin is a 403 (DNS rebinding)', () async {
@@ -214,7 +282,7 @@ void main() {
       final list = resultOf(r);
       expect(list['resultType'], 'complete');
       expect(list['ttlMs'], isA<int>());
-      expect((list['tools'] as List).length, 5);
+      expect((list['tools'] as List).length, 4);
     });
 
     test('a tools/call names the tool in Mcp-Name, base64 too', () async {
@@ -288,6 +356,16 @@ void main() {
     tools.held[call.id]!.complete((text: 'late', isError: false)); // ignored
   });
 
+  test('a plan that timed out is not approved', () async {
+    final reply = post(rpc('tools/call', {'name': 'present_plan', 'arguments': <String, Object?>{}}));
+    await tools.arrived;
+    heldTimer().fire();
+    final text = ((resultOf(await reply)['content'] as List).single as Map)['text'] as String;
+    expect(text, contains('NOT approved'));
+    expect(text, contains('do not start building'));
+    expect(text, isNot(contains('Carry on')));
+  });
+
   test('closing the session ends its pending calls and its token', () async {
     final reply = ask();
     final call = await tools.arrived;
@@ -295,6 +373,39 @@ void main() {
     final result = resultOf(await reply);
     expect(((result['content'] as List).single as Map)['text'], 'Error: the EveryAI session ended.');
     expect(await call.ended, HostEnd.sessionClosed);
+  });
+
+  test('a token revoked while its call body is read runs nothing', () async {
+    await server.mint('s2', tools); // keeps the server up
+    final c = HttpClient();
+    addTearDown(() => c.close(force: true));
+    final body = utf8.encode(
+      jsonEncode(
+        rpc('tools/call', {
+          'name': 'memory',
+          'arguments': {'action': 'add', 'text': 'x'},
+        }),
+      ),
+    );
+    final req = await c.postUrl(tok.url);
+    req.headers
+      ..contentType = ContentType.json
+      ..set('authorization', 'Bearer ${tok.token}');
+    req.contentLength = body.length;
+    final authed = Completer<void>();
+    onNow = () {
+      if (!authed.isCompleted) authed.complete();
+    };
+    req.add(body.sublist(0, 10));
+    await req.flush();
+    await authed.future; // the server checked the token and now reads the body
+    onNow = null;
+    await server.revokeSession('s1');
+    req.add(body.sublist(10));
+    final res = await req.close();
+    await res.drain<void>();
+    expect(res.statusCode, 401);
+    expect(tools.calls, isEmpty);
   });
 
   test('a revoked session token is refused while the server stays up', () async {

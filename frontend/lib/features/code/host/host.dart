@@ -34,6 +34,9 @@ typedef HostResult = ({String text, bool isError});
 
 /// What a session offers through the server; the session controller
 /// implements it and dispatches by [HostCall.name] (one of [hostToolSpecs]).
+/// The server checks only the token: a call that runs something (bug_check's
+/// `command`) must pass the session's own permission decision first, as the
+/// EveryAI harness does, since it runs in the app outside the agent's sandbox.
 abstract interface class HostTools {
   Future<HostResult> call(HostCall call);
 }
@@ -48,11 +51,13 @@ typedef HostTimer = Timer Function(Duration after, void Function() fire);
 /// The app's one MCP host. It listens only while a token is live.
 abstract interface class HostServer {
   /// A new token for [sessionId], whose calls go to [tools]. Binds the
-  /// server on first use.
-  Future<HostToken> mint(String sessionId, HostTools tools);
+  /// server on first use. bug_check is listed only when [bugFix].
+  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false});
 
-  /// Marks [token] as used now, so it doesn't expire while the session idles.
-  void touch(String token);
+  /// Marks [token] as used now, so it doesn't expire while the session idles
+  /// (call it at each turn). False when it already expired: the agent then
+  /// needs a new token, and maybe a new URL, so restart it with a fresh mint.
+  bool touch(String token);
 
   /// Ends [token] and its pending calls; the server stops with the last one.
   Future<void> revoke(String token);
@@ -64,7 +69,8 @@ abstract interface class HostServer {
   Future<void> stop();
 }
 
-/// The server: [idleLimit] without use ends a token, [heldLimit] without an
+/// The server: [idleLimit] without use ends a token (the server closes with
+/// the last one), [heldLimit] without an
 /// answer ends a [heldHostTools] call, and a keep-alive goes out every
 /// [keepAlive] while a call waits.
 HostServer createHostServer({
@@ -75,8 +81,9 @@ HostServer createHostServer({
   HostTimer? timer,
 }) => impl.createHostServer(idleLimit: idleLimit, heldLimit: heldLimit, keepAlive: keepAlive, now: now, timer: timer);
 
-/// The tools every session token sees, MCP-shaped, in a fixed order (an
-/// agent's prompt cache keeps them). Empty where the server can't run.
+/// The tools a session token sees, MCP-shaped, in a fixed order (an agent's
+/// prompt cache keeps them); bug_check only for Bug fix sessions. Empty where
+/// the server can't run.
 List<Map<String, Object?>> get hostToolSpecs => impl.hostToolSpecs;
 
 /// The calls that wait for the user, so they get [createHostServer]'s
