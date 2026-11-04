@@ -1,0 +1,11 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// models(): model/list over two pages; one model is hidden from pickers.
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"pro"},"requiresOpenaiAuth":true}}}
+{"dir":"out","msg":{"id":3,"method":"model/list","params":{}}}
+{"dir":"in","msg":{"id":3,"result":{"data":[{"id":"gpt-5.5-codex","model":"gpt-5.5-codex","displayName":"GPT-5.5 Codex","description":"For coding","hidden":false,"isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Fast"},{"reasoningEffort":"medium","description":"Balanced"},{"reasoningEffort":"high","description":"Deep"},{"reasoningEffort":"xhigh","description":"Deepest"}]},{"id":"internal-x","model":"internal-x","displayName":"Internal","description":"","hidden":true,"isDefault":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":"page-2"}}}
+{"dir":"out","msg":{"id":4,"method":"model/list","params":{"cursor":"page-2"}}}
+{"dir":"in","msg":{"id":4,"result":{"data":[{"id":"gpt-5.4-mini","model":"gpt-5.4-mini","displayName":"GPT-5.4 mini","description":"Small","hidden":false,"isDefault":false,"defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Fast"}]}],"nextCursor":null}}}

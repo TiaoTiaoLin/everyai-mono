@@ -137,7 +137,6 @@ void main() {
     test('stub drivers say they are not built yet and refuse to start', () async {
       final stubs = <HarnessDriver>[
         ClaudeDriver(which: _nowhere),
-        CodexDriver(which: _nowhere),
         OpenCodeDriver(which: _nowhere),
         AcpDriver(id: 'acp:x', label: 'x', command: 'x', which: _nowhere),
         TerminalDriver(id: 'terminal:x', label: 'x', command: 'x', which: _nowhere),

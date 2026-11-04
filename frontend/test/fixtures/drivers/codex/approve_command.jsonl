@@ -1,0 +1,19 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// A command Codex asks about (run through the user's shell): the item starts, then the approval request; we accept
+// once (never for the session) and the item completes. Order per README@b04ed4c50c5c "Approvals".
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
+{"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"workspace-write"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"workspaceWrite"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Run the tests"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"workspaceWrite"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'npm test'","cwd":"{{cwd}}","processId":null,"status":"inProgress","commandActions":[{"type":"unknown","command":"npm test"}],"aggregatedOutput":null,"exitCode":null,"durationMs":null}}}}
+{"dir":"in","msg":{"id":0,"method":"item/commandExecution/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"call_1","approvalId":null,"kind":"command","command":"/bin/zsh -lc 'npm test'","cwd":"{{cwd}}","reason":null,"startedAtMs":1762200001000}}}
+{"dir":"out","msg":{"id":0,"result":{"decision":"accept"}}}
+{"dir":"in","msg":{"method":"serverRequest/resolved","params":{"threadId":"thr_1","requestId":0}}}
+{"dir":"in","msg":{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"commandExecution","id":"call_1","command":"/bin/zsh -lc 'npm test'","cwd":"{{cwd}}","processId":null,"status":"completed","commandActions":[{"type":"unknown","command":"npm test"}],"aggregatedOutput":"3 passing\n","exitCode":0,"durationMs":900}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[],"error":null}}}}

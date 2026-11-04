@@ -1,0 +1,7 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// detect(): the handshake and account/read (local auth only, no model call). Not signed in.
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":null,"requiresOpenaiAuth":true}}}

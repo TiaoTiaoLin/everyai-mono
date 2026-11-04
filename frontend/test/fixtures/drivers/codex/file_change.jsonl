@@ -1,0 +1,26 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// Edits Codex asks about: one refused by name (decline, then a steer with the reason; Codex reports the item
+// declined), then two refused at once without names (cancel each), which interrupts the turn.
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
+{"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"workspace-write"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"workspaceWrite"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Rename the helper"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"workspaceWrite"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"fileChange","id":"call_2","changes":[{"path":"lib/a.dart","kind":{"type":"update","move_path":null},"diff":"@@ -1 +1 @@\n-old\n+new\n"},{"path":"lib/old.dart","kind":{"type":"update","move_path":"lib/new.dart"},"diff":""}],"status":"inProgress"}}}}
+{"dir":"in","msg":{"id":0,"method":"item/fileChange/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"call_2","reason":null,"grantRoot":null,"startedAtMs":1762200001000}}}
+{"dir":"out","msg":{"id":0,"result":{"decision":"decline"}}}
+{"dir":"out","msg":{"id":5,"method":"turn/steer","params":{"threadId":"thr_1","input":[{"type":"text","text":"{{any}}"}],"expectedTurnId":"turn_1"}}}
+{"dir":"in","msg":{"id":5,"result":{"turnId":"turn_1"}}}
+{"dir":"in","msg":{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"fileChange","id":"call_2","changes":[],"status":"declined"}}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"fileChange","id":"call_3","changes":[{"path":"lib/b.dart","kind":{"type":"add"},"diff":"+b\n"}],"status":"inProgress"}}}}
+{"dir":"in","msg":{"id":1,"method":"item/fileChange/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"call_3","startedAtMs":1762200002000}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"fileChange","id":"call_4","changes":[{"path":"lib/c.dart","kind":{"type":"delete"},"diff":""}],"status":"inProgress"}}}}
+{"dir":"in","msg":{"id":2,"method":"item/fileChange/requestApproval","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"call_4","startedAtMs":1762200002100}}}
+{"dir":"out","msg":{"id":1,"result":{"decision":"cancel"}}}
+{"dir":"out","msg":{"id":2,"result":{"decision":"cancel"}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"interrupted","items":[],"error":null}}}}
