@@ -17,8 +17,8 @@ void main() {
     expect(tierBlock(HarnessTier.ultraEfficient, forks: true), isNot(contains('fork')));
   });
 
-  test('the bar offers four tiers; ultra efficient stays hidden', () {
-    expect(HarnessTier.offered, [HarnessTier.efficient, HarnessTier.thorough, HarnessTier.max, HarnessTier.ultra]);
+  test('the effort level offers Efficient and Thorough; ultra efficient stays hidden', () {
+    expect(HarnessTier.offered, [HarnessTier.efficient, HarnessTier.thorough]);
     expect(HarnessTier.max.phased && HarnessTier.ultra.phased, isTrue);
     expect(HarnessTier.thorough.phased, isFalse);
   });

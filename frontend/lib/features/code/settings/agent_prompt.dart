@@ -142,7 +142,7 @@ enum HarnessTier {
   final String description;
 
   /// The tiers the bar offers, in order.
-  static const offered = [efficient, thorough, max, ultra];
+  static const offered = [efficient, thorough];
 
   /// Runs the required phase flow.
   bool get phased => this == max || this == ultra;

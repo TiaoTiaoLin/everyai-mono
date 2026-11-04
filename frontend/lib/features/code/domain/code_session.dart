@@ -87,6 +87,7 @@ final class CodeSessionInfo {
     this.harnessMode = HarnessMode.build,
     this.leads = const {},
     this.pendingHandoff = '',
+    this.workflow,
   });
 
   final String id;
@@ -142,6 +143,10 @@ final class CodeSessionInfo {
   final HarnessTier tier;
   final HarnessMode harnessMode;
 
+  /// The session-long workflow that is on ('max', the Max approach skill), or
+  /// null. Script workflows run once and aren't kept here.
+  final String? workflow;
+
   /// Question cards and plans are answered inside the held tool call (see
   /// `SessionSpec.holdClientTools`). Off for sessions started before it.
   final bool holdClientTools;
@@ -183,6 +188,8 @@ final class CodeSessionInfo {
     Map<String, LeadRecord>? leads,
     String? pendingHandoff,
     bool merged = false,
+    String? workflow,
+    bool clearWorkflow = false,
   }) => CodeSessionInfo(
     id: id,
     projectId: projectId,
@@ -209,6 +216,7 @@ final class CodeSessionInfo {
     harnessMode: harnessMode ?? this.harnessMode,
     leads: leads ?? this.leads,
     pendingHandoff: pendingHandoff ?? this.pendingHandoff,
+    workflow: clearWorkflow ? null : workflow ?? this.workflow,
   );
 
   factory CodeSessionInfo.fromJson(Map<String, Object?> json) => CodeSessionInfo(
@@ -248,6 +256,7 @@ final class CodeSessionInfo {
           if (value case final Map<String, Object?> lead) key: LeadRecord.fromJson(lead),
     },
     pendingHandoff: json['pending_handoff'] as String? ?? '',
+    workflow: json['workflow'] as String?,
   );
 
   Map<String, Object?> toJson() => {
@@ -275,5 +284,6 @@ final class CodeSessionInfo {
     if (harnessMode != HarnessMode.build) 'harness_mode': harnessMode.name,
     if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
     if (pendingHandoff.isNotEmpty) 'pending_handoff': pendingHandoff,
+    'workflow': ?workflow,
   };
 }

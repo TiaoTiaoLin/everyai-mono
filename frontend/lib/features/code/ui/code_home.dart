@@ -24,6 +24,8 @@ import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
 import '../../slash/slash_command.dart' show CodeSlashHost;
 import '../morning_providers.dart';
+import '../workflows/workflow_library.dart' show WorkflowOrigin;
+import '../workflows/workflow_picker.dart';
 import 'agent_menu.dart';
 import 'code_composer.dart';
 import 'transcript/aside_card.dart';
@@ -46,6 +48,9 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
   String? _projectId;
   AgentMode? _picked;
   bool _isolated = false;
+
+  /// The workflow picked for the new session, or null for none.
+  WorkflowPick? _workflow;
 
   /// A spending cap for the new session (dollars), or null for none.
   double? _budget;
@@ -87,17 +92,6 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
     setState(() => _projectId = project.id);
   }
 
-  /// The tier the new session runs on: the bar's pick, capped at Thorough
-  /// for the scripted demo (it has no phase flow).
-  HarnessTier _tierFor(CodeProject project) {
-    final tier = ref.read(codeSettingsProvider).tier;
-    return tier.phased && isDemoPath(project.path) ? HarnessTier.thorough : tier;
-  }
-
-  /// Bug fix isn't in the scripted demo.
-  HarnessMode _harnessModeFor(CodeProject project) =>
-      isDemoPath(project.path) ? HarnessMode.build : ref.read(codeSettingsProvider).harnessMode;
-
   /// The lead the new session runs on: the pick, except that the scripted demo always runs its own.
   String _leadFor(CodeProject project) =>
       isDemoPath(project.path) ? everyaiHarnessName : ref.read(codeLeadProvider).harness;
@@ -112,6 +106,8 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
     ref.read(preferencesProvider)[lastModeKey(project.id)] = mode.name;
     final harness = _leadFor(project);
     final (:model, :effort) = _modelFor(harness);
+    // The scripted demo runs no workflows.
+    final workflow = isDemoPath(project.path) ? null : _workflow;
     setState(() => _starting = true);
     try {
       final info = await ref
@@ -124,11 +120,17 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
             mode: mode,
             files: files,
             isolated: _isolated,
-            tier: _tierFor(project),
-            harnessMode: _harnessModeFor(project),
+            tier: ref.read(codeSettingsProvider).tier,
             harness: harness,
+            workflow: workflow,
           );
       if (_budget case final usd?) ref.read(codeSettingsProvider.notifier).setBudget(info.id, usd);
+      // A script workflow takes the prompt as its task; the lead was told so in its first message.
+      if (workflow?.entry case final w?) {
+        final why = await ref.read(codeSessionProvider(info.id).notifier).launchWorkflow(w, prompt);
+        if (why != null && mounted) showAdaptiveToast(context, why);
+      }
+      if (mounted) setState(() => _workflow = null);
       if (mounted) context.go(Routes.codeSession(info.id));
     } on Object catch (e) {
       if (mounted) showAdaptiveToast(context, 'Couldn\'t start the session: $e');
@@ -214,10 +216,11 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
                       onChanged: lead == everyaiHarnessName
                           ? ref.read(codeAgentProvider.notifier).chooseModel
                           : (model, effort) => ref.read(codeLeadProvider.notifier).chooseModel(lead, model, effort),
-                      tier: ref.watch(codeSettingsProvider.select((s) => s.tier)),
-                      onTier: ref.read(codeSettingsProvider.notifier).setTier,
-                      harnessMode: ref.watch(codeSettingsProvider.select((s) => s.harnessMode)),
-                      onHarnessMode: ref.read(codeSettingsProvider.notifier).setHarnessMode,
+                      level: ref.watch(codeSettingsProvider.select((s) => s.tier)),
+                      onLevel: ref.read(codeSettingsProvider.notifier).setTier,
+                      workflow: _workflow,
+                      onWorkflow: (w) => setState(() => _workflow = w),
+                      projectDir: project.path,
                       budget: _budget,
                       onBudget: (v) => setState(() => _budget = v),
                     ),
@@ -227,6 +230,8 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
                       onPick: (p) => setState(() {
                         _projectId = p.id;
                         _picked = null;
+                        // Another project's own workflows aren't this one's.
+                        if (_workflow?.entry?.origin == WorkflowOrigin.project) _workflow = null;
                       }),
                       onOpen: _openFolder,
                       onSample: _addSample,

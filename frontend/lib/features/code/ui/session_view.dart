@@ -88,10 +88,13 @@ class CodeSessionScreen extends ConsumerWidget {
       harness: info.harness,
       model: info.model,
       effort: info.effort,
-      tier: info.tier,
-      harnessMode: info.harnessMode,
-      onHarnessMode: controller.setHarnessMode,
-      onTier: controller.setTier,
+      level: info.tier,
+      onLevel: controller.setTier,
+      // A workflow's own agents and subagents don't start workflows.
+      workflow: controller.workflowPick,
+      onWorkflow: info.isSubagent ? null : controller.pickWorkflow,
+      projectDir:
+          ref.watch(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull?.path ?? info.workingDir,
       demo: isDemoPath(info.workingDir),
       // Any time, from the menu; a subagent keeps its parent's lead.
       onHarness: info.isSubagent || isDemoPath(info.workingDir)

@@ -94,6 +94,7 @@ import 'workflows/workflow_bridge.dart'
 import 'workflows/workflow_engine.dart';
 import 'workflows/workflow_journal.dart';
 import 'workflows/workflow_library.dart';
+import 'workflows/workflow_picker.dart';
 import 'workflows/workflow_prelude.dart' show workflowCtxKey;
 import 'workflows/workflow_runs.dart';
 
@@ -475,6 +476,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     HarnessTier? tier,
     HarnessMode? harnessMode,
     String harness = everyaiHarnessName,
+    WorkflowPick? workflow,
   }) async {
     final id = const Uuid().v7();
     harnessMode ??= ref.read(codeSettingsProvider).harnessMode;
@@ -525,7 +527,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             mode: mode,
             effort: effort,
             holdClientTools: hold,
-            initialMessage: modeNote(mode, first.text),
+            initialMessage: modeNote(mode, switch (workflow) {
+              null => first.text,
+              WorkflowPick(:final entry?) => workflowStartNote(entry, first.text),
+              _ => '${maxWorkflowNote(on: true)}\n\n${first.text}',
+            }),
             initialImages: first.images,
             isolated: worktree != null,
             tier: tier,
@@ -563,6 +569,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       holdClientTools: hold,
       tier: tier,
       harnessMode: harnessMode,
+      workflow: workflow?.isMax ?? false ? maxWorkflowId : null,
     );
     state = [info, ...state];
     _save();
@@ -1249,9 +1256,14 @@ final class CodeSessionState {
     this.switching = false,
     this.handoffProblem = '',
     this.changing,
+    this.armed,
   });
 
   final Transcript transcript;
+
+  /// The script workflow the user picked for their next message, which
+  /// becomes its task; null when none. Not kept over a restart.
+  final WorkflowEntry? armed;
 
   /// The session is moving to another lead harness; messages wait for the new one.
   final bool switching;
@@ -1319,7 +1331,10 @@ final class CodeSessionState {
     String? handoffProblem,
     LimitPick? changing,
     bool clearChanging = false,
+    WorkflowEntry? armed,
+    bool clearArmed = false,
   }) => CodeSessionState(
+    armed: clearArmed ? null : armed ?? this.armed,
     switching: switching ?? this.switching,
     handoffProblem: handoffProblem ?? this.handoffProblem,
     changing: clearChanging ? null : changing ?? this.changing,
@@ -2276,6 +2291,86 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_session case final PhasedSession phased) unawaited(phased.skipPhase());
   }
 
+  /// The workflow the menu shows: the one armed for the next message, else Max when it is on.
+  WorkflowPick? get workflowPick {
+    if (state.armed case final w?) return WorkflowPick.script(w);
+    return ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workflow == maxWorkflowId
+        ? const WorkflowPick.max()
+        : null;
+  }
+
+  /// The user picked [pick] in the menu (null: none). A script workflow is
+  /// armed for the next message; Max turns on for the session, with a note
+  /// on the next message (the lead loads the skill itself). One at a time.
+  void pickWorkflow(WorkflowPick? pick) {
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (info == null) return;
+    final maxOn = pick?.isMax ?? false;
+    if (maxOn != (info.workflow == maxWorkflowId)) {
+      sessions.update(maxOn ? info.copyWith(workflow: maxWorkflowId) : info.copyWith(clearWorkflow: true));
+      final note = maxWorkflowNote(on: maxOn);
+      // Turned on and off again before a message went out: nothing to tell.
+      _tierNote = _tierNote == maxWorkflowNote(on: !maxOn)
+          ? ''
+          : [_tierNote, note].where((n) => n.isNotEmpty).join('\n\n');
+    }
+    final w = pick?.entry;
+    state = w != null ? state.copyWith(armed: w) : state.copyWith(clearArmed: true);
+  }
+
+  /// [picked] as it is now, or why it can't run: a project file must still
+  /// be trusted with the same digest, and one run goes at a time.
+  Future<({WorkflowEntry? entry, String why})> _checkWorkflow(WorkflowEntry picked) async {
+    final now = (await _workflowEntries()).where((w) => w.id == picked.id && w.digest == picked.digest).firstOrNull;
+    if (now == null) {
+      return (
+        entry: null,
+        why: "${picked.title} changed since you picked it, so it didn't run. Review it and pick it again.",
+      );
+    }
+    if (_activeRuns.isNotEmpty) {
+      return (entry: null, why: 'A workflow is already running in this session. Wait for its result, then pick again.');
+    }
+    return (entry: now, why: '');
+  }
+
+  /// Starts [picked] on [task] (its lead was already told, as the session's
+  /// first message). Null when it started, else why not.
+  Future<String?> launchWorkflow(WorkflowEntry picked, String task) async {
+    final (:entry, :why) = await _checkWorkflow(picked);
+    if (entry == null) return why;
+    await _launch(entry, task);
+    return null;
+  }
+
+  Future<void> _launch(WorkflowEntry entry, String task) async {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    await runWorkflow(
+      entry.title,
+      entry.source,
+      args: workflowArgsFor(entry, task),
+      ctx: {
+        'lead': {'harness': info?.harness, 'model': info?.model},
+      },
+    );
+  }
+
+  /// The armed workflow [picked] takes [task]: the lead is told it started,
+  /// and the run goes on in the app.
+  Future<bool> _sendWorkflow(WorkflowEntry picked, String task, List<Attachment> files) async {
+    state = state.copyWith(clearArmed: true);
+    final (:entry, :why) = await _checkWorkflow(picked);
+    if (entry == null) {
+      _builder.addNotice(NoticeItem('workflow-${_events.length}-${picked.id}', why));
+      state = state.copyWith(transcript: _builder.snapshot);
+      return false;
+    }
+    if (!await send(workflowStartNote(entry, task), files: files)) return false;
+    await _launch(entry, task);
+    return true;
+  }
+
   /// [text] with a mode note: the full one after a mode change, else a short reminder.
   /// Nested instruction files found since the last message go first, after the mode note.
   String _noted(String text) {
@@ -2308,6 +2403,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   @override
   Future<bool> send(String text, {List<Attachment> files = const []}) async {
     if (!_withinBudget()) return false;
+    if (state.armed case final w? when text.trim().isNotEmpty) return _sendWorkflow(w, text.trim(), files);
     final out = await _outgoing(text, files);
     if (out == null) return false;
     // An outside agent waiting on a card is mid-turn: free it, so the turn can end and the message go out.
