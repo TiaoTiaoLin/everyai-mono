@@ -137,6 +137,7 @@ void main() {
           'auggie',
           'factory-droid',
           'cursor',
+          'grok',
         ],
       );
     });
@@ -158,6 +159,7 @@ void main() {
           'auggie': ('auggie', 'Auggie'),
           'factory-droid': ('droid', 'Factory Droid'),
           'cursor': ('cursor-agent', 'Cursor CLI'),
+          'grok': ('grok', 'Grok Build'),
         };
         for (final MapEntry(key: id, value: (command, label)) in want.entries) {
           final d = r.resolve(id)! as AcpDriver;

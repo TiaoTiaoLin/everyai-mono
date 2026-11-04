@@ -38,11 +38,15 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     this.which,
     Future<String> Function()? dataDir,
     AcpConnect? connect,
+    AcpConnect? ttyConnect,
+    Future<Map<String, String>> Function()? loginEnv,
     this.signedIn,
     this.initTimeout = const Duration(seconds: 60),
     this.replayQuiet = const Duration(milliseconds: 300),
   }) : _dataDir = dataDir ?? GitService.dataDir,
-       _connect = connect ?? _spawn;
+       _connect = connect ?? _spawn,
+       _ttyConnect = ttyConnect ?? _spawnTty,
+       _loginEnv = loginEnv ?? shellLoginEnv;
 
   final String id;
   final String label;
@@ -73,7 +77,15 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
 
   final Future<String> Function() _dataDir;
   final AcpConnect _connect;
+
+  /// [_connect] under a terminal of its own ([AcpProfile.ttyFallback]).
+  final AcpConnect _ttyConnect;
+  final Future<Map<String, String>> Function() _loginEnv;
   final _live = <String, AcpSession>{};
+
+  /// The agent exited for want of a terminal once: from then on, this app
+  /// run starts it under one.
+  var _tty = false;
 
   /// What runs: the executable, its arguments and its profile.
   late final AcpCommand resolved = acpCommand(command, args);
@@ -86,6 +98,39 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     required String logPath,
     required Map<String, String> env,
   }) => spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
+
+  static Future<LineChannel> _spawnTty({
+    required String executable,
+    required List<String> args,
+    required String cwd,
+    required String sessionTag,
+    required String logPath,
+    required Map<String, String> env,
+  }) =>
+      spawnDriverTty(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
+
+  Future<LineChannel> _start({
+    required String executable,
+    required List<String> args,
+    required String cwd,
+    required String sessionTag,
+    required String logPath,
+    required Map<String, String> env,
+  }) => (_tty ? _ttyConnect : _connect)(
+    executable: executable,
+    args: args,
+    cwd: cwd,
+    sessionTag: sessionTag,
+    logPath: logPath,
+    env: env,
+  );
+
+  /// Moves later starts under a terminal; false when they already are.
+  bool _switchToTty() {
+    if (_tty) return false;
+    _tty = true;
+    return true;
+  }
 
   @override
   DriverInfo get info => DriverInfo(
@@ -170,7 +215,9 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     caps: caps,
     command: resolved,
     resolve: _executable,
-    connect: _connect,
+    connect: _start,
+    switchToTty: _switchToTty,
+    loginEnv: _loginEnv,
     initTimeout: initTimeout,
     replayQuiet: replayQuiet,
     offered: _offered,

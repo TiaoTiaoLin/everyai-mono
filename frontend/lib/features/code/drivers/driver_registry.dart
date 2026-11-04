@@ -87,6 +87,8 @@ const _acpAgents = [
   ('auggie', 'Auggie', 'auggie', 'npm i -g @augmentcode/auggie'),
   ('factory-droid', 'Factory Droid', 'droid', 'npm i -g droid'),
   ('cursor', 'Cursor CLI', 'cursor-agent', 'curl https://cursor.com/install -fsS | bash'),
+  // The install line from x.ai/news/grok-build-cli.
+  ('grok', 'Grok Build', 'grok', 'curl -fsSL https://x.ai/cli/install.sh | bash'),
 ];
 
 /// Whether each listed driver can run here, by id; looked up once and kept

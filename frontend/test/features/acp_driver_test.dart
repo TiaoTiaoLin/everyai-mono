@@ -10,6 +10,7 @@ import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/json_rpc.dart';
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
@@ -42,12 +43,16 @@ final class _Rig {
     List<String> args = const [],
     Duration? initTimeout,
     Future<String?> Function(String command)? which,
+    AcpConnect? connect,
+    AcpConnect? ttyConnect,
+    Map<String, String> loginEnv = const {},
   }) => AcpDriver(
     id: id,
     label: switch (command) {
       'gemini' => 'Gemini CLI',
       'opencode' => 'OpenCode',
       'cursor-agent' => 'Cursor CLI',
+      'grok' => 'Grok Build',
       _ => command,
     },
     command: command,
@@ -56,21 +61,25 @@ final class _Rig {
     dataDir: () async => dataDir,
     initTimeout: initTimeout ?? const Duration(seconds: 60),
     replayQuiet: Duration.zero,
-    connect:
-        ({
-          required String executable,
-          required List<String> args,
-          required String cwd,
-          required String sessionTag,
-          required String logPath,
-          required Map<String, String> env,
-        }) async {
-          spawns.add((executable: executable, args: args, cwd: cwd, logPath: logPath, env: env));
-          final c = ReplayChannel.file('$_fixtures/${scripts.removeAt(0)}');
-          channels.add(c);
-          return c;
-        },
+    loginEnv: () async => loginEnv,
+    ttyConnect: ttyConnect,
+    connect: connect ?? replay,
   );
+
+  /// Starts the agent on the next script.
+  Future<LineChannel> replay({
+    required String executable,
+    required List<String> args,
+    required String cwd,
+    required String sessionTag,
+    required String logPath,
+    required Map<String, String> env,
+  }) async {
+    spawns.add((executable: executable, args: args, cwd: cwd, logPath: logPath, env: env));
+    final c = ReplayChannel.file('$_fixtures/${scripts.removeAt(0)}');
+    channels.add(c);
+    return c;
+  }
 
   SessionSpec spec({
     AgentMode mode = AgentMode.ask,
@@ -1308,4 +1317,178 @@ void main() {
       expect([cursorSignedInFrom(0), cursorSignedInFrom(44), cursorSignedInFrom(1)], [true, false, null]);
     });
   });
+
+  group('Grok Build (derived from T3 Code)', () {
+    test('initialize says it is an extension client; Stop sends Ctrl+C in _meta', () async {
+      final r = rig(['grok/cancel.jsonl']);
+      final s = await r.driver('grok', 'grok').start(r.spec());
+      final seen = _Seen(s);
+      expect(r.spawns.single.args, ['--permission-mode', 'default', '--no-auto-update', 'agent', 'stdio']);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.running);
+      await s.interrupt();
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      await s.close();
+    });
+
+    test(
+      'prompt_complete ends a turn whose reply hangs; a late reply, wakes and other prompts change nothing',
+      () async {
+        final r = rig(['grok/turns.jsonl']);
+        final s = await r.driver('grok', 'grok').start(r.spec());
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.finished);
+        await s.send('again');
+        await seen.until(() => seen.all.any((e) => usageLimitOf(e) != null));
+        await seen.untilStatus(ExecutionStatus.error);
+        await s.send('once more');
+        await seen.until(() => seen.all.where((e) => usageLimitOf(e) != null).length == 2);
+        await r.channels.single.finished;
+        r.expectPlayed();
+        expect(seen.statuses, [
+          ExecutionStatus.running,
+          ExecutionStatus.finished,
+          ExecutionStatus.running,
+          ExecutionStatus.error,
+          ExecutionStatus.running,
+          ExecutionStatus.error,
+        ]);
+        final limits = [for (final e in seen.all) ?usageLimitOf(e)];
+        expect(limits.map((l) => l.resetsAt), [null, null]);
+        expect(limits.last.message, 'Grok Build: Usage limit reached');
+        // The background task: one row, closed as failed with its output.
+        final row = seen.calls.single;
+        expect((row.id, row.actionKind, row.summary), ('xbg-t1', 'TerminalAction', 'In the background: npm run dev'));
+        final result = seen.results.single;
+        expect((result.actionId, result.observation['is_error'], result.text), ('xbg-t1', true, 'crashed'));
+        // No MCP environment, task environment or unknown payload got anywhere.
+        await s.close();
+        final journal = File('${r.dataDir}/acp-sessions/${s.id}/events.jsonl').readAsStringSync();
+        final shown = jsonEncode([for (final e in seen.all) e.raw]);
+        for (final secret in ['sk-secret-1', 'sk-secret-2', 'sk-secret-3']) {
+          expect(journal, isNot(contains(secret)));
+          expect(shown, isNot(contains(secret)));
+        }
+      },
+    );
+
+    test('its own questions are declined with a notice; a plan is shown and Grok told to wait', () async {
+      final r = rig(['grok/requests.jsonl']);
+      final s = await r.driver('grok', 'grok').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final c = r.channels.single;
+      expect(_replyTo(c, 'q1'), {'outcome': 'cancelled'});
+      expect((_replyTo(c, 'p1')! as Map)['outcome'], 'abandoned');
+      expect(seen.notices.single, contains('"Which database?"'));
+      expect(seen.messages.map((m) => m.text), contains('1. Add the route\n2. Test it'));
+      // Subagents: one reported at once, one held until subagent_finished.
+      final t = _transcript(seen.all);
+      final subs = t.items.whereType<SubagentItem>().toList();
+      expect(subs.map((i) => i.step.call.action['description']), ['Explore the server', 'Count files']);
+      expect(subs.map((i) => i.step.result?.text), ['Found 3 routes.', 'There are 12 files.']);
+      final order = [for (final e in seen.results) e.actionId];
+      expect(order, ['tc-spawn-2', 'tc-spawn-1']);
+      await s.close();
+    });
+
+    test('not signed in at session/new: authenticate once with the cached sign-in, or the key when set', () async {
+      final r = rig(['grok/auth.jsonl', 'grok/auth_key.jsonl']);
+      await (await r.driver('grok', 'grok').start(r.spec())).close();
+      final keyed = r.driver('grok', 'grok', loginEnv: const {'XAI_API_KEY': 'xai-test'});
+      await (await keyed.start(r.spec())).close();
+      r.expectPlayed();
+    });
+
+    test("a sign-in method it doesn't offer as its own: the sign-in hint", () async {
+      final r = rig(['grok/auth_unoffered.jsonl']);
+      await expectLater(
+        r.driver('grok', 'grok').start(r.spec()),
+        throwsA(
+          isA<HarnessError>().having(
+            (e) => e.message,
+            'message',
+            "Grok Build isn't signed in. Run `grok login` in a terminal, then try again.",
+          ),
+        ),
+      );
+      r.expectPlayed();
+    });
+
+    test('exited for want of a terminal: started again under one, and so is the next session', () async {
+      final r = rig(['grok/handshake.jsonl', 'grok/handshake.jsonl']);
+      var piped = 0;
+      final d = r.driver(
+        'grok',
+        'grok',
+        connect:
+            ({
+              required String executable,
+              required List<String> args,
+              required String cwd,
+              required String sessionTag,
+              required String logPath,
+              required Map<String, String> env,
+            }) async {
+              piped++;
+              return _NoTty();
+            },
+        ttyConnect: r.replay,
+      );
+      await (await d.start(r.spec())).close();
+      await (await d.start(r.spec())).close();
+      r.expectPlayed();
+      expect((piped, r.channels.length), (1, 2));
+    });
+
+    test('another agent with the same exit: an error, never a terminal', () async {
+      final r = rig(const []);
+      var ttys = 0;
+      final d = r.driver(
+        'acp:gemini',
+        'gemini',
+        connect: ({
+          required String executable,
+          required List<String> args,
+          required String cwd,
+          required String sessionTag,
+          required String logPath,
+          required Map<String, String> env,
+        }) async => _NoTty(),
+        ttyConnect:
+            ({
+              required String executable,
+              required List<String> args,
+              required String cwd,
+              required String sessionTag,
+              required String logPath,
+              required Map<String, String> env,
+            }) async {
+              ttys++;
+              return _NoTty();
+            },
+      );
+      await expectLater(d.start(r.spec()), throwsA(isA<HarnessError>()));
+      expect(ttys, 0);
+    });
+  });
+}
+
+/// An agent that exits at once, saying it couldn't open a terminal.
+final class _NoTty implements LineChannel {
+  @override
+  Stream<String> get lines => const Stream.empty();
+
+  @override
+  void send(String line) {}
+
+  @override
+  String get lastError => 'Error: Device not configured (os error 6)';
+
+  @override
+  Future<void> close() async {}
 }

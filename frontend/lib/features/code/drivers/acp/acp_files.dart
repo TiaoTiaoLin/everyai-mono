@@ -17,6 +17,10 @@ Future<List<({String name, String description})>> listSkills(String skillDir) =>
 /// [command]'s absolute path on the login shell's PATH, or null.
 Future<String?> whichCommand(String command) => impl.whichCommand(command);
 
+/// The login shell's environment (an app started from the Dock lacks the
+/// user's).
+Future<Map<String, String>> shellLoginEnv() => impl.loginEnv();
+
 /// Whether any of [names] is set (non-empty) in the login environment, or
 /// in [env] when given (tests). Only presence is checked.
 Future<bool> envHasAny(List<String> names, {Map<String, String>? env}) async {
@@ -43,6 +47,13 @@ Future<bool?> kiroSignedIn(String executable) => impl.kiroSignedIn(executable);
 /// presence only, read by `cursorSignedInFrom` in `acp_agents.dart`); null
 /// elsewhere.
 Future<bool?> cursorSignedIn() => impl.cursorSignedIn();
+
+/// Whether Grok Build is signed in, from `grok --no-auto-update models`
+/// (it lists models without starting the agent; read by
+/// `parseGrokModelsLogin` in `acp_xai.dart`). A "not logged in" is checked
+/// once more, since an expired token refreshes in that same run. An API key
+/// is checked before this (the profile's `keyEnv`).
+Future<bool?> grokSignedIn(String executable) => impl.grokSignedIn(executable);
 
 /// Why Kiro CLI must not start in [cwd], or null: the project's
 /// `.kiro/agents/` (agent configs offered as its modes, which can pre-allow

@@ -1,0 +1,9 @@
+// Derived from T3 Code's provider-grok (MIT, @ 8b44f42b: acpSupport.ts, xaiAcpExtension.ts and its tests), not recorded: unverified against a real `grok agent stdio`.
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "everyai", "title": "EveryAI", "version": "0.1.0"}, "_meta": {"clientType": "extension"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "authMethods": [{"id": "cached_token", "name": "Grok account"}, {"id": "xai.api_key", "name": "xAI API key"}], "agentCapabilities": {"loadSession": true}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/new", "id": 2, "params": {"cwd": "{{cwd}}", "mcpServers": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "Authentication required"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "authenticate", "id": 3, "params": {"methodId": "cached_token"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "result": {}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/new", "id": 4, "params": {"cwd": "{{cwd}}", "mcpServers": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 4, "result": {"sessionId": "grok-1"}}}

@@ -16,7 +16,7 @@ import 'acp_files.dart';
 // Agents without logic of their own are [AcpAgent.generic] plus data.
 
 /// The agents with logic of their own; anything else is [generic].
-enum AcpAgent { gemini, openCode, qwen, kiro, cursor, generic }
+enum AcpAgent { gemini, openCode, qwen, kiro, cursor, grok, generic }
 
 /// How to run one ACP agent so every risky call comes to the app as a
 /// `session/request_permission`.
@@ -39,6 +39,9 @@ final class AcpProfile {
     this.configPins = const {},
     this.notThis,
     this.alsoNamed = const [],
+    this.ttyFallback = false,
+    this.initializeMeta,
+    this.cancelMeta,
   });
 
   final AcpAgent agent;
@@ -95,6 +98,22 @@ final class AcpProfile {
   /// when the command's own name isn't found.
   final List<String> alsoNamed;
 
+  /// Whether it may need a terminal of its own: when it exits saying it
+  /// couldn't open one (`isNoTtyExit`), it starts again under a pty.
+  final bool ttyFallback;
+
+  /// `_meta` for `initialize` and for `session/cancel`, when it reads one.
+  final Map<String, Object?>? initializeMeta;
+  final Map<String, Object?>? cancelMeta;
+
+  /// The `authenticate` method to try once when `session/new` says it isn't
+  /// signed in, read from the login environment [env]; null tries none.
+  Future<String?> authMethod(Future<Map<String, String>> Function() env) async => switch (agent) {
+    // Ported from T3 Code (MIT), packages/provider-grok/src/server/acpSupport.ts `resolveGrokAuthMethodId`.
+    AcpAgent.grok => ((await env())['XAI_API_KEY'] ?? '').trim().isNotEmpty ? 'xai.api_key' : 'cached_token',
+    _ => null,
+  };
+
   /// How the session's briefing reaches it (`drivers/briefing/recipes.dart`).
   Delivery deliver(BriefingInput i, List<({String name, String description})> skills) => switch (agent) {
     AcpAgent.gemini => recipes.gemini(i, skills: skills),
@@ -131,6 +150,7 @@ final class AcpProfile {
       AcpAgent.openCode => openCodeSignedIn(executable),
       AcpAgent.kiro => kiroSignedIn(executable),
       AcpAgent.cursor => cursorSignedIn(),
+      AcpAgent.grok => grokSignedIn(executable),
       _ => null,
     };
   }
@@ -433,6 +453,35 @@ const _cursor = AcpProfile._(
   alsoNamed: ['cursor-agent', 'agent'],
 );
 
+// Grok Build (docs.x.ai/build/cli/reference lists `grok agent stdio`). The
+// global flags go before `agent`, as in T3 Code (MIT),
+// packages/provider-grok/src/server/acpSupport.ts `grokAcpSpawnArgs`:
+// `--permission-mode default` keeps it asking whatever its config says, and
+// `--no-auto-update` keeps the installed version (neither is in xAI's
+// reference yet). `initialize` says `clientType: extension`, which asks
+// instead of quietly refusing, and Stop is Ctrl+C, which also holds back
+// background wakes until the next message. No session modes are known yet.
+// No consent: xAI's announcement (x.ai/news/grok-build-cli) offers ACP
+// "to build your own bots and agent orchestration apps".
+const _grok = AcpProfile._(
+  agent: AcpAgent.grok,
+  pinned: [
+    ['--permission-mode', 'default'],
+    ['--no-auto-update'],
+    ['agent'],
+    ['stdio'],
+  ],
+  dropped: ['--always-approve', '--yolo', '--dangerously-skip-permissions'],
+  // Allow rules (docs.x.ai/build/cli/reference) would let calls past the app.
+  droppedWithValue: ['--allow'],
+  caps: {..._shared, DriverCap.switchModel, DriverCap.subagents},
+  signIn: 'Run `grok login` in a terminal',
+  keyEnv: ['XAI_API_KEY'],
+  ttyFallback: true,
+  initializeMeta: {'clientType': 'extension'},
+  cancelMeta: {'cancelTrigger': 'ctrl_c'},
+);
+
 /// `<name> version: v1.2.3`: how the same-named AWS Copilot CLI and pressly's
 /// goose print their version, unlike the agents.
 const _otherCli = r'^\S+ version: v\d';
@@ -454,6 +503,7 @@ AcpProfile acpProfileOf(String executable) => switch (executable.split('/').last
   'auggie' => _auggie,
   'droid' => _droid,
   'cursor-agent' || 'agent' => _cursor,
+  'grok' => _grok,
   _ => _generic,
 };
 

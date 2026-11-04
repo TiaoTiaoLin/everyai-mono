@@ -273,7 +273,15 @@ SOFTWARE.
   rewritten in Dart (no files copied verbatim; no prompt text was taken). So
   far: Kiro CLI's ACP launch arguments (`--agent-engine=v3`,
   `--auth-method=cli`) and the reading of `kiro-cli whoami --format json`
-  (`packages/provider-kiro/src/server/acpSupport.ts`, `status.ts`). Source:
+  (`packages/provider-kiro/src/server/acpSupport.ts`, `status.ts`); Grok
+  Build's ACP launch flags, `initialize`/`session/cancel` `_meta`, sign-in
+  method pick and `grok models` sign-in reading
+  (`packages/provider-grok/src/server/acpSupport.ts`, `status.ts`), and its
+  `x.ai/*` extension mapping: prompt completion, background tasks,
+  subagents, the usage-limit code (`xaiAcpExtension.ts`; test payloads
+  adapted from `xaiAcpExtension.test.ts` in
+  `frontend/test/fixtures/drivers/grok/`). The replies Grok reads are our
+  own words. Source:
   https://github.com/pingdotgg/t3code at commit
   8b44f42b14c8e273156474a924ccf29680dd7857.
 - **Where:** `frontend/lib/features/code/drivers/` (the parts marked "Ported

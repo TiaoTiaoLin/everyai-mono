@@ -7,6 +7,7 @@ import 'dart:io';
 import '../../../skills/domain/skill_format.dart' show parseFrontMatter;
 import '../../harness/everyai/shell_io.dart' show ShellEnv;
 import 'acp_agents.dart' show cursorSignedInFrom, kiroSignedInFrom;
+import 'acp_xai.dart' show parseGrokModelsLogin;
 
 Future<Map<String, Object?>?> readJsonFile(String path) async {
   try {
@@ -144,6 +145,17 @@ Future<bool?> cursorSignedIn() async {
     'cursor-user',
   ]);
   return out == null ? null : cursorSignedInFrom(out.code);
+}
+
+Future<bool?> grokSignedIn(String executable) async {
+  Future<bool?> probe() async {
+    final out = await _status(executable, const ['--no-auto-update', 'models']);
+    return out == null || out.code != 0 ? null : parseGrokModelsLogin(out.stdout);
+  }
+
+  final first = await probe();
+  if (first != false) return first;
+  return await probe() ?? false;
 }
 
 /// [executable] [args]'s exit code and output, or null when it can't run or
