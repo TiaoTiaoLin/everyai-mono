@@ -6,6 +6,7 @@ import '../code_providers.dart';
 import '../code_settings_providers.dart';
 import '../domain/code_session.dart';
 import '../drivers/driver.dart';
+import '../git/git_service.dart';
 import '../drivers/driver_policy.dart' show leadFix;
 import '../drivers/driver_registry.dart';
 import '../drivers/event_journal.dart';
@@ -30,6 +31,9 @@ final pastSessionSourcesProvider = Provider<List<PastSessionSource>>(
 const _withSources = {'everyai', claudeHarness, codexHarness, 'opencode', 'gemini'};
 
 /// How long one harness may take to list a folder's sessions before it is left out.
+/// The folder's git worktrees, made by EveryAI or not (`git worktree list`). Tests override it.
+final gitWorktreesProvider = Provider<Future<List<String>> Function(String dir)>((ref) => GitService.worktrees);
+
 final pastSessionTimeoutProvider = Provider<Duration>((ref) => const Duration(seconds: 5));
 
 /// Why [driverId] has no earlier sessions to offer (it can't list or load them), for Settings → Code →
@@ -83,7 +87,17 @@ final pastSessionsProvider = FutureProvider.autoDispose.family<List<PastSession>
     for (final s in sources)
       if (statuses[s.harness]?.installed ?? false) s,
   ];
-  final worktrees = projectWorktrees(sessions, project);
+  List<String> git;
+  try {
+    git = await ref.read(gitWorktreesProvider)(project.path).timeout(timeout);
+  } on Object {
+    git = const [];
+  }
+  final worktrees = {
+    ...projectWorktrees(sessions, project),
+    for (final w in git)
+      if (w != project.path) w,
+  }.toList();
   final lists = await Future.wait([
     for (final s in installed)
       s

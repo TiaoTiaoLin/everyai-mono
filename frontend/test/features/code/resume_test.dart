@@ -18,6 +18,7 @@ import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentM
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/gateway_key.dart';
+import 'package:every_ai/features/code/git/git_service_io.dart' show worktreePaths;
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
@@ -123,6 +124,7 @@ void main() {
   late ProviderContainer container;
   late Map<String, HarnessDriver> drivers;
   late List<PastSessionSource> sources;
+  var gitTrees = <String>[];
 
   ProviderContainer make() => ProviderContainer(
     overrides: [
@@ -137,6 +139,7 @@ void main() {
       apiClientProvider.overrideWithValue(ApiClient(baseUrl: Uri.parse('http://backend/'), client: _noNetwork)),
       pastSessionSourcesProvider.overrideWith((ref) => sources),
       pastSessionTimeoutProvider.overrideWithValue(const Duration(milliseconds: 200)),
+      gitWorktreesProvider.overrideWithValue((dir) async => gitTrees),
     ],
   );
 
@@ -170,6 +173,7 @@ void main() {
       'cli': _Adopting(FakeLeadDriver('cli', label: 'Consent', needsConsent: true)),
     };
     sources = const [];
+    gitTrees = [];
     prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
     container = make();
@@ -347,5 +351,47 @@ void main() {
     expect(opened, 0);
     await tester.tap(find.byKey(const ValueKey('ok')));
     expect(opened, 1);
+  });
+
+  test("the folder's git worktrees are searched too, made by EveryAI or not", () async {
+    final alpha = _Source('alpha', const []);
+    sources = [alpha];
+    gitTrees = [project.path, '/elsewhere/feature-wt'];
+    container = make();
+    await listed();
+    expect(alpha.asked.single.$1, project.path);
+    expect(alpha.asked.single.$2, ['/elsewhere/feature-wt']);
+  });
+
+  test('worktree paths are read from git worktree list --porcelain; bare and prunable ones left out', () {
+    const out =
+        'worktree /repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /wt/a\nHEAD def\ndetached\n\n'
+        'worktree /wt/gone\nHEAD 123\nprunable gitdir file points to non-existent location\n\nworktree /bare\nbare\n';
+    expect(worktreePaths(out), ['/repo', '/wt/a']);
+    expect(worktreePaths(''), isEmpty);
+  });
+
+  test("a lead switch after a resume hands over the resumed conversation's history too", () async {
+    final history = [userMessageEvent('h-u', 'Fix the login'), agentMessageEvent('h-a', 'Fixed it in auth.dart.')];
+    final info = await container
+        .read(codeSessionsProvider.notifier)
+        .resumePast(
+          project: theProject(),
+          past: past('alpha', 'native-1', at: DateTime(2026, 11, 1)),
+          mode: AgentMode.ask,
+          history: history,
+        );
+    container.listen(codeSessionProvider(info.id), (_, _) {});
+    await whenValue(container, codeSessionProvider(info.id).select((s) => s.connected), (bool c) => c);
+    await pumpEventQueue();
+    final outcome = await container.read(codeSessionProvider(info.id).notifier).switchLead('beta', run: true);
+    expect(outcome.failed, isFalse);
+    final beta = (drivers['beta']! as _Adopting).inner;
+    final first = beta.specs.single.initialMessage!;
+    final path = RegExp(r'<transcript>\n(.+)\n</transcript>').firstMatch(first)![1]!;
+    final file = File('${project.path}/$path').readAsStringSync();
+    expect(file, contains('# Alpha'));
+    expect(file, contains('Fix the login'));
+    expect(file, contains('Fixed it in auth.dart.'));
   });
 }
