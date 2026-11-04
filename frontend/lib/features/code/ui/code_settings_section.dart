@@ -543,7 +543,6 @@ final class _Layer {
   final StoredCodeSettings prefs;
 }
 
-/// A wrap of removable chips and an add chip.
 /// Settings → Code → Harnesses: each driver with what was found on this
 /// computer, the consent switch for subscription CLIs, and Refresh.
 class HarnessesSetting extends ConsumerWidget {
@@ -611,7 +610,9 @@ class HarnessesSetting extends ConsumerWidget {
             key: const ValueKey('code-settings.harnesses.refresh'),
             label: 'Refresh',
             emphasis: ButtonEmphasis.secondary,
-            onPressed: () => ref.invalidate(driverStatusesProvider),
+            onPressed: () => ref
+              ..invalidate(driverStatusesProvider)
+              ..invalidate(driverModelsProvider),
           ),
         ),
       ],
@@ -627,6 +628,7 @@ String harnessStatusLine(String id, DriverStatus s) => [
   if (s.problem case final p? when p.isNotEmpty) p.endsWith('.') ? p.substring(0, p.length - 1) : p,
 ].join(' · ');
 
+/// A wrap of removable chips and an add chip.
 class _Chips extends StatelessWidget {
   const _Chips({required this.items, required this.addLabel, required this.onAdd, required this.onRemove});
 

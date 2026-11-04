@@ -124,6 +124,7 @@ void main() {
       expect((u.calls, u.promptTokens, u.completionTokens, u.cachedTokens), (4, 2700, 190, 800));
       expect((u.chargedMicros, u.ownKeyMicros, u.planMicros, u.spentMicros), (300, 900, 2000, 1200));
       expect(u.lastPromptTokens, 400);
+      expect(u.planCalls, 1);
     });
 
     test("a turn's summed input doesn't fill the context ring", () async {
@@ -202,6 +203,34 @@ void main() {
       await tester.pumpWidget(_host(const UsageBreakdown(totals: plan, contextWindow: 0)));
       expect(find.text('On your plan'), findsOneWidget);
       expect(find.text(r'$0.04 at API prices'), findsOneWidget);
+    });
+
+    testWidgets('a plan call with no price still reads as on the plan', (tester) async {
+      // Codex reports tokens on a subscription without a price.
+      final unpriced = UsageTotals.zero.addCall(prompt: 12000, completion: 800, onPlan: true);
+      expect((unpriced.planMicros, unpriced.onPlan), (0, true));
+      expect(UsageTotals.fromJson(unpriced.toJson()), unpriced);
+      final db = AppDatabase(NativeDatabase.memory());
+      late Preferences prefs;
+      await tester.runAsync(() async => prefs = await Preferences.load(db));
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            databaseProvider.overrideWithValue(db),
+            preferencesProvider.overrideWithValue(prefs),
+            modelCatalogProvider.overrideWith(_FixedCatalog.new),
+            codeUsageProvider.overrideWithBuild((ref, n) async => unpriced),
+          ],
+          child: _host(const SessionMeter(sessionId: 's1', model: 'm')),
+        ),
+      );
+      await tester.pump();
+      expect(find.textContaining('on your plan'), findsOneWidget);
+      expect(find.textContaining(r'$'), findsNothing);
+      await tester.pumpWidget(_host(UsageBreakdown(totals: unpriced, contextWindow: 0)));
+      expect(find.text('no price reported'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      await tester.runAsync(db.close);
     });
   });
 }

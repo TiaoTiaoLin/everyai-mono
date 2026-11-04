@@ -158,7 +158,8 @@ const _hostToolInfos = <HostToolInfo>[
 ];
 
 /// Ends the outside CLIs and the MCP host when the app quits (provider
-/// disposal doesn't run then). Read when an outside session starts.
+/// disposal doesn't run then). The shell listens to it from app start, so
+/// every CLI is covered, however it was spawned.
 final driverShutdownProvider = Provider<void>((ref) {
   Future<void> closeAll() => closeAllDriverProcesses().timeout(const Duration(seconds: 3), onTimeout: () {});
   final lifecycle = AppLifecycleListener(
@@ -232,7 +233,8 @@ final class CodeLead extends Notifier<CodeLeadChoice> {
 
 /// An outside driver's own models (empty for the EveryAI harness, whose
 /// models come from the catalog, and while a driver can't list them).
-final driverModelsProvider = FutureProvider.family<List<DriverModel>, String>((ref, id) async {
+/// Not kept once unwatched, so a CLI signed in since lists its models.
+final driverModelsProvider = FutureProvider.autoDispose.family<List<DriverModel>, String>((ref, id) async {
   try {
     return await ref.read(driverRegistryProvider).resolve(id)?.models() ?? const [];
   } on Object {
@@ -394,12 +396,15 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     // to be isolated (then a worktree on its own branch). A remote host's
     // folder can't be branched or snapshotted from here.
     final local = !noLocalFolder(project.path);
+    final runner = await harnessFor(ref, project.path, harness: harness);
+    final driver = runner is HarnessDriver && isOutsideLead(harness, project.path) ? runner : null;
+    // Before anything is made for the session.
+    if (driver != null) {
+      if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
+    }
     final worktree = local && isolated ? await _worktreeFor(project, title, id) : null;
     final baseline = local && worktree == null ? await _baselineFor(project.path) : null;
     final workingDir = worktree?.path ?? project.path;
-    final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
-    final runner = await harnessFor(ref, project.path, harness: harness);
-    final driver = runner is HarnessDriver && isOutsideLead(harness, project.path) ? runner : null;
     tier ??= ref.read(codeSettingsProvider).tier;
     if (driver != null) {
       // Max, Ultra and Bug fix need the EveryAI harness's phase control; outside agents get them later.
@@ -412,6 +417,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     final saved = Completer<void>();
     final HarnessSession live;
     try {
+      final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
       final briefing = driver == null
           ? null
           : await _brief(
@@ -445,6 +451,10 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         if (briefing != null) await _unbrief(id);
         rethrow;
       }
+    } on Object {
+      // A session that didn't start leaves no branch behind.
+      if (worktree != null) await _dropWorktree(worktree);
+      rethrow;
     } finally {
       saved.complete();
     }
@@ -937,6 +947,14 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     );
   }
 
+  static Future<void> _dropWorktree(SessionWorktree w) async {
+    try {
+      await GitService.removeWorktree(w, hooksDir: '${await GitService.dataDir()}/git-hooks');
+    } on Object {
+      // Left behind, it is only disk space and a branch.
+    }
+  }
+
   /// The in-place session's starting point; a snapshot that fails only costs
   /// the Changes view.
   static Future<GitBaseline?> _baselineFor(String dir) async {
@@ -1221,26 +1239,44 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
   }
 
-  /// Pairs each waiting host call with the oldest open card of its tool that
-  /// has none yet. The agent's row and its call to the host arrive in either
-  /// order, so this runs on both.
+  /// Pairs each waiting host call with an open card of its tool, from the
+  /// user's last message on: one with the call's arguments first, newest
+  /// calls with newest cards. The agent's row and its call to the host
+  /// arrive in either order, so this runs on both and pairs afresh each
+  /// time: a call that took a card left open by an earlier run (the app quit
+  /// while it waited) moves to its own card once that arrives.
   void _bindHostWaits() {
-    if (_hostWaits.every((w) => w.row != null)) return;
-    final bound = {for (final w in _hostWaits) ?w.row};
-    for (final item in state.transcript.items) {
-      final call = switch (item) {
-        QuestionItem(:final call, answers: null) || PlanProposal(:final call, verdict: null) => call,
-        _ => null,
-      };
-      if (call == null || bound.contains(call.id)) continue;
-      final tool = hostToolOf(call);
-      if (tool == null) continue;
-      final wait = _hostWaits.where((w) => w.row == null && w.call.name == tool).firstOrNull;
-      if (wait == null) continue;
-      wait.row = call.id;
-      bound.add(call.id);
+    if (_hostWaits.isEmpty) return;
+    final items = state.transcript.items;
+    final open = [
+      for (final item in items.skip(items.lastIndexWhere((i) => i is UserTurn) + 1).toList().reversed)
+        if (switch (item) {
+              QuestionItem(:final call, answers: null) || PlanProposal(:final call, verdict: null) => call,
+              _ => null,
+            }
+            case final call? when hostToolOf(call) != null)
+          call,
+    ];
+    final waits = _hostWaits.reversed.toList();
+    for (final w in waits) {
+      w.row = null;
+    }
+    // Matching arguments first, so a call never takes the card another call's arguments match.
+    for (final exact in [true, false]) {
+      for (final wait in waits.where((w) => w.row == null)) {
+        final call = open
+            .where((c) => hostToolOf(c) == wait.call.name && (!exact || _sameArgs(c, wait.call.args)))
+            .firstOrNull;
+        if (call == null) continue;
+        wait.row = call.id;
+        open.remove(call);
+      }
     }
   }
+
+  /// Whether the agent's row [call] carries host call arguments [args].
+  static bool _sameArgs(ActionCall call, Map<String, Object?> args) =>
+      args.entries.every((e) => jsonEncode(call.action[e.key]) == jsonEncode(e.value));
 
   /// The host call card [rowId] answers, if one waits.
   _HostWait? _hostFor(String rowId) => _hostWaits.where((w) => w.row == rowId && !w.done.isCompleted).firstOrNull;
@@ -1860,6 +1896,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     final out = await _outgoing(text, files);
     final session = _session;
     if (out == null || session == null) return;
+    // An outside agent blocked on a card reads the steer only once the call returns.
+    _releaseHostCards();
+    _touchHost();
     await steerOrResend(
       session,
       _driver.caps,
@@ -1900,6 +1939,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       } finally {
         _compacting = false;
       }
+    }
+    // An outside CLI keeps its own context: a summary through the gateway would bill credits and a fresh
+    // conversation would lose its EveryAI tools.
+    if (isOutsideLead(info.harness, info.workingDir)) {
+      return CompactOutcome.failed('${_driver.info.label} keeps its own context and compacts it on its own.');
     }
     final plan = planCompaction(_events);
     if (plan == null) return const CompactOutcome.nothing();
@@ -3141,6 +3185,7 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
       cached: r.cached,
       ownKey: r.onPlan ? 0 : cost,
       plan: r.onPlan ? cost : 0,
+      onPlan: r.onPlan,
       context: false,
     );
     if (r.contextTokens case final c?) next = next.withContext(c);

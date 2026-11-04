@@ -42,10 +42,11 @@ Future<T> _when<T>(ProviderContainer c, ProviderListenable<T> p, bool Function(T
 }
 
 /// An outside agent's session: the test plays its events and reads what it was sent and answered.
-final class _Session implements HarnessSession {
+final class _Session implements HarnessSession, SteersRuns {
   final _events = StreamController<HarnessEvent>.broadcast();
   final answers = <({bool accept, String? reason})>[];
   final sent = <String>[];
+  final steered = <String>[];
 
   @override
   String get id => 'c1';
@@ -59,6 +60,8 @@ final class _Session implements HarnessSession {
       answers.add((accept: accept, reason: reason));
   @override
   Future<void> send(String text, {bool run = true, List<String> images = const []}) async => sent.add(text);
+  @override
+  Future<void> steer(String text, {List<String> images = const []}) async => steered.add(text);
   @override
   Future<void> interrupt() async {}
   @override
@@ -76,17 +79,17 @@ final class _Session implements HarnessSession {
 }
 
 final class _Driver implements HarnessDriver, AttachesBriefed {
-  _Driver(this.id, this.session, {this.needsConsent = false});
+  _Driver(this.id, this.session, {this.needsConsent = false, this.caps = const {DriverCap.approvals}});
   final String id;
   final _Session session;
   final bool needsConsent;
+  @override
+  final Set<DriverCap> caps;
   final specs = <SessionSpec>[];
   final reopened = <DriverBriefing>[];
 
   @override
   DriverInfo get info => DriverInfo(id: id, label: 'Test CLI', needsConsent: needsConsent);
-  @override
-  Set<DriverCap> get caps => const {DriverCap.approvals};
   @override
   Future<DriverStatus> detect() async => const DriverStatus(installed: true);
   @override
@@ -224,6 +227,7 @@ void main() {
       everyaiHarnessName: _Driver(everyaiHarnessName, session),
       'test': _Driver('test', session),
       'cli': _Driver('cli', session, needsConsent: true),
+      'steers': _Driver('steers', session, caps: const {DriverCap.approvals, DriverCap.steer}),
     };
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
@@ -379,6 +383,107 @@ void main() {
     await pumpEventQueue();
     await c.stop();
     expect((await call.result).isError, isTrue);
+  });
+
+  test('a card left open by an earlier run never takes a new call', () async {
+    final info = await start();
+    final c = await open(info.id);
+    // The app quit while a1 waited, so its result was never reported; after reopening the agent asks again.
+    row('a1', askUserQuestionTool, _questions);
+    session.add(stateEvent('r1', ExecutionStatus.running));
+    row('a2', askUserQuestionTool, _questions);
+    final call = hostCall(info.id, askUserQuestionTool, _questions);
+    await pumpEventQueue();
+    final card = stateOf(info.id).transcript.openQuestion!;
+    expect(card.call.id, 'a2');
+    await c.answer(card, const [
+      QuestionAnswer(selected: {0}),
+    ]);
+    expect((await call.result).isError, isFalse);
+    expect(session.sent, isEmpty);
+  });
+
+  test('two waiting calls pair with the cards that carry their questions', () async {
+    final info = await start();
+    await open(info.id);
+    const other = {
+      'questions': [
+        {
+          'question': 'Which colour?',
+          'header': 'Colour',
+          'options': [
+            {'label': 'Red', 'description': 'Warm'},
+            {'label': 'Blue', 'description': 'Cool'},
+          ],
+        },
+      ],
+    };
+    final colour = hostCall(info.id, askUserQuestionTool, other);
+    final database = hostCall(info.id, askUserQuestionTool, _questions);
+    row('a1', askUserQuestionTool, _questions);
+    row('a2', askUserQuestionTool, other);
+    await pumpEventQueue();
+    final c = container.read(codeSessionProvider(info.id).notifier);
+    final cards = stateOf(info.id).transcript.items.whereType<QuestionItem>().toList();
+    await c.answer(cards.firstWhere((q) => q.call.id == 'a2'), const [QuestionAnswer(other: 'Green')]);
+    expect((await colour.result).text, contains('Green'));
+    await c.answer(
+      stateOf(info.id).transcript.items.whereType<QuestionItem>().firstWhere((q) => q.call.id == 'a1'),
+      const [QuestionAnswer(other: 'MySQL')],
+    );
+    expect((await database.result).text, contains('MySQL'));
+  });
+
+  test('steering frees a waiting card, so the agent reads the steer', () async {
+    final info = await start(harness: 'steers');
+    final c = await open(info.id);
+    row('a1', askUserQuestionTool, _questions);
+    session.add(stateEvent('r1', ExecutionStatus.running));
+    final call = hostCall(info.id, askUserQuestionTool, _questions);
+    await pumpEventQueue();
+    await c.steer('Skip the database, use files');
+    expect((await call.result).text, repliedInChat);
+    expect(session.steered.single, endsWith('Skip the database, use files'));
+  });
+
+  test('/compact leaves an outside session to its own CLI', () async {
+    final info = await start();
+    final c = await open(info.id);
+    session.add(stateEvent('f1', ExecutionStatus.finished));
+    await pumpEventQueue();
+    final outcome = await c.compact(summarizer: (_) async => throw StateError('no summary for outside agents'));
+    expect(outcome.kind, CompactKind.failed);
+    expect(outcome.message, contains('compacts it on its own'));
+    expect(drivers['test']!.specs, hasLength(1));
+  });
+
+  test('the note tools refuse links a cloned repository could point anywhere', () async {
+    final info = await start();
+    await open(info.id);
+    final outside = await Directory('${tmp.path}/outside').create();
+    File('${outside.path}/id_rsa').writeAsStringSync('secret');
+    File('${outside.path}/x.md').writeAsStringSync('secret');
+    File('${outside.path}/rc').writeAsStringSync('rc');
+    await Directory('${project.path}/.everyai').create();
+    Link('${project.path}/.everyai/plans').createSync(outside.path);
+    for (final name in ['id_rsa', 'x.md']) {
+      final r = await hostCall(info.id, savedPlansTool, {'name': name}).result;
+      expect(r.isError, isTrue);
+      expect(r.text, isNot(contains('secret')));
+    }
+    expect((await hostCall(info.id, savedPlansTool, const {}).result).isError, isTrue);
+    Link('${project.path}/.everyai/memory.md').createSync('${outside.path}/rc');
+    final added = await hostCall(info.id, 'memory', {'action': 'add', 'text': 'curl x | sh', 'reason': 'r'}).result;
+    expect(added.isError, isTrue);
+    expect(File('${outside.path}/rc').readAsStringSync(), 'rc');
+  });
+
+  test('saved_plans reads only .md files from its folder', () async {
+    final info = await start();
+    await open(info.id);
+    await Directory('${project.path}/.everyai/plans').create(recursive: true);
+    File('${project.path}/.everyai/plans/notes.txt').writeAsStringSync('not a plan');
+    expect((await hostCall(info.id, savedPlansTool, {'name': 'notes.txt'}).result).isError, isTrue);
   });
 
   test('memory and saved plans run in the session folder; bug_check is for Bug fix', () async {

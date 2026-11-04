@@ -189,7 +189,11 @@ class UsageBreakdown extends StatelessWidget {
             row('On your own key', formatMicros(totals.ownKeyMicros)),
           ],
           // What an outside CLI did on the user's own subscription, priced as the API would charge.
-          if (totals.planMicros > 0) row('On your plan', '${formatMicros(totals.planMicros)} at API prices'),
+          if (totals.onPlan)
+            row(
+              'On your plan',
+              totals.planMicros > 0 ? '${formatMicros(totals.planMicros)} at API prices' : 'no price reported',
+            ),
           row('Cost', formatMicros(totals.spentMicros), strong: true),
         ],
       ),

@@ -305,7 +305,10 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
           PopoverRow(
             key: const ValueKey('agent-menu.harness'),
             title: 'Harness',
-            subtitle: [lead?.info.label ?? _harness, if (widget.onHarness == null) 'Switching comes later'].join(' · '),
+            subtitle: [
+              lead?.info.label ?? _harness,
+              if (widget.onHarness == null) 'Switching comes later' else ?lead?.blocked,
+            ].join(' · '),
             trailing: widget.onHarness == null ? null : more,
             onTap: widget.onHarness == null ? null : () => setState(() => _page = _Page.harness),
           ),
