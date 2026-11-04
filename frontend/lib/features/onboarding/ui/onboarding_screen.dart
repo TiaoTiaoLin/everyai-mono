@@ -577,8 +577,8 @@ class _CodeHarnesses extends ConsumerWidget {
               _ => null,
             },
             checking: statuses is! AsyncData,
-            consented: own.contains(d.info.id),
-            onConsent: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.id, v),
+            consented: own.contains(d.info.consentId),
+            onConsent: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.consentId, v),
           ),
         const SizedBox(height: 8),
         Text(

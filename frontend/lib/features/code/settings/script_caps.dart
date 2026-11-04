@@ -31,8 +31,6 @@ ScriptCaps scriptCapsFor(HarnessTier tier, String model, {ScriptLevel level = Sc
     HarnessTier.ultraEfficient => (10, 0, 1),
     HarnessTier.efficient => (20, 0, 1),
     HarnessTier.thorough => (40, 20, 1),
-    HarnessTier.max => (80, 40, 1),
-    HarnessTier.ultra => (150, 80, 2),
   };
   final family = _scriptFamilies.contains(familyOf(model));
   return switch (level) {

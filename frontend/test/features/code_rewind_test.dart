@@ -8,6 +8,7 @@ import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/compaction.dart' show userTextOf;
 import 'package:every_ai/features/code/domain/rewind.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
@@ -114,6 +115,23 @@ void main() {
       );
       expect(const RewindOutcome.busy().label, contains('stop it'));
       expect(rewindPrompt('this message', files: false), contains('The files stay as they are.'));
+      final filesOnly = rewindPrompt('this message', files: true, conversation: false);
+      expect(filesOnly, contains('files back'));
+      expect(filesOnly, isNot(contains('forgets')));
+    });
+
+    test('the note for a harness that kept the conversation', () {
+      final note = rewindNote('  Add a\n  decrement method ');
+      expect(note, rewindNote('Add a decrement method'));
+      expect(note, startsWith('<everyai-rewind>'));
+      expect(note, contains('"Add a decrement method"'));
+      expect(rewindNote('x' * 200), contains('${'x' * 80}…"'));
+    });
+
+    test('the note comes off the echoed message', () {
+      expect(splitRewindNote('${rewindNote('Add a file')}\n\ntry again'), 'try again');
+      expect(splitRewindNote('try again'), 'try again');
+      expect(userTextOf(modeNote(AgentMode.ask, '${rewindNote('Add a file')}\n\ntry again', full: true)), 'try again');
     });
   });
 

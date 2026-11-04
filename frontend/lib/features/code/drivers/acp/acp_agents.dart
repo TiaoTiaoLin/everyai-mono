@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../domain/agent_mode.dart';
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart' as recipes;
 import '../driver.dart';
@@ -32,6 +33,7 @@ final class AcpProfile {
     this.extraEnv = const {},
     this.askMode,
     this.planMode,
+    this.modePolicy = const {},
     this.lateReplay = false,
     this.minVersion,
     this.keyEnv = const [],
@@ -66,6 +68,11 @@ final class AcpProfile {
 
   /// Its read-only mode, for Plan (when it has one).
   final String? planMode;
+
+  /// The app's policy for its other modes that still ask before acting (the
+  /// picker offers them under their own names). [askMode] and [planMode]
+  /// need no entry; a mode in neither is listed greyed (`acpModes`).
+  final Map<String, AgentMode> modePolicy;
 
   /// What the user does to sign in, as an instruction.
   final String signIn;
@@ -123,7 +130,7 @@ final class AcpProfile {
 
   /// Its environment on top of [delivery]'s: OpenCode gets [openCodePermissions].
   Map<String, String> env(Delivery? delivery) => switch (agent) {
-    AcpAgent.openCode => withOpenCodePermissions(delivery?.env ?? const {}),
+    AcpAgent.openCode => withOpenCodePermissions({...extraEnv, ...?delivery?.env}),
     _ => {...extraEnv, ...?delivery?.env},
   };
 
@@ -140,6 +147,37 @@ final class AcpProfile {
     AcpAgent.cursor => cursorWorkspaceProblem(cwd),
     _ => Future.value(),
   };
+
+  /// This profile with [env] (an ACP registry entry's) under its own
+  /// [extraEnv]: on a clash the profile's value wins, so a registry entry
+  /// can't undo a pin that keeps the agent asking.
+  AcpProfile withEnv(Map<String, String> env) => env.isEmpty
+      ? this
+      : AcpProfile._(
+          agent: agent,
+          pinned: pinned,
+          caps: caps,
+          signIn: signIn,
+          dropped: dropped,
+          droppedWithValue: droppedWithValue,
+          extraEnv: {...env, ...extraEnv},
+          askMode: askMode,
+          planMode: planMode,
+          modePolicy: modePolicy,
+          lateReplay: lateReplay,
+          minVersion: minVersion,
+          keyEnv: keyEnv,
+          needsConsent: needsConsent,
+          configPins: configPins,
+          notThis: notThis,
+          alsoNamed: alsoNamed,
+          ttyFallback: ttyFallback,
+          initializeMeta: initializeMeta,
+          cancelMeta: cancelMeta,
+        );
+
+  /// Whether this is one of the profiles above (not [generic]'s).
+  bool get known => !identical(this, _generic);
 
   /// Whether it is signed in, without a model call; null when it can't tell.
   /// [env] replaces the login environment (tests).
@@ -313,6 +351,8 @@ const _kiro = AcpProfile._(
   // confirmation"); off, every tool comes as a permission request. T3 Code's
   // `kiroAutopilotValue` turns it on only for full-access threads.
   configPins: {'autopilot': 'off'},
+  // Its `mode` option; with Autopilot off both ask before acting.
+  modePolicy: {'vibe': AgentMode.ask, 'plan': AgentMode.plan},
 );
 
 // Kimi Code CLI (MoonshotAI/kimi-code docs/en/reference/kimi-acp.md). Its
@@ -376,6 +416,7 @@ const _goose = AcpProfile._(
   extraEnv: {'GOOSE_MODE': 'approve'},
   caps: {..._shared, DriverCap.mcp},
   askMode: 'approve',
+  modePolicy: {'chat': AgentMode.plan},
   signIn: 'Run `goose configure` in a terminal',
   // pressly's database-migration tool is also `goose` ("goose version: v3.26.0").
   notThis: (
@@ -445,6 +486,8 @@ const _cursor = AcpProfile._(
   caps: {..._shared, DriverCap.mcp, DriverCap.switchModel, DriverCap.subagents},
   askMode: 'agent',
   planMode: 'plan',
+  // Its Ask mode answers questions and changes nothing.
+  modePolicy: {'ask': AgentMode.plan},
   signIn: 'Run `agent login` in a terminal',
   keyEnv: ['CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'],
   needsConsent: true,
@@ -510,8 +553,11 @@ typedef AcpCommand = ({String executable, List<String> args, AcpProfile profile}
 
 /// [command] and [args] as the driver runs them. Without [args], a command
 /// with spaces is split into words, one literal argument each, without a
-/// shell (`acp:dsh --profile acp`). The profile's pinned arguments come first.
-AcpCommand acpCommand(String command, List<String> args) {
+/// shell (`acp:dsh --profile acp`). The profile's pinned arguments come first,
+/// after [prefix] (a runner's own arguments: `npx -y <package>`). [profile]
+/// replaces the one picked by the executable's name (an ACP registry agent
+/// run through `npx` keeps its own).
+AcpCommand acpCommand(String command, List<String> args, {AcpProfile? profile, List<String> prefix = const []}) {
   var exe = command.trim();
   var own = args;
   if (own.isEmpty && exe.contains(RegExp(r'\s'))) {
@@ -519,9 +565,12 @@ AcpCommand acpCommand(String command, List<String> args) {
     exe = words.first;
     own = words.sublist(1);
   }
-  final profile = acpProfileOf(exe);
-  return (executable: exe, args: _pin(own, profile), profile: profile);
+  final p = profile ?? acpProfileOf(exe);
+  return (executable: exe, args: [...prefix, ..._pin(own, p)], profile: p);
 }
+
+/// ACP registry ids whose agent is listed here under another id.
+const registryAliases = {'grok-build': 'grok'};
 
 List<String> _pin(List<String> own, AcpProfile profile) {
   final flags = {for (final g in profile.pinned) g.first, ...profile.dropped, ...profile.droppedWithValue};

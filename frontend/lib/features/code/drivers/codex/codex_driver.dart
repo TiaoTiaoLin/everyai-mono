@@ -8,6 +8,7 @@ import '../../harness/events.dart';
 import '../../harness/harness.dart';
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart' as recipes;
+import '../driver_policy.dart' show hostRunTools;
 import '../driver.dart';
 import '../driver_process.dart';
 import '../event_journal.dart';
@@ -34,7 +35,7 @@ typedef CodexSpawn = Future<LineChannel> Function({
 /// It keeps `<data>/drivers/codex/`: `threads/<id>.json` (what [attach]
 /// needs to start it again), `journal/<id>.jsonl` (the transcript) and
 /// `logs/<session>.log` (stderr).
-final class CodexDriver implements HarnessDriver, AttachesBriefed {
+final class CodexDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode {
   CodexDriver({this.which, this.spawn, this.dataDir});
 
   /// Replaces the PATH lookup in [detect] (tests).
@@ -53,6 +54,10 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
 
   /// Not fork or rewind (Codex has thread forks and rollbacks; not wired
   /// yet), not subagents (its own aren't mapped; ours stand in).
+  /// [codexModeFor]: Read Only for Ask, Default for Auto-edit; no preset runs Plan or Full auto.
+  @override
+  bool startsNatively(AgentMode mode) => mode == AgentMode.ask || mode == AgentMode.autoEdit;
+
   @override
   Set<DriverCap> get caps => const {
     DriverCap.steer,
@@ -65,6 +70,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
     DriverCap.images,
     DriverCap.switchModel,
     DriverCap.effort,
+    DriverCap.nativeModes,
   };
 
   static const _notInstalled = HarnessError(
@@ -159,6 +165,49 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
     return session;
   }
 
+  /// A new thread holding [items] (a native import, see `codex_import.dart`):
+  /// started as [start] starts one, without a briefing, then given the items
+  /// with `thread/inject_items`; its id, or null when this Codex has no such
+  /// method. A thread the items didn't go into is deleted. The session text
+  /// of the briefing goes in when [attachBriefed] first opens it.
+  Future<String?> importThread({
+    required String cwd,
+    required String sessionTag,
+    required String model,
+    String? effort,
+    required AgentMode mode,
+    required List<Map<String, Object?>> items,
+  }) async {
+    final found = await detectCli('codex', which: which);
+    if (!found.installed || found.path == null) throw _notInstalled;
+    final session = CodexSession(
+      await _spawn(found.path!, args: const [], cwd: cwd, env: const {}, tag: sessionTag),
+      cwd: cwd,
+      mode: mode,
+      model: model,
+      effort: effort,
+    );
+    try {
+      await session.open();
+      await session.startThread();
+      try {
+        await session.injectItems(items);
+      } on Object catch (e) {
+        try {
+          await session.deleteThread();
+        } on Object {
+          // Left behind: an empty thread in the user's Codex history.
+        }
+        if (e is JsonRpcError && e.code == JsonRpcError.methodNotFound) return null;
+        rethrow;
+      }
+      await _saveMeta(await _data(), session, sessionTag, instruct: true);
+      return session.id;
+    } finally {
+      await session.close();
+    }
+  }
+
   /// Starts Codex again on the thread and replays our journal. The EveryAI
   /// MCP server isn't there until a briefing is handed over again (its token
   /// is never written down): see [attachBriefed].
@@ -168,8 +217,10 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
   /// [attach] with a new briefing (the old token was revoked when the session
   /// closed): the reopened process, and any it is started again as, get its
   /// `-c` overrides, token and skill roots. The session text goes only into
-  /// thread/start (`developerInstructions`), so it isn't sent again here. A
-  /// session still open here is returned as it is.
+  /// thread/start (`developerInstructions`), so it isn't sent again here,
+  /// except to an imported thread, which started without it: it gets the text
+  /// once, as a developer message. A session still open here is returned as
+  /// it is.
   @override
   Future<HarnessSession> attachBriefed(
     String conversationId,
@@ -193,6 +244,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
       await respawn(),
       cwd: cwd,
       mode: AgentMode.values.asNameMap()[meta['mode']] ?? AgentMode.ask,
+      native: meta['native_mode'] as String?,
       model: meta['model'] as String?,
       effort: meta['effort'] as String?,
     );
@@ -202,6 +254,24 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
     } on Object catch (e) {
       await session.close();
       throw HarnessError("Codex couldn't reopen the session: $e");
+    }
+    if (meta['instruct'] == true && briefing != null) {
+      if (launch.instructions case final text? when text.isNotEmpty) {
+        try {
+          await session.injectItems([
+            {
+              'type': 'message',
+              'role': 'developer',
+              'content': [
+                {'type': 'input_text', 'text': text},
+              ],
+            },
+          ]);
+        } on Object {
+          // Runs without our session text, as without skills.
+        }
+      }
+      await _saveMeta(data, session, tag);
     }
     final journal = openEventJournal('$data/journal', conversationId);
     final history = await journal.read();
@@ -234,8 +304,9 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
   }
 
   /// What [attach] starts [session] with: its folder, and its mode, model
-  /// and effort as they are now.
-  static Future<void> _saveMeta(String data, CodexSession session, String tag) => writeText(
+  /// and effort as they are now; [instruct] for an imported thread that
+  /// still needs the briefing's session text.
+  static Future<void> _saveMeta(String data, CodexSession session, String tag, {bool instruct = false}) => writeText(
     _metaPath(data, session.id),
     jsonEncode({
       'cwd': session.cwd,
@@ -243,6 +314,8 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
       'model': session.model,
       'effort': session.effort,
       'mode': session.mode.name,
+      'native_mode': ?session.native,
+      if (instruct) 'instruct': true,
     }),
   );
 
@@ -285,7 +358,9 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
   /// The briefing as Codex takes it (`recipes.codex`), plus two settings
   /// for our server the recipe doesn't set yet: a tool timeout above the
   /// host's 300 s wait for a question card (Codex's default is 60 s), and
-  /// our tools pre-approved, so a card isn't preceded by a Codex prompt.
+  /// our tools pre-approved, so a card isn't preceded by a Codex prompt;
+  /// except bug_check and check, which run a command in the app: those ask
+  /// (an elicitation), so the session's approval sees them.
   /// The session text is read from the briefing folder.
   Future<_Launch> _launch(DriverBriefing? b) async {
     if (b == null) return _noBriefing;
@@ -299,6 +374,7 @@ final class CodexDriver implements HarnessDriver, AttachesBriefed {
         'mcp_servers.$everyaiServerName.tool_timeout_sec=330',
         '-c',
         'mcp_servers.$everyaiServerName.default_tools_approval_mode="approve"',
+        for (final tool in hostRunTools) ...['-c', 'mcp_servers.$everyaiServerName.tools.$tool.approval_mode="prompt"'],
       ],
       env: d.env,
       initRequests: skillDir.isEmpty ? const <RpcCall>[] : d.initRequests,

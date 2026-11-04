@@ -101,6 +101,156 @@ void _expectAuth(ReplayHttpClient http) {
 }
 
 void main() {
+  test(
+    "the / menu: OpenCode's command list plus compact, refreshed on command.updated; each runs on its route",
+    () async {
+      // Derived from T3 Code's OpenCode 2 fixture and the 2.1.3 binary's route and event names, not recorded.
+      const list = {
+        'location': {'directory': _cwd},
+        'data': [
+          {'name': 'init', 'description': 'guided AGENTS.md setup'},
+          {'name': 'review', 'description': 'review changes [commit|branch|pr], defaults to uncommitted'},
+        ],
+      };
+      final http = ReplayHttpClient.script(
+        [
+          _head('turn_approvals.jsonl', '/prompt'),
+          _line('out', {'id': 3, 'method': 'GET', 'path': '/api/command'}),
+          _line('in', {'id': 3, 'status': 200, 'body': list}),
+          _line('in', {
+            'event': {'type': 'command.updated', 'data': <String, Object?>{}},
+          }),
+          _line('out', {'id': 4, 'method': 'GET', 'path': '/api/command'}),
+          _line('in', {
+            'id': 4,
+            'status': 200,
+            'body': {
+              'data': [
+                {'name': 'init', 'description': 'guided AGENTS.md setup'},
+              ],
+            },
+          }),
+          _line('out', {
+            'id': 5,
+            'method': 'POST',
+            'path': '/api/session/$_ses/command',
+            'body': {'name': 'review', 'text': 'x'},
+          }),
+          _line('in', {'id': 5, 'status': 200, 'body': <String, Object?>{}}),
+          _line('out', {'id': 6, 'method': 'POST', 'path': '/api/session/$_ses/compact', 'body': <String, Object?>{}}),
+          _line('in', {'id': 6, 'status': 200, 'body': true}),
+        ].join('\n'),
+      );
+      final (:driver, data: _) = _driver(http);
+      final session = await driver.start(_spec(initial: null));
+      final native = session as HasNativeCommands;
+      final lists = <List<NativeCommand>>[];
+      native.commands.listen(lists.add);
+      await pumpEventQueue();
+      expect([for (final c in lists[1]) c.name], ['compact', 'init', 'review']);
+      expect(lists.last.map((c) => c.name), ['compact', 'init']);
+      await native.runCommand('review', 'x');
+      await native.runCommand('compact', '');
+      http.channel.expectFinished();
+      await session.close();
+    },
+  );
+
+  test(
+    "the modes picker: OpenCode's primary agents (hidden and subagents left out); a pick switches the agent",
+    () async {
+      // Shaped by the 2.1.3 OpenAPI's Agent.Info, not recorded.
+      Map<String, Object?> agent(String id, String mode, {bool hidden = false, String description = ''}) => {
+        'id': id,
+        'name': id,
+        'description': description,
+        'mode': mode,
+        'hidden': hidden,
+        'request': <String, Object?>{},
+        'permissions': <Object?>[],
+      };
+      final http = ReplayHttpClient.script(
+        [
+          _head('turn_approvals.jsonl', '/prompt'),
+          _line('out', {'id': 3, 'method': 'GET', 'path': '/api/agent'}),
+          _line('in', {
+            'id': 3,
+            'status': 200,
+            'body': {
+              'location': {'directory': _cwd},
+              'data': [
+                agent('build', 'primary', description: 'The default agent'),
+                agent('plan', 'primary', description: 'Plans without changing files'),
+                agent('general', 'subagent'),
+                agent('title', 'primary', hidden: true),
+                agent('docs', 'all', description: 'Writes the docs'),
+              ],
+            },
+          }),
+          _line('out', {
+            'id': 4,
+            'method': 'POST',
+            'path': '/api/session/$_ses/agent',
+            'body': {'agent': 'plan'},
+          }),
+          _line('in', {'id': 4, 'status': 204, 'body': null}),
+        ].join('\n'),
+      );
+      final (:driver, data: _) = _driver(http);
+      final session = await driver.start(_spec(initial: null));
+      final native = session as NativeModes;
+      final sets = <NativeModeSet>[];
+      native.nativeModes.listen(sets.add);
+      await pumpEventQueue();
+      final modes = sets.last.modes;
+      expect([for (final m in modes) m.id], ['build', 'plan', 'docs']);
+      expect([for (final m in modes) m.policy], [AgentMode.ask, AgentMode.plan, AgentMode.ask]);
+      expect(modes.every((m) => m.blocked == null), isTrue);
+      expect(sets.last.current, 'build');
+      await expectLater(native.setNativeMode('general'), throwsA(isA<HarnessError>()));
+      await native.setNativeMode('plan');
+      await pumpEventQueue();
+      expect(sets.last.current, 'plan');
+      http.channel.expectFinished();
+      await session.close();
+    },
+  );
+
+  test('compact is offered before the list loads, and a failed load is tried again by the next listen', () async {
+    final http = ReplayHttpClient.script(
+      [
+        _head('turn_approvals.jsonl', '/prompt'),
+        _line('out', {'id': 3, 'method': 'GET', 'path': '/api/command'}),
+        _line('in', {
+          'id': 3,
+          'status': 503,
+          'body': {'error': 'warming up'},
+        }),
+        _line('out', {'id': 4, 'method': 'GET', 'path': '/api/command'}),
+        _line('in', {
+          'id': 4,
+          'status': 200,
+          'body': {
+            'data': [
+              {'name': 'init', 'description': 'guided AGENTS.md setup'},
+            ],
+          },
+        }),
+      ].join('\n'),
+    );
+    final (:driver, data: _) = _driver(http);
+    final session = await driver.start(_spec(initial: null));
+    final native = session as HasNativeCommands;
+    expect((await native.commands.first).map((c) => c.name), ['compact']);
+    await pumpEventQueue();
+    final lists = <List<NativeCommand>>[];
+    native.commands.listen(lists.add);
+    await pumpEventQueue();
+    expect(lists.last.map((c) => c.name), ['compact', 'init']);
+    http.channel.expectFinished();
+    await session.close();
+  });
+
   test('a session is created with our rules, listens before the first prompt, and answers per call', () async {
     final http = _replay('turn_approvals.jsonl');
     final (:driver, :data) = _driver(http);

@@ -538,7 +538,7 @@ Handoff buildHandoff(
     since: scope.kind == HandoffKind.delta ? since : null,
     staleReason: scope.staleReason,
     approvedPlan: approved,
-    proposedPlan: t.openPlan?.markdown ?? '',
+    proposedPlan: (t.openPlan ?? t.items.whereType<PlanProposal>().where((p) => p.shown).lastOrNull)?.markdown ?? '',
     todos: t.plan,
     openQuestions: [for (final q in t.openQuestion?.questions ?? const <Question>[]) q.question],
     lastRequest: lastRequest,
@@ -653,6 +653,9 @@ const handoffCutRequests = 5;
         replied = false;
         finished = false;
       case ChatMessage(:final text) when text.trim().isNotEmpty:
+        replied = true;
+      case ActionCall(actionKind: 'ProposedPlanAction'):
+        // The harness's plan is its reply.
         replied = true;
       case ActionCall():
         replied = false;
@@ -942,6 +945,16 @@ String handoffMessage(Handoff h, {String? fromName}) {
   }
   b.write(handoffClose);
   return b.toString();
+}
+
+/// Only the `<cut-turn>` block of [h], for a lead whose own session already
+/// holds the conversation (a native import); '' when no turn was cut.
+String cutTurnMessage(Handoff h) {
+  final cut = h.cut;
+  if (cut == null) return '';
+  final b = StringBuffer();
+  writeTaggedBlock(b, 'cut-turn', _cutLead, _cutText(cut, transcript: h.transcript.isNotEmpty));
+  return b.toString().trim();
 }
 
 const _cutLead =

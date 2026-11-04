@@ -2,6 +2,7 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/permissions_providers.dart' show StoredPermissions;
+import 'package:every_ai/features/code/drivers/driver_policy.dart' show hostToolOf;
 import 'package:flutter_test/flutter_test.dart';
 
 ActionCall _call(Map<String, Object?> action, {String tool = 'terminal', String id = 'a'}) =>
@@ -189,6 +190,17 @@ void main() {
         expect(d.verdict, Verdict.deny);
         expect(d.source, DecisionSource.floor);
       }
+    });
+
+    test('floor: false skips only the floor', () {
+      for (final m in AgentMode.values) {
+        expect(policy.decide(_sh('rm -rf ~'), m, floor: false).source, isNot(DecisionSource.floor));
+      }
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.fullAuto, floor: false).verdict, Verdict.allow);
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.ask, floor: false).source, DecisionSource.dangerous);
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.plan, floor: false).source, DecisionSource.plan);
+      const denying = PermissionPolicy(rules: PermissionRules(deny: ['rm *']));
+      expect(denying.decide(_sh('rm -rf ~'), AgentMode.fullAuto, floor: false).source, DecisionSource.rule);
     });
 
     test('dangerous actions ask even in Auto-edit, but not in Full auto', () {
@@ -403,6 +415,14 @@ void main() {
         }
         expect(outside.decide(host('bug_check'), m).verdict, Verdict.ask);
       }
+    });
+
+    test('run_workflow is ours but starts agents, so it asks except in Full auto', () {
+      expect(hostToolOf(host('run_workflow')), 'run_workflow');
+      for (final m in [AgentMode.plan, AgentMode.ask, AgentMode.autoEdit]) {
+        expect(outside.decide(host('run_workflow'), m).verdict, Verdict.ask, reason: '$m');
+      }
+      expect(outside.decide(host('run_workflow'), AgentMode.fullAuto).verdict, Verdict.allow);
     });
 
     test('only for an outside agent, and a deny rule still wins', () {

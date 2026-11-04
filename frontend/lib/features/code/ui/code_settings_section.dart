@@ -22,6 +22,7 @@ import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
 import '../drivers/driver.dart' show DriverStatus;
 import '../drivers/driver_registry.dart';
+import '../drivers/registry_install/ui/add_agent_list.dart' show AddAgentEntry;
 import '../permissions_providers.dart';
 import '../settings/setting_defs.dart';
 import '../settings/settings.dart' as files;
@@ -560,6 +561,7 @@ class HarnessesSetting extends ConsumerWidget {
       for (final d in drivers)
         if (d.info.needsConsent) d.info.label,
     ];
+    final handoff = ref.watch(codeLeadProvider.select((l) => l.handoff));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -599,8 +601,8 @@ class HarnessesSetting extends ConsumerWidget {
                   const SizedBox(width: 8),
                   AdaptiveSwitch(
                     key: ValueKey('code-settings.own-cli.${d.info.id}'),
-                    value: own.contains(d.info.id),
-                    onChanged: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.id, v),
+                    value: own.contains(d.info.consentId),
+                    onChanged: (v) => ref.read(codeSettingsProvider.notifier).setOwnCli(d.info.consentId, v),
                   ),
                 ],
               ],
@@ -614,6 +616,28 @@ class HarnessesSetting extends ConsumerWidget {
             style: theme.type.caption.tint(theme.textMuted),
           ),
         ],
+        // Where a usage limit moves on to by itself (picked on the "switch to:" card).
+        if (handoff.isNotEmpty)
+          Padding(
+            key: const ValueKey('code-settings.handoff-default'),
+            padding: const EdgeInsets.only(top: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Default handoff: ${ref.read(driverRegistryProvider).resolve(handoff)?.info.label ?? handoff}',
+                    style: theme.type.callout.tint(theme.text),
+                  ),
+                ),
+                AdaptiveButton(
+                  key: const ValueKey('code-settings.handoff-default.clear'),
+                  label: 'Clear',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: ref.read(codeLeadProvider.notifier).clearHandoff,
+                ),
+              ],
+            ),
+          ),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -632,6 +656,8 @@ class HarnessesSetting extends ConsumerWidget {
             ],
           ],
         ),
+        const SizedBox(height: 8),
+        const AddAgentEntry(),
       ],
     );
   }
@@ -833,7 +859,7 @@ class _FullPromptState extends ConsumerState<_FullPrompt> {
 
   Future<String> _load() async {
     final s = ref.read(codeSettingsProvider);
-    final p = await files.agentPromptFor(widget.projectDir, tier: s.tier, harnessMode: s.harnessMode);
+    final p = await files.agentPromptFor(widget.projectDir, tier: s.tier);
     final suffix = withSystemPrompts(p.suffix, global: s.globalPrompt, project: s.promptFor(widget.projectId));
     return '${p.persona}\n\n$suffix'.trim();
   }

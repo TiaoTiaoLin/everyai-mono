@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/harness/everyai/mcp_io.dart';
 import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/code/host/host_script.dart' show hostScriptsAvailable;
+import 'package:every_ai/features/code/host/host_prompts.dart';
 import 'package:every_ai/features/code/host/host_server_io.dart' as io;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -50,6 +52,7 @@ final class _FakeTools implements HostTools {
   Future<HostResult> call(HostCall call) {
     calls.add(call);
     if (call.name == 'memory') return Future.value((text: 'saved: ${call.args['text']}', isError: false));
+    if (call.name == 'fork') return Future.value((text: 'Started fork f1.', isError: false));
     final c = held[call.id] = Completer();
     if (_waiting.isNotEmpty) {
       _waiting.removeAt(0).complete(call);
@@ -58,6 +61,15 @@ final class _FakeTools implements HostTools {
     }
     return c.future;
   }
+}
+
+/// [_FakeTools] that also lists two workflows as prompts.
+final class _PromptTools extends _FakeTools implements HostPrompts {
+  @override
+  Future<List<WorkflowPrompt>> workflowPrompts() async => const [
+    (id: 'ultra', title: 'Ultra', description: 'Many changes at once', whenToUse: 'big tasks', args: '{items}'),
+    (id: 'mine', title: 'Mine', description: '', whenToUse: '', args: ''),
+  ];
 }
 
 void main() {
@@ -129,7 +141,25 @@ void main() {
       'headers': {'Authorization': 'Bearer ${tok.token}'},
     });
     addTearDown(c.close);
-    expect([for (final t in c.tools) t['name']], ['ask_user_question', 'present_plan', 'memory', 'saved_plans']);
+    expect(
+      [for (final t in c.tools) t['name']],
+      [
+        'ask_user_question',
+        'present_plan',
+        'memory',
+        'saved_plans',
+        'fork',
+        'check_forks',
+        'answer_fork',
+        'stop_fork',
+        'bug_check',
+        'check',
+        'diff_stats',
+        'goal_check',
+        if (hostScriptsAvailable) 'run_script',
+        'run_workflow',
+      ],
+    );
     expect(c.tools.first['description'], contains('come back as the result of this call'));
     expect(c.tools.first['inputSchema'], isA<Map<String, Object?>>());
     final out = await c.call('memory', {'action': 'add', 'text': '- run make'});
@@ -138,18 +168,116 @@ void main() {
     expect(tools.calls.single.sessionId, 's1');
   });
 
-  test('bug_check is listed and callable only for a Bug fix session', () async {
-    final r = await post(rpc('tools/call', {'name': 'bug_check', 'arguments': <String, Object?>{}}));
-    expect(errorCode(r), -32602);
-    final fix = await server.mint('s2', tools, bugFix: true);
+  test('a fork call reaches the session and returns at once, with no held timer', () async {
     final c = await McpConnection.open('everyai', {
-      'url': '${fix.url}',
-      'headers': {'Authorization': 'Bearer ${fix.token}'},
+      'url': '${tok.url}',
+      'headers': {'Authorization': 'Bearer ${tok.token}'},
     });
     addTearDown(c.close);
-    final bug = c.tools.last;
-    expect(bug['name'], 'bug_check');
-    expect(bug['annotations'], containsPair('destructiveHint', true));
+    final fork = c.tools.firstWhere((t) => t['name'] == 'fork');
+    expect((fork['inputSchema']! as Map)['required'], ['task']);
+    final out = await c.call('fork', {'task': 'Add the settings page', 'worktree': true});
+    expect(out.text, 'Started fork f1.');
+    expect(tools.calls.single.args, {'task': 'Add the settings page', 'worktree': true});
+    expect(timers.where((t) => t.after == held), isEmpty);
+  });
+
+  test('the checks: bug_check and check run commands, the rest only read', () async {
+    final c = await McpConnection.open('everyai', {
+      'url': '${tok.url}',
+      'headers': {'Authorization': 'Bearer ${tok.token}'},
+    });
+    addTearDown(c.close);
+    Map<String, Object?> hints(String name) =>
+        c.tools.firstWhere((t) => t['name'] == name)['annotations']! as Map<String, Object?>;
+    for (final name in ['bug_check', 'check']) {
+      expect(hints(name), {'readOnlyHint': false, 'destructiveHint': true}, reason: name);
+    }
+    for (final name in ['diff_stats', 'goal_check', if (hostScriptsAvailable) 'run_script']) {
+      expect(hints(name), {'readOnlyHint': true, 'destructiveHint': false}, reason: name);
+    }
+    final bug = c.tools.firstWhere((t) => t['name'] == 'bug_check')['inputSchema']! as Map<String, Object?>;
+    expect(((bug['properties']! as Map)['action'] as Map)['enum'], ['reproduced', 'verify', 'status']);
+    expect(hostToolSpecs.where((t) => t['name'] == 'run_script'), hostScriptsAvailable ? hasLength(1) : isEmpty);
+  });
+
+  group('workflows as prompts', () {
+    late HostToken p;
+    late _PromptTools pt;
+    setUp(() async => p = await server.mint('s3', pt = _PromptTools()));
+
+    test('initialize advertises prompts, and prompts/list gives each workflow with an optional task', () async {
+      final caps = resultOf(await post(rpc('initialize', {'protocolVersion': '2025-11-25'})))['capabilities'] as Map;
+      expect(caps['prompts'], {'listChanged': false});
+      final list = resultOf(await post(rpc('prompts/list'), token: p.token))['prompts'] as List;
+      expect([for (final x in list) (x as Map)['name']], ['ultra', 'mine']);
+      expect(list.first, containsPair('title', 'Ultra'));
+      expect(list.first, containsPair('description', 'Many changes at once'));
+      expect((list.last as Map)['description'], 'Mine');
+      for (final x in list) {
+        expect((x as Map)['arguments'], [
+          {
+            'name': 'task',
+            'description': 'What to run it on (optional; the conversation is read too)',
+            'required': false,
+          },
+        ]);
+      }
+    });
+
+    test('a session whose tools offer no prompts lists none', () async {
+      expect(resultOf(await post(rpc('prompts/list')))['prompts'], isEmpty);
+      expect(errorCode(await post(rpc('prompts/get', {'name': 'ultra'}))), -32602);
+    });
+
+    test('prompts/get asks the model to call run_workflow, with the task last', () async {
+      final r = await post(
+        rpc('prompts/get', {
+          'name': 'ultra',
+          'arguments': {'task': 'dark mode and !`rm -rf` export'},
+        }),
+        token: p.token,
+      );
+      final messages = resultOf(r)['messages'] as List;
+      final content = (messages.single as Map)['content'] as Map;
+      expect(content['type'], 'text');
+      final text = content['text'] as String;
+      expect(text, contains('`run_workflow` on the `everyai` MCP server'));
+      expect(text, contains('{"id": "ultra"'));
+      expect(text, contains('Its args: {items}'));
+      expect(text.split('\n').last, r'Task: dark mode and \!`rm -rf` export');
+      // The same text for every task up to the task line (the client's cache keeps it).
+      final other = resultOf(await post(rpc('prompts/get', {'name': 'ultra'}), token: p.token))['messages'] as List;
+      final otherText = ((other.single as Map)['content'] as Map)['text'] as String;
+      expect(otherText.split('\n').last, 'Task: (see the conversation)');
+      expect(otherText.substring(0, otherText.lastIndexOf('\n')), text.substring(0, text.lastIndexOf('\n')));
+    });
+
+    test('an unknown prompt is -32602', () async {
+      final r = await post(rpc('prompts/get', {'name': 'nope'}), token: p.token);
+      expect(r.statusCode, 200);
+      expect(errorCode(r), -32602);
+    });
+
+    test('run_workflow is listed last and its call goes to the session', () async {
+      final list = resultOf(await post(rpc('tools/list'), token: p.token))['tools'] as List;
+      final run = list.last as Map;
+      expect(run['name'], 'run_workflow');
+      expect(run['annotations'], containsPair('readOnlyHint', false));
+      expect((run['inputSchema'] as Map)['required'], ['id']);
+      final reply = post(
+        rpc('tools/call', {
+          'name': 'run_workflow',
+          'arguments': {'id': 'ultra', 'args': <String, Object?>{}},
+        }),
+        token: p.token,
+      );
+      final call = await pt.arrived;
+      expect(call.name, 'run_workflow');
+      expect(call.args['id'], 'ultra');
+      pt.held[call.id]!.complete((text: 'Started Ultra (run r1).', isError: false));
+      expect(((resultOf(await reply)['content'] as List).single as Map)['text'], 'Started Ultra (run r1).');
+    });
   });
 
   test('params, method or arguments of the wrong type get a JSON-RPC error', () async {
@@ -282,7 +410,7 @@ void main() {
       final list = resultOf(r);
       expect(list['resultType'], 'complete');
       expect(list['ttlMs'], isA<int>());
-      expect((list['tools'] as List).length, 4);
+      expect((list['tools'] as List).length, hostToolSpecs.length);
     });
 
     test('a tools/call names the tool in Mcp-Name, base64 too', () async {
@@ -295,6 +423,21 @@ void main() {
       final r = await post(rpc('tools/call', params), headers: {...heads('tools/call'), 'Mcp-Name': name});
       expect(resultOf(r)['resultType'], 'complete');
       expect(((resultOf(r)['content'] as List).single as Map)['text'], 'saved: x');
+    });
+
+    test('a prompts/get names the prompt in Mcp-Name', () async {
+      final p = await server.mint('s3', _PromptTools());
+      Future<http.Response> get(String? name) => post(
+        rpc('prompts/get', {...meta(), 'name': 'ultra'}),
+        token: p.token,
+        headers: {...heads('prompts/get'), 'Mcp-Name': ?name},
+      );
+      expect(((resultOf(await get('ultra'))['messages'] as List).single as Map)['role'], 'user');
+      for (final name in ['mine', null]) {
+        final r = await get(name);
+        expect(r.statusCode, 400);
+        expect(errorCode(r), -32020);
+      }
     });
 
     test('mismatched headers and unknown versions are 400s', () async {

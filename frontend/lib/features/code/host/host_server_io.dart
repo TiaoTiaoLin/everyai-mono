@@ -9,9 +9,12 @@ import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../domain/agent_mode.dart' show askUserQuestionTool, clientToolSpecs, presentPlanTool;
-import '../domain/phases.dart' show bugCheckSpec, bugCheckTool;
 import '../harness/everyai/project_notes_io.dart' show memoryToolSpec;
 import 'host.dart';
+import 'host_checks.dart';
+import 'host_script.dart';
+import 'host_prompts.dart';
+import 'host_max_tools.dart' show maxForkSpecs;
 
 // MCP over Streamable HTTP, tools only, stateless (no Mcp-Session-Id), on
 // one endpoint that speaks both eras the spec defines:
@@ -30,21 +33,21 @@ const _metaVersion = 'io.modelcontextprotocol/protocolVersion';
 const _maxBody = 4 << 20;
 
 /// `ask_user_question` and `present_plan` with the held wording (the answer
-/// is the call's result), then memory, saved plans and bug_check.
+/// is the call's result), then memory, saved plans, the Max fork tools, the checks,
+/// run_script where Deno is found and run_workflow.
 final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   for (final name in [askUserQuestionTool, presentPlanTool])
     _mcpTool(clientToolSpecs(held: true).firstWhere((s) => s['name'] == name)),
   _mcpTool(memoryToolSpec),
   savedPlansSpec,
-  // It runs the agent's repro command, so a client must not auto-allow it as harmless.
-  {
-    ..._mcpTool(bugCheckSpec),
-    'annotations': {'readOnlyHint': false, 'destructiveHint': true},
-  },
+  for (final s in maxForkSpecs) _mcpTool(s),
+  hostBugCheckSpec,
+  checkSpec,
+  diffStatsSpec,
+  goalCheckSpec,
+  if (hostScriptsAvailable) hostRunScriptSpec,
+  runWorkflowSpec,
 ]);
-
-/// [hostToolSpecs] without bug_check, for sessions that aren't fixing a bug.
-final List<Map<String, Object?>> _plainSpecs = List.unmodifiable(hostToolSpecs.where((t) => t['name'] != bugCheckTool));
 
 /// An OpenAI-style spec (flat or `{function: …}`) in MCP's shape.
 Map<String, Object?> _mcpTool(Map<String, Object?> spec) {
@@ -131,10 +134,10 @@ final class _HostServer implements HostServer {
   }
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
+  Future<HostToken> mint(String sessionId, HostTools tools) async {
     _sweep();
     final token = 'eai_host_${base64Url.encode(List.generate(32, (_) => _random.nextInt(256))).replaceAll('=', '')}';
-    final grant = _Grant(token, sessionId, tools, bugFix ? hostToolSpecs : _plainSpecs, now());
+    final grant = _Grant(token, sessionId, tools, hostToolSpecs, now());
     _grants.add(grant);
     try {
       await _serial(() async {
@@ -304,7 +307,7 @@ final class _HostServer implements HostServer {
       final name = _decodeName(req.headers.value('mcp-name'));
       if (header != modern ||
           req.headers.value('mcp-method') != method ||
-          (method == 'tools/call' && name != params['name'])) {
+          ((method == 'tools/call' || method == 'prompts/get') && name != params['name'])) {
         return _reply(req, 400, _error(id, -32020, 'Headers do not match the body'));
       }
     } else if (header != null && !_legacy.contains(header)) {
@@ -331,6 +334,7 @@ final class _HostServer implements HostServer {
     const cached = {'ttlMs': 3600000, 'cacheScope': 'private'};
     const capabilities = {
       'tools': {'listChanged': false},
+      'prompts': {'listChanged': false},
     };
     const serverInfo = {'name': 'EveryAI', 'version': '1.0'};
     switch (method) {
@@ -360,6 +364,11 @@ final class _HostServer implements HostServer {
         return _reply(req, 200, done({}));
       case 'tools/list':
         return _reply(req, 200, done({'tools': grant.specs, if (modern != null) ...cached}));
+      case 'prompts/list':
+        return _reply(req, 200, done(await promptsList(grant.tools)));
+      case 'prompts/get':
+        final r = await promptsGet(grant.tools, params);
+        return _reply(req, 200, r.result != null ? done(r.result!) : _error(id, r.code, r.message));
       case 'tools/call':
         final name = params['name'];
         if (name is! String || !grant.specs.any((t) => t['name'] == name)) {

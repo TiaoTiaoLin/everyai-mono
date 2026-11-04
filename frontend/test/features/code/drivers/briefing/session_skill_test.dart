@@ -6,6 +6,7 @@ SessionSkillInput _input({
   List<RosterEntry> others = const [],
   List<String> profiles = const [],
   String worktree = '/wt/s1',
+  List<WorkflowInfo> workflows = const [],
 }) => SessionSkillInput(
   worktree: worktree,
   projectRoot: '/proj',
@@ -16,6 +17,7 @@ SessionSkillInput _input({
     (name: 'present_plan', when: 'you finish planning'),
   ],
   runtimeProfiles: profiles,
+  workflows: workflows,
 );
 
 void main() {
@@ -63,6 +65,24 @@ void main() {
     expect(c.substring(0, cut), a.substring(0, cut));
     expect(c, contains('`/wt/other`'));
     expect(a.indexOf('## Runtime profiles'), greaterThan(cut));
+  });
+
+  test('workflows come last, one line each, and only when there are some', () {
+    final a = sessionBriefing(_input());
+    expect(a, isNot(contains('## Workflows')));
+    final b = sessionBriefing(
+      _input(
+        workflows: const [(id: 'ultra', when: 'several independent changes'), (id: 'bugfix', when: 'a bug to fix')],
+      ),
+    );
+    expect(b.substring(0, a.length - 1), a.substring(0, a.length - 1));
+    final section = b.substring(b.indexOf('## Workflows'));
+    expect(b.indexOf('## Workflows'), greaterThan(b.indexOf('## Runtime profiles')));
+    expect(section, contains('`run_workflow`'));
+    expect(section.split('\n').where((l) => l.startsWith('- ')), [
+      '- `ultra`: several independent changes',
+      '- `bugfix`: a bug to fix',
+    ]);
   });
 
   test('commands in session values are defused', () {

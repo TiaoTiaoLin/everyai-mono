@@ -29,8 +29,11 @@ final _monoSmall = EveryType.resolve().caption.mono.copyWith(height: 1.45);
 
 /// The user's message, right-aligned like chat.
 class UserTurnView extends StatelessWidget {
-  const UserTurnView({super.key, required this.text, this.mode, this.lead = '', this.onRewind});
+  const UserTurnView({super.key, required this.text, this.mode, this.lead = '', this.workflow = '', this.onRewind});
   final String text;
+
+  /// What its workflow notes said ("Started Bug fix"), '' for none.
+  final String workflow;
 
   /// The harness that got it, shown when the session had more than one ('' hides it).
   final String lead;
@@ -50,11 +53,15 @@ class UserTurnView extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          if (mode != null || lead.isNotEmpty)
+          if (mode != null || lead.isNotEmpty || workflow.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: 4, right: 4),
               child: Text(
-                [if (lead.isNotEmpty) lead, if (mode != null) '${mode!.label} mode'].join(' · '),
+                [
+                  if (lead.isNotEmpty) lead,
+                  if (mode != null) '${mode!.label} mode',
+                  if (workflow.isNotEmpty) workflow,
+                ].join(' · '),
                 style: theme.type.caption.medium.tint(theme.textMuted),
               ),
             ),
@@ -309,6 +316,23 @@ class _ToolView extends StatelessWidget {
 /// A row's title with its path or command colored: "Edited lib/**main.dart**",
 /// "\$ git status".
 TextSpan stepTitleSpan(BuildContext context, ActionCall call, TextStyle base) {
+  final span = _titleSpan(context, call, base);
+  if (!call.native || call.nativeName.isEmpty || span.toPlainText().contains(call.nativeName)) return span;
+  // An outside harness's own word for the tool (Bash, apply_patch), before our title.
+  final theme = EveryTheme.of(context);
+  return TextSpan(
+    style: base,
+    children: [
+      TextSpan(
+        text: '${call.nativeName}  ',
+        style: _mono.copyWith(color: theme.textMuted, fontSize: (base.fontSize ?? 13) - 1),
+      ),
+      span,
+    ],
+  );
+}
+
+TextSpan _titleSpan(BuildContext context, ActionCall call, TextStyle base) {
   final theme = EveryTheme.of(context);
   final title = stepTitle(call);
   if (call.actionKind == 'TerminalAction') {
@@ -650,16 +674,27 @@ class PlanView extends StatelessWidget {
                   Padding(padding: const EdgeInsets.only(top: 2), child: _TaskMark(t.status)),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      t.title,
-                      style: theme.type.callout.copyWith(
-                        color: t.status == 'done' ? theme.textMuted : theme.text,
-                        decoration: t.status == 'done' ? TextDecoration.lineThrough : null,
-                        decorationColor: theme.textMuted,
-                        fontWeight: t.status == 'in_progress' ? FontWeight.w600 : FontWeight.w400,
-                      ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          // The harness's own wording of what it is doing, while it does it.
+                          t.status == 'in_progress' && t.active.isNotEmpty ? t.active : t.title,
+                          style: theme.type.callout.copyWith(
+                            color: t.status == 'done' ? theme.textMuted : theme.text,
+                            decoration: t.status == 'done' ? TextDecoration.lineThrough : null,
+                            decorationColor: theme.textMuted,
+                            fontWeight: t.status == 'in_progress' ? FontWeight.w600 : FontWeight.w400,
+                          ),
+                        ),
+                        if (t.notes.isNotEmpty) Text(t.notes, style: theme.type.caption.tint(theme.textMuted)),
+                      ],
                     ),
                   ),
+                  if (t.priority.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Text(t.priority, style: theme.type.caption.tint(theme.textMuted)),
+                  ],
                 ],
               ),
             ),
@@ -711,9 +746,12 @@ class _TaskMark extends StatelessWidget {
 }
 
 class NoticeView extends StatefulWidget {
-  const NoticeView({super.key, required this.item, this.onRetry});
+  const NoticeView({super.key, required this.item, this.onRetry, this.onChange});
   final NoticeItem item;
   final VoidCallback? onRetry;
+
+  /// Change on an automatic handoff: the picker again.
+  final VoidCallback? onChange;
 
   @override
   State<NoticeView> createState() => _NoticeViewState();
@@ -766,6 +804,15 @@ class _NoticeViewState extends State<NoticeView> {
               if (widget.onRetry != null) ...[
                 const SizedBox(width: 8),
                 AdaptiveButton(label: 'Retry', emphasis: ButtonEmphasis.secondary, onPressed: widget.onRetry),
+              ],
+              if (widget.onChange != null) ...[
+                const SizedBox(width: 8),
+                AdaptiveButton(
+                  key: const ValueKey('notice.change'),
+                  label: 'Change',
+                  emphasis: ButtonEmphasis.secondary,
+                  onPressed: widget.onChange,
+                ),
               ],
             ],
           ),
@@ -981,7 +1028,7 @@ String approvalTitle(ActionCall call) => switch (call.actionKind) {
     final n => 'Apply this patch to $n files?',
   },
   'DelegateAction' || 'TaskAction' => 'Start a subagent?',
-  _ => 'Allow ${call.toolName}?',
+  _ => 'Allow ${call.nativeName.isEmpty ? call.toolName : call.nativeName}?',
 };
 
 /// Three or more consecutive finished commands or tool calls, shown as one

@@ -95,7 +95,14 @@ final class _Detecting implements HarnessDriver {
 void main() {
   group('registry', () {
     late ProviderContainer container;
-    setUp(() => container = ProviderContainer(overrides: [harnessProvider.overrideWithValue(FakeHarness())]));
+    setUp(
+      () => container = ProviderContainer(
+        overrides: [
+          harnessProvider.overrideWithValue(FakeHarness()),
+          preferencesProvider.overrideWithValue(Preferences.inMemory()),
+        ],
+      ),
+    );
     tearDown(() => container.dispose());
 
     test('every planned driver is registered under its stored name', () {

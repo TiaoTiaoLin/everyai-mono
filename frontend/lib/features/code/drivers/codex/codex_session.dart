@@ -55,11 +55,17 @@ final class _Pending {
   final answer = Completer<_Decision>();
 }
 
-final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns {
-  CodexSession(LineChannel channel, {required this.cwd, required AgentMode mode, String? model, String? effort})
-    : _currentMode = mode,
-      _model = model == null || model.isEmpty ? null : model,
-      _effort = effort == null || effort.isEmpty ? null : effort {
+final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns, HasNativeCommands, NativeModes {
+  CodexSession(
+    LineChannel channel, {
+    required this.cwd,
+    required AgentMode mode,
+    this._native,
+    String? model,
+    String? effort,
+  }) : _currentMode = mode,
+       _model = model == null || model.isEmpty ? null : model,
+       _effort = effort == null || effort.isEmpty ? null : effort {
     _bind(channel);
   }
 
@@ -128,6 +134,25 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   String? get effort => _effort;
   AgentMode get mode => _currentMode;
 
+  /// The preset picked by name, or null for the one [mode] shows ([codexModeFor]).
+  String? get native => _native;
+  String? _native;
+
+  late final _modes = NativeModeFeed((modes: codexModes, current: _native ?? codexModeFor(_currentMode)));
+
+  @override
+  Stream<NativeModeSet> get nativeModes => _modes.stream;
+
+  /// Taken by the next turn/start, like [setMode].
+  @override
+  Future<void> setNativeMode(String id) async {
+    final m = offeredMode(codexModes, id, 'Codex');
+    _currentMode = m.policy;
+    _native = m.id;
+    _modes.set(current: m.id);
+    await onChanged?.call();
+  }
+
   // ------------------------------------------------------------------ setup
 
   /// The handshake, then [initRequests] (the briefing's skill roots; a
@@ -185,6 +210,14 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     }, codexSetupTimeout);
     _threadId = threadId;
   }
+
+  /// Appends [items] (raw Responses API items: messages, calls and their
+  /// outputs) to the thread's history the model sees (`thread/inject_items`).
+  Future<void> injectItems(List<Map<String, Object?>> items) =>
+      _peer.request('thread/inject_items', {'threadId': _threadId, 'items': items}, codexSetupTimeout);
+
+  /// Deletes the thread (its rollout and Codex's records of it).
+  Future<void> deleteThread() => _peer.request('thread/delete', {'threadId': _threadId}, codexSetupTimeout);
 
   void useJournal(EventJournal journal) => _journal = journal;
 
@@ -314,6 +347,35 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     });
   }
 
+  /// Codex sends no command list (its TUI's `/` commands are its own), so
+  /// these are the app-server methods that stand for them, from the
+  /// codex-cli 0.166.0 schema: not a list Codex gave us.
+  @override
+  Stream<List<NativeCommand>> get commands => Stream.value(codexCommands);
+
+  @override
+  Future<void> runCommand(String name, String args) => _starts(() async {
+    await _ensureRunning();
+    _emit(userMessage('u-${_newId()}', '/$name $args'.trim()));
+    final branch = args.trim();
+    final res = switch (name) {
+      'compact' => await _peer.request('thread/compact/start', {'threadId': _threadId}),
+      'review' => await _peer.request('review/start', {
+        'threadId': _threadId,
+        'target': switch (branch) {
+          '' => {'type': 'uncommittedChanges'},
+          _ when !branch.contains(' ') => {'type': 'baseBranch', 'branch': branch},
+          _ => {'type': 'custom', 'instructions': branch},
+        },
+      }),
+      _ => throw HarnessError('Codex has no /$name command here.'),
+    };
+    if (res case {'turn': {'id': final String t}}) {
+      _begin(t);
+      _stopIfAsked(t);
+    }
+  });
+
   /// Runs [body], which starts a turn, so a Stop before the turn/start
   /// reply isn't lost; one asked after every start is in is forgotten.
   Future<void> _starts(Future<void> Function() body) async {
@@ -360,13 +422,18 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     };
     if (turn != null) _begin(turn);
     if (turn == null ? _turnId == null : _ended.contains(turn)) release();
-    if (turn != null && _stopAsked && !_ended.contains(turn)) {
-      _stopAsked = false;
-      if (_startedTurn == turn) {
-        unawaited(_interruptAgain(turn));
-      } else {
-        _interruptOnStart = turn;
-      }
+    if (turn != null) _stopIfAsked(turn);
+  }
+
+  /// A Stop pressed while [turn]'s start was in flight (no turn id yet)
+  /// interrupts it now, or as soon as Codex says it started.
+  void _stopIfAsked(String turn) {
+    if (!_stopAsked || _ended.contains(turn)) return;
+    _stopAsked = false;
+    if (_startedTurn == turn) {
+      unawaited(_interruptAgain(turn));
+    } else {
+      _interruptOnStart = turn;
     }
   }
 
@@ -469,6 +536,8 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   @override
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
     _currentMode = mode;
+    _native = null;
+    _modes.set(current: codexModeFor(mode));
     await onChanged?.call();
   }
 
@@ -488,6 +557,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     // Pending approvals are settled once the peer is gone (no reply is sent).
     await _peer.close();
     await _journal?.close();
+    _modes.close();
     for (final c in [..._listeners]) {
       unawaited(c.close());
     }
@@ -602,6 +672,12 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
 
   void _itemCompleted(Map<String, Object?> item) {
     if (item['id'] case final String id) _streamed.remove(id);
+    if (item['type'] == 'plan' && item['text'] is String && (item['text'] as String).isNotEmpty) {
+      final (call, result) = planTextEvents('${item['id']}', toolName: 'plan', body: item['text'] as String);
+      _call(call);
+      _result(result);
+      return;
+    }
     if (messageOf(item) case final message?) {
       _emit(message);
       return;
@@ -843,3 +919,13 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
     _ => call.toolName,
   };
 }
+
+/// The commands [CodexSession] offers (see [CodexSession.commands]).
+const codexCommands = [
+  NativeCommand(name: 'compact', description: 'Summarize the conversation to free up context'),
+  NativeCommand(
+    name: 'review',
+    description: 'Review the uncommitted changes, the branch against a base branch, or what you describe',
+    argsHint: '[base branch]',
+  ),
+];

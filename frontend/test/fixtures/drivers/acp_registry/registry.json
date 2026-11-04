@@ -1,0 +1,306 @@
+{
+ "version": "1.0.0",
+ "agents": [
+  {
+   "id": "claude-acp",
+   "name": "Claude Agent",
+   "version": "0.100.0",
+   "description": "ACP wrapper for Anthropic's Claude",
+   "repository": "https://github.com/agentclientprotocol/claude-agent-acp",
+   "authors": [
+    "Anthropic",
+    "Zed Industries",
+    "JetBrains"
+   ],
+   "license": "proprietary",
+   "license_url": "https://github.com/agentclientprotocol/claude-agent-acp/blob/main/LICENSE",
+   "distribution": {
+    "npx": {
+     "package": "@agentclientprotocol/claude-agent-acp@0.100.0"
+    }
+   }
+  },
+  {
+   "id": "cursor",
+   "name": "Cursor",
+   "version": "2026.10.22",
+   "description": "Cursor's coding agent",
+   "website": "https://cursor.com/docs/cli/acp",
+   "authors": [
+    "Cursor"
+   ],
+   "license": "proprietary",
+   "license_url": "https://cursor.com/terms-of-service",
+   "distribution": {
+    "binary": {
+     "darwin-aarch64": {
+      "archive": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/darwin/arm64/agent-cli-package.tar.gz",
+      "cmd": "./dist-package/cursor-agent",
+      "args": [
+       "acp"
+      ]
+     },
+     "linux-x86_64": {
+      "archive": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/linux/x64/agent-cli-package.tar.gz",
+      "cmd": "./dist-package/cursor-agent",
+      "args": [
+       "acp"
+      ]
+     },
+     "windows-aarch64": {
+      "archive": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/windows/arm64/agent-cli-package.zip",
+      "cmd": "./dist-package\\cursor-agent.cmd",
+      "args": [
+       "acp"
+      ]
+     },
+     "windows-x86_64": {
+      "archive": "https://downloads.cursor.com/lab/2026.10.22-27dcf5f/windows/x64/agent-cli-package.zip",
+      "cmd": "./dist-package\\cursor-agent.cmd",
+      "args": [
+       "acp"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "fast-agent",
+   "name": "fast-agent",
+   "version": "0.10.1",
+   "description": "Code and build agents with comprehensive multi-provider support",
+   "repository": "https://github.com/evalstate/fast-agent",
+   "website": "https://fast-agent.ai",
+   "authors": [
+    "enquiries@fast-agent.ai"
+   ],
+   "license": "Apache 2.0",
+   "license_url": "https://github.com/evalstate/fast-agent/blob/main/LICENSE",
+   "distribution": {
+    "uvx": {
+     "package": "fast-agent-acp==0.10.1",
+     "args": [
+      "-x"
+     ],
+     "env": {
+      "FAST_AGENT_MODEL": "codexplan"
+     }
+    }
+   }
+  },
+  {
+   "id": "gemini",
+   "name": "Gemini CLI",
+   "version": "0.66.0",
+   "description": "Google's official CLI for Gemini",
+   "repository": "https://github.com/google-gemini/gemini-cli",
+   "website": "https://geminicli.com",
+   "authors": [
+    "Google"
+   ],
+   "license": "Apache-2.0",
+   "license_url": "https://github.com/google-gemini/gemini-cli/blob/main/LICENSE",
+   "distribution": {
+    "npx": {
+     "package": "@google/gemini-cli@0.66.0",
+     "args": [
+      "--acp"
+     ]
+    }
+   }
+  },
+  {
+   "id": "grok-build",
+   "name": "Grok Build",
+   "version": "1.0.74",
+   "description": "xAI's coding agent and CLI",
+   "website": "https://x.ai/cli",
+   "authors": [
+    "xAI"
+   ],
+   "license": "proprietary",
+   "license_url": "https://x.ai/legal/terms-of-service",
+   "distribution": {
+    "npx": {
+     "package": "@xai-official/grok@1.0.74",
+     "args": [
+      "agent",
+      "stdio"
+     ]
+    }
+   }
+  },
+  {
+   "id": "kilo",
+   "name": "Kilo",
+   "version": "7.8.18",
+   "description": "The open source coding agent",
+   "repository": "https://github.com/Kilo-Org/kilocode",
+   "website": "https://kilo.ai/",
+   "authors": [
+    "Kilo Code"
+   ],
+   "license": "MIT",
+   "license_url": "https://github.com/Kilo-Org/kilocode/blob/main/LICENSE",
+   "distribution": {
+    "binary": {
+     "darwin-aarch64": {
+      "archive": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.18/kilo-darwin-arm64.zip",
+      "cmd": "./kilo",
+      "args": [
+       "acp"
+      ],
+      "sha256": "1ea2285a2f45ec27b7fa3b644f92700adf4a91fd671aaf18ba0cb8f26c795df5"
+     },
+     "linux-x86_64": {
+      "archive": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.18/kilo-linux-x64.tar.gz",
+      "cmd": "./kilo",
+      "args": [
+       "acp"
+      ],
+      "sha256": "503561fb8c4b8ede26703457a912b98cf18c9c9e8961649f3718cf7676b5c02a"
+     },
+     "windows-x86_64": {
+      "archive": "https://github.com/Kilo-Org/kilocode/releases/download/v7.8.18/kilo-windows-x64.zip",
+      "cmd": "./kilo.exe",
+      "args": [
+       "acp"
+      ],
+      "sha256": "4d13c566a3e7d91ceb6986ea037a4eee6aa145918a75b38f8208034c07e74780"
+     }
+    },
+    "npx": {
+     "package": "@kilocode/cli@7.8.18",
+     "args": [
+      "acp"
+     ]
+    }
+   }
+  },
+  {
+   "id": "kiro",
+   "name": "Kiro CLI",
+   "version": "2.37.1",
+   "description": "The Kiro coding agent",
+   "repository": "https://github.com/kirodotdev/Kiro",
+   "website": "https://kiro.dev/docs/cli/acp/",
+   "authors": [
+    "Amazon"
+   ],
+   "license": "proprietary",
+   "license_url": "https://kiro.dev/license/",
+   "distribution": {
+    "binary": {
+     "darwin-aarch64": {
+      "archive": "https://prod.download.cli.kiro.dev/stable/2.37.1/kirocli-universal-darwin.tar.gz",
+      "sha256": "c2b2bb628673cea6f05174528735ac1f82478dd936a27f0826f0cd7029699c8e",
+      "cmd": "./kirocli/bin/kiro-cli",
+      "args": [
+       "acp",
+       "--agent-engine=v3"
+      ]
+     },
+     "linux-x86_64": {
+      "archive": "https://prod.download.cli.kiro.dev/stable/2.37.1/kirocli-x86_64-linux.tar.gz",
+      "sha256": "cf6c7438934a169781b3d564e81bcdfccac901c5d659f35235ac19e0d01192a3",
+      "cmd": "./kirocli/bin/kiro-cli-chat",
+      "args": [
+       "acp",
+       "--agent-engine=v3"
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "opencode",
+   "name": "OpenCode",
+   "version": "2.2.5",
+   "description": "The open source coding agent",
+   "repository": "https://github.com/anomalyco/opencode",
+   "website": "https://opencode.ai",
+   "authors": [
+    "Anomaly"
+   ],
+   "license": "MIT",
+   "license_url": "https://github.com/anomalyco/opencode/blob/dev/LICENSE",
+   "distribution": {
+    "binary": {
+     "darwin-aarch64": {
+      "archive": "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-darwin-arm64.zip",
+      "cmd": "./opencode",
+      "args": [
+       "acp"
+      ],
+      "sha256": "25ba9908979fa7d764792c82589b4b5768ab1511154e0317d98aa77d216ce767"
+     },
+     "linux-x86_64": {
+      "archive": "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-linux-x64.tar.gz",
+      "cmd": "./opencode",
+      "args": [
+       "acp"
+      ],
+      "sha256": "09f44302c10fd036912f59c81fd1aef5df45dd06f649197f9dfc9bbe2a79614e"
+     },
+     "windows-aarch64": {
+      "archive": "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-windows-arm64.zip",
+      "cmd": "./opencode.exe",
+      "args": [
+       "acp"
+      ],
+      "sha256": "4e426a39d68516b036cd28b574c5ce5f3b50846ab460521f83f2458fe7f242d8"
+     },
+     "windows-x86_64": {
+      "archive": "https://github.com/anomalyco/opencode/releases/download/v2.2.5/opencode-windows-x64.zip",
+      "cmd": "./opencode.exe",
+      "args": [
+       "acp"
+      ],
+      "sha256": "2f3bfd6b3527c60c2a882557b20ddc9ba6bdff4b5a8fe61c853da8fcfb3076e8"
+     }
+    }
+   }
+  },
+  {
+   "id": "sigit",
+   "name": "siGit Code",
+   "version": "1.7.8",
+   "description": "Local-first coding agent. Runs entirely on your machine with optional on-device LLM inference via Onde.",
+   "repository": "https://github.com/getsigit/sigit",
+   "website": "https://github.com/getsigit/sigit",
+   "authors": [
+    "smbCloud"
+   ],
+   "license": "Apache-2.0",
+   "license_url": "https://github.com/getsigit/sigit/blob/main/LICENSE",
+   "distribution": {
+    "binary": {
+     "darwin-aarch64": {
+      "archive": "https://github.com/getsigit/sigit/releases/download/v1.7.8/sigit-macos-arm64.tar.gz",
+      "cmd": "./sigit",
+      "sha256": "6273178ea98ee3b3fa60d0c41bbabaa6493448032b99d6564880aa2ed41af2d0"
+     },
+     "linux-x86_64": {
+      "archive": "https://github.com/getsigit/sigit/releases/download/v1.7.8/sigit-linux-amd64",
+      "cmd": "./sigit-linux-amd64",
+      "sha256": "ce37b3b7593773b3d6e6839775f7fec0417b29fc5aeaf7fa80ff2c52d7b5db10"
+     },
+     "windows-aarch64": {
+      "archive": "https://github.com/getsigit/sigit/releases/download/v1.7.8/sigit-win-arm64.exe",
+      "cmd": "./sigit-win-arm64.exe",
+      "sha256": "d61c7fc43ef5ad04c94f7f44eec84d6f220c8a69574f77115578025a3ff6a885"
+     },
+     "windows-x86_64": {
+      "archive": "https://github.com/getsigit/sigit/releases/download/v1.7.8/sigit-win-amd64.exe",
+      "cmd": "./sigit-win-amd64.exe",
+      "sha256": "521daba4275ea8e4934334a1b5c9cc0885c2cf207f16af3d6116fff73d8e69d3"
+     }
+    },
+    "npx": {
+     "package": "@smbcloud/sigit@1.7.8"
+    }
+   }
+  }
+ ],
+ "extensions": []
+}

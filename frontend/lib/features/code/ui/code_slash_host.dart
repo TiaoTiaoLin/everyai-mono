@@ -125,6 +125,7 @@ CodeSlashHost codeSlashHost(BuildContext context, WidgetRef ref, String sessionI
         message: rewindPrompt(
           back == 1 ? 'your last message' : 'your last $back messages',
           files: info?.worktree != null,
+          conversation: controller().rewindsConversation,
         ),
         confirmLabel: 'Rewind',
         destructive: true,
@@ -133,7 +134,6 @@ CodeSlashHost codeSlashHost(BuildContext context, WidgetRef ref, String sessionI
       toast((await controller().rewind(turn)).label);
     },
     cost: () => controller().showCost(),
-    skipPhase: () => controller().skipPhase(),
     btw: (question) => controller().askAside(question),
     review: (focus) => controller().review(focus),
     goal: (args) {

@@ -30,7 +30,7 @@ Future<T> whenValue<T>(ProviderContainer c, ProviderListenable<T> p, bool Functi
 /// An outside agent's session: the test plays its events and reads what it
 /// was sent and answered. With [replays], a new listener gets every event
 /// played so far first, as a reopened conversation does.
-final class FakeLeadSession implements HarnessSession, SteersRuns {
+final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands, NativeModes {
   FakeLeadSession({this.id = 'c1', this.replays = false, List<HarnessEvent> history = const []}) {
     _history.addAll(history);
   }
@@ -53,6 +53,36 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
   List<HarnessEvent> onInterrupt = const [];
 
   List<HarnessEvent> get history => List.unmodifiable(_history);
+
+  /// Its own `/` commands (the test sets them) and the ones run, as `name|args`.
+  final nativeCommands = NativeCommandList();
+  final ran = <String>[];
+  @override
+  Stream<List<NativeCommand>> get commands => nativeCommands.stream;
+  @override
+  Future<void> runCommand(String name, String args) async {
+    if (runFails case final e?) throw e;
+    ran.add('$name|$args');
+  }
+
+  /// What [runCommand] throws (a transport error of the driver's own).
+  Object? runFails;
+
+  /// Its own modes (empty until the test sets them: then the app's picker is
+  /// ours) and the ones picked by name.
+  final modeFeed = NativeModeFeed();
+  final picked = <String>[];
+
+  /// What [setNativeMode] throws.
+  Object? pickFails;
+  @override
+  Stream<NativeModeSet> get nativeModes => modeFeed.stream;
+  @override
+  Future<void> setNativeMode(String id) async {
+    if (pickFails case final e?) throw e;
+    picked.add(id);
+    modeFeed.set(current: id);
+  }
 
   @override
   Stream<HarnessEvent> get events {
@@ -94,8 +124,15 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
 
   /// When set, [setMode] waits for it (an agent that takes the switch late).
   Completer<void>? modeGate;
+
+  /// The modes the app set on it, in order.
+  final modes = <AgentMode>[];
   @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async => modeGate?.future;
+  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
+    modes.add(mode);
+    await modeGate?.future;
+  }
+
   @override
   Future<void> switchLlm(SessionSpec spec) async => llmSwitches++;
   @override
@@ -110,7 +147,7 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
 /// A driver over fake sessions. Given [session], every start and attach
 /// returns it; otherwise each start makes a new one (`<id>-c1`, `<id>-c2`, …)
 /// and attach reopens it, replaying what it played ([attachFails] refuses).
-final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
+final class FakeLeadDriver implements HarnessDriver, AttachesBriefed, ChecksResume {
   FakeLeadDriver(
     this.id, {
     this.session,
@@ -118,9 +155,13 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
     this.caps = const {DriverCap.approvals},
     this.label = 'Test CLI',
     this.status = const DriverStatus(installed: true),
+    this.consentId,
   });
 
   final String id;
+
+  /// Where its consent is stored, when not under [id] (an ACP profile).
+  final String? consentId;
   final FakeLeadSession? session;
   final bool needsConsent;
   final String label;
@@ -134,6 +175,12 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   final conversations = <String, FakeLeadSession>{};
   var attachFails = false;
 
+  /// What [resumeProblem] says (null: it can be resumed).
+  String? problem;
+
+  @override
+  Future<String?> resumeProblem(String conversationId) async => problem;
+
   /// [start] throws (the CLI didn't start).
   var startFails = false;
 
@@ -144,9 +191,16 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
   FakeLeadSession? latest;
 
   @override
-  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent);
+  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent, consentId: consentId);
+
+  /// When set, [detect] waits for it (harness detection still running).
+  Completer<void>? detectGate;
   @override
-  Future<DriverStatus> detect() async => status;
+  Future<DriverStatus> detect() async {
+    await detectGate?.future;
+    return status;
+  }
+
   @override
   Future<List<DriverModel>> models() async => const [];
   @override
@@ -204,7 +258,7 @@ final class FakeHost implements HostServer {
   var _n = 0;
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async {
+  Future<HostToken> mint(String sessionId, HostTools tools) async {
     minted.add(sessionId);
     this.tools[sessionId] = tools;
     final token = 'tok${++_n}';

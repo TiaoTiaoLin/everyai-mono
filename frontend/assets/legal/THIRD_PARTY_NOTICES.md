@@ -281,11 +281,16 @@ SOFTWARE.
   subagents, the usage-limit code (`xaiAcpExtension.ts`; test payloads
   adapted from `xaiAcpExtension.test.ts` in
   `frontend/test/fixtures/drivers/grok/`). The replies Grok reads are our
-  own words. Source:
+  own words. The ACP registry install rules: the index checks (https only,
+  pinned npx/uvx packages, bounded fields, the 1 MiB cap), the command path
+  check, the platform pick with its windows-aarch64 fallback, the archive
+  kind by URL suffix, and the checksum and stays-inside checks of a
+  download (`packages/provider-acp-registry/src/server/AcpRegistrySupport.ts`).
+  Source:
   https://github.com/pingdotgg/t3code at commit
   8b44f42b14c8e273156474a924ccf29680dd7857.
 - **Where:** `frontend/lib/features/code/drivers/` (the parts marked "Ported
-  from T3 Code")
+  from T3 Code", and `drivers/registry_install/`)
 - **License:** MIT
 
 ```

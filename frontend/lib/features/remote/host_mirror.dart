@@ -8,6 +8,7 @@ import '../code/code_providers.dart'
     show CodeSessionState, codeProjectsProvider, codeSessionProvider, codeSessionsProvider, codeStatusesProvider;
 import '../code/domain/agent_mode.dart';
 import '../code/domain/code_session.dart';
+import '../code/domain/floor_advice.dart';
 import '../code/domain/permissions.dart';
 import '../code/domain/questions.dart';
 import '../code/domain/transcript.dart';
@@ -189,11 +190,7 @@ final class HostMirror {
       remember: controller.rememberable(),
       rememberBy: controller.rememberBy(),
       perCall: controller.perCall,
-      flags: {
-        for (final c in state.transcript.pending)
-          if (controller.policy.decide(c, state.mode) case Decision(source: DecisionSource.dangerous, :final why))
-            c.id: why,
-      },
+      flags: approvalFlags(controller.policy, state.transcript.pending, state.mode),
     );
   }
 
@@ -213,7 +210,7 @@ final class HostMirror {
       String text() => args['text'] as String? ?? '';
       switch (m['kind']) {
         case MirrorAction.send:
-          await c.send(text(), files: _files(args['files']));
+          await c.sendTyped(text(), files: _files(args['files']));
         case MirrorAction.steer:
           await c.steer(text(), files: _files(args['files']));
         case MirrorAction.stop:

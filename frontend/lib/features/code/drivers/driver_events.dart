@@ -23,6 +23,8 @@ ActionCall actionEvent({
   'kind': 'ActionEvent',
   'id': id,
   'source': 'agent',
+  // Marks a call as the outside harness's own, so the row shows its tool name.
+  'native': true,
   'tool_name': toolName,
   'tool_call_id': toolCallId ?? id,
   'action': {...args, 'kind': kind},
@@ -32,6 +34,13 @@ ActionCall actionEvent({
       {'type': 'text', 'text': thought},
     ],
 }) as ActionCall;
+
+/// A plan the harness wrote ([body], Markdown), as a call the transcript shows as a plan card, plus its result so
+/// it never waits for approval.
+(ActionCall, ToolResult) planTextEvents(String id, {required String toolName, required String body}) => (
+  actionEvent(id: id, toolName: toolName, kind: 'ProposedPlanAction', args: {'body': body}),
+  resultEvent(id: '$id-r', actionId: id, toolName: toolName, text: 'Plan shown.'),
+);
 
 /// What [actionId]'s call returned: [text], or an error.
 ToolResult resultEvent({

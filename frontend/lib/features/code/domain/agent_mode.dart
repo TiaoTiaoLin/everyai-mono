@@ -167,6 +167,18 @@ String modeNote(AgentMode mode, String text, {bool full = true, AgentMode? from,
   return (mode, text.substring(end + _noteClose.length).trimLeft());
 }
 
+const _sessionOpen = '<everyai-session>';
+const _sessionClose = '</everyai-session>';
+
+/// Splits the briefing block (`<everyai-session>…</everyai-session>`, which ACP agents without a skill route get
+/// in front of their first prompt) off a user message: the block's text (null without one) and the rest.
+(String?, String) splitSessionBlock(String text) {
+  if (!text.startsWith(_sessionOpen)) return (null, text);
+  final end = text.indexOf(_sessionClose);
+  if (end < 0) return (null, text);
+  return (text.substring(_sessionOpen.length, end).trim(), text.substring(end + _sessionClose.length).trimLeft());
+}
+
 /// The question-card client tool (see AGENTS.md "Question cards").
 const askUserQuestionTool = 'ask_user_question';
 

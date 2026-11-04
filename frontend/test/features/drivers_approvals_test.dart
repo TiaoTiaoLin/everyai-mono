@@ -9,11 +9,14 @@ import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/floor_advice.dart';
 import 'package:every_ai/features/code/domain/rewind.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
+import 'package:every_ai/features/code/domain/transcript.dart';
+import 'package:every_ai/features/code/git/git_service.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
@@ -81,7 +84,15 @@ final class _Session implements HarnessSession {
   }
 
   @override
-  Future<void> send(String text, {bool run = true, List<String> images = const []}) async => steered.add(text);
+  Future<void> send(String text, {bool run = true, List<String> images = const []}) async {
+    steered.add(text);
+    if (!_sent.isCompleted) _sent.complete(text);
+  }
+
+  var _sent = Completer<String>();
+
+  /// The next message sent from now on.
+  Future<String> nextSend() => (_sent = Completer()).future;
   @override
   Future<void> interrupt() async => steered.add('(interrupt)');
   @override
@@ -92,8 +103,9 @@ final class _Session implements HarnessSession {
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {}
   @override
   Future<void> switchLlm(SessionSpec spec) async {}
+  final rewound = <String?>[];
   @override
-  Future<void> rewindTo(String? head) async {}
+  Future<void> rewindTo(String? head) async => rewound.add(head);
   @override
   Future<void> close() => _events.close();
 }
@@ -115,7 +127,7 @@ final class _Host implements HostServer {
   var _n = 0;
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools, {bool bugFix = false}) async =>
+  Future<HostToken> mint(String sessionId, HostTools tools) async =>
       (url: Uri.parse('http://127.0.0.1:9/mcp'), token: 'tok${++_n}');
   @override
   bool touch(String token) => true;
@@ -164,22 +176,28 @@ void main() {
     String harness = 'test',
     List<String> deny = const [],
     Map<String, HarnessDriver> extra = const {},
+    SessionWorktree? worktree,
+    bool reopen = false,
   }) async {
     final prefs = await Preferences.load(db);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: tmp.path).toJson()]);
-    prefs['code.sessions'] = jsonEncode([
-      CodeSessionInfo(
-        id: 's1',
-        projectId: 'p1',
-        title: 't',
-        conversationId: 'c1',
-        model: 'm',
-        mode: mode,
-        workingDir: tmp.path,
-        createdAt: DateTime(2026),
-        harness: harness,
-      ).toJson(),
-    ]);
+    // [reopen]: the session as the last run saved it (an app restart).
+    if (!reopen) {
+      prefs['code.sessions'] = jsonEncode([
+        CodeSessionInfo(
+          id: 's1',
+          projectId: 'p1',
+          title: 't',
+          conversationId: 'c1',
+          model: 'm',
+          mode: mode,
+          workingDir: worktree?.path ?? tmp.path,
+          createdAt: DateTime(2026),
+          harness: harness,
+          worktree: worktree,
+        ).toJson(),
+      ]);
+    }
     // The user turned on "Use my own installed CLIs" for the extra drivers that need it (Gemini).
     prefs['code.settings'] = jsonEncode({
       'global': {
@@ -235,12 +253,62 @@ void main() {
     return a;
   }
 
-  test('the safety floor holds for an outside driver in Full auto', () async {
-    await open(AgentMode.fullAuto);
+  Future<List<ActionCall>> pending() async {
+    final p = await _when(
+      container,
+      codeSessionProvider('s1').select((s) => s.transcript.pending),
+      (List<ActionCall> p) => p.isNotEmpty,
+    );
+    await pumpEventQueue();
+    return p;
+  }
+
+  test('Full auto: an outside floor hit gets advice, then the user decides', () async {
+    // Every outside driver with approvals answers per call.
+    session = _PerCallSession();
+    final controller = await open(AgentMode.fullAuto);
     session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
     final a = await answered();
     expect(a.accept, isFalse);
+    expect(a.reason, startsWith(floorAdviceLead));
     expect(a.reason, contains(floorReason('rm -rf ~')!));
+    // The model asks the user and runs it again: now it waits on the card, with the warning.
+    session.forgetAnswers();
+    session.add(resultEvent(id: 'r1', actionId: 'a1', toolName: 'Bash', text: a.reason!));
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final waiting = await pending();
+    expect(session.answers, isEmpty);
+    final state = container.read(codeSessionProvider('s1'));
+    expect(approvalFlags(controller.policy, waiting, state.mode), {waiting.single.id: floorReason('rm -rf ~')});
+    await controller.approve(ApprovalScope.once, [waiting.single.id]);
+    expect((await answered()).accept, isTrue);
+  });
+
+  test('Ask: an outside floor hit waits on the card with a warning', () async {
+    session = _PerCallSession();
+    final controller = await open(AgentMode.ask);
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final waiting = await pending();
+    expect(session.answers, isEmpty);
+    expect(approvalFlags(controller.policy, waiting, AgentMode.ask).values, [floorReason('rm -rf ~')]);
+  });
+
+  test('a deny rule still refuses an outside floor hit outright', () async {
+    session = _PerCallSession();
+    await open(AgentMode.fullAuto, deny: ['rm *']);
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final a = await answered();
+    expect(a.accept, isFalse);
+    expect(a.reason, contains('`rm *` forbids it'));
+  });
+
+  test('the EveryAI harness keeps the hard floor in Full auto', () async {
+    session = _PerCallSession();
+    await open(AgentMode.fullAuto, harness: everyaiHarnessName);
+    session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
+    final a = await answered();
+    expect(a.accept, isFalse);
+    expect(a.reason, contains('never runs'));
   });
 
   test('Plan mode refuses an outside driver\'s changes', () async {
@@ -313,6 +381,145 @@ void main() {
     expect(session.steered, isEmpty);
   });
 
+  group('rewind on an outside lead with a worktree', () {
+    Future<String> git(String dir, List<String> args) async {
+      final r = await Process.run('git', ['-C', dir, ...args]);
+      if (r.exitCode != 0) fail('git ${args.join(' ')}: ${r.stderr}');
+      return '${r.stdout}'.trim();
+    }
+
+    late String repo;
+    late SessionWorktree w;
+
+    setUp(() async {
+      repo = '${tmp.path}/app';
+      await Directory(repo).create(recursive: true);
+      await git(repo, ['init', '-q', '-b', 'main']);
+      await git(repo, ['config', 'user.name', 'Dev']);
+      await git(repo, ['config', 'user.email', 'dev@example.com']);
+      File('$repo/README.md').writeAsStringSync('# App\n');
+      await git(repo, ['add', '-A']);
+      await git(repo, ['commit', '-q', '-m', 'Initial commit']);
+      w = await GitService.createWorktree(
+        repoRoot: repo,
+        slug: 'rewind-test',
+        worktreesDir: '${tmp.path}/worktrees/app',
+        hooksDir: '${tmp.path}/hooks',
+      );
+    });
+
+    /// Sends [text] through the controller and echoes back what the harness got, as the drivers do.
+    Future<void> turn(CodeSessionController controller, String id, String text) async {
+      await controller.send(text);
+      final turns = container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>().length;
+      session.add(
+        HarnessEvent.decode({
+          'kind': 'MessageEvent',
+          'id': id,
+          'source': 'user',
+          'llm_message': {'role': 'user', 'content': session.steered.last},
+        }),
+      );
+      await _when(
+        container,
+        codeSessionProvider('s1').select((s) => s.transcript.items.whereType<UserTurn>().length),
+        (int n) => n > turns,
+      );
+    }
+
+    test('checkpoints are taken on hidden refs only', () async {
+      final head = await git(repo, ['rev-parse', 'HEAD']);
+      final branches = await git(repo, ['branch', '--list']);
+      final status = await git(repo, ['status', '--porcelain']);
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      File('${w.path}/one.txt').writeAsStringSync('1');
+      await turn(controller, 'm2', 'Add another');
+      expect(await git(repo, ['rev-parse', '--verify', checkpointRef(w, 2)]), isNotEmpty);
+      expect(await git(repo, ['rev-parse', 'HEAD']), head);
+      expect(await git(repo, ['branch', '--list']), branches);
+      expect(await git(repo, ['status', '--porcelain']), status);
+      expect(await git(w.path, ['rev-parse', 'HEAD']), w.baseCommit);
+    });
+
+    test('the files go back, the harness keeps the turns and hears about it once', () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      final out = await controller.rewind(2);
+      expect((out.kind, out.files, out.conversation), (RewindKind.done, true, false));
+      expect(out.label, contains('Test CLI still remembers'));
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
+      expect(session.rewound, isEmpty);
+      expect(container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>(), hasLength(2));
+      await turn(controller, 'm3', 'try again');
+      expect(session.steered.last, contains('<everyai-rewind>'));
+      expect(session.steered.last, contains('"Add a decrement method"'));
+      // The echoed note stays out of the user's turn, so a later rewind quotes what they typed.
+      final turns = container.read(codeSessionProvider('s1')).transcript.items.whereType<UserTurn>().toList();
+      expect(turns.last.text, 'try again');
+      await controller.rewind(3);
+      await controller.send('and once more');
+      expect(session.steered.last, contains('"try again"'));
+      await controller.send('and again');
+      expect(session.steered.last, isNot(contains('<everyai-rewind>')));
+    });
+
+    test('the note survives an app restart before the next message', () async {
+      await open(AgentMode.fullAuto, worktree: w);
+      final controller = container.read(codeSessionProvider('s1').notifier);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      expect((await controller.rewind(2)).files, isTrue);
+      container.dispose();
+      session = _Session();
+      final reopened = await open(AgentMode.fullAuto, worktree: w, reopen: true);
+      await reopened.send('try again');
+      expect(session.steered.last, contains('<everyai-rewind>'));
+      expect(session.steered.last, contains('"Add a decrement method"'));
+    });
+
+    test('a message sent while the files go back waits for them and carries the note', () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      final sent = session.steered.length;
+      final next = session.nextSend();
+      final rewinding = controller.rewind(2);
+      await controller.send('try again');
+      // It waits for the files and goes out once the rewind is done.
+      expect(session.steered, hasLength(sent));
+      await rewinding;
+      final text = await next;
+      expect(session.steered.skip(sent), hasLength(1));
+      expect(text, contains('<everyai-rewind>'));
+      expect(text, endsWith('try again'));
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
+    });
+
+    test('a driver with its own rewind takes the conversation back too', () async {
+      final controller = await open(
+        AgentMode.fullAuto,
+        harness: 'native',
+        worktree: w,
+        extra: {
+          'native': _TestDriver('native', session, caps: const {DriverCap.approvals, DriverCap.rewind}),
+        },
+      );
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      final out = await controller.rewind(2);
+      expect((out.kind, out.files, out.conversation), (RewindKind.done, true, true));
+      expect(session.rewound, ['m1']);
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
+      await controller.send('try again');
+      expect(session.steered.last, isNot(contains('<everyai-rewind>')));
+    });
+  });
+
   test('a mid-run message on a driver without steering interrupts and is sent again', () async {
     final controller = await open(AgentMode.ask);
     await controller.steer('use tabs');
@@ -382,17 +589,24 @@ void main() {
       expect(done(), isTrue);
     }
 
-    test("Full auto still refuses OpenCode's rm -rf ~ (the floor), as its reject option", () async {
+    test('Full auto on OpenCode runs in its asking build mode, so rm -rf ~ (the floor) waits on the card', () async {
       final controller = await open(
         AgentMode.fullAuto,
         harness: 'acp',
         extra: acp('opencode', 'opencode/perm_floor.jsonl', ses),
       );
       await controller.send('Clean up');
-      expect(await answered0(), 'reject');
-      await channels.single.finished;
-      channels.single.expectFinished();
-      await journalled('finished');
+      await _when(
+        container,
+        codeSessionProvider('s1').select((s) => s.transcript.pending),
+        (List<ActionCall> p) => p.isNotEmpty,
+      );
+      await pumpEventQueue();
+      // OpenCode has no mode that runs everything, so the nearest asks (see nativeModeFor).
+      expect(controller.state.nativeMode, 'build');
+      expect(controller.state.mode, AgentMode.ask);
+      expect(channels.single.sent.where((m) => m['id'] == 0 && m['method'] == null), isEmpty);
+      await journalled('waiting_for_confirmation');
     });
 
     test("Ask runs OpenCode's ls at once, allowed once", () async {

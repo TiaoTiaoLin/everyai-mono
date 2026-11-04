@@ -3,6 +3,7 @@
 import '../../domain/agent_mode.dart';
 import '../../domain/mcp_servers.dart' show shellSplit;
 import '../../harness/events.dart';
+import '../../harness/harness.dart' show NativeMode;
 import '../driver_events.dart';
 
 // Codex app-server shapes ↔ the app's events, as pure functions. Field names
@@ -58,6 +59,10 @@ typedef CodexPolicy = ({
 /// The reviewer is always the user (here: the app). A user's
 /// `approvals_reviewer = "auto_review"` in their Codex config would
 /// otherwise let Codex's own reviewer answer calls the app must judge.
+///
+/// The presets ([codexModes]) pick only the mode: Read Only runs as Ask,
+/// with no sandbox outside Plan, for the reason above (the app's approval is
+/// the gate, as in Codex's own Read Only, where edits need approval).
 CodexPolicy codexPolicy(AgentMode mode) => (
   approvalPolicy: 'untrusted',
   approvalsReviewer: 'user',
@@ -66,6 +71,42 @@ CodexPolicy codexPolicy(AgentMode mode) => (
       ? const {'type': 'readOnly', 'networkAccess': true}
       : const {'type': 'dangerFullAccess'},
 );
+
+const codexReadOnly = 'read-only';
+
+/// Codex's own presets under its names, each under the app's policy for it.
+/// `full-access` is listed greyed, never offered (Codex's `never` would skip
+/// the app's check). Codex's plan mode is the experimental collaboration
+/// mode, not used here. Descriptions are ours: in both, Codex asks the app
+/// about every edit and command it doesn't count as a safe read. They say
+/// there is no sandbox: unlike Codex's own presets (read-only,
+/// workspace-write), the turns run unsandboxed outside Plan, since a
+/// sandbox-blocked call that the app approved would run again outside the
+/// sandbox without asking (see [codexPolicy]).
+const codexModes = [
+  NativeMode(
+    id: codexReadOnly,
+    label: 'Read Only',
+    description: "Asks before edits and commands, which run outside Codex's sandbox once approved",
+    policy: AgentMode.ask,
+  ),
+  NativeMode(
+    id: 'default',
+    label: 'Default',
+    description: "Edits files without asking; commands still ask, and run outside Codex's sandbox once approved",
+    policy: AgentMode.autoEdit,
+  ),
+  NativeMode(
+    id: 'full-access',
+    label: 'Full Access',
+    policy: AgentMode.fullAuto,
+    blocked: 'Not offered: Codex would run everything without asking EveryAI first.',
+  ),
+];
+
+/// The preset a session in [mode] shows when none was picked by name.
+String codexModeFor(AgentMode mode) =>
+    mode == AgentMode.autoEdit || mode == AgentMode.fullAuto ? 'default' : codexReadOnly;
 
 /// Whether usage under an `account/updated` `authMode` is on a plan rather
 /// than billed per token: the modes Codex serves from its own backend

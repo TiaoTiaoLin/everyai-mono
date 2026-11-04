@@ -6,6 +6,8 @@ import '../domain/phases.dart' show bugCheckTool;
 import '../harness/events.dart';
 import '../harness/harness.dart';
 import '../host/host.dart' show savedPlansTool;
+import '../host/host_prompts.dart' show runWorkflowTool;
+import '../host/host_max_tools.dart' show maxHostTools;
 import 'briefing/briefing_types.dart' show everyaiServerName;
 import 'driver.dart';
 import 'driver_process.dart' show noAnswerProblem, notBuiltProblem;
@@ -74,22 +76,53 @@ const _knownKinds = {
 };
 
 /// The tools the app's MCP host offers an outside agent (`host/host.dart`).
-const hostToolNames = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool, bugCheckTool};
+const hostToolNames = {
+  askUserQuestionTool,
+  presentPlanTool,
+  'memory',
+  savedPlansTool,
+  bugCheckTool,
+  runWorkflowTool,
+  ...maxHostTools,
+  'check',
+  'diff_stats',
+  'goal_check',
+  'run_script',
+};
 
 /// The host tools the policy lets run without asking: they only show the
-/// user a card or read and write the project's notes. bug_check runs a
-/// command, so it goes through the mode like any other.
-const trustedHostTools = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool};
+/// user a card, read and write the project's notes, or read the session
+/// (diff_stats, goal_check, run_script's sandboxed reads). bug_check and
+/// check run a command, so they go through the mode like any other.
+const trustedHostTools = {
+  askUserQuestionTool,
+  presentPlanTool,
+  'memory',
+  savedPlansTool,
+  ...maxHostTools,
+  'diff_stats',
+  'goal_check',
+  'run_script',
+};
+
+/// The host tools that run a command in the app: an outside agent's own
+/// permission flow must ask the session about them.
+const hostRunTools = {bugCheckTool, 'check'};
 
 /// The host tool an outside agent's [call] is (`ask_user_question`, …), or
 /// null when it calls another MCP server. CLIs name MCP tools their own
-/// way: `mcp__everyai__x` (Claude Code), `everyai__x`, `everyai.x`,
-/// `everyai/x`. Only the name counts: the call's own arguments are the
+/// way: `mcp__everyai__x` (Claude Code), `everyai__x`, `everyai_x`
+/// (OpenCode), `everyai.x`, `everyai/x`. Only the name counts: the call's own arguments are the
 /// agent's, so a field in them can't make a foreign tool ours.
 String? hostToolOf(ActionCall call) {
   if (!isMcpTool(call)) return null;
   final name = call.toolName;
-  for (final prefix in const ['mcp__${everyaiServerName}__', '${everyaiServerName}__', '$everyaiServerName.']) {
+  for (final prefix in const [
+    'mcp__${everyaiServerName}__',
+    '${everyaiServerName}__',
+    '${everyaiServerName}_',
+    '$everyaiServerName.',
+  ]) {
     if (name.startsWith(prefix)) return _host(name.substring(prefix.length));
   }
   if (name.startsWith('$everyaiServerName/')) return _host(name.substring(everyaiServerName.length + 1));
