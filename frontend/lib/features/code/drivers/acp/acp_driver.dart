@@ -33,6 +33,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
     required this.command,
     this.args = const [],
     this.needsConsent = false,
+    this.installHint,
     this.which,
     Future<String> Function()? dataDir,
     AcpConnect? connect,
@@ -47,6 +48,9 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   final String command;
   final List<String> args;
   final bool needsConsent;
+
+  /// How to install it, as one line ([DriverInfo.installHint]).
+  final String? installHint;
 
   /// Replaces the PATH lookup in [detect] and at start (tests).
   final Future<String?> Function(String command)? which;
@@ -79,7 +83,12 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
   }) => spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
 
   @override
-  DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent);
+  DriverInfo get info => DriverInfo(
+    id: id,
+    label: label,
+    needsConsent: needsConsent || resolved.profile.needsConsent,
+    installHint: installHint,
+  );
 
   /// No steering (ACP has none) and no fork or rewind yet.
   @override
@@ -96,7 +105,10 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       path: s.path,
       version: s.version,
       signedIn: signed,
-      problem: s.problem ?? (signed == false ? 'Not signed in. $hint.' : null),
+      problem:
+          s.problem ??
+          acpVersionProblem(resolved.profile, label, s.version) ??
+          (signed == false ? 'Not signed in. $hint.' : null),
     );
   }
 

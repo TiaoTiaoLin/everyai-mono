@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
@@ -670,7 +671,7 @@ void main() {
     });
   });
 
-  test('Gemini counts as signed in with an API key, or with its cached Google sign-in', () async {
+  test('Gemini counts as signed in with an API key; a cached personal Google sign-in no longer does', () async {
     final home = tmp.path;
     expect(await geminiSignedIn(home: home, env: const {'GEMINI_API_KEY': 'k'}), isTrue);
     expect(await geminiSignedIn(home: home, env: const {}), isFalse);
@@ -678,12 +679,55 @@ void main() {
     File('$home/.gemini/settings.json').writeAsStringSync('{"security":{"auth":{"selectedType":"oauth-personal"}}}');
     expect(await geminiSignedIn(home: home, env: const {}), isFalse);
     File('$home/.gemini/oauth_creds.json').writeAsStringSync('{}');
-    expect(await geminiSignedIn(home: home, env: const {}), isTrue);
+    expect(await geminiSignedIn(home: home, env: const {}), isFalse);
+    // With a Cloud project it may be a Code Assist licence: unknown.
+    expect(await geminiSignedIn(home: home, env: const {'GOOGLE_CLOUD_PROJECT': 'p'}), isNull);
+    expect(await geminiSignedIn(home: home, env: const {'GOOGLE_CLOUD_PROJECT_ID': 'p'}), isNull);
     File('$home/.gemini/settings.json').writeAsStringSync('{"security":{"auth":{"selectedType":"vertex-ai"}}}');
     expect(await geminiSignedIn(home: home, env: const {}), isNull);
   });
 
   group('other ACP agents', () {
+    test('goose is moved off its auto mode, which never asks, before the first prompt', () async {
+      final r = rig(['acp/goose_mode.jsonl']);
+      final d = r.driver('goose', 'goose');
+      final s = await d.start(r.spec());
+      final seen = _Seen(s);
+      expect(r.spawns.single.args, ['acp']);
+      expect(r.spawns.single.env['GOOSE_MODE'], 'approve');
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final methods = [for (final m in r.channels.single.sent) m['method']];
+      expect(methods.indexOf('session/set_mode'), lessThan(methods.indexOf('session/prompt')));
+      await s.close();
+    });
+
+    test('an Antigravity CLI before 1.5.0 shows the version problem; it needs consent', () async {
+      final agy = File('${tmp.path}/agy')..writeAsStringSync('#!/bin/sh\necho "agy 1.4.11"\n');
+      await Process.run('chmod', ['+x', agy.path]);
+      AcpDriver driver() => AcpDriver(
+        id: 'antigravity',
+        label: 'Antigravity CLI',
+        command: 'agy',
+        which: (c) async => agy.path,
+        signedIn: () async => false,
+      );
+      expect(driver().info.needsConsent, isTrue);
+      final old = await driver().detect();
+      expect((old.installed, old.version), (true, 'agy 1.4.11'));
+      expect(old.problem, 'Antigravity CLI 1.4.11 is too old: update to 1.5.0 or later.');
+      agy.writeAsStringSync('#!/bin/sh\necho "agy 1.5.0"\n');
+      expect((await driver().detect()).problem, startsWith('Not signed in. Run `agy` in a terminal'));
+    });
+
+    test('Qwen Code refuses a project whose .qwen folder could let it act unasked', () async {
+      final r = rig(const []);
+      Directory('${r.work}/.qwen/policies').createSync(recursive: true);
+      expect(acpProfileOf('qwen').preflight(r.work), completion(contains('.qwen folder can let Qwen Code act')));
+      expect(await acpProfileOf('gemini').preflight(r.work), isNull);
+    });
+
     test('no allow-once option: refused, with a notice', () async {
       final r = rig(['acp/always_only.jsonl']);
       final d = r.driver('acp:dsh', 'dsh');

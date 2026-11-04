@@ -6,6 +6,7 @@ import 'dart:io';
 
 import '../../../skills/domain/skill_format.dart' show parseFrontMatter;
 import '../../harness/everyai/shell_io.dart' show ShellEnv;
+import 'acp_agents.dart' show kiroSignedInFrom;
 
 Future<Map<String, Object?>?> readJsonFile(String path) async {
   try {
@@ -62,6 +63,8 @@ Future<String?> whichCommand(String command) async {
   }
 }
 
+Future<Map<String, String>> loginEnv() async => (await ShellEnv.load()).env;
+
 Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async {
   final vars = env ?? (await ShellEnv.load()).env;
   if (['GEMINI_API_KEY', 'GOOGLE_API_KEY'].any((k) => (vars[k] ?? '').isNotEmpty)) return true;
@@ -71,7 +74,13 @@ Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async {
   final auth = security is Map<String, Object?> ? security['auth'] : null;
   final type = (auth is Map<String, Object?> ? auth['selectedType'] : null) ?? settings?['selectedAuthType'];
   return switch (type) {
-    'oauth-personal' => File('$dir/oauth_creds.json').exists(),
+    // A personal Google sign-in no longer works; with a Cloud project it may
+    // be a Code Assist licence, which the files can't tell apart.
+    'oauth-personal' =>
+      await File('$dir/oauth_creds.json').exists() &&
+              ['GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_PROJECT_ID'].any((k) => (vars[k] ?? '').isNotEmpty)
+          ? null
+          : false,
     // A key type without the key in the environment.
     'gemini-api-key' => false,
     // Vertex AI, Cloud Shell, ...: their credentials live elsewhere.
@@ -107,9 +116,33 @@ Future<bool?> openCodeSignedIn(String executable) async {
   }
 }
 
-Future<String?> geminiWorkspaceProblem(String cwd) async {
+Future<bool?> kiroSignedIn(String executable) async {
+  final out = await _status(executable, const ['whoami', '--format', 'json']);
+  return out == null ? null : kiroSignedInFrom(out.code, out.stdout);
+}
+
+/// [executable] [args]'s exit code and output, or null when it can't run or
+/// takes over 10 s (then it is killed, not left behind).
+Future<({int code, String stdout})?> _status(String executable, List<String> args) async {
+  Process? proc;
+  try {
+    final shell = await ShellEnv.load();
+    final p = proc = await Process.start(executable, args, environment: shell.env);
+    unawaited(p.stderr.drain<void>());
+    final out = p.stdout.transform(utf8.decoder).join();
+    final code = await p.exitCode.timeout(const Duration(seconds: 10));
+    return (code: code, stdout: await out);
+  } on TimeoutException {
+    proc?.kill(ProcessSignal.sigkill);
+    return null;
+  } on Object {
+    return null;
+  }
+}
+
+Future<String?> geminiWorkspaceProblem(String cwd, {required String folder, required String label}) async {
   final found = <String>[];
-  final settings = await readJsonFile('$cwd/.gemini/settings.json');
+  final settings = await readJsonFile('$cwd/$folder/settings.json');
   for (final MapEntry(:key, :value) in (settings ?? const <String, Object?>{}).entries) {
     final harmless =
         _geminiHarmless.contains(key) ||
@@ -117,10 +150,10 @@ Future<String?> geminiWorkspaceProblem(String cwd) async {
     if (!harmless) found.add('settings.json "$key"');
   }
   for (final d in const ['policies', 'extensions']) {
-    if (await Directory('$cwd/.gemini/$d').exists()) found.add('$d/');
+    if (await Directory('$cwd/$folder/$d').exists()) found.add('$d/');
   }
   if (found.isEmpty) return null;
-  return "This project's .gemini folder can let Gemini CLI act without asking the app (${found.join(', ')}). "
+  return "This project's $folder folder can let $label act without asking the app (${found.join(', ')}). "
       'Remove those, or add MCP servers in Settings → Code → MCP servers instead, then try again.';
 }
 

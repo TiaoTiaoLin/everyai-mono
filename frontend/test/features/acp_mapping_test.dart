@@ -479,6 +479,88 @@ void main() {
       expect(oc.args, ['acp']);
     });
 
+    test('each listed agent runs with its ACP flags, and flags that skip asking are stripped', () {
+      final cases = <(String, List<String>, List<String>)>[
+        ('copilot', ['--yolo', '--allow-tool', 'shell(rm)', '-m', 'x'], ['--acp', '--stdio', '-m', 'x']),
+        ('copilot', ['--allow-all', '--allow-url=example.com'], ['--acp', '--stdio']),
+        ('droid', ['--auto', 'high', '--skip-permissions-unsafe'], ['exec', '--output-format', 'acp-daemon']),
+        ('droid', ['--auto=medium'], ['exec', '--output-format', 'acp-daemon']),
+        (
+          'kiro-cli',
+          ['--agent-engine=v2', '--trust-tools', 'fs_write'],
+          ['acp', '--agent-engine=v3', '--auth-method=cli'],
+        ),
+        ('kiro-cli', ['--agent-engine', 'v2', '--trust-all-tools'], ['acp', '--agent-engine=v3', '--auth-method=cli']),
+        ('cline', ['--auto-approve', 'true', '-y'], ['--acp', '--auto-approve', 'false']),
+        ('cline', ['--zen', '-z'], ['--acp', '--auto-approve', 'false']),
+        ('qwen', ['--yolo', '--approval-mode=yolo'], ['--acp', '--approval-mode', 'default']),
+        ('agy', [], ['acp']),
+        ('/opt/homebrew/bin/goose', [], ['acp']),
+        ('vibe-acp', [], []),
+        ('kimi', ['-y'], ['acp']),
+        ('auggie', [], ['--acp']),
+      ];
+      for (final (cmd, own, want) in cases) {
+        expect(acpCommand(cmd, own).args, want, reason: '$cmd $own');
+      }
+      expect(acpCommand('qwen', const []).profile.agent, AcpAgent.qwen);
+      expect(acpCommand('kiro-cli', const []).profile.agent, AcpAgent.kiro);
+      expect(acpCommand('goose', const []).profile.askMode, 'approve');
+      expect(
+        (acpCommand('cline', const []).profile.askMode, acpCommand('cline', const []).profile.planMode),
+        ('act', 'plan'),
+      );
+    });
+
+    test('auto-update stays off and goose starts in its asking mode', () {
+      expect(acpProfileOf('droid').env(null), {
+        'DROID_DISABLE_AUTO_UPDATE': 'true',
+        'FACTORY_DROID_AUTO_UPDATE_ENABLED': 'false',
+      });
+      expect(acpProfileOf('auggie').env(null), {'AUGMENT_DISABLE_AUTO_UPDATE': '1'});
+      expect(acpProfileOf('goose').env(null), {'GOOSE_MODE': 'approve'});
+      expect(
+        acpProfileOf('goose').env((
+          args: const <String>[],
+          env: const {'X': '1'},
+          initRequests: const [],
+          instructions: null,
+          firstPrompt: null,
+        )),
+        {'GOOSE_MODE': 'approve', 'X': '1'},
+      );
+      expect(acpProfileOf('gemini').env(null), isEmpty);
+    });
+
+    test('an agent older than its profile needs shows the version problem; an odd line never blocks', () {
+      final agy = acpProfileOf('agy');
+      expect(
+        acpVersionProblem(agy, 'Antigravity CLI', 'agy 1.4.11'),
+        'Antigravity CLI 1.4.11 is too old: update to 1.5.0 or later.',
+      );
+      expect(acpVersionProblem(agy, 'Antigravity CLI', '1.5.0'), isNull);
+      expect(acpVersionProblem(agy, 'Antigravity CLI', 'agy version 1.10.2 (abc)'), isNull);
+      expect(acpVersionProblem(agy, 'Antigravity CLI', 'weird'), isNull);
+      expect(acpVersionProblem(agy, 'Antigravity CLI', null), isNull);
+      expect(acpVersionProblem(acpProfileOf('kiro-cli'), 'Kiro CLI', 'kiro-cli 2.35.9'), contains('2.36.0'));
+      expect(acpVersionProblem(acpProfileOf('kiro-cli'), 'Kiro CLI', 'kiro-cli 2.37.1'), isNull);
+      expect(acpVersionProblem(acpProfileOf('goose'), 'goose', '0.0.1'), isNull);
+    });
+
+    test('sign-in checks make no model call: a key in the environment, or Kiro whoami', () async {
+      expect(kiroSignedInFrom(1, '{"account":null}'), isFalse);
+      expect(kiroSignedInFrom(0, '{"accountType":"Social","email":"a@b.c"}'), isTrue);
+      expect(kiroSignedInFrom(2, ''), isNull);
+      for (final (cmd, key) in [('vibe-acp', 'MISTRAL_API_KEY'), ('droid', 'FACTORY_API_KEY')]) {
+        final p = acpProfileOf(cmd);
+        expect(await p.signedIn(cmd, env: {key: 'k'}), isTrue, reason: cmd);
+        expect(await p.signedIn(cmd, env: {key: ' '}), isNull, reason: cmd);
+        expect(await p.signedIn(cmd, env: const {}), isNull, reason: cmd);
+      }
+      // A Kiro key counts before whoami would run.
+      expect(await acpProfileOf('kiro-cli').signedIn('kiro-cli', env: const {'KIRO_API_KEY': 'k'}), isTrue);
+    });
+
     test("OpenCode's permission rules go into its inline config, next to the briefing's", () {
       final env = withOpenCodePermissions({'OPENCODE_CONFIG_CONTENT': '{"mcp":{"servers":{}}}', 'X': '1'});
       expect(env['X'], '1');

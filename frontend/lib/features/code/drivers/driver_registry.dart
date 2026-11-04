@@ -51,15 +51,29 @@ final driverRegistryProvider = Provider<DriverRegistry>(
     'claude-code': ClaudeDriver(),
     'codex': CodexDriver(),
     'opencode': OpenCodeDriver(),
-    'gemini': AcpDriver(
-      id: 'gemini',
-      label: 'Gemini CLI',
-      command: 'gemini',
-      args: const ['--acp'],
-      needsConsent: true,
-    ),
+    // ACP agents, by their ACP registry ids (cdn.agentclientprotocol.com
+    // registry v1), so a registry-driven list can take these as overrides.
+    // Whether one needs the user's consent comes from its profile.
+    for (final (id, label, command, hint) in _acpAgents)
+      id: AcpDriver(id: id, label: label, command: command, installHint: hint),
   }),
 );
+
+/// The ACP agents listed by default: id, label, command, install hint. Each
+/// command's profile (`acp/acp_agents.dart`) pins its ACP arguments.
+const _acpAgents = [
+  ('antigravity', 'Antigravity CLI', 'agy', 'curl -fsSL https://antigravity.google/cli/install.sh | bash'),
+  ('gemini', 'Gemini CLI (API key or enterprise)', 'gemini', 'npm i -g @google/gemini-cli'),
+  ('github-copilot-cli', 'GitHub Copilot CLI', 'copilot', 'npm i -g @github/copilot'),
+  ('kiro', 'Kiro CLI', 'kiro-cli', 'curl -fsSL https://cli.kiro.dev/install | bash'),
+  ('kimi', 'Kimi Code CLI', 'kimi', 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash'),
+  ('qwen-code', 'Qwen Code', 'qwen', 'npm i -g @qwen-code/qwen-code'),
+  ('cline', 'Cline CLI', 'cline', 'npm i -g cline'),
+  ('goose', 'goose', 'goose', 'brew install block-goose-cli'),
+  ('mistral-vibe', 'Mistral Vibe', 'vibe-acp', 'uv tool install mistral-vibe'),
+  ('auggie', 'Auggie', 'auggie', 'npm i -g @augmentcode/auggie'),
+  ('factory-droid', 'Factory Droid', 'droid', 'npm i -g droid'),
+];
 
 /// Whether each listed driver can run here, by id; looked up once and kept
 /// (invalidate it to look again). A check that fails shows as its problem.

@@ -180,6 +180,15 @@ void main() {
         harness: harness,
       ).toJson(),
     ]);
+    // The user turned on "Use my own installed CLIs" for the extra drivers that need it (Gemini).
+    prefs['code.settings'] = jsonEncode({
+      'global': {
+        'ownClis': [
+          for (final d in extra.values)
+            if (d.info.needsConsent) d.info.id,
+        ],
+      },
+    });
     if (deny.isNotEmpty) {
       prefs[CodePermissions.key] = jsonEncode({
         'global': {'allow': <String>[], 'deny': deny},
