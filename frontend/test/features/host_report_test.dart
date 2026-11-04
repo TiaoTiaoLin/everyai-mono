@@ -46,6 +46,24 @@ void main() {
     expect(body, contains('<path>'));
   });
 
+  test('other path forms are replaced and approximate numbers are kept', () {
+    final u = _link(
+      happened:
+          'at file:///Users/ann/proj/secret.dart:3, C:/Users/ann/x.dart, \\\\srv\\share\\ann\\x, '
+          'lib/payments/stripe_secret.dart; took ~30s',
+    );
+    final body = u.queryParameters['body']!;
+    for (final leak in ['ann', 'secret', 'payments', 'stripe']) {
+      expect(body, isNot(contains(leak)));
+    }
+    expect(body, contains('took ~30s'));
+  });
+
+  test('an empty model reads as the CLI default', () {
+    final u = reportIssueUri(title: 't', tool: 'x', happened: 'h', harness: 'Codex', model: '');
+    expect(u.queryParameters['body'], contains('Model: the CLI default · App:'));
+  });
+
   test('the title is capped and an oversized body is cut under the link limit', () {
     final u = _link(title: 'x' * 500, happened: 'word ' * 5000, expected: 'é' * 3000);
     expect(u.queryParameters['title']!.length, lessThanOrEqualTo(121));
@@ -68,5 +86,7 @@ void main() {
     expect(harnessRules, contains('only after the user says yes'));
     expect(harnessRules, contains('never again after a no'));
     expect(harnessRules, contains('gh issue create -R'));
+    expect(harnessRules, contains('App: $appVersion'));
+    expect(harnessRules, contains('--label feedback'));
   });
 }

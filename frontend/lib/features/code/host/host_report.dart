@@ -31,8 +31,16 @@ const reportIssueSpec = <String, Object?>{
 const _maxTitle = 120;
 const _maxUrl = 7500;
 
-// POSIX absolute (two or more segments), ~/..., and Windows drive paths.
-final _path = RegExp(r'(?:~|(?<![\w.:/-])/(?=[\w.-]+/))[/\w.\-@+]*[\w.\-]|[A-Za-z]:\\[^\s"\x27`]+');
+// file: URLs, POSIX absolute (two or more segments), ~/ and ~user/, Windows drive and UNC paths, and relative paths
+// (a slash and a file extension).
+final _path = RegExp(
+  r'file://[^\s"\x27`]+'
+  r'|~[\w-]*/[^\s"\x27`]*'
+  r'|(?<![\w.:/-])/(?=[\w.-]+/)[/\w.\-@+]*[\w.\-]'
+  r'|[A-Za-z]:[\\/][^\s"\x27`]+'
+  r'|\\\\[^\s"\x27`]+'
+  r'|(?<![\w.:/\\-])[\w.-]+(?:/[\w.-]+)+\.\w+',
+);
 
 String _clean(String s) => s.replaceAll(_path, '<path>').trim();
 
@@ -59,7 +67,7 @@ Uri reportIssueUri({
         '**What happened:** ${fields[2]}',
         '',
         '---',
-        'Harness: $harness · Model: $model · App: $appVersion',
+        'Harness: $harness · Model: ${model.trim().isEmpty ? 'the CLI default' : model.trim()} · App: $appVersion',
       ].join('\n'),
       'labels': 'feedback',
     },
