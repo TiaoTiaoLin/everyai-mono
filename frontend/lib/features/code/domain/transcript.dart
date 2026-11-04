@@ -196,6 +196,19 @@ const planApprovedReason =
 /// Opens the result of a held `present_plan` call when the user wants changes.
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';
 
+/// The kind of a note the app adds on a lead switch (see [leadNoticeEvent]).
+const leadNoticeKind = 'EveryAILeadNotice';
+
+/// [notice] as an event, so it is kept with the lead timeline and shows
+/// again after a restart (the builder folds it back into [notice]).
+HarnessEvent leadNoticeEvent(NoticeItem notice) => HarnessEvent.decode({
+  'id': '',
+  'kind': leadNoticeKind,
+  'key': notice.key,
+  'message': notice.message,
+  if (notice.handedOffFrom.isNotEmpty) 'handed_off_from': notice.handedOffFrom,
+});
+
 final class NoticeItem extends TranscriptItem {
   const NoticeItem(
     super.key,
@@ -447,6 +460,14 @@ final class TranscriptBuilder {
         // EveryAI's own limit is the gateway's 402: no reset time.
         final limit = usageLimitOf(e) ?? (isOutOfCredits(message) ? UsageLimit(message: message) : null);
         _items.add(NoticeItem(e.id, message, error: true, limit: limit));
+      case UnknownEvent(kind: leadNoticeKind, :final raw):
+        _items.add(
+          NoticeItem(
+            raw['key'] as String? ?? '',
+            raw['message'] as String? ?? '',
+            handedOffFrom: raw['handed_off_from'] as String? ?? '',
+          ),
+        );
       case UnknownEvent() || ConnectionChange() || UsageReport():
         break;
     }

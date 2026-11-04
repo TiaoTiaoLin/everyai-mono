@@ -133,21 +133,6 @@ String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsen
     ? "Turn on 'Use my own installed CLIs' for ${info.label} in Settings → Code to use it."
     : null;
 
-/// The harnesses in [listed] a session on [current] can move to now:
-/// nothing in their way ([leadBlocked]: checked, installed, signed in, and
-/// allowed by the user's "Use my own installed CLIs", [ownClis]).
-List<DriverInfo> readyLeads(
-  Iterable<HarnessDriver> listed,
-  Map<String, DriverStatus>? statuses,
-  Set<String> ownClis, {
-  required String current,
-}) => [
-  for (final d in listed)
-    if (d.info.id != current &&
-        leadBlocked(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.consentId)) == null)
-      d.info,
-];
-
 /// What the "your limit ran out, switch to:" picker lists: every harness
 /// found here ([offeredAsLead]) but the one on now ([current]) and the one
 /// that ran out ([ranOut]), each with what is in the way and how to fix it
@@ -1746,8 +1731,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
           if (s.conversationId == conversationId)
             for (final e in s.events)
               if (e.id.isNotEmpty) e.id,
-      ]);
+      ])
+      // A conversation written by a native import replays earlier leads' turns too.
+      ..addAll(importedIds(_timeline, conversationId));
   }
+
+  /// A conversation a native import wrote was just opened: what it replays
+  /// is earlier leads' work, which the timeline already shows. Those ids are
+  /// collected here (see [_onEvent]) and kept with the timeline.
+  bool _importReplay = false;
+  final _importedNow = <String>[];
 
   /// [harness] as the user knows it.
   @override
@@ -1800,6 +1793,15 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   void _onEvent(HarnessEvent event) {
     if (event is ConnectionChange) {
       state = state.copyWith(connected: event.connected);
+      return;
+    }
+    // An imported conversation's history is earlier leads' work: none of it is new, not even its states.
+    if (_importReplay) {
+      if (event.id.isNotEmpty && _replayed.add(event.id)) {
+        _importedNow.add(event.id);
+        _events.add(event);
+        _trackContext(event);
+      }
       return;
     }
     // A lead that came back replays its conversation; the timeline already shows the old part.
@@ -1862,7 +1864,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _sendQueued();
     if (_live && event is ConversationFailure) {
       _autoLimit = event.id;
-      if (state.handoffProblem.isNotEmpty) state = state.copyWith(handoffProblem: '');
+      // A picker reopened with Change was about an earlier limit: this one gets its own.
+      if (state.handoffProblem.isNotEmpty || state.changing != null) {
+        state = state.copyWith(handoffProblem: '', clearChanging: true);
+      }
     }
     unawaited(_maybeHandOff());
   }
@@ -2518,6 +2523,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       statuses = const {};
     }
     if (!ref.mounted) return;
+    // The user may have chosen meanwhile (Wait, a harness, Change).
+    final now = limitPick;
+    if (now == null || now.change || (state.transcript.items.last as NoticeItem).key != key) return;
     final own = ref.read(codeSettingsProvider).ownClis;
     if (leadFix(driver.info, statuses[to], consented: own.contains(driver.info.consentId)) case final why?) {
       state = state.copyWith(handoffProblem: '${driver.info.label}: $why');
@@ -2719,14 +2727,47 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         try {
           imported = await ref
               .read(nativeImporterProvider)(to)
-              ?.write(NativeImportSource(stints: stints, handoff: handoff, cwd: info.workingDir, title: info.title));
+              ?.write(
+                NativeImportSource(
+                  stints: stints,
+                  handoff: handoff,
+                  cwd: info.workingDir,
+                  title: info.title,
+                  mode: state.mode,
+                  model: pick.model,
+                  effort: pick.effort,
+                  sessionTag: info.billingTag,
+                ),
+              );
           if (imported != null) {
-            live = await sessions.attachSession(
-              info.copyWith(harness: to, conversationId: imported.nativeId, model: pick.model, effort: pick.effort),
-              keepCurrent: true,
+            final opened = info.copyWith(
+              harness: to,
+              conversationId: imported.nativeId,
+              model: pick.model,
+              effort: pick.effort,
             );
+            live = await sessions.attachSession(opened, keepCurrent: true);
+            // A reopen keeps what the conversation last ran with: the session's mode and model hold.
+            await live.setMode(state.mode, holdClientTools: info.holdClientTools);
+            if (target.caps.contains(DriverCap.switchModel)) {
+              final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
+              await live.switchLlm(
+                await sessions.specFor(
+                  sessionId: info.id,
+                  projectDir: project?.path ?? info.workingDir,
+                  workingDir: info.workingDir,
+                  model: pick.model,
+                  mode: state.mode,
+                  effort: pick.effort,
+                  holdClientTools: info.holdClientTools,
+                  sessionTag: info.billingTag,
+                ),
+              );
+            }
           }
         } on Object {
+          if (live != null) unawaited(live.close());
+          live = null;
           // The facts and the transcript file instead.
           imported = null;
         }
@@ -2760,6 +2801,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       return LeadSwitchOutcome.failed('$e');
     }
     final message = handoffMessage(handoff, fromName: fromLabel);
+    // An imported conversation already holds everything but the cut-off turn's bookkeeping.
+    final cutTurn = cutTurnMessage(handoff);
     if (!ref.mounted) {
       unawaited(live.close());
       ready.complete();
@@ -2775,7 +2818,21 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     } on Object {
       // Nothing listens to it any more.
     }
-    final segment = (harness: from, conversationId: info.conversationId, events: current);
+    final importNote = imported == null
+        ? null
+        : NoticeItem(
+            'handoff-import-${live.id}',
+            imported.note ?? 'The conversation so far was imported into ${target.info.label}.',
+          );
+    // The switch's notes are kept with the stint that ended, so they show again after a restart.
+    final segment = (
+      harness: from,
+      conversationId: info.conversationId,
+      events: [
+        ...current,
+        for (final n in [?notice, ?importNote]) leadNoticeEvent(n),
+      ],
+    );
     _timeline = [..._timeline, segment];
     try {
       await appendSegment(dir, segment);
@@ -2802,8 +2859,11 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       leads: leads,
       tier: tier,
       harnessMode: harnessMode,
-      // An imported conversation already holds everything.
-      pendingHandoff: run || imported != null ? '' : message,
+      pendingHandoff: run
+          ? ''
+          : imported != null
+          ? cutTurn
+          : message,
     );
     sessions.update(next);
 
@@ -2817,8 +2877,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     // It is at work from the start: messages typed meanwhile wait for its turn to end.
     if (run) _builder.add(_statusEvent('running'));
     _builder.lead = target.info.label;
-    if (notice != null) _builder.addNotice(notice);
-    if (imported?.note case final note?) _builder.addNotice(NoticeItem('handoff-import-${live.id}', note));
+    for (final n in [?notice, ?importNote]) {
+      _builder.addNotice(n);
+    }
     _carried = _builder.snapshot.items;
     _answered = '';
     _doom.reset();
@@ -2832,11 +2893,29 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       return const LeadSwitchOutcome.failed('The session was closed.');
     }
     // Replayed history is already skipped through [_replayed], so the lead is live at once.
+    _importReplay = imported != null;
+    _importedNow.clear();
     _sub = live.events.listen(_onEvent);
     ready.complete();
+    if (imported != null) {
+      // Every driver replays the history it has at once when listened to:
+      // let it all arrive (one turn of the event loop) before anything live.
+      await Future<void>.delayed(Duration.zero);
+      _importReplay = false;
+      if (_importedNow.isNotEmpty) {
+        final marker = importedMarker(live.id, _importedNow);
+        _timeline.last.events.add(marker);
+        try {
+          await appendToTimeline(dir, marker);
+        } on Object {
+          // A restart shows the imported turns twice.
+        }
+      }
+      if (!ref.mounted) return const LeadSwitchOutcome.failed('The session was closed.');
+    }
     if (!outside) _syncFlow();
     if (run && imported != null) {
-      await live.send(_noted(carryOn));
+      await live.send(_noted(cutTurn.isEmpty ? carryOn : '$cutTurn\n\n$carryOn'));
     } else if (run && handoff.kind == HandoffKind.delta) {
       await live.send(_noted('$message\n\n$carryOn'));
     } else if (run) {

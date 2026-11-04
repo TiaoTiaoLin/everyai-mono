@@ -94,8 +94,15 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
 
   /// When set, [setMode] waits for it (an agent that takes the switch late).
   Completer<void>? modeGate;
+
+  /// The modes the app set on it, in order.
+  final modes = <AgentMode>[];
   @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async => modeGate?.future;
+  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
+    modes.add(mode);
+    await modeGate?.future;
+  }
+
   @override
   Future<void> switchLlm(SessionSpec spec) async => llmSwitches++;
   @override
@@ -149,8 +156,15 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed {
 
   @override
   DriverInfo get info => DriverInfo(id: id, label: label, needsConsent: needsConsent, consentId: consentId);
+
+  /// When set, [detect] waits for it (harness detection still running).
+  Completer<void>? detectGate;
   @override
-  Future<DriverStatus> detect() async => status;
+  Future<DriverStatus> detect() async {
+    await detectGate?.future;
+    return status;
+  }
+
   @override
   Future<List<DriverModel>> models() async => const [];
   @override
