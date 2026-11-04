@@ -20,15 +20,16 @@ Future<({HandoffGit git, Map<String, FileDiff> diffs})?> handoffGit(CodeSessionI
       info.worktree ??
       SessionWorktree(repoRoot: b!.repoRoot, path: b.dir, branch: b.branch, baseBranch: b.branch, baseCommit: b.commit);
   try {
-    final changes = await GitService.changes(target);
+    // One diff gives both the change list and the excerpts (each snapshot
+    // re-indexes the whole tree).
+    final diffs = await GitService.diff(target);
     final uncommitted = await GitService.uncommittedDiff(target);
     final commits = log.baseCommit.isEmpty ? const <String>[] : await GitService.commitSubjects(log);
-    final diffs = await GitService.diff(target);
     return (
-      git: HandoffGit(
+      git: HandoffGit.capped(
         branch: info.branch.isNotEmpty ? info.branch : target.branch,
         worktree: info.worktree?.path ?? '',
-        changes: changes,
+        changes: [for (final d in diffs) FileChange(d.path, d.kind, added: d.added, removed: d.removed)],
         uncommitted: uncommitted.length,
         commits: commits.take(handoffCommits).toList(),
       ),

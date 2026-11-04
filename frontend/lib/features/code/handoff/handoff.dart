@@ -5,11 +5,15 @@ import 'package:flutter/foundation.dart';
 import '../../billing/billing_providers.dart' show BillingSummary;
 import '../domain/compaction.dart';
 import '../domain/fork_files.dart';
+import '../domain/phases.dart' show parsePhaseNote;
 import '../domain/questions.dart' show Question;
 import '../domain/transcript.dart';
 import '../git/git_models.dart';
 import '../harness/events.dart';
+import '../harness/everyai/research_sites.dart' show secretPath;
 import '../harness/summarizer.dart' show Summarizer;
+
+export '../domain/compaction.dart' show handoffClose, handoffOpen, splitHandoff;
 
 // The handoff: what a new lead of a Code session gets when another harness
 // took the work so far (the old one ran out of plan usage, or the user
@@ -24,26 +28,33 @@ import '../harness/summarizer.dart' show Summarizer;
 
 enum HandoffKind { full, delta }
 
-/// skipped: neither credits nor a key pay for it; failed: the call or its
-/// reply was bad, so only the facts go out.
+/// skipped: neither credits nor a key pay for it, or every turn it covers is
+/// shown word for word anyway; failed: the call or its reply was bad, so only
+/// the facts go out.
 enum SummaryState { done, skipped, failed }
 
 /// A delta over this many rendered characters (about 15K tokens) is stale.
-/// It is also [renderSessionRecord]'s default cap, so a delta is never cut.
+/// One that fits is shown whole: the lead coming back reads all it missed.
 const handoffDeltaMaxChars = 60000;
 
-/// The newest turns shown word for word (tool output cut short).
+/// The newest turns of a full handoff shown word for word (tool output cut
+/// short); the summary covers what came before.
 const handoffRecentChars = 12000;
+
+/// The user's last message, cut to this many characters.
+const handoffRequestChars = 4000;
+
+/// The most changed files the git block lists, the biggest first.
+const handoffChanges = 30;
+
+/// What the summarizer reads (about 30K tokens): a handoff summary is short.
+const handoffSummaryBudget = CompactionBudget(input: 120000, protectedOutput: 30000);
 
 /// At most this many files, the newest first, each diff cut to [handoffDiffChars]
 /// and all of them to [handoffDiffTotalChars].
 const handoffFiles = 5;
 const handoffDiffChars = 4000;
 const handoffDiffTotalChars = 16000;
-
-/// Opens a handoff message (see [handoffMessage]).
-const handoffOpen = '<everyai-handoff';
-const handoffClose = '</everyai-handoff>';
 
 /// The last event a handoff covers, in the conversation it came from.
 @immutable
@@ -95,15 +106,46 @@ final class HandoffGit {
     this.changes = const [],
     this.uncommitted = 0,
     this.commits = const [],
+    this.moreChanges = 0,
+    this.moreAdded = 0,
+    this.moreRemoved = 0,
   });
+
+  /// [changes] cut to the [handoffChanges] biggest; the rest are counted.
+  factory HandoffGit.capped({
+    required String branch,
+    String worktree = '',
+    required List<FileChange> changes,
+    int uncommitted = 0,
+    List<String> commits = const [],
+  }) {
+    final sorted = [...changes]..sort((a, b) => (b.added + b.removed).compareTo(a.added + a.removed));
+    final rest = sorted.skip(handoffChanges);
+    return HandoffGit(
+      branch: branch,
+      worktree: worktree,
+      changes: sorted.take(handoffChanges).toList(),
+      uncommitted: uncommitted,
+      commits: commits,
+      moreChanges: rest.length,
+      moreAdded: rest.fold(0, (n, c) => n + c.added),
+      moreRemoved: rest.fold(0, (n, c) => n + c.removed),
+    );
+  }
 
   final String branch;
 
   /// The session's own checkout, or '' when it works in the project folder.
   final String worktree;
 
-  /// Every file changed since the session started, committed or not.
+  /// Files changed since the session started, committed or not: at most
+  /// [handoffChanges], the biggest first (see [HandoffGit.capped]).
   final List<FileChange> changes;
+
+  /// The changed files left out of [changes], and their lines.
+  final int moreChanges;
+  final int moreAdded;
+  final int moreRemoved;
 
   /// Files changed but not committed.
   final int uncommitted;
@@ -126,6 +168,9 @@ final class HandoffGit {
     ],
     uncommitted: (j['uncommitted'] as num?)?.toInt() ?? 0,
     commits: [for (final c in (j['commits'] as List<Object?>? ?? const [])) '$c'],
+    moreChanges: (j['more_changes'] as num?)?.toInt() ?? 0,
+    moreAdded: (j['more_added'] as num?)?.toInt() ?? 0,
+    moreRemoved: (j['more_removed'] as num?)?.toInt() ?? 0,
   );
 
   Map<String, Object?> toJson() => {
@@ -136,6 +181,7 @@ final class HandoffGit {
     ],
     'uncommitted': uncommitted,
     'commits': commits,
+    if (moreChanges > 0) ...{'more_changes': moreChanges, 'more_added': moreAdded, 'more_removed': moreRemoved},
   };
 }
 
@@ -189,7 +235,8 @@ final class Handoff {
   /// Questions the agent asked that the user hasn't answered.
   final List<String> openQuestions;
 
-  /// The user's last message (mode and context notes split off).
+  /// The user's last message (mode and context notes split off), cut to
+  /// [handoffRequestChars].
   final String lastRequest;
 
   /// The newest files changed, at most [handoffFiles].
@@ -287,7 +334,7 @@ final class Handoff {
 /// unless it is stale: [since] isn't in [events], the target can't reopen
 /// its old conversation ([resumable] false), or the delta renders to more
 /// than [handoffDeltaMaxChars]. Then all of [events] (a full handoff), with
-/// the reason.
+/// the reason. The size is measured as [handoffRecord] shows it.
 ///
 /// [events] is the session's record, oldest first. Event ids are unique per
 /// conversation, so the last match counts.
@@ -303,7 +350,7 @@ final class Handoff {
   final at = events.lastIndexWhere((e) => e.id.isNotEmpty && e.id == since.eventId);
   if (at < 0) return full('the last turn it saw is no longer in the session record');
   final delta = events.sublist(at + 1);
-  final size = renderSessionRecord(delta, maxChars: 1 << 30).length;
+  final size = renderSessionRecord(handoffRecord(delta), maxChars: 1 << 30).length;
   if (size > handoffDeltaMaxChars) return full('too much happened since it last led ($size characters)');
   return (events: delta, kind: HandoffKind.delta, staleReason: null);
 }
@@ -332,12 +379,24 @@ Handoff buildHandoff(
     builder.add(e);
   }
   final t = builder.snapshot;
+  // A Max/Ultra flow that started over for a new task (its phase notes
+  // carry a new run id) dropped the plan it had: only a later one stands.
+  final current = {for (final e in events.sublist(_lastRestart(events))) e.id};
   var approved = '';
   var lastRequest = '';
   for (final item in t.items.reversed) {
-    if (approved.isEmpty && item is PlanProposal && item.verdict == PlanVerdict.approved) approved = item.markdown;
+    if (approved.isEmpty &&
+        item is PlanProposal &&
+        item.verdict == PlanVerdict.approved &&
+        current.contains(item.key)) {
+      approved = item.markdown;
+    }
     if (lastRequest.isEmpty && item is UserTurn) lastRequest = item.text.trim();
     if (approved.isNotEmpty && lastRequest.isNotEmpty) break;
+  }
+  if (lastRequest.length > handoffRequestChars) {
+    lastRequest =
+        '${lastRequest.substring(0, handoffRequestChars)}\n[… ${lastRequest.length - handoffRequestChars} characters cut …]';
   }
 
   // Files the agent wrote, the newest first; else what git saw change (an
@@ -384,9 +443,91 @@ Handoff buildHandoff(
     lastRequest: lastRequest,
     files: files,
     git: git,
-    recent: renderSessionRecord(scope.events, maxChars: handoffRecentChars),
+    recent: renderSessionRecord(
+      handoffRecord(scope.events),
+      maxChars: scope.kind == HandoffKind.delta ? handoffDeltaMaxChars : handoffRecentChars,
+    ),
   );
 }
+
+/// Where the flow last started over: the first event of its newest run
+/// (0 when it never did).
+int _lastRestart(List<HarnessEvent> events) {
+  String? run;
+  var at = 0;
+  for (final (i, e) in events.indexed) {
+    if (e is! ChatMessage || !e.fromUser) continue;
+    final note = parsePhaseNote(userTextOf(e.text));
+    if (note == null) continue;
+    if (run != null && note.run != run) at = i;
+    run = note.run;
+  }
+  return at;
+}
+
+/// [events] as the next lead and the summarizer may read them: an earlier
+/// handoff is split off the user's message (a message that was only that is
+/// left out), and the content of calls on files that may hold secrets, and
+/// their results, is withheld (only the path is shown).
+List<HarnessEvent> handoffRecord(List<HarnessEvent> events) {
+  final withheld = <String>{};
+  final out = <HarnessEvent>[];
+  for (final e in events) {
+    switch (e) {
+      case ChatMessage(fromUser: true, :final text):
+        final (block, said) = splitHandoff(userTextOf(text));
+        if (block == null) {
+          out.add(e);
+        } else if (said.isNotEmpty) {
+          out.add(ChatMessage(id: e.id, raw: e.raw, fromUser: true, text: said));
+        }
+      case ActionCall() when _callPaths(e).any(_secret):
+        withheld.add(e.id);
+        out.add(
+          ActionCall(
+            id: e.id,
+            raw: const {},
+            toolName: e.toolName,
+            toolCallId: e.toolCallId,
+            action: {
+              if (e.actionKind.isNotEmpty) 'kind': e.actionKind,
+              'paths': _callPaths(e).toList(),
+              'content': _withheldText,
+            },
+          ),
+        );
+      case ToolResult() when withheld.contains(e.actionId):
+        out.add(
+          ToolResult(
+            id: e.id,
+            raw: const {},
+            actionId: e.actionId,
+            toolName: e.toolName,
+            toolCallId: e.toolCallId,
+            outcome: e.outcome,
+            observation: const {
+              'content': [
+                {'type': 'text', 'text': _withheldText},
+              ],
+            },
+          ),
+        );
+      default:
+        out.add(e);
+    }
+  }
+  return out;
+}
+
+const _withheldText = '(not shown: the file may hold secrets)';
+
+/// Every path [call] names: what it writes, and what it reads or views.
+Set<String> _callPaths(ActionCall call) => {
+  ...writeTargets(call),
+  for (final key in const ['path', 'file_path'])
+    if (call.action[key] case final String p when p.isNotEmpty) p,
+  ...?(call.action['paths'] as List<Object?>?)?.whereType<String>(),
+};
 
 String _diffText(FileDiff d) {
   if (d.binary) return '(binary)';
@@ -395,11 +536,9 @@ String _diffText(FileDiff d) {
   ].join('\n');
 }
 
-/// Files whose diff may hold secrets: only their paths go out.
-bool _secret(String path) {
-  final name = path.split('/').last.toLowerCase();
-  return name.startsWith('.env') || name.endsWith('.pem') || name.endsWith('.key') || name.startsWith('id_rsa');
-}
+/// Files that may hold secrets: only their paths go out. [secretPath]
+/// matches folders like `.ssh/` by a leading slash, which a relative path lacks.
+bool _secret(String path) => secretPath(path.startsWith('/') ? path : '/$path');
 
 /// The message the new lead gets before the user's own next message: our
 /// words, the facts in tagged blocks in a fixed order (the most volatile
@@ -457,6 +596,7 @@ String _gitText(HandoffGit g) => [
   if (g.changes.isNotEmpty) ...[
     'Changed since the session started:',
     for (final c in g.changes) '${c.kind.letter} +${c.added} -${c.removed} ${c.path}',
+    if (g.moreChanges > 0) '… and ${g.moreChanges} more files (+${g.moreAdded} -${g.moreRemoved})',
   ],
   'Files not committed yet: ${g.uncommitted}',
   if (g.commits.isNotEmpty) ...['Commits since the session started, newest first:', for (final c in g.commits) '- $c'],
@@ -465,7 +605,8 @@ String _gitText(HandoffGit g) => [
 /// The one line added to the summary request (see [summarizeHandoff]).
 const handoffFocus =
     'that it hands the work to a different coding agent that has seen none of it, so keep it short and leave out '
-    'the plan, todos, files and git state, which that agent gets separately.';
+    'the plan, todos, files and git state, which that agent gets separately (write "see below" under those '
+    'headings).';
 
 /// Whether the utility summary can be paid for: by the user's own key
 /// ([ownKey]), or by credits. Unknown [billing] tries anyway (the gateway
@@ -474,16 +615,23 @@ bool handoffSummaryPayable({required bool ownKey, BillingSummary? billing}) =>
     ownKey || billing == null || billing.walletMicros + billing.quotaLeftMicros > 0;
 
 /// [h] with a summary of [scope] (the events it covers) from [summarize]: the
-/// utility model through the gateway, billed to the session. Null when
-/// neither credits nor a key pay for it ([handoffSummaryPayable]), which
-/// skips it. Never throws: a failed call or a bad reply leaves the facts.
+/// utility model through the gateway, billed to the session. [summarize] is
+/// null when neither credits nor a key pay for it ([handoffSummaryPayable]),
+/// which skips it. Only the turns older than [Handoff.recent] are summarized
+/// (in [handoffSummaryBudget]); with none, it is skipped. Never throws: a
+/// failed call or a bad reply leaves the facts.
 Future<Handoff> summarizeHandoff(Handoff h, List<HarnessEvent> scope, Summarizer? summarize) async {
-  if (summarize == null) return h.withSummary(null, SummaryState.skipped);
+  final head = _olderThanShown(
+    handoffRecord(scope),
+    h.kind == HandoffKind.delta ? handoffDeltaMaxChars : handoffRecentChars,
+  );
+  if (summarize == null || !head.any(countsForModel)) return h.withSummary(null, SummaryState.skipped);
   try {
     final reply = await summarize(
       summaryRequest(
-        CompactionPlan(head: scope, tail: const []),
+        CompactionPlan(head: head, tail: const []),
         focus: handoffFocus,
+        budget: handoffSummaryBudget,
       ),
     );
     final summary = cleanSummary(reply);
@@ -491,4 +639,17 @@ Future<Handoff> summarizeHandoff(Handoff h, List<HarnessEvent> scope, Summarizer
   } on Object {
     return h.withSummary(null, SummaryState.failed);
   }
+}
+
+/// [events] up to the newest ones that fit in [shown] rendered characters
+/// (what [renderSessionRecord] shows word for word).
+List<HarnessEvent> _olderThanShown(List<HarnessEvent> events, int shown) {
+  var size = 0;
+  for (var i = events.length - 1; i >= 0; i--) {
+    final n = renderSessionRecord([events[i]], maxChars: 1 << 30).length;
+    if (n == 0) continue;
+    if (size + n > shown) return events.sublist(0, i + 1);
+    size += n + 2;
+  }
+  return const [];
 }

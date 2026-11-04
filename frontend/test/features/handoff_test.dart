@@ -90,6 +90,12 @@ Handoff _build(List<HarnessEvent> events, {HandoffCoverage? since, bool resumabl
   now: DateTime.utc(2026, 11, 4, 10),
 );
 
+/// [_session] and then [n] long agent replies, past what is shown word for word.
+List<HarnessEvent> _long([int n = 40]) => [..._session(), for (var i = 0; i < n; i++) _agent('big$i', 'x' * 2000)];
+
+String _phase(String run) =>
+    '<everyai-phase flow="max" phase="research" run="$run">\nResearch first.\n</everyai-phase>';
+
 const _goodSummary =
     '## Objective\n- tests\n\n## Important details\n- none\n\n## Work state\n- half\n\n## Next move\n1. x';
 
@@ -156,6 +162,117 @@ void main() {
     expect(h.recent.length, lessThanOrEqualTo(handoffRecentChars + 40));
   });
 
+  test('a delta bigger than the full handoff\'s recent turns, but not stale, is shown whole', () {
+    final events = [
+      ..._session(),
+      _user('u9', 'use postgres, not sqlite'),
+      for (var i = 0; i < 15; i++) _agent('m$i', 'y' * 2000),
+    ];
+    final h = _build(
+      events,
+      since: const HandoffCoverage(conversationId: 'c1', eventId: 'x1'),
+    );
+    expect(h.kind, HandoffKind.delta);
+    expect(h.recent.length, greaterThan(handoffRecentChars));
+    expect(h.recent, contains('use postgres, not sqlite'));
+    expect(h.recent, isNot(contains('[earlier steps omitted]')));
+  });
+
+  test('files that may hold secrets: no content anywhere in the message, nor in what is summarized', () async {
+    final events = [
+      _user('u1', 'set it up'),
+      _call('e1', 'file_editor', {
+        'kind': 'FileEditorAction',
+        'command': 'create',
+        'path': '$_dir/.env',
+        'file_text': 'OPENAI_KEY=sk-secret123',
+      }),
+      _result('e1', ToolOutcome.ok, text: 'created'),
+      _call('e2', 'read', {'kind': 'ReadAction', 'path': '$_dir/.npmrc'}),
+      _result('e2', ToolOutcome.ok, text: '//registry/:_authToken=npm-secret456'),
+      ..._write('e3', '.ssh/id_ed25519'),
+      ..._write('e4', '.env.example'),
+    ];
+    final h = _build(events);
+    final m = handoffMessage(h);
+    expect(m, isNot(contains('sk-secret123')));
+    expect(m, isNot(contains('npm-secret456')));
+    expect(m, contains('.npmrc'));
+    expect(
+      {for (final f in h.files) f.path: f.withheld},
+      {'.env.example': false, '.ssh/id_ed25519': true, '.env': true},
+    );
+    // Long enough that the calls are summarized, not shown.
+    final long = [...events, for (var i = 0; i < 10; i++) _agent('big$i', 'x' * 2000)];
+    String? asked;
+    await summarizeHandoff(_build(long), long, (m) async {
+      asked = '$m';
+      return _goodSummary;
+    });
+    expect(asked, contains('.npmrc'));
+    expect(asked, isNot(contains('sk-secret123')));
+    expect(asked, isNot(contains('npm-secret456')));
+  });
+
+  test('a plan approved for a task the flow started over from does not stand', () {
+    final events = [
+      _user('n1', _phase('r1')),
+      ..._session().sublist(0, 3),
+      _user('n2', _phase('r2')),
+      _user('u2', 'Something else entirely'),
+    ];
+    expect(_build(events).approvedPlan, isEmpty);
+    // The same run all along: the plan stands.
+    expect(_build([..._session().sublist(0, 3), _user('n2', _phase('r1'))]).approvedPlan, startsWith('# Decrement'));
+    expect(
+      _build([_user('n1', _phase('r1')), ..._session().sublist(0, 3), _user('n2', _phase('r1'))]).approvedPlan,
+      startsWith('# Decrement'),
+    );
+  });
+
+  test('an earlier handoff in the record is split off: not in the turns, the last request or the transcript', () {
+    final earlier = handoffMessage(_build(_session()));
+    final events = [
+      ..._session(),
+      _user('h1', earlier),
+      _agent('a2', 'Picking it up.'),
+      _user('h2', '$earlier\n\nNow the docs'),
+    ];
+    final h = _build(events);
+    expect(h.lastRequest, 'Now the docs');
+    expect(h.recent, isNot(contains(handoffOpen)));
+    expect(h.recent, contains('[user]\nNow the docs'));
+    final m = handoffMessage(h);
+    expect(handoffClose.allMatches(m), hasLength(1));
+    final b = TranscriptBuilder();
+    events.forEach(b.add);
+    final t = b.snapshot;
+    expect(t.items.whereType<NoticeItem>().map((n) => n.message), contains('Handed over from claude'));
+    expect(t.items.whereType<UserTurn>().last.text, 'Now the docs');
+    expect(splitHandoff('plain'), (null, 'plain'));
+  });
+
+  test('the last request is cut', () {
+    final h = _build([_user('u1', 'z' * 9000)]);
+    expect(h.lastRequest.length, lessThan(handoffRequestChars + 60));
+  });
+
+  test('the git block lists the biggest changes and counts the rest', () {
+    final g = HandoffGit.capped(
+      branch: 'b',
+      changes: [for (var i = 0; i < 40; i++) FileChange('f$i.txt', ChangeKind.added, added: i)],
+    );
+    expect(g.changes, hasLength(handoffChanges));
+    expect(g.changes.first.path, 'f39.txt');
+    expect((g.moreChanges, g.moreAdded), (10, 45));
+    expect(HandoffGit.fromJson(g.toJson()).toJson(), g.toJson());
+    final m = handoffMessage(
+      buildHandoff(_session(), from: 'claude', fromConversation: 'c1', to: 'codex', workingDir: _dir, git: g),
+    );
+    expect(m, contains('… and 10 more files (+45 -0)'));
+    expect(m, isNot(contains('f0.txt')));
+  });
+
   test('the message keeps its blocks in a fixed order, volatile last, empty ones left out', () {
     final h = _build(_session()).withSummary(_goodSummary, SummaryState.done);
     final m = handoffMessage(h, fromName: 'Claude Code');
@@ -200,31 +317,40 @@ void main() {
     });
 
     test('is skipped without a summarizer', () async {
-      final h = await summarizeHandoff(_build(_session()), _session(), null);
+      final h = await summarizeHandoff(_build(_long()), _long(), null);
       expect((h.summaryState, h.summary), (SummaryState.skipped, null));
     });
 
+    test('is skipped when every turn is shown word for word', () async {
+      var asked = false;
+      final h = await summarizeHandoff(_build(_session()), _session(), (_) async {
+        asked = true;
+        return _goodSummary;
+      });
+      expect((h.summaryState, asked), (SummaryState.skipped, false));
+    });
+
     test('a failed call or a junk reply leaves the facts', () async {
-      final base = _build(_session());
-      final refused = await summarizeHandoff(
-        base,
-        _session(),
-        (_) async => throw const HarnessError('no', status: 402),
-      );
+      final base = _build(_long());
+      final refused = await summarizeHandoff(base, _long(), (_) async => throw const HarnessError('no', status: 402));
       expect((refused.summaryState, refused.summary), (SummaryState.failed, null));
       expect(refused.approvedPlan, base.approvedPlan);
-      final junk = await summarizeHandoff(base, _session(), (_) async => 'Sure!');
+      final junk = await summarizeHandoff(base, _long(), (_) async => 'Sure!');
       expect(junk.summaryState, SummaryState.failed);
     });
 
     test('a good reply lands in the message, asked with the handoff focus', () async {
       List<Map<String, Object?>>? asked;
-      final h = await summarizeHandoff(_build(_session()), _session(), (m) async {
+      final h = await summarizeHandoff(_build(_long()), _long(), (m) async {
         asked = m;
         return _goodSummary;
       });
       expect(h.summaryState, SummaryState.done);
-      expect('${asked!.last['content']}', contains(handoffFocus));
+      final input = '${asked!.last['content']}';
+      expect(input, contains(handoffFocus));
+      // The oldest turns are summarized; the newest, shown word for word, are not.
+      expect(input, contains('Add a decrement method'));
+      expect(('x' * 2000).allMatches(input).length, lessThan(40));
       expect(handoffMessage(h), contains('<summary>\n## Objective'));
     });
   });
@@ -328,6 +454,7 @@ void main() {
       await saveHandoff(tmp.path, first);
       await saveHandoff(tmp.path, back);
       File('${tmp.path}/handoffs/broken.json').writeAsStringSync('{');
+      File('${tmp.path}/handoffs/shape.json').writeAsStringSync('{"coverage": []}');
 
       final loaded = await loadHandoffs(tmp.path);
       expect(loaded.map((h) => h.toHarness), ['claude', 'codex']);

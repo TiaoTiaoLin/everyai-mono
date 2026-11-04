@@ -29,6 +29,9 @@ Future<List<Handoff>> loadHandoffs(String sessionDir) async {
       continue;
     } on FileSystemException {
       continue;
+    } on TypeError {
+      // Valid JSON in another shape (an older version, a hand edit).
+      continue;
     }
   }
   return out..sort((a, b) => b.createdAt.compareTo(a.createdAt));

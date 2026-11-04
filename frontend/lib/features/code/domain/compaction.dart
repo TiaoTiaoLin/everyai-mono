@@ -33,6 +33,23 @@ const _summaryClose = '</summary>';
 const _recentOpen = '<recent-turns>';
 const _recentClose = '</recent-turns>';
 
+/// Opens and closes a handoff message, the facts a new lead of a session
+/// gets (see `handoffMessage`).
+const handoffOpen = '<everyai-handoff';
+const handoffClose = '</everyai-handoff>';
+
+/// [text] (mode and context notes already split off) without the handoff
+/// block it starts with: (the block or null, the rest). A driver records the
+/// handoff it sent as a user message, so the next handoff and the transcript
+/// read only what the user wrote.
+(String?, String) splitHandoff(String text) {
+  final t = text.trimLeft();
+  if (!t.startsWith(handoffOpen)) return (null, text);
+  final end = t.indexOf(handoffClose);
+  if (end < 0) return (t, '');
+  return (t.substring(0, end + handoffClose.length), t.substring(end + handoffClose.length).trim());
+}
+
 /// Shown in place of tool output the summary doesn't need.
 const clearedOutput = '[old tool output cleared]';
 

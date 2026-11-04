@@ -5,7 +5,7 @@ import '../drivers/driver_policy.dart' show hostToolOf;
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import 'agent_mode.dart';
-import 'compaction.dart' show splitCompacted;
+import 'compaction.dart' show splitCompacted, splitHandoff;
 import 'questions.dart';
 import 'subagents.dart';
 
@@ -367,7 +367,7 @@ final class TranscriptBuilder {
         _retry = e;
       case ChatMessage(fromUser: true, text: final raw):
         final (mode, noted) = splitModeNote(raw);
-        final (_, text) = splitContextNotes(noted);
+        var (_, text) = splitContextNotes(noted);
         final changed = mode != null && mode != _notedMode;
         if (mode != null) _notedMode = mode;
         // A continuation conversation opens with the summary, not something the user typed.
@@ -375,6 +375,13 @@ final class TranscriptBuilder {
           _items.add(NoticeItem(e.id, contextCompactedNotice, detail: c.summary));
           return;
         }
+        final (handedOver, said) = splitHandoff(text);
+        if (handedOver != null && said.isEmpty) {
+          final from = RegExp(r'from="([^"]*)"').firstMatch(handedOver)?[1] ?? '';
+          _items.add(NoticeItem(e.id, 'Handed over${from.isEmpty ? '' : ' from $from'}', detail: handedOver));
+          return;
+        }
+        if (handedOver != null) text = said;
         if (_answer(text) || _reported(text)) return;
         if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
           final n = RegExp(r'reports="(\d+)"').firstMatch(text)?[1] ?? '';
