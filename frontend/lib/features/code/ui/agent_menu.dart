@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -14,7 +16,7 @@ import '../code_settings_providers.dart' show codeSettingsProvider;
 import '../domain/agent_menu.dart';
 import '../domain/code_session.dart' show everyaiHarnessName;
 import '../drivers/driver.dart';
-import '../drivers/driver_policy.dart' show leadBlocked;
+import '../drivers/driver_policy.dart' show leadFix, offeredAsLead;
 import '../drivers/driver_registry.dart';
 import '../settings/agent_prompt.dart' show HarnessMode, HarnessTier;
 import '../settings/code_settings.dart' show budgetPresets;
@@ -24,6 +26,24 @@ import '../ultra/ultra_access.dart' show ultraAccessProvider;
 /// A harness that can lead a session, as the menu lists it: why it can't
 /// now ([blocked], null when it can) and its version.
 typedef LeadOption = ({DriverInfo info, String? blocked, String detail});
+
+/// The leads the Harness page lists: EveryAI, [current], and the
+/// harnesses installed here ([offeredAsLead]), each greyed with what is in
+/// its way and the fix ([leadFix]). Missing ones are left out.
+List<LeadOption> leadOptions(
+  Iterable<DriverInfo> listed,
+  Map<String, DriverStatus>? statuses,
+  Set<String> ownClis, {
+  required String current,
+}) => [
+  for (final info in listed)
+    if (offeredAsLead(info, statuses?[info.id], current: current))
+      (
+        info: info,
+        blocked: leadFix(info, statuses?[info.id], consented: ownClis.contains(info.id)),
+        detail: statuses?[info.id]?.version ?? '',
+      ),
+];
 
 /// The agent menu: the lead Harness, Harness mode, the tier bar (Efficient
 /// → Ultra), Model (the user's own models that can call tools, or an
@@ -97,21 +117,15 @@ class AgentMenu extends ConsumerWidget {
     final registry = ref.watch(driverRegistryProvider);
     final lead = registry.resolve(harness)?.info ?? DriverInfo(id: harness, label: harness);
     final outside = harness != everyaiHarnessName;
-    // Every harness with what is in its way, when the lead can be picked; else only its own.
+    // EveryAI and the harnesses installed here, with what is in their way and
+    // its fix, when the lead can be picked; else only its own.
     final List<LeadOption> leads;
     if (onHarness == null) {
       leads = [(info: lead, blocked: null, detail: '')];
     } else {
       final statuses = ref.watch(driverStatusesProvider).value;
       final own = ref.watch(codeSettingsProvider.select((s) => s.ownClis));
-      leads = [
-        for (final d in registry.listed)
-          (
-            info: d.info,
-            blocked: leadBlocked(d.info, statuses?[d.info.id], consented: own.contains(d.info.id)),
-            detail: statuses?[d.info.id]?.version ?? '',
-          ),
-      ];
+      leads = leadOptions([for (final d in registry.listed) d.info], statuses, own, current: harness);
     }
     final driverModels = outside ? ref.watch(driverModelsProvider(harness)).value ?? const <DriverModel>[] : null;
     final label = outside
@@ -153,6 +167,9 @@ class AgentMenu extends ConsumerWidget {
                 close();
                 onHarness!(h);
               },
+        onCheckAgain: onHarness == null
+            ? null
+            : () => unawaited(ref.read(driverStatusesProvider.notifier).refresh(reloadShell: true)),
         driverModels: driverModels,
       ),
       child: Semantics(
@@ -212,13 +229,19 @@ class AgentMenuPanel extends StatefulWidget {
     this.leads = const [],
     this.harness = everyaiHarnessName,
     this.onHarness,
+    this.onCheckAgain,
     this.driverModels,
   });
 
-  /// The harnesses the Harness row lists (none: no row).
+  /// The harnesses the Harness row lists: no row when there are none, or
+  /// only one to pick from.
   final List<LeadOption> leads;
   final String harness;
   final ValueChanged<String>? onHarness;
+
+  /// Looks for harnesses again (the user installed one); a row at the end
+  /// of the Harness page.
+  final VoidCallback? onCheckAgain;
 
   /// An outside lead's own models (its Model and Effort pages list these);
   /// null for the EveryAI harness, whose models are [groups].
@@ -310,7 +333,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
     final rows = switch (_page) {
       _Page.root => [
         const PopoverHeader('Agent'),
-        if (widget.leads.isNotEmpty)
+        if (widget.leads.length > 1 || (widget.leads.isNotEmpty && widget.onHarness == null))
           PopoverRow(
             key: const ValueKey('agent-menu.harness'),
             title: 'Harness',
@@ -420,6 +443,16 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
                     });
                     widget.onHarness!(l.info.id);
                   },
+          ),
+        if (widget.onCheckAgain case final again?)
+          PopoverRow(
+            key: const ValueKey('agent-menu.harness.check-again'),
+            title: 'Check again',
+            subtitle: 'Looks for harnesses you installed',
+            onTap: () {
+              setState(() => _page = _Page.root);
+              again();
+            },
           ),
       ],
       _Page.model when _outside => [

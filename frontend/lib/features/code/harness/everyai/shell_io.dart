@@ -7,9 +7,11 @@ import 'dart:io';
 import '../session_processes.dart' show sessionEnvVar;
 
 /// The user's login shell, and the environment it sets up (PATH from
-/// `~/.zshrc` and friends: pyenv, nvm, Homebrew), captured once per app run.
-/// Commands then run in that shell with that environment, the way the user's
-/// own terminal would run them, not in the app's launchd environment.
+/// `~/.zshrc` and friends: pyenv, nvm, Homebrew), captured once per app run
+/// (until [reload]). Commands then run in that shell with that environment,
+/// the way the user's own terminal would run them, not in the app's launchd
+/// environment. The usual install directories ([commonDirs]) go after the
+/// shell's PATH, so a CLI is found even when the rc files don't add them.
 final class ShellEnv {
   ShellEnv._(this.shell, this.env);
 
@@ -19,6 +21,12 @@ final class ShellEnv {
   static Future<ShellEnv>? _cached;
 
   static Future<ShellEnv> load() => _cached ??= _capture();
+
+  /// Reads the login shell's environment again (the user installed something).
+  static Future<ShellEnv> reload() {
+    _cached = null;
+    return load();
+  }
 
   static String get _defaultShell {
     final s = Platform.environment['SHELL'];
@@ -47,12 +55,19 @@ final class ShellEnv {
           final eq = entry.indexOf('=');
           if (eq > 0) env[entry.substring(0, eq)] = entry.substring(eq + 1);
         }
-        if (env.containsKey('PATH')) return ShellEnv._(shell, _clean(env));
+        if (env.containsKey('PATH')) return ShellEnv._(shell, _withCommonDirs(_clean(env)));
       }
     } on Object {
       // Fall back to the app's own environment below.
     }
-    return ShellEnv._(shell, _clean(Map.of(Platform.environment)));
+    return ShellEnv._(shell, _withCommonDirs(_clean(Map.of(Platform.environment))));
+  }
+
+  static Map<String, String> _withCommonDirs(Map<String, String> env) {
+    final windows = Platform.isWindows;
+    final key = windows ? env.keys.firstWhere((k) => k.toUpperCase() == 'PATH', orElse: () => 'Path') : 'PATH';
+    final home = (windows ? env['USERPROFILE'] : env['HOME']) ?? Platform.environment['HOME'] ?? '';
+    return env..[key] = mergePaths(env[key] ?? '', commonDirs(home, env, windows: windows), windows: windows);
   }
 
   /// Drops what belongs to the capturing shell, not to commands.
@@ -65,6 +80,104 @@ final class ShellEnv {
     ..['PAGER'] = 'cat'
     ..['GIT_PAGER'] = 'cat'
     ..['NO_COLOR'] = '1';
+}
+
+/// Where CLIs are usually installed, for an app started from the Dock whose
+/// login shell doesn't put them on PATH: Homebrew, npm's global prefix
+/// (`NPM_CONFIG_PREFIX` or `prefix=` in `~/.npmrc`), nvm's default or newest
+/// Node, bun, cargo, volta, deno, Cursor's and the user's own bin. Only the
+/// ones that exist ([exists]); [read] and [list] read a file and a
+/// directory's entries (null or empty when missing). No process runs.
+List<String> commonDirs(
+  String home,
+  Map<String, String> env, {
+  bool windows = false,
+  bool Function(String dir)? exists,
+  String? Function(String file)? read,
+  List<String> Function(String dir)? list,
+}) {
+  final has = exists ?? (d) => Directory(d).existsSync();
+  final readFile =
+      read ??
+      (f) {
+        try {
+          return File(f).readAsStringSync();
+        } on Object {
+          return null;
+        }
+      };
+  final entries =
+      list ??
+      (d) {
+        try {
+          return [for (final e in Directory(d).listSync()) e.path.split(Platform.pathSeparator).last];
+        } on Object {
+          return const [];
+        }
+      };
+  String? nonEmpty(String? v) => v == null || v.trim().isEmpty ? null : v.trim();
+  if (windows) {
+    return [
+      if (nonEmpty(env['APPDATA']) case final a?) '$a\\npm',
+      if (nonEmpty(env['LOCALAPPDATA']) case final l?) ...['$l\\Programs\\nodejs', '$l\\Volta\\bin', '$l\\pnpm'],
+      if (nonEmpty(env['USERPROFILE']) case final u?) ...['$u\\.local\\bin', '$u\\.bun\\bin', '$u\\scoop\\shims'],
+    ].where(has).toList();
+  }
+  String expand(String p) => p.startsWith('~/') ? '$home${p.substring(1)}' : p;
+  String? npmPrefix() {
+    if (nonEmpty(env['NPM_CONFIG_PREFIX'] ?? env['npm_config_prefix']) case final p?) return expand(p);
+    for (final line in (readFile('$home/.npmrc') ?? '').split('\n')) {
+      final m = RegExp(r'^\s*prefix\s*=\s*(.+?)\s*$').firstMatch(line);
+      if (m != null) return expand(m.group(1)!.replaceAll('"', ''));
+    }
+    return null;
+  }
+
+  String? nvmBin() {
+    final nvm = nonEmpty(env['NVM_DIR']) ?? '$home/.nvm';
+    final versions = '$nvm/versions/node';
+    final alias = nonEmpty(readFile('$nvm/alias/default'));
+    if (alias != null && RegExp(r'^v?\d+\.\d+\.\d+$').hasMatch(alias)) {
+      final dir = '$versions/${alias.startsWith('v') ? alias : 'v$alias'}/bin';
+      if (has(dir)) return dir;
+    }
+    List<int> parts(String v) => [for (final p in v.replaceFirst('v', '').split('.')) int.tryParse(p) ?? 0];
+    int newer(String a, String b) {
+      final (x, y) = (parts(a), parts(b));
+      for (var i = 0; i < 3 && i < x.length && i < y.length; i++) {
+        if (x[i] != y[i]) return x[i].compareTo(y[i]);
+      }
+      return 0;
+    }
+
+    final found = entries(versions).where((v) => RegExp(r'^v\d+\.\d+\.\d+$').hasMatch(v)).toList()..sort(newer);
+    return found.isEmpty ? null : '$versions/${found.last}/bin';
+  }
+
+  return [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '$home/.local/bin',
+    '$home/.npm-global/bin',
+    if (npmPrefix() case final p?) '$p/bin',
+    ?nvmBin(),
+    '$home/.bun/bin',
+    '$home/.cargo/bin',
+    '$home/.volta/bin',
+    '$home/.deno/bin',
+    '$home/.cursor/bin',
+  ].where(has).toList();
+}
+
+/// [path] with [extra] directories after it, each kept once (the first
+/// time it appears), so the user's own order wins.
+String mergePaths(String path, List<String> extra, {bool windows = false}) {
+  final sep = windows ? ';' : ':';
+  final seen = <String>{};
+  return [
+    for (final d in [...path.split(sep), ...extra])
+      if (d.isNotEmpty && seen.add(windows ? d.toLowerCase() : d)) d,
+  ].join(sep);
 }
 
 /// What a finished command printed (stdout and stderr interleaved).

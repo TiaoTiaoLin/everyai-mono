@@ -35,18 +35,27 @@ void untrackDriverClose(Future<void> Function() close) => _closers.remove(close)
 Future<void> closeAllDriverProcesses() =>
     Future.wait([impl.closeAllDriverProcesses(), for (final c in _closers.toList()) c()]);
 
-/// Looks for [command] on the login shell's PATH (an app started from the
-/// Dock doesn't have the user's) and asks it for its version: installed,
-/// path and the first line of `[command] [versionArgs]`. Whether it is
-/// signed in is the driver's own check. [which] replaces the lookup (tests).
+/// Looks for [command] on the login shell's PATH plus the usual install
+/// directories (an app started from the Dock doesn't have the user's; no
+/// process runs for the lookup) and asks it for its version: installed,
+/// path and the first line of `[command] [versionArgs]`, which is ended
+/// after 4 s. Whether it is signed in is the driver's own check. [which]
+/// replaces the lookup (tests).
 Future<DriverStatus> detectCli(
   String command, {
   List<String> versionArgs = const ['--version'],
   Future<String?> Function(String command)? which,
 }) => impl.detectCli(command, versionArgs: versionArgs, which: which);
 
+/// Reads the login shell's PATH again, for the next [detectCli] and spawn
+/// (the user installed something since the app started).
+Future<void> reloadShellEnv() => impl.reloadShellEnv();
+
 /// The problem a driver whose sessions aren't built yet reports.
 const notBuiltProblem = 'Not built yet.';
+
+/// The problem a driver whose check ran out of time reports.
+const noAnswerProblem = "Didn't answer in 8 s.";
 
 /// [detectCli] for a driver whose sessions aren't built yet.
 Future<DriverStatus> notBuiltYet(String command, {Future<String?> Function(String command)? which}) async =>
