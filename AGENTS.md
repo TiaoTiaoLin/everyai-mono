@@ -633,6 +633,14 @@ owner's local notes (gitignored); the task board is the GitHub Project.
   show "Coming later" on outside leads. 1023 tests pass. Nothing has run live: no real turn through any driver, Codex
   isn't installed, Gemini sign-in is untested. Open nits: ACP reopen drops the user's MCP servers; a race in the Claude
   rebrief while it spawns (not reachable today).
+- **Multi-harness run 3, no-spend handoff (2026-11-04; branch `batch/mh-3`, 609f9d1).** Owner: EveryAI spends nothing
+  on a session it doesn't lead. The handoff (`code/handoff/`) has no utility-model summary any more (old stored JSON
+  with one still loads). It is facts plus the whole conversation as `.everyai/handoffs/<stem>.md` (git-excluded),
+  which the new lead may read. A turn the usage limit cut off (`cutTurn`: the last real request with no finished reply
+  before the limit; carry-ons count as the same turn) goes over as `<cut-turn>` with its calls and results, and the
+  new lead finishes it. Gated on outside leads (`domain/no_spend.dart`): `/btw`, `/goal` and `/learn` are refused
+  with a reason; `/commit` and `/pr` drafts are written without a model; no decide risk label (`riskLabelDir`). Audit
+  in `docs/research/batches/multi-harness/run3/no-spend.md` (untracked). Not live-tested.
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
