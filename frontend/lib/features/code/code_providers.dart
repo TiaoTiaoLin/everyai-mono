@@ -1286,6 +1286,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     }
   }
 
+  /// Pins [id] to the top of the sidebar, or unpins it.
+  void setPinned(String id, bool pinned) {
+    final info = byId(id);
+    if (info != null && info.pinned != pinned) update(info.copyWith(pinned: pinned));
+  }
+
   void update(CodeSessionInfo info) {
     state = [for (final s in state) s.id == info.id ? info : s];
     _save();
