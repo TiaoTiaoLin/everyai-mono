@@ -258,6 +258,20 @@ void main() {
     expect(saved.readAsStringSync(), startsWith('# Dark mode'));
   });
 
+  test('a host plan is approved before the agent takes the mode switch', () async {
+    final info = await start(mode: AgentMode.plan);
+    final c = await open(info.id);
+    row('a1', presentPlanTool, _plan);
+    final call = hostCall(info.id, presentPlanTool, _plan);
+    await pumpEventQueue();
+    // Like Cursor blocked on its plan request: the switch is taken only after the plan is answered.
+    final gate = session.modeGate = Completer<void>();
+    unawaited(call.result.then((_) => gate.complete()));
+    await c.startBuilding();
+    expect((await call.result).text, startsWith(planApprovedReason));
+    expect(stateOf(info.id).mode, AgentMode.autoEdit);
+  });
+
   test('a chat message while a card waits frees the call and goes out after the turn', () async {
     final info = await start();
     final c = await open(info.id);

@@ -266,3 +266,48 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## T3 Code (pingdotgg/t3code @ 8b44f42b)
+
+- **What:** logic and protocol knowledge from T3 Code's provider adapters,
+  rewritten in Dart (no files copied verbatim; no prompt text was taken). So
+  far: Kiro CLI's ACP launch arguments (`--agent-engine=v3`,
+  `--auth-method=cli`) and the reading of `kiro-cli whoami --format json`
+  (`packages/provider-kiro/src/server/acpSupport.ts`, `status.ts`); Grok
+  Build's ACP launch flags, `initialize`/`session/cancel` `_meta`, sign-in
+  method pick and `grok models` sign-in reading
+  (`packages/provider-grok/src/server/acpSupport.ts`, `status.ts`), and its
+  `x.ai/*` extension mapping: prompt completion, background tasks,
+  subagents, the usage-limit code (`xaiAcpExtension.ts`; test payloads
+  adapted from `xaiAcpExtension.test.ts` in
+  `frontend/test/fixtures/drivers/grok/`). The replies Grok reads are our
+  own words. Source:
+  https://github.com/pingdotgg/t3code at commit
+  8b44f42b14c8e273156474a924ccf29680dd7857.
+- **Where:** `frontend/lib/features/code/drivers/` (the parts marked "Ported
+  from T3 Code")
+- **License:** MIT
+
+```
+MIT License
+
+Copyright (c) 2026 T3 Tools Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

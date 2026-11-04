@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fluent_ui/fluent_ui.dart' as f;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -15,6 +17,7 @@ import '../core/providers.dart' show apiClientProvider, serverStatusProvider;
 import '../core/theme/every_theme.dart';
 import '../core/ui/adaptive.dart' show AdaptiveButton, AdaptiveProgress, GlassSurface, GlassLevel, showAdaptiveToast;
 import '../features/code/code_providers.dart' show driverShutdownProvider;
+import '../features/code/drivers/driver_registry.dart' show driverStatusesProvider;
 import '../features/history/ui/sidebar.dart';
 import '../features/onboarding/onboarding_providers.dart';
 import '../features/onboarding/ui/onboarding_screen.dart';
@@ -78,13 +81,29 @@ class _AppShellState extends ConsumerState<AppShell> {
     context.go(location);
   }
 
+  AppLifecycleListener? _lifecycle;
+
   @override
   void initState() {
     super.initState();
     // A settings link that came before the shell existed (the first location).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && ref.read(pendingSettingsProvider) != null) _openPendingSettings();
+      // Which coding CLIs are installed: the last check at once, a new one in
+      // the background, and again when the app comes back after a while.
+      if (mounted && Host.isDesktop) ref.read(driverStatusesProvider);
     });
+    if (Host.isDesktop) {
+      _lifecycle = AppLifecycleListener(
+        onResume: () => unawaited(ref.read(driverStatusesProvider.notifier).refreshIfStale()),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _lifecycle?.dispose();
+    super.dispose();
   }
 
   void _openSettings() {

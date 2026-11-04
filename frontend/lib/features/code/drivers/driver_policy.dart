@@ -8,7 +8,7 @@ import '../harness/harness.dart';
 import '../host/host.dart' show savedPlansTool;
 import 'briefing/briefing_types.dart' show everyaiServerName;
 import 'driver.dart';
-import 'driver_process.dart' show notBuiltProblem;
+import 'driver_process.dart' show noAnswerProblem, notBuiltProblem;
 
 // What the app does when a driver lacks a cap, in one place.
 
@@ -110,6 +110,26 @@ String? leadBlocked(DriverInfo info, DriverStatus? status, {required bool consen
   if (status.signedIn == false) return 'Not signed in';
   if (info.needsConsent && !consented) return 'Turn on in Settings';
   return status.problem;
+}
+
+/// Whether the harness picker offers [info] as a lead: EveryAI, the one
+/// picked now ([current], so a pick is never lost), and every harness found
+/// on this computer. One that isn't installed (or not checked yet) is left
+/// out; Settings → Code → Harnesses still lists it.
+bool offeredAsLead(DriverInfo info, DriverStatus? status, {required String current}) =>
+    info.id == everyaiHarnessName || info.id == current || (status?.installed ?? false);
+
+/// [leadBlocked] as the picker shows it: what is in the way and how to fix
+/// it, in one line ("Not signed in. Run `claude auth login` in a terminal.").
+String? leadFix(DriverInfo info, DriverStatus? status, {required bool consented}) {
+  final why = leadBlocked(info, status, consented: consented);
+  if (why == null || status == null) return why;
+  if (status.problem == notBuiltProblem) return 'Not built yet in this version';
+  if (!status.installed) return why;
+  if (status.signedIn == false) return status.problem ?? why;
+  if (info.needsConsent && !consented) return 'Turn on in Settings → Code → Harnesses';
+  if (status.problem == noAnswerProblem) return '$noAnswerProblem Check again.';
+  return why;
 }
 
 /// One line on how far [mode] holds on an outside lead: the driver's own

@@ -70,3 +70,53 @@ void notifyStatusChange(Ref ref, SessionStatus? from, SessionStatus to, String s
   if (n == null || ref.read(appFocusedProvider)()) return;
   unawaited(ref.read(systemNotifierProvider).show(n.title, n.body));
 }
+
+/// How long a session has to keep waiting before "Needs your input" goes out.
+/// An approval the mode answers by itself (Auto-edit, Full auto) passes
+/// through needsInput for a moment on every step; those blips aren't news.
+const needsInputSettle = Duration(seconds: 3);
+
+/// One session's notifications, with waits that end within [needsInputSettle]
+/// left out. Feed it every status change; dispose it with the session.
+final class StatusAlerts {
+  StatusAlerts(this._ref, this._title, {Timer Function(Duration, void Function())? timer})
+    : _startTimer = timer ?? Timer.new;
+
+  final Ref _ref;
+  final String Function() _title;
+  final Timer Function(Duration, void Function()) _startTimer;
+
+  Timer? _wait;
+
+  /// The status before the current wait, so a blip doesn't count as the
+  /// "from" of the next change (running → blip → done is still "Finished").
+  SessionStatus? _beforeWait;
+
+  void onChange(SessionStatus? from, SessionStatus to) {
+    if (from == to) return;
+    if (to == SessionStatus.needsInput) {
+      // A first sighting (reopened while waiting) isn't news either.
+      if (from == null) return;
+      _wait?.cancel();
+      _beforeWait = from;
+      _wait = _startTimer(needsInputSettle, () {
+        _wait = null;
+        notifyStatusChange(_ref, _beforeWait, SessionStatus.needsInput, _title());
+      });
+      return;
+    }
+    var since = from;
+    if (from == SessionStatus.needsInput && _wait != null) {
+      // The wait ended before anyone was told: as if it never happened.
+      _wait!.cancel();
+      _wait = null;
+      since = _beforeWait;
+    }
+    notifyStatusChange(_ref, since, to, _title());
+  }
+
+  void dispose() {
+    _wait?.cancel();
+    _wait = null;
+  }
+}

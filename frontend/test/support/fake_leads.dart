@@ -91,8 +91,11 @@ final class FakeLeadSession implements HarnessSession, SteersRuns {
   var llmSwitches = 0;
   @override
   Future<void> resume() async => resumes++;
+
+  /// When set, [setMode] waits for it (an agent that takes the switch late).
+  Completer<void>? modeGate;
   @override
-  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {}
+  Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async => modeGate?.future;
   @override
   Future<void> switchLlm(SessionSpec spec) async => llmSwitches++;
   @override

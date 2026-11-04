@@ -354,6 +354,95 @@ void main() {
       expect(find.text('Not used by this model'), findsOneWidget);
     });
 
+    test('the Harness page lists EveryAI and installed harnesses, greyed with their fix', () {
+      const gemini = DriverInfo(id: 'gemini', label: 'Gemini CLI');
+      final options = leadOptions(
+        [everyai, claude, codex, ready, gemini],
+        {
+          'claude-code': const DriverStatus(installed: true, signedIn: true, version: '2.1'),
+          'codex': const DriverStatus(),
+          'test': const DriverStatus(
+            installed: true,
+            signedIn: false,
+            problem: 'Not signed in. Run `test login` in a terminal.',
+          ),
+        },
+        const {},
+        current: 'everyai',
+      );
+      expect(
+        [for (final o in options) (o.info.id, o.blocked)],
+        [
+          ('everyai', null),
+          ('claude-code', 'Turn on in Settings → Code → Harnesses'),
+          ('test', 'Not signed in. Run `test login` in a terminal.'),
+        ],
+      );
+      // The current pick stays even when it is gone.
+      expect(
+        [
+          for (final o in leadOptions([everyai, codex], {}, const {}, current: 'codex')) o.blocked,
+        ],
+        [null, 'Checking…'],
+      );
+      expect(leadOptions([everyai, codex], null, const {}, current: 'everyai'), hasLength(1));
+    });
+
+    testWidgets('with only EveryAI there is no Harness row, but the check stays in reach', (tester) async {
+      var checks = 0;
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 320,
+            height: 700,
+            child: AgentMenuPanel(
+              groups: agentMenuGroups(_catalog),
+              model: 'anthropic/claude-opus-5.5',
+              effort: '',
+              onChanged: (_, _) {},
+              close: () {},
+              leads: const [(info: everyai, blocked: null, detail: '')],
+              onHarness: (_) {},
+              onCheckAgain: () => checks++,
+            ),
+          ),
+        ),
+      );
+      expect(find.byKey(const ValueKey('agent-menu.harness')), findsNothing);
+      expect(find.byKey(const ValueKey('agent-menu.model')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.find-harnesses')));
+      await tester.pump();
+      expect(checks, 1);
+    });
+
+    testWidgets('Check again looks for harnesses again', (tester) async {
+      var checks = 0;
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 320,
+            height: 700,
+            child: AgentMenuPanel(
+              groups: agentMenuGroups(_catalog),
+              model: 'anthropic/claude-opus-5.5',
+              effort: '',
+              onChanged: (_, _) {},
+              close: () {},
+              leads: leads,
+              onHarness: (_) {},
+              onCheckAgain: () => checks++,
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness')));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('agent-menu.harness.check-again')));
+      await tester.pump();
+      expect(checks, 1);
+      expect(find.byKey(const ValueKey('agent-menu.harness')), findsOneWidget);
+    });
+
     testWidgets('in a session the harness is shown, not switched', (tester) async {
       await tester.pumpWidget(
         _host(

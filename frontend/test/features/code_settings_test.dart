@@ -173,7 +173,7 @@ void main() {
     );
   });
 
-  testWidgets('Settings → Code → Harnesses: statuses, the consent switch and Refresh', (tester) async {
+  testWidgets('Settings → Code → Harnesses: statuses, install hints, the consent switch and Refresh', (tester) async {
     final db = AppDatabase(NativeDatabase.memory());
     late Preferences prefs;
     await tester.runAsync(() async => prefs = await Preferences.load(db));
@@ -181,12 +181,19 @@ void main() {
       const DriverInfo(id: 'claude-code', label: 'Claude Code', needsConsent: true),
       const DriverStatus(installed: true, version: '2.1.318', problem: notBuiltProblem),
     );
-    final codex = _Driver(const DriverInfo(id: 'codex', label: 'Codex'), const DriverStatus());
+    final codex = _Driver(
+      const DriverInfo(id: 'codex', label: 'Codex', installHint: 'npm install -g @openai/codex'),
+      const DriverStatus(),
+    );
+    var reloads = 0;
     final container = ProviderContainer(
       overrides: [
         databaseProvider.overrideWithValue(db),
         preferencesProvider.overrideWithValue(prefs),
         driverRegistryProvider.overrideWithValue(DriverRegistry({'claude-code': claude, 'codex': codex})),
+        driverStatusesProvider.overrideWith(
+          () => DriverStatuses(loadShell: () async {}, reloadShell: () async => reloads++),
+        ),
       ],
     );
     await tester.pumpWidget(
@@ -203,6 +210,10 @@ void main() {
     await tester.pump();
     expect(find.text('2.1.318 · Not built yet'), findsOneWidget);
     expect(find.text('Not installed'), findsOneWidget);
+    // Every harness is listed; a missing one says how to install it.
+    expect(find.text('To install: npm install -g @openai/codex'), findsOneWidget);
+    expect(find.byKey(const ValueKey('code-settings.harness.claude-code.hint')), findsNothing);
+    expect(find.text('Checked just now'), findsOneWidget);
     expect(find.textContaining('Claude Code run the copy installed on this computer'), findsOneWidget);
     // Only the subscription CLI has the switch, and it starts off.
     expect(find.byKey(const ValueKey('code-settings.own-cli.codex')), findsNothing);
@@ -215,7 +226,9 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(codex.detects, 2);
+    expect(reloads, 1);
     expect(find.text('0.9'), findsOneWidget);
+    expect(find.textContaining('To install'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     container.dispose();
     await tester.runAsync(db.close);

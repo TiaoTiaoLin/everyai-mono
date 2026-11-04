@@ -128,7 +128,7 @@ bool isOutsideLead(String harness, String workingDir) =>
 
 /// Why [info] may not run yet: a subscription CLI needs the user's
 /// "Use my own installed CLIs" for it ([ownClis]). Null when it may.
-String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsent && !ownClis.contains(info.id)
+String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsent && !ownClis.contains(info.consentId)
     ? "Turn on 'Use my own installed CLIs' for ${info.label} in Settings → Code to use it."
     : null;
 
@@ -642,13 +642,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (!keepCurrent) {
       if (tokens.remove(id) case final old?) await host.revoke(old);
     }
-    final token = await host.mint(
-      id,
-      _HostForward(
-        () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
-        ready ?? Future<void>.value(),
-      ),
+    final forward = _HostForward(
+      () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
+      ready ?? Future<void>.value(),
     );
+    final token = await host.mint(id, forward);
     try {
       final export = await _exportBriefing(
         id,
@@ -663,6 +661,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         mcpToken: token.token,
         skillDir: export.skillDir,
         sessionSkill: export.text,
+        host: forward,
       );
     } on Object {
       await host.revoke(token.token);
@@ -1525,11 +1524,16 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         s.close();
       }
     });
-    listenSelf((prev, next) {
-      if (prev?.status == next.status) return;
-      final title = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.title ?? 'Code session';
-      notifyStatusChange(ref, prev?.status, next.status, title);
-    });
+    // Subagents and forks don't notify: an approval they wait on shows on the
+    // parent (subagentNeedsInput), and their questions are the orchestrator's.
+    if (info?.parentId == null) {
+      final alerts = StatusAlerts(
+        ref,
+        () => ref.read(codeSessionsProvider.notifier).byId(sessionId)?.title ?? 'Code session',
+      );
+      ref.onDispose(alerts.dispose);
+      listenSelf((prev, next) => alerts.onChange(prev?.status, next.status));
+    }
     // The budget holds whether or not the session is on screen: every new
     // reading (and a lowered budget) is checked here.
     if (info != null) {
@@ -2443,7 +2447,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return LeadSwitchOutcome.failed('$e');
       }
       final own = ref.read(codeSettingsProvider).ownClis;
-      if (leadBlocked(target.info, statuses[to], consented: own.contains(to)) case final why?) {
+      if (leadBlocked(target.info, statuses[to], consented: own.contains(target.info.consentId)) case final why?) {
         return LeadSwitchOutcome.failed('${target.info.label}: $why');
       }
       if (_busy && (!stopFirst || !await _stopAndSettle())) return const LeadSwitchOutcome.busy();
@@ -3640,8 +3644,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   Future<void> startBuilding() async {
     final open = state.transcript.openPlan;
     final held = open?.call;
-    if (state.mode == AgentMode.plan) await setMode(AgentMode.autoEdit);
+    final switching = state.mode == AgentMode.plan ? setMode(AgentMode.autoEdit) : Future<void>.value();
     // An outside agent's plan: the approval is its host call's result, and the plan is kept with the project.
+    // It is answered without waiting for the mode switch: an agent blocked on the plan request (Cursor's
+    // `cursor/create_plan`) may only take the switch once the plan is answered.
     final wait = open == null ? null : _hostFor(open.call.id);
     if (open != null && wait != null) {
       final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
@@ -3649,8 +3655,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       _answerHost(wait, planApprovedReason);
       _builder.settlePlan(open.call.id, PlanVerdict.approved);
       state = state.copyWith(transcript: _builder.snapshot);
+      await switching;
       return;
     }
+    await switching;
     final session = _session;
     if (session != null && held != null && _isHeld(held)) {
       await _replyInCall(session, planApprovedReason);

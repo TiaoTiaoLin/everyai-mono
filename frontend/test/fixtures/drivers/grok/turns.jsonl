@@ -1,0 +1,19 @@
+// Derived from T3 Code's provider-grok (MIT, @ 8b44f42b: acpSupport.ts, xaiAcpExtension.ts and its tests), not recorded: unverified against a real `grok agent stdio`.
+// The first prompt's id is bound as {{session}} (the agent echoes it back); the second completion has none, which settles the only prompt running. Turn 1's reply never comes until turn 2 has started, and is ignored then.
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "everyai", "title": "EveryAI", "version": "0.1.0"}, "_meta": {"clientType": "extension"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "authMethods": [{"id": "cached_token", "name": "Grok account"}, {"id": "xai.api_key", "name": "xAI API key"}], "agentCapabilities": {"loadSession": true}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/new", "id": 2, "params": {"cwd": "{{cwd}}", "mcpServers": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "grok-1"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/prompt", "id": 3, "params": {"sessionId": "grok-1", "prompt": [{"type": "text", "text": "go"}], "_meta": {"promptId": "{{session}}", "requestId": "{{session}}"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "_x.ai/mcp/servers_updated", "params": {"sessionId": "grok-1", "servers": [{"name": "github", "command": "npx", "env": {"GITHUB_TOKEN": "sk-secret-1"}}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "x.ai/task_backgrounded", "params": {"sessionId": "grok-1", "update": {"sessionUpdate": "task_backgrounded", "task_id": "t1", "tool_call_id": "call-bg-1", "command": "npm run dev", "env": {"API_KEY": "sk-secret-2"}}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "_x.ai/task_completed", "params": {"sessionId": "grok-1", "update": {"sessionUpdate": "task_completed", "task_snapshot": {"task_id": "t1", "command": "npm run dev", "exit_code": 1, "output": "crashed"}}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "x.ai/unknown_thing", "params": {"sessionId": "grok-1", "apiKey": "sk-secret-3"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "x.ai/session/prompt_complete", "params": {"sessionId": "grok-1", "promptId": "task-completed-t1", "stopReason": "end_turn"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "x.ai/session/prompt_complete", "params": {"sessionId": "grok-1", "promptId": "someone-else", "stopReason": "end_turn"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "x.ai/session/prompt_complete", "params": {"sessionId": "grok-1", "promptId": "{{session}}", "stopReason": "end_turn"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/prompt", "id": 4, "params": {"sessionId": "grok-1", "prompt": [{"type": "text", "text": "again"}], "_meta": {"promptId": "{{any}}", "requestId": "{{any}}"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "_x.ai/session/prompt_complete", "params": {"sessionId": "grok-1", "stopReason": "rate_limit"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/prompt", "id": 5, "params": {"sessionId": "grok-1", "prompt": [{"type": "text", "text": "once more"}], "_meta": {"promptId": "{{any}}", "requestId": "{{any}}"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 5, "error": {"code": -32003, "message": "Usage limit reached"}}}

@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
@@ -105,18 +106,93 @@ void main() {
       expect(r.resolve('opencode'), isA<OpenCodeDriver>());
       final gemini = r.resolve('gemini')! as AcpDriver;
       expect((gemini.info.needsConsent, gemini.command), (true, 'gemini'));
-      expect(gemini.args, ['--acp']);
+      expect(gemini.info.label, 'Gemini CLI (API key or enterprise)');
+      expect(gemini.resolved.args, ['--acp', '--approval-mode', 'default']);
       expect(r.resolve('claude-code')!.info.needsConsent, isTrue);
       expect(r.resolve('codex')!.info.needsConsent, isFalse);
       final acp = r.resolve('acp:goose')!;
       expect(acp, isA<AcpDriver>());
       expect((acp.info.id, (acp as AcpDriver).command), ('acp:goose', 'goose'));
+      expect(acp.resolved.args, ['acp']);
       expect(identical(r.resolve('acp:goose'), acp), isTrue);
       expect(r.resolve('terminal:aider'), isA<TerminalDriver>());
       expect(r.resolve('terminal:aider')!.info.id, 'terminal:aider');
       expect(r.resolve('acp:'), isNull);
       expect(r.resolve('nope'), isNull);
-      expect([for (final d in r.listed) d.info.id], ['everyai', 'claude-code', 'codex', 'opencode', 'gemini']);
+      expect(
+        [for (final d in r.listed) d.info.id],
+        [
+          'everyai',
+          'claude-code',
+          'codex',
+          'opencode',
+          'antigravity',
+          'gemini',
+          'github-copilot-cli',
+          'kiro',
+          'kimi',
+          'qwen-code',
+          'cline',
+          'goose',
+          'mistral-vibe',
+          'auggie',
+          'factory-droid',
+          'cursor',
+          'grok',
+        ],
+      );
+    });
+
+    test(
+      'each ACP agent is listed with its command, label and install hint; only Google and Cursor ask for consent',
+      () {
+        final r = container.read(driverRegistryProvider);
+        const want = {
+          'antigravity': ('agy', 'Antigravity CLI'),
+          'gemini': ('gemini', 'Gemini CLI (API key or enterprise)'),
+          'github-copilot-cli': ('copilot', 'GitHub Copilot CLI'),
+          'kiro': ('kiro-cli', 'Kiro CLI'),
+          'kimi': ('kimi', 'Kimi Code CLI'),
+          'qwen-code': ('qwen', 'Qwen Code'),
+          'cline': ('cline', 'Cline CLI'),
+          'goose': ('goose', 'goose'),
+          'mistral-vibe': ('vibe-acp', 'Mistral Vibe'),
+          'auggie': ('auggie', 'Auggie'),
+          'factory-droid': ('droid', 'Factory Droid'),
+          'cursor': ('cursor-agent', 'Cursor CLI'),
+          'grok': ('grok', 'Grok Build'),
+        };
+        for (final MapEntry(key: id, value: (command, label)) in want.entries) {
+          final d = r.resolve(id)! as AcpDriver;
+          expect((d.command, d.info.label), (command, label), reason: id);
+          expect(d.info.installHint, isNotEmpty, reason: id);
+          expect(d.info.needsConsent, id == 'gemini' || id == 'cursor', reason: id);
+        }
+        expect(r.resolve('github-copilot-cli')!.info.installHint, 'npm i -g @github/copilot');
+      },
+    );
+
+    test("an acp: driver for a listed agent's program runs on that agent's consent switch", () {
+      final r = container.read(driverRegistryProvider);
+      final agy = r.resolve('acp:agy')!;
+      // Antigravity ships on consumer logins: no consent switch (owner, 2026-11-04).
+      expect((agy.info.needsConsent, agy.info.consentId), (false, 'antigravity'));
+      expect(consentProblem(agy.info, const {}), isNull);
+      final gem = r.resolve('acp:gemini')!;
+      expect(consentProblem(gem.info, const {}), contains("Turn on 'Use my own installed CLIs'"));
+      expect(consentProblem(gem.info, const {'gemini'}), isNull);
+      expect(r.resolve('acp:/opt/bin/gemini --sandbox')!.info.consentId, 'gemini');
+      expect(r.resolve('acp:dsh')!.info.consentId, 'acp:dsh');
+      // Cursor installs as `cursor-agent` and `agent`: either shares the listed entry's switch.
+      final cursor = r.resolve('cursor')!;
+      expect((cursor.info.needsConsent, cursor.info.consentId), (true, 'cursor'));
+      expect(consentProblem(cursor.info, const {}), contains("Turn on 'Use my own installed CLIs' for Cursor CLI"));
+      expect(consentProblem(cursor.info, const {'cursor'}), isNull);
+      expect(r.resolve('acp:agent')!.info.consentId, 'cursor');
+      expect(
+        leadBlocked(cursor.info, const DriverStatus(installed: true, signedIn: true), consented: false),
+        'Turn on in Settings',
+      );
     });
 
     test('harnessFor goes through the registry; the demo and removed harnesses are unchanged', () async {
@@ -159,10 +235,8 @@ void main() {
         signedIn: () async => false,
       );
       final s = await d.detect();
-      expect(
-        (s.installed, s.signedIn, s.problem),
-        (true, false, 'Not signed in. Run `gemini` in a terminal and sign in.'),
-      );
+      expect((s.installed, s.signedIn), (true, false));
+      expect(s.problem, startsWith('Not signed in. Set GEMINI_API_KEY, or sign in with a Code Assist'));
       final missing = await AcpDriver(id: 'acp:x', label: 'x', command: 'x', which: _nowhere).detect();
       expect((missing.installed, missing.problem), (false, null));
     });
@@ -182,22 +256,22 @@ void main() {
       expect((s.installed, s.path, s.version, s.problem), (true, '/bin/echo', '--version', 'Not built yet.'));
     });
 
-    test('statuses are looked up once, kept, and again after invalidating', () async {
+    test('statuses are looked up once, kept, and again on refresh', () async {
       final ok = _Detecting('a', () async => const DriverStatus(installed: true, version: '1.0'));
       final broken = _Detecting('b', () async => throw StateError('no PATH'));
       final c = ProviderContainer(
         overrides: [
           driverRegistryProvider.overrideWithValue(DriverRegistry({'a': ok, 'b': broken})),
+          preferencesProvider.overrideWithValue(Preferences.inMemory()),
         ],
       );
       addTearDown(c.dispose);
       final first = await c.read(driverStatusesProvider.future);
       expect(first['a']!.version, '1.0');
-      expect(first['b']!.problem, contains('no PATH'));
+      expect(first['b']!.problem, "Couldn't check: Bad state: no PATH");
       await c.read(driverStatusesProvider.future);
       expect(ok.detects, 1);
-      c.invalidate(driverStatusesProvider);
-      await c.read(driverStatusesProvider.future);
+      await c.read(driverStatusesProvider.notifier).refresh();
       expect(ok.detects, 2);
     });
   });

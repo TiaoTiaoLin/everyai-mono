@@ -49,7 +49,8 @@ final class OpenCodeDriver implements HarnessDriver, AttachesBriefed {
   String? _path;
 
   @override
-  DriverInfo get info => const DriverInfo(id: 'opencode', label: 'OpenCode');
+  DriverInfo get info =>
+      const DriverInfo(id: 'opencode', label: 'OpenCode', installHint: 'curl -fsSL https://opencode.ai/install | bash');
 
   /// Pictures, forks, rewinding, its own subagents and the user's MCP
   /// servers are not wired up yet.

@@ -25,6 +25,28 @@ Future<DriverProcess> spawnDriver({
 }) =>
     impl.spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
 
+/// [spawnDriver] for a CLI that needs a terminal of its own (Grok Build
+/// opens `/dev/tty` and exits without one): it runs under a pty, which is
+/// its controlling terminal, while its stdin and stdout are named pipes in
+/// [logPath]'s folder (`acp.in`, `acp.out`), so the JSON lines never pass
+/// through the terminal (no echo, no line-length cap). What it writes to the
+/// terminal goes to [logPath]. macOS and Linux only.
+Future<DriverProcess> spawnDriverTty({
+  required String executable,
+  required List<String> args,
+  required String cwd,
+  required String sessionTag,
+  required String logPath,
+  Map<String, String> env = const {},
+}) => impl.spawnDriverTty(
+  executable: executable,
+  args: args,
+  cwd: cwd,
+  sessionTag: sessionTag,
+  logPath: logPath,
+  env: env,
+);
+
 final _closers = <Future<void> Function()>{};
 
 /// Registers [close] to run when the app quits (processes that don't come from [spawnDriver], e.g. a pty).
@@ -35,18 +57,30 @@ void untrackDriverClose(Future<void> Function() close) => _closers.remove(close)
 Future<void> closeAllDriverProcesses() =>
     Future.wait([impl.closeAllDriverProcesses(), for (final c in _closers.toList()) c()]);
 
-/// Looks for [command] on the login shell's PATH (an app started from the
-/// Dock doesn't have the user's) and asks it for its version: installed,
-/// path and the first line of `[command] [versionArgs]`. Whether it is
-/// signed in is the driver's own check. [which] replaces the lookup (tests).
+/// Looks for [command] on the login shell's PATH plus the usual install
+/// directories (an app started from the Dock doesn't have the user's; no
+/// process runs for the lookup) and asks it for its version: installed,
+/// path and the first line of `[command] [versionArgs]`, which is ended
+/// after 4 s. Whether it is signed in is the driver's own check. [which]
+/// replaces the lookup (tests).
 Future<DriverStatus> detectCli(
   String command, {
   List<String> versionArgs = const ['--version'],
   Future<String?> Function(String command)? which,
 }) => impl.detectCli(command, versionArgs: versionArgs, which: which);
 
+/// Reads the login shell's PATH again, for the next [detectCli] and spawn
+/// (the user installed something since the app started).
+Future<void> reloadShellEnv() => impl.reloadShellEnv();
+
+/// Reads the login shell's PATH if this app run hasn't yet (kept after).
+Future<void> loadShellEnv() => impl.loadShellEnv();
+
 /// The problem a driver whose sessions aren't built yet reports.
 const notBuiltProblem = 'Not built yet.';
+
+/// The problem a driver whose check ran out of time reports.
+const noAnswerProblem = "Didn't answer in 30 s.";
 
 /// [detectCli] for a driver whose sessions aren't built yet.
 Future<DriverStatus> notBuiltYet(String command, {Future<String?> Function(String command)? which}) async =>

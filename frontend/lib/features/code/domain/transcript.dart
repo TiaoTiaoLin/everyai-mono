@@ -145,6 +145,9 @@ final class PlanProposal extends TranscriptItem {
   String get summary => call.str('summary');
   String get verification => call.str('verification');
 
+  /// The plan in the agent's own Markdown (Cursor's `create_plan`), or ''.
+  String get body => call.str('body');
+
   List<PlanStep> get steps => [
     for (final s in (call.action['steps'] as List<Object?>? ?? const []))
       if (s is Map<String, Object?>)
@@ -161,6 +164,7 @@ final class PlanProposal extends TranscriptItem {
   String get markdown => [
     '# $title',
     if (summary.isNotEmpty) '\n$summary',
+    if (body.trim().isNotEmpty) '\n${body.trim()}',
     '',
     for (final (i, s) in steps.indexed) ...[
       '${i + 1}. ${s.title}${s.detail.isEmpty ? '' : ': ${s.detail}'}',

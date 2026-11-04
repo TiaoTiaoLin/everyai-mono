@@ -1,0 +1,14 @@
+// Derived from Cursor's ACP doc (cursor.com/docs/cli/acp, read 2026-11-04), not recorded: unverified against a real `agent acp`.
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "everyai", "title": "EveryAI", "version": "0.1.0"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "authMethods": [{"id": "cursor_login", "name": "Cursor Login", "description": "Run `agent login` in a terminal"}], "agentCapabilities": {"loadSession": true, "promptCapabilities": {"embeddedContext": true}, "mcpCapabilities": {"http": true, "sse": true}}}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/new", "id": 2, "params": {"cwd": "{{cwd}}", "mcpServers": []}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "cur-1"}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "method": "session/prompt", "id": 3, "params": {"sessionId": "cur-1", "prompt": [{"type": "text", "text": "go"}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "cursor/update_todos", "params": {"sessionId": "cur-1", "toolCallId": "td-1", "merge": false, "todos": [{"id": "t1", "content": "Read the code", "status": "pending"}, {"id": "t2", "content": "Fix the bug", "status": "in_progress"}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "cursor/update_todos", "params": {"sessionId": "cur-1", "toolCallId": "td-2", "merge": true, "todos": [{"id": "t1", "content": "Read the code", "status": "completed"}, {"id": "t3", "content": "Write docs", "status": "cancelled"}]}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "cursor/task", "params": {"sessionId": "cur-1", "toolCallId": "task-1", "description": "Explore the repo", "prompt": "Find the counter", "subagentType": "explore"}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "cur-1", "update": {"sessionUpdate": "tool_call", "toolCallId": "task-1", "title": "Task", "kind": "other", "status": "in_progress"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "method": "cursor/task", "params": {"sessionId": "cur-1", "toolCallId": "task-1", "description": "Explore the repo", "prompt": "Find the counter", "subagentType": "explore", "agentId": "ag-1", "durationMs": 4200}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": "r1", "method": "cursor/update_todos", "params": {"sessionId": "cur-1", "toolCallId": "td-3", "merge": false, "todos": [{"id": "t9", "content": "Ship it", "status": "pending"}]}}}
+{"dir": "out", "msg": {"jsonrpc": "2.0", "id": "r1", "result": {"outcome": {"outcome": "accepted"}}}}
+{"dir": "in", "msg": {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}}

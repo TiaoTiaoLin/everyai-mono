@@ -1,15 +1,21 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
+import 'package:every_ai/features/code/domain/transcript.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_agents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_driver.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_files.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/json_rpc.dart';
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
+import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/questions/domain/questions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../support/replay_transport.dart';
@@ -31,34 +37,49 @@ final class _Rig {
   String get dataDir => '$root/data';
   String get work => '$root/work';
 
-  AcpDriver driver(String id, String command, {List<String> args = const [], Duration? initTimeout}) => AcpDriver(
+  AcpDriver driver(
+    String id,
+    String command, {
+    List<String> args = const [],
+    Duration? initTimeout,
+    Future<String?> Function(String command)? which,
+    AcpConnect? connect,
+    AcpConnect? ttyConnect,
+    Map<String, String> loginEnv = const {},
+  }) => AcpDriver(
     id: id,
     label: switch (command) {
       'gemini' => 'Gemini CLI',
       'opencode' => 'OpenCode',
+      'cursor-agent' => 'Cursor CLI',
+      'grok' => 'Grok Build',
       _ => command,
     },
     command: command,
     args: args,
-    which: (c) async => '/usr/local/bin/$c',
+    which: which ?? (c) async => '/usr/local/bin/$c',
     dataDir: () async => dataDir,
     initTimeout: initTimeout ?? const Duration(seconds: 60),
     replayQuiet: Duration.zero,
-    connect:
-        ({
-          required String executable,
-          required List<String> args,
-          required String cwd,
-          required String sessionTag,
-          required String logPath,
-          required Map<String, String> env,
-        }) async {
-          spawns.add((executable: executable, args: args, cwd: cwd, logPath: logPath, env: env));
-          final c = ReplayChannel.file('$_fixtures/${scripts.removeAt(0)}');
-          channels.add(c);
-          return c;
-        },
+    loginEnv: () async => loginEnv,
+    ttyConnect: ttyConnect,
+    connect: connect ?? replay,
   );
+
+  /// Starts the agent on the next script.
+  Future<LineChannel> replay({
+    required String executable,
+    required List<String> args,
+    required String cwd,
+    required String sessionTag,
+    required String logPath,
+    required Map<String, String> env,
+  }) async {
+    spawns.add((executable: executable, args: args, cwd: cwd, logPath: logPath, env: env));
+    final c = ReplayChannel.file('$_fixtures/${scripts.removeAt(0)}');
+    channels.add(c);
+    return c;
+  }
 
   SessionSpec spec({
     AgentMode mode = AgentMode.ask,
@@ -130,6 +151,58 @@ Directory _stored(
   );
   if (events.isNotEmpty) File('${dir.path}/events.jsonl').writeAsStringSync('${events.map(jsonEncode).join('\n')}\n');
   return dir;
+}
+
+/// The app's side of the MCP host for a session: records each call and
+/// answers it when the test says.
+final class _Host implements HostTools {
+  final calls = <HostCall>[];
+  final _replies = <Completer<HostResult>>[];
+
+  @override
+  Future<HostResult> call(HostCall call) {
+    calls.add(call);
+    final c = Completer<HostResult>();
+    _replies.add(c);
+    return c.future;
+  }
+
+  void answer(String text, {bool isError = false}) => _replies.removeAt(0).complete((text: text, isError: isError));
+}
+
+DriverBriefing _cursorBrief(HostTools host) =>
+    DriverBriefing(mcpUrl: 'http://127.0.0.1:7777/mcp', mcpToken: 'tok-cursor', host: host);
+
+/// Our reply to the agent's request [id] on [c].
+Object? _replyTo(ReplayChannel c, String id) =>
+    c.sent.singleWhere((m) => m['id'] == id && m['method'] == null)['result'];
+
+/// The question card arguments of `cursor/ask.jsonl`'s request.
+Map<String, Object?> _askArgs() => {
+  'questions': [
+    {
+      'question': 'Which database?',
+      'options': [
+        {'label': 'Postgres'},
+        {'label': 'SQLite'},
+      ],
+    },
+    {
+      'question': 'Which extras?',
+      'multi_select': true,
+      'options': [
+        {'label': 'Auth'},
+        {'label': 'Billing'},
+        {'label': 'Search'},
+      ],
+    },
+  ],
+};
+
+Transcript _transcript(List<HarnessEvent> events) {
+  final b = TranscriptBuilder();
+  events.forEach(b.add);
+  return b.snapshot;
 }
 
 void main() {
@@ -670,7 +743,7 @@ void main() {
     });
   });
 
-  test('Gemini counts as signed in with an API key, or with its cached Google sign-in', () async {
+  test('Gemini counts as signed in with an API key; a cached personal Google sign-in no longer does', () async {
     final home = tmp.path;
     expect(await geminiSignedIn(home: home, env: const {'GEMINI_API_KEY': 'k'}), isTrue);
     expect(await geminiSignedIn(home: home, env: const {}), isFalse);
@@ -678,12 +751,105 @@ void main() {
     File('$home/.gemini/settings.json').writeAsStringSync('{"security":{"auth":{"selectedType":"oauth-personal"}}}');
     expect(await geminiSignedIn(home: home, env: const {}), isFalse);
     File('$home/.gemini/oauth_creds.json').writeAsStringSync('{}');
+    expect(await geminiSignedIn(home: home, env: const {}), isFalse);
+    // With a Cloud project it may be a Code Assist licence: unknown.
+    expect(await geminiSignedIn(home: home, env: const {'GOOGLE_CLOUD_PROJECT': 'p'}), isNull);
+    expect(await geminiSignedIn(home: home, env: const {'GOOGLE_CLOUD_PROJECT_ID': 'p'}), isNull);
+    // Gemini CLI also loads ~/.gemini/.env and ~/.env, as its auth docs suggest.
+    File('$home/.gemini/.env').writeAsStringSync('# licence\nGOOGLE_CLOUD_PROJECT=my-proj\n');
+    expect(await geminiSignedIn(home: home, env: const {}), isNull);
+    File('$home/.gemini/.env').writeAsStringSync('GOOGLE_CLOUD_PROJECT=""\n');
+    expect(await geminiSignedIn(home: home, env: const {}), isFalse);
+    File('$home/.env').writeAsStringSync('export GEMINI_API_KEY=k\n');
     expect(await geminiSignedIn(home: home, env: const {}), isTrue);
+    File('$home/.env').deleteSync();
     File('$home/.gemini/settings.json').writeAsStringSync('{"security":{"auth":{"selectedType":"vertex-ai"}}}');
     expect(await geminiSignedIn(home: home, env: const {}), isNull);
   });
 
   group('other ACP agents', () {
+    test('goose is moved off its auto mode, which never asks, before the first prompt', () async {
+      final r = rig(['acp/goose_mode.jsonl']);
+      final d = r.driver('goose', 'goose');
+      final s = await d.start(r.spec());
+      final seen = _Seen(s);
+      expect(r.spawns.single.args, ['acp']);
+      expect(r.spawns.single.env['GOOSE_MODE'], 'approve');
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final methods = [for (final m in r.channels.single.sent) m['method']];
+      expect(methods.indexOf('session/set_mode'), lessThan(methods.indexOf('session/prompt')));
+      await s.close();
+    });
+
+    test('Kiro has Autopilot turned off before the first prompt, and again when it turns it back on', () async {
+      final r = rig(['acp/kiro_autopilot.jsonl']);
+      final s = await r.driver('kiro', 'kiro-cli').start(r.spec());
+      final seen = _Seen(s);
+      expect(r.spawns.single.args, ['acp', '--agent-engine=v3', '--auth-method=cli']);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      await seen.until(
+        () => r.channels.single.sent.where((m) => m['method'] == 'session/set_config_option').length == 2,
+      );
+      r.expectPlayed();
+      final methods = [for (final m in r.channels.single.sent) m['method']];
+      expect(methods.indexOf('session/set_config_option'), lessThan(methods.indexOf('session/prompt')));
+      expect(seen.notices, isEmpty);
+      await s.close();
+    });
+
+    test('Kiro refuses a project whose .kiro folder has its own agents or MCP servers', () async {
+      final r = rig(const []);
+      expect(await acpProfileOf('kiro-cli').preflight(r.work), isNull);
+      Directory('${r.work}/.kiro/settings').createSync(recursive: true);
+      File('${r.work}/.kiro/settings/mcp.json').writeAsStringSync('{}');
+      expect(await acpProfileOf('kiro-cli').preflight(r.work), contains('.kiro folder can let Kiro CLI act'));
+      Directory('${r.work}/.kiro/agents').createSync();
+      expect(await acpProfileOf('kiro-cli').preflight(r.work), contains('(agents/, settings/mcp.json)'));
+    });
+
+    test('a same-named program (pressly goose, AWS Copilot) shows as a problem, not a ready agent', () async {
+      final goose = File('${tmp.path}/goose')..writeAsStringSync('#!/bin/sh\necho "goose version: v3.26.0"\n');
+      await Process.run('chmod', ['+x', goose.path]);
+      AcpDriver driver(String cmd) =>
+          AcpDriver(id: cmd, label: cmd, command: cmd, which: (c) async => goose.path, signedIn: () async => null);
+      expect((await driver('goose').detect()).problem, contains("not Block's goose"));
+      expect((await driver('copilot').detect()).problem, contains('not GitHub Copilot CLI'));
+      goose.writeAsStringSync('#!/bin/sh\necho "goose 1.9.3"\n');
+      expect((await driver('goose').detect()).problem, isNull);
+    });
+
+    test("Copilot's allow-all environment variable from the user's shell is turned off", () async {
+      expect(acpProfileOf('copilot').env(null)['COPILOT_ALLOW_ALL'], 'false');
+    });
+
+    test('an Antigravity CLI before 1.5.0 shows the version problem; it needs no consent', () async {
+      final agy = File('${tmp.path}/agy')..writeAsStringSync('#!/bin/sh\necho "agy 1.4.11"\n');
+      await Process.run('chmod', ['+x', agy.path]);
+      AcpDriver driver() => AcpDriver(
+        id: 'antigravity',
+        label: 'Antigravity CLI',
+        command: 'agy',
+        which: (c) async => agy.path,
+        signedIn: () async => false,
+      );
+      expect(driver().info.needsConsent, isFalse);
+      final old = await driver().detect();
+      expect((old.installed, old.version), (true, 'agy 1.4.11'));
+      expect(old.problem, 'Antigravity CLI 1.4.11 is too old: update to 1.5.0 or later.');
+      agy.writeAsStringSync('#!/bin/sh\necho "agy 1.5.0"\n');
+      expect((await driver().detect()).problem, startsWith('Not signed in. Run `agy` in a terminal'));
+    });
+
+    test('Qwen Code refuses a project whose .qwen folder could let it act unasked', () async {
+      final r = rig(const []);
+      Directory('${r.work}/.qwen/policies').createSync(recursive: true);
+      expect(acpProfileOf('qwen').preflight(r.work), completion(contains('.qwen folder can let Qwen Code act')));
+      expect(await acpProfileOf('gemini').preflight(r.work), isNull);
+    });
+
     test('no allow-once option: refused, with a notice', () async {
       final r = rig(['acp/always_only.jsonl']);
       final d = r.driver('acp:dsh', 'dsh');
@@ -744,4 +910,819 @@ void main() {
       await s.close();
     });
   });
+  group('Cursor CLI (derived from its ACP doc)', () {
+    test(
+      'the handshake: `acp`, Plan pinned to its plan mode, our server in session/new and no .cursor/mcp.json',
+      () async {
+        final r = rig(['cursor/handshake.jsonl']);
+        final s = await r
+            .driver('cursor', 'cursor-agent', args: const ['--force'])
+            .start(r.spec(mode: AgentMode.plan, briefing: _cursorBrief(_Host())));
+        await r.channels.single.finished;
+        r.expectPlayed();
+        expect(r.spawns.single.args, ['acp']);
+        expect(Directory('${r.work}/.cursor').existsSync(), isFalse);
+        await s.close();
+      },
+    );
+
+    test('`agent` is found when `cursor-agent` is not on PATH', () async {
+      final r = rig(['cursor/load_unknown.jsonl']);
+      _stored(r, 'c0', 'cur-old');
+      final d = r.driver('cursor', 'cursor-agent', which: (c) async => c == 'agent' ? '/opt/cursor/agent' : null);
+      final s = await d.attach('c0');
+      final seen = _Seen(s);
+      await s.send('Hello');
+      await seen.untilStatus(ExecutionStatus.finished);
+      expect(r.spawns.single.executable, '/opt/cursor/agent');
+      // session/load answered "Session not found": a fresh session, and the user is told.
+      r.expectPlayed();
+      expect(seen.notices.single, contains("couldn't reopen its conversation, so it starts fresh"));
+    });
+
+    Future<(_Rig, HarnessSession, _Seen, _Host)> asking(String script) async {
+      final r = rig([script]);
+      final host = _Host();
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec(briefing: _cursorBrief(host)));
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.until(() => host.calls.isNotEmpty);
+      return (r, s, seen, host);
+    }
+
+    test('cursor/ask_question is our question card; the picks go back as option ids', () async {
+      final (r, s, seen, host) = await asking('cursor/ask.jsonl');
+      final row = seen.calls.single;
+      expect(
+        (row.toolName, row.actionKind, hostToolOf(row)),
+        ('everyai__ask_user_question', 'MCPToolAction', askUserQuestionTool),
+      );
+      final call = host.calls.single;
+      expect((call.name, call.id), (askUserQuestionTool, row.id));
+      expect(call.args, {
+        'questions': [
+          {
+            'question': 'Which database?',
+            'header': 'Setup',
+            'multi_select': false,
+            'options': [
+              {'label': 'Postgres', 'description': ''},
+              {'label': 'SQLite', 'description': ''},
+            ],
+          },
+          {
+            'question': 'Which extras?',
+            'header': '',
+            'multi_select': true,
+            'options': [
+              {'label': 'Auth', 'description': ''},
+              {'label': 'Billing', 'description': ''},
+              {'label': 'Search', 'description': ''},
+            ],
+          },
+        ],
+      });
+      for (final e in call.args.entries) {
+        expect(row.action[e.key], e.value);
+      }
+      // Waiting on a card isn't waiting on an approval.
+      expect(seen.status, ExecutionStatus.running);
+      final questions = Question.listFrom(call.args);
+      final answers = [
+        const QuestionAnswer(selected: {0}),
+        const QuestionAnswer(selected: {0, 2}),
+      ];
+      host.answer(answersReason(questions, answers));
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(_replyTo(r.channels.single, 'q1'), {
+        'outcome': {
+          'outcome': 'answered',
+          'answers': [
+            {
+              'questionId': 'db',
+              'selectedOptionIds': ['pg'],
+            },
+            {
+              'questionId': 'extras',
+              'selectedOptionIds': ['auth', 'search'],
+            },
+          ],
+        },
+      });
+      // Cursor's own tool_call for the same id added no second row.
+      expect(seen.calls, hasLength(1));
+      final card = _transcript(seen.all).items.whereType<QuestionItem>().single;
+      expect(card.answers, answers);
+      await s.close();
+    });
+
+    test(
+      'an Other answer or a reply in chat goes back as skipped with the words; a given-up card as cancelled',
+      () async {
+        final questions = Question.listFrom(_askArgs());
+        final other = answersReason(questions, [
+          const QuestionAnswer(selected: {1}),
+          const QuestionAnswer(other: 'Only logging'),
+        ]);
+        for (final (text, isError, want) in [
+          (
+            other,
+            false,
+            {
+              'outcome': {'outcome': 'skipped', 'reason': other},
+            },
+          ),
+          (
+            repliedInChat,
+            false,
+            {
+              'outcome': {'outcome': 'skipped', 'reason': repliedInChat},
+            },
+          ),
+          (
+            'Error: no longer waiting.',
+            true,
+            {
+              'outcome': {'outcome': 'cancelled'},
+            },
+          ),
+        ]) {
+          final (r, s, seen, host) = await asking('cursor/ask.jsonl');
+          host.answer(text, isError: isError);
+          await seen.untilStatus(ExecutionStatus.finished);
+          r.expectPlayed();
+          expect(_replyTo(r.channels.single, 'q1'), want, reason: text);
+          expect(seen.results.single.text, text);
+          await s.close();
+        }
+      },
+    );
+
+    test(
+      'the _cursor/ spelling is handled; over 4 questions are skipped with a note; unknown requests cancelled',
+      () async {
+        final r = rig(['cursor/ask_misc.jsonl']);
+        final host = _Host();
+        final s = await r.driver('cursor', 'cursor-agent').start(r.spec(briefing: _cursorBrief(host)));
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.finished);
+        r.expectPlayed();
+        expect(host.calls, isEmpty);
+        expect(seen.calls, isEmpty);
+        await s.close();
+      },
+    );
+
+    test('without a briefing questions are skipped and plans cancelled, and nothing waits', () async {
+      final r = rig(['cursor/no_host.jsonl']);
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.calls, isEmpty);
+      await s.close();
+    });
+
+    test('cursor/create_plan is our plan card: approved is accepted, changes are rejected with the words', () async {
+      final revise = '$planRevisionLead Use a stateful widget.';
+      for (final (text, want) in [
+        (
+          planApprovedReason,
+          {
+            'outcome': {'outcome': 'accepted'},
+          },
+        ),
+        (
+          revise,
+          {
+            'outcome': {'outcome': 'rejected', 'reason': revise},
+          },
+        ),
+      ]) {
+        final (r, s, seen, host) = await asking('cursor/plan.jsonl');
+        final row = seen.calls.single;
+        expect((row.toolName, hostToolOf(row)), ('everyai__present_plan', presentPlanTool));
+        expect(host.calls.single.args, {
+          'title': 'Add a counter',
+          'summary': 'A counter with tests.',
+          'steps': [
+            {'title': 'Write the widget'},
+            {'title': 'Add a test'},
+          ],
+          'body': '## Steps\n\nBuild it, then test it.',
+        });
+        final plan = _transcript(seen.all).items.whereType<PlanProposal>().single;
+        expect(plan.markdown, contains('Build it, then test it.'));
+        expect(plan.steps.map((st) => st.title), ['Write the widget', 'Add a test']);
+        host.answer(text);
+        await seen.untilStatus(ExecutionStatus.finished);
+        r.expectPlayed();
+        expect(_replyTo(r.channels.single, 'p1'), want);
+        final settled = _transcript(seen.all).items.whereType<PlanProposal>().single;
+        expect(settled.verdict, text == planApprovedReason ? PlanVerdict.approved : PlanVerdict.revised);
+        await s.close();
+      }
+    });
+
+    test('Stop while a plan waits: the card is given up, Cursor gets cancelled, the row is Cancelled', () async {
+      final (r, s, seen, host) = await asking('cursor/plan_stop.jsonl');
+      await s.interrupt();
+      expect(await host.calls.single.ended, HostEnd.cancelled);
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      expect(seen.results.single.text, 'Cancelled.');
+      expect(seen.results.single.actionId, seen.calls.single.id);
+      await s.close();
+    });
+
+    test('closing the session, or the agent exiting, gives up a waiting card', () async {
+      final (_, s, _, host) = await asking('cursor/plan.jsonl');
+      await s.close();
+      expect(await host.calls.single.ended, HostEnd.sessionClosed);
+
+      final (_, s2, seen2, host2) = await asking('cursor/ask_eof.jsonl');
+      expect(await host2.calls.single.ended, HostEnd.clientGone);
+      await seen2.until(() => seen2.results.isNotEmpty);
+      expect(seen2.results.single.text, 'Cancelled.');
+      await s2.close();
+    });
+
+    test('cursor/update_todos is the task list (replace or merge by id); cursor/task a subagent row', () async {
+      final r = rig(['cursor/todos_task.jsonl']);
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final lists = [
+        for (final c in seen.calls)
+          if (c.actionKind == 'TaskTrackerAction') c,
+      ];
+      expect({for (final c in lists) c.toolName}, {'acp:update_todos'});
+      List<Object?> tasks(ActionCall c) => c.action['task_list']! as List<Object?>;
+      expect(tasks(lists[0]), [
+        {'title': 'Read the code', 'status': 'todo', 'notes': ''},
+        {'title': 'Fix the bug', 'status': 'in_progress', 'notes': ''},
+      ]);
+      expect(tasks(lists[1]), [
+        {'title': 'Read the code', 'status': 'done', 'notes': ''},
+        {'title': 'Fix the bug', 'status': 'in_progress', 'notes': ''},
+        {'title': 'Write docs', 'status': 'done', 'notes': 'cancelled'},
+      ]);
+      // The request form replaces too, and is acked.
+      expect(tasks(lists[2]), [
+        {'title': 'Ship it', 'status': 'todo', 'notes': ''},
+      ]);
+      final task = seen.calls.singleWhere((c) => c.actionKind == 'TaskAction');
+      expect((task.toolName, task.str('description'), task.str('agent')), ('acp:task', 'Explore the repo', 'explore'));
+      expect(seen.results.singleWhere((x) => x.actionId == task.id).text, 'Done in 4.2 s.');
+      // Its tool_call for the same id added no row.
+      expect(seen.calls.where((c) => c.toolCallId == 'task-1'), hasLength(1));
+      final items = _transcript(seen.all).items;
+      expect(items.whereType<SubagentItem>(), hasLength(1));
+      expect(items.whereType<PlanItem>().last.tasks.single.title, 'Ship it');
+      await s.close();
+    });
+
+    test('a subagent still running when the user stops closes as Cancelled', () async {
+      final r = rig(['cursor/task_stop.jsonl']);
+      final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.until(() => seen.calls.isNotEmpty);
+      expect(seen.calls.single.str('agent'), 'reviewer');
+      await s.interrupt();
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      expect(seen.results.single.text, 'Cancelled.');
+      await s.close();
+    });
+
+    test("to-dos Cursor replays while loading a conversation aren't shown again", () async {
+      final r = rig(['cursor/load_replay.jsonl']);
+      _stored(r, 'c1', 'cur-old');
+      final s = await r.driver('cursor', 'cursor-agent').attach('c1');
+      final seen = _Seen(s);
+      await s.send('Next');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.calls, isEmpty);
+      await s.close();
+    });
+
+    test("Cursor's tool_call before its question request: that row closes, the card has its own id", () async {
+      final (r, s, seen, host) = await asking('cursor/ask_tool_first.jsonl');
+      final (step, card) = (seen.calls.first, seen.calls.last);
+      expect(seen.calls, hasLength(2));
+      expect(step.id, isNot(card.id));
+      expect(host.calls.single.id, card.id);
+      expect(seen.results.single, isA<ToolResult>().having((x) => x.actionId, 'actionId', step.id));
+      host.answer(
+        answersReason(Question.listFrom(host.calls.single.args), const [
+          QuestionAnswer(selected: {0}),
+        ]),
+      );
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect({for (final x in seen.results) x.actionId}, {step.id, card.id});
+      expect({for (final x in seen.results) x.id}, hasLength(2));
+      final items = _transcript(seen.all).items;
+      expect(items.whereType<QuestionItem>().single.answers, isNotNull);
+      final keys = [for (final i in items) i.key];
+      expect(keys.toSet(), hasLength(keys.length));
+      final steps = [
+        for (final i in items.whereType<StepItem>()) i.step,
+        for (final g in items.whereType<ExploreGroup>()) ...g.steps,
+      ];
+      expect(steps, isNotEmpty);
+      expect(steps.every((st) => st.done), isTrue);
+      await s.close();
+    });
+
+    test(
+      'a subagent whose only end is its tool_call_update closes; one shown first as a step becomes a subagent row',
+      () async {
+        final r = rig(['cursor/task_update_end.jsonl']);
+        final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.finished);
+        r.expectPlayed();
+        final tasks = seen.calls.where((c) => c.actionKind == 'TaskAction').toList();
+        expect([for (final t in tasks) t.toolCallId], ['task-1', 'ex-1']);
+        String? endOf(ActionCall c) => seen.results.where((x) => x.actionId == c.id).singleOrNull?.text;
+        expect([for (final t in tasks) endOf(t)], ['Done.', 'Failed.']);
+        // The step Cursor showed for ex-1 first is closed too.
+        expect(seen.calls.every((c) => endOf(c) != null), isTrue);
+        expect(_transcript(seen.all).items.whereType<SubagentItem>(), hasLength(2));
+        await s.close();
+      },
+    );
+
+    test('to-dos replayed while loading are kept: a merge after the reopen changes the whole list', () async {
+      final r = rig(['cursor/load_merge.jsonl']);
+      _stored(r, 'c1', 'cur-old');
+      final s = await r.driver('cursor', 'cursor-agent').attach('c1');
+      final seen = _Seen(s);
+      await s.send('Next');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.calls.single.action['task_list'], [
+        {'title': 'Old', 'status': 'todo', 'notes': ''},
+        {'title': 'Older', 'status': 'done', 'notes': ''},
+      ]);
+      await s.close();
+    });
+
+    test('Cursor refuses a project whose .cursor folder allows tools or has hooks', () async {
+      final r = rig(const []);
+      final p = acpProfileOf('cursor-agent');
+      Directory('${r.work}/.cursor').createSync();
+      File('${r.work}/.cursor/cli.json').writeAsStringSync('{"permissions":{"allow":[],"deny":["Shell(rm)"]}}');
+      expect(await p.preflight(r.work), isNull);
+      File('${r.work}/.cursor/cli.json').writeAsStringSync('{"permissions":{"allow":["Shell(*)"]}}');
+      expect(await p.preflight(r.work), contains('(cli.json "permissions.allow")'));
+      File('${r.work}/.cursor/hooks.json').writeAsStringSync('{}');
+      expect(await p.preflight(r.work), contains('.cursor folder can let Cursor CLI act'));
+      expect(await p.preflight(r.work), contains('hooks.json'));
+      expect(acpCommand('cursor-agent', const ['--trust', '--approve-mcps', '--model', 'x']).args, [
+        'acp',
+        '--model',
+        'x',
+      ]);
+    });
+
+    test("another program named `agent` isn't taken for Cursor CLI", () async {
+      final agent = File('${tmp.path}/agent')..writeAsStringSync('#!/bin/sh\necho "agent 0.3.1"\n');
+      await Process.run('chmod', ['+x', agent.path]);
+      AcpDriver driver() => AcpDriver(
+        id: 'cursor',
+        label: 'Cursor CLI',
+        command: 'cursor-agent',
+        which: (c) async => c == 'agent' ? agent.path : null,
+        signedIn: () async => null,
+      );
+      expect((await driver().detect()).problem, contains('not Cursor CLI'));
+      agent.writeAsStringSync('#!/bin/sh\necho "2026.10.22-3f1c2ab"\n');
+      expect((await driver().detect()).problem, isNull);
+    });
+
+    test('signed in: a key in the environment; the keychain entry by exit code only', () async {
+      final p = acpProfileOf('cursor-agent');
+      expect(await p.signedIn('/x/cursor-agent', env: const {'CURSOR_API_KEY': 'k'}), isTrue);
+      expect(await p.signedIn('/x/cursor-agent', env: const {'CURSOR_AUTH_TOKEN': 't'}), isTrue);
+      expect([cursorSignedInFrom(0), cursorSignedInFrom(44), cursorSignedInFrom(1)], [true, false, null]);
+    });
+  });
+
+  group('Grok Build (derived from T3 Code)', () {
+    test('initialize says it is an extension client; Stop sends Ctrl+C in _meta', () async {
+      final r = rig(['grok/cancel.jsonl']);
+      final s = await r.driver('grok', 'grok').start(r.spec());
+      final seen = _Seen(s);
+      expect(r.spawns.single.args, ['--permission-mode', 'default', '--no-auto-update', 'agent', 'stdio']);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.running);
+      await s.interrupt();
+      await seen.untilStatus(ExecutionStatus.paused);
+      r.expectPlayed();
+      await s.close();
+    });
+
+    test(
+      'prompt_complete ends a turn whose reply hangs; a late reply, wakes and other prompts change nothing',
+      () async {
+        final r = rig(['grok/turns.jsonl']);
+        final s = await r.driver('grok', 'grok').start(r.spec());
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.finished);
+        await s.send('again');
+        await seen.until(() => seen.all.any((e) => usageLimitOf(e) != null));
+        await seen.untilStatus(ExecutionStatus.error);
+        await s.send('once more');
+        await seen.until(() => seen.all.where((e) => usageLimitOf(e) != null).length == 2);
+        await r.channels.single.finished;
+        r.expectPlayed();
+        expect(seen.statuses, [
+          ExecutionStatus.running,
+          ExecutionStatus.finished,
+          ExecutionStatus.running,
+          ExecutionStatus.error,
+          ExecutionStatus.running,
+          ExecutionStatus.error,
+        ]);
+        final limits = [for (final e in seen.all) ?usageLimitOf(e)];
+        expect(limits.map((l) => l.resetsAt), [null, null]);
+        expect(limits.last.message, 'Grok Build: Usage limit reached');
+        // The background task: one row, closed as running there, then as failed with its output.
+        final row = seen.calls.single;
+        expect((row.id, row.actionKind, row.summary), ('xbg-t1', 'TerminalAction', 'In the background: npm run dev'));
+        expect(
+          [for (final r in seen.results) (r.actionId, r.observation['is_error'] == true, r.text)],
+          [('xbg-t1', false, 'Still running in the background.'), ('xbg-t1', true, 'crashed')],
+        );
+        // No MCP environment, task environment or unknown payload got anywhere.
+        await s.close();
+        final journal = File('${r.dataDir}/acp-sessions/${s.id}/events.jsonl').readAsStringSync();
+        final shown = jsonEncode([for (final e in seen.all) e.raw]);
+        for (final secret in ['sk-secret-1', 'sk-secret-2', 'sk-secret-3']) {
+          expect(journal, isNot(contains(secret)));
+          expect(shown, isNot(contains(secret)));
+        }
+      },
+    );
+
+    test('its own questions are declined with a notice; a plan is shown and Grok told to wait', () async {
+      final r = rig(['grok/requests.jsonl']);
+      final s = await r.driver('grok', 'grok').start(r.spec());
+      final seen = _Seen(s);
+      await s.send('go');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      final c = r.channels.single;
+      expect(_replyTo(c, 'q1'), {'outcome': 'cancelled'});
+      expect((_replyTo(c, 'p1')! as Map)['outcome'], 'abandoned');
+      expect(seen.notices.single, contains('"Which database?"'));
+      expect(seen.messages.map((m) => m.text), contains('1. Add the route\n2. Test it'));
+      // Subagents: one reported at once, one held until subagent_finished.
+      final t = _transcript(seen.all);
+      final subs = t.items.whereType<SubagentItem>().toList();
+      expect(subs.map((i) => i.step.call.action['description']), ['Explore the server', 'Count files']);
+      expect(subs.map((i) => i.step.result?.text), ['Found 3 routes.', 'There are 12 files.']);
+      // The one in the background is closed as running there first, so no approval lists it.
+      final order = [for (final e in seen.results) e.actionId];
+      expect(order, ['tc-spawn-1', 'tc-spawn-2', 'tc-spawn-1']);
+      expect(seen.results.first.text, startsWith('Running in the background'));
+      await s.close();
+    });
+
+    test('not signed in at session/new: authenticate once with the cached sign-in, or the key when set', () async {
+      final r = rig(['grok/auth.jsonl', 'grok/auth_key.jsonl']);
+      await (await r.driver('grok', 'grok').start(r.spec())).close();
+      final keyed = r.driver('grok', 'grok', loginEnv: const {'XAI_API_KEY': 'xai-test'});
+      await (await keyed.start(r.spec())).close();
+      r.expectPlayed();
+    });
+
+    test("a sign-in method it doesn't offer as its own: the sign-in hint", () async {
+      final r = rig(['grok/auth_unoffered.jsonl']);
+      await expectLater(
+        r.driver('grok', 'grok').start(r.spec()),
+        throwsA(
+          isA<HarnessError>().having(
+            (e) => e.message,
+            'message',
+            "Grok Build isn't signed in. Run `grok login` in a terminal, then try again.",
+          ),
+        ),
+      );
+      r.expectPlayed();
+    });
+
+    group('background wakes', () {
+      /// A Grok that answers the handshake and holds every prompt's reply.
+      Future<(HarnessSession, _Live, _Seen)> started(_Rig r) async {
+        final live = _Live(
+          (m) => switch (m['method']) {
+            'initialize' => {'protocolVersion': 1, 'agentCapabilities': <String, Object?>{}},
+            'session/new' => {'sessionId': 'grok-1'},
+            'session/prompt' => null,
+            _ => <String, Object?>{},
+          },
+        );
+        final d = r.driver(
+          'grok',
+          'grok',
+          connect: ({
+            required String executable,
+            required List<String> args,
+            required String cwd,
+            required String sessionTag,
+            required String logPath,
+            required Map<String, String> env,
+          }) async => live,
+        );
+        final s = await d.start(r.spec(mode: AgentMode.fullAuto));
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.running);
+        // Our prompt ends by its turn_completed, with what it used; the reply never comes.
+        live.push({
+          'jsonrpc': '2.0',
+          'method': '_x.ai/session/update',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'turn_completed',
+              'prompt_id': live.promptIds.single,
+              'stop_reason': 'end_turn',
+              'usage': {'inputTokens': 100, 'outputTokens': 5, 'cachedReadTokens': 40, 'costUsdTicks': 2000000000},
+            },
+          },
+        });
+        await seen.untilStatus(ExecutionStatus.finished);
+        return (s, live, seen);
+      }
+
+      void ask(_Live live) => live.push({
+        'jsonrpc': '2.0',
+        'id': 'w1',
+        'method': 'session/request_permission',
+        'params': {
+          'sessionId': 'grok-1',
+          'toolCall': {
+            'toolCallId': 'wake-1',
+            'title': 'npm test',
+            'kind': 'execute',
+            'status': 'pending',
+            'rawInput': {'command': 'npm test'},
+          },
+          'options': [
+            {'optionId': 'allow', 'name': 'Allow', 'kind': 'allow_once'},
+            {'optionId': 'reject', 'name': 'Reject', 'kind': 'reject_once'},
+          ],
+        },
+      });
+
+      test('a wake that asks runs until its own turn ends; the next message then goes out', () async {
+        final r = rig(const []);
+        final (s, live, seen) = await started(r);
+        final usage = seen.all.whereType<UsageReport>().single;
+        expect((usage.input, usage.output, usage.cached, usage.costMicros), (100, 5, 40, 200000));
+        ask(live);
+        await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+        await s.respond(accept: true);
+        await seen.until(() => live.replyTo('w1') != null);
+        expect(seen.status, ExecutionStatus.running);
+        live.push({
+          'jsonrpc': '2.0',
+          'method': '_x.ai/session/update',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'turn_completed',
+              'prompt_id': 'task-completed-t1',
+              'usage': {'inputTokens': 7, 'outputTokens': 1},
+            },
+          },
+        });
+        await seen.untilStatus(ExecutionStatus.finished);
+        expect(seen.all.whereType<UsageReport>().length, 2);
+        await s.send('again');
+        await seen.until(() => live.promptIds.length == 2);
+        await s.close();
+      });
+
+      test('Stop frees a wake that waits for an answer', () async {
+        final r = rig(const []);
+        final (s, live, seen) = await started(r);
+        ask(live);
+        await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+        // What the controller's Stop does: refuse everything, then interrupt.
+        await s.respond(accept: false);
+        await s.interrupt();
+        expect(seen.status, ExecutionStatus.paused);
+        expect(live.replyTo('w1'), {
+          'outcome': {'outcome': 'cancelled'},
+        });
+        await s.close();
+      });
+
+      test("background rows never wait among the calls to approve; a kill or Grok's exit ends them", () async {
+        final r = rig(const []);
+        final (s, live, seen) = await started(r);
+        void task(String id, String call) => live.push({
+          'jsonrpc': '2.0',
+          'method': 'x.ai/task_backgrounded',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'task_backgrounded',
+              'task_id': id,
+              'tool_call_id': call,
+              'command': 'npm run $id',
+            },
+          },
+        });
+        task('dev', 'call-dev');
+        task('watch', 'call-watch');
+        ask(live);
+        await seen.untilStatus(ExecutionStatus.waitingForConfirmation);
+        expect(_transcript(seen.all).pending.map((c) => c.id), ['tc-wake-1']);
+        await s.respond(accept: true);
+        // Killed by its tool call id, with no task_completed.
+        live.push({
+          'jsonrpc': '2.0',
+          'method': 'session/update',
+          'params': {
+            'sessionId': 'grok-1',
+            'update': {
+              'sessionUpdate': 'tool_call',
+              'toolCallId': 'kill-1',
+              'title': 'kill call-dev (killed)',
+              'kind': 'execute',
+              'status': 'completed',
+              'rawInput': {'variant': 'KillTask', 'task_id': 'call-dev'},
+              'rawOutput': {'type': 'KillTask', 'outcome': 'killed'},
+            },
+          },
+        });
+        await seen.until(() => seen.results.any((e) => e.actionId == 'xbg-dev' && e.text == 'Stopped.'));
+        await live.close();
+        await seen.until(() => seen.results.any((e) => e.actionId == 'xbg-watch' && e.text.contains('exited')));
+        // A wake cut off by the exit doesn't stay running.
+        expect(seen.status, ExecutionStatus.paused);
+        await s.close();
+      });
+    });
+
+    test('two sessions that exit for want of a terminal at once: both start again under one', () async {
+      final r = rig(['grok/handshake.jsonl', 'grok/handshake.jsonl']);
+      final both = Completer<void>();
+      var piped = 0;
+      final d = r.driver(
+        'grok',
+        'grok',
+        connect:
+            ({
+              required String executable,
+              required List<String> args,
+              required String cwd,
+              required String sessionTag,
+              required String logPath,
+              required Map<String, String> env,
+            }) async {
+              if (++piped == 2) both.complete();
+              await both.future;
+              return _NoTty();
+            },
+        ttyConnect: r.replay,
+      );
+      final sessions = await Future.wait([d.start(r.spec()), d.start(r.spec())]);
+      for (final s in sessions) {
+        await s.close();
+      }
+      r.expectPlayed();
+      expect((piped, r.channels.length), (2, 2));
+    });
+
+    test('exited for want of a terminal: started again under one, and so is the next session', () async {
+      final r = rig(['grok/handshake.jsonl', 'grok/handshake.jsonl']);
+      var piped = 0;
+      final d = r.driver(
+        'grok',
+        'grok',
+        connect:
+            ({
+              required String executable,
+              required List<String> args,
+              required String cwd,
+              required String sessionTag,
+              required String logPath,
+              required Map<String, String> env,
+            }) async {
+              piped++;
+              return _NoTty();
+            },
+        ttyConnect: r.replay,
+      );
+      await (await d.start(r.spec())).close();
+      await (await d.start(r.spec())).close();
+      r.expectPlayed();
+      expect((piped, r.channels.length), (1, 2));
+    });
+
+    test('another agent with the same exit: an error, never a terminal', () async {
+      final r = rig(const []);
+      var ttys = 0;
+      final d = r.driver(
+        'acp:gemini',
+        'gemini',
+        connect: ({
+          required String executable,
+          required List<String> args,
+          required String cwd,
+          required String sessionTag,
+          required String logPath,
+          required Map<String, String> env,
+        }) async => _NoTty(),
+        ttyConnect:
+            ({
+              required String executable,
+              required List<String> args,
+              required String cwd,
+              required String sessionTag,
+              required String logPath,
+              required Map<String, String> env,
+            }) async {
+              ttys++;
+              return _NoTty();
+            },
+      );
+      await expectLater(d.start(r.spec()), throwsA(isA<HarnessError>()));
+      expect(ttys, 0);
+    });
+  });
+}
+
+/// An agent that exits at once, saying it couldn't open a terminal.
+/// A Grok the test drives: [answer] gives the result of each request we
+/// send (null holds it), and [push] sends what Grok says on its own.
+final class _Live implements LineChannel {
+  _Live(this.answer);
+
+  final Map<String, Object?>? Function(Map<String, Object?> request) answer;
+  final _lines = StreamController<String>();
+  final sent = <Map<String, Object?>>[];
+
+  /// The `_meta.promptId` of each prompt we sent.
+  List<Object?> get promptIds => [
+    for (final m in sent)
+      if (m['method'] == 'session/prompt') ((m['params']! as Map)['_meta']! as Map)['promptId'],
+  ];
+
+  /// Our reply to Grok's request [id], or null.
+  Object? replyTo(String id) => [
+    for (final m in sent)
+      if (m['id'] == id && m['method'] == null) m['result'],
+  ].firstOrNull;
+
+  void push(Map<String, Object?> msg) => _lines.add(jsonEncode(msg));
+
+  @override
+  Stream<String> get lines => _lines.stream;
+
+  @override
+  void send(String line) {
+    final m = jsonDecode(line) as Map<String, Object?>;
+    sent.add(m);
+    if (m['method'] == null || m['id'] == null) return;
+    if (answer(m) case final result?) push({'jsonrpc': '2.0', 'id': m['id'], 'result': result});
+  }
+
+  @override
+  String get lastError => '';
+
+  @override
+  Future<void> close() async {
+    if (!_lines.isClosed) await _lines.close();
+  }
+}
+
+final class _NoTty implements LineChannel {
+  @override
+  Stream<String> get lines => const Stream.empty();
+
+  @override
+  void send(String line) {}
+
+  @override
+  String get lastError => 'Error: Device not configured (os error 6)';
+
+  @override
+  Future<void> close() async {}
 }

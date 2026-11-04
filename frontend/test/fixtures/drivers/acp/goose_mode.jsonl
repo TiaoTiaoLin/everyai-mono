@@ -1,0 +1,9 @@
+// Derived from aaif-goose/goose crates/goose/src/acp (server.rs, response_builder.rs; Apache-2.0), not recorded: unverified. goose starts in its auto mode, which never asks.
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"}}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{},"mcpCapabilities":{"http":true}},"authMethods":[]}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/new","id":2,"params":{"cwd":"{{cwd}}","mcpServers":[]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"goose-1","modes":{"availableModes":[{"id":"auto","name":"Auto"},{"id":"approve","name":"Approve"},{"id":"smart_approve","name":"Smart approve"},{"id":"chat","name":"Chat"}],"currentModeId":"auto"}}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/set_mode","id":3,"params":{"sessionId":"goose-1","modeId":"approve"}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":3,"result":{}}}
+{"dir":"out","msg":{"jsonrpc":"2.0","method":"session/prompt","id":4,"params":{"sessionId":"goose-1","prompt":[{"type":"text","text":"go"}]}}}
+{"dir":"in","msg":{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}}

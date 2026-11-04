@@ -10,6 +10,18 @@ Future<String?> whichCommand(String command) async => null;
 
 Future<bool?> geminiSignedIn({String? home, Map<String, String>? env}) async => null;
 
+Future<Map<String, String>> loginEnv() async => const {};
+
 Future<bool?> openCodeSignedIn(String executable) async => null;
 
-Future<String?> geminiWorkspaceProblem(String cwd) async => null;
+Future<bool?> kiroSignedIn(String executable) async => null;
+
+Future<bool?> cursorSignedIn() async => null;
+
+Future<bool?> grokSignedIn(String executable) async => null;
+
+Future<String?> geminiWorkspaceProblem(String cwd, {required String folder, required String label}) async => null;
+
+Future<String?> kiroWorkspaceProblem(String cwd) async => null;
+
+Future<String?> cursorWorkspaceProblem(String cwd) async => null;

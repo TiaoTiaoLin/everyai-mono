@@ -13,6 +13,15 @@ Future<DriverProcess> spawnDriver({
   Map<String, String> env = const {},
 }) async => throw const HarnessError('Outside agents run on the desktop app.');
 
+Future<DriverProcess> spawnDriverTty({
+  required String executable,
+  required List<String> args,
+  required String cwd,
+  required String sessionTag,
+  required String logPath,
+  Map<String, String> env = const {},
+}) async => throw const HarnessError('Outside agents run on the desktop app.');
+
 Future<DriverStatus> detectCli(
   String command, {
   List<String> versionArgs = const ['--version'],
@@ -20,3 +29,7 @@ Future<DriverStatus> detectCli(
 }) async => const DriverStatus(problem: 'Needs the desktop app.');
 
 Future<void> closeAllDriverProcesses() async {}
+
+Future<void> reloadShellEnv() async {}
+
+Future<void> loadShellEnv() async {}

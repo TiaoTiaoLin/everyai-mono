@@ -8,6 +8,7 @@ import '../../domain/agent_mode.dart';
 import '../../domain/permissions.dart' show typedReason;
 import '../../harness/events.dart';
 import '../../harness/harness.dart';
+import '../../host/host.dart' show HostCall, HostEnd, HostResult;
 import '../briefing/briefing_types.dart';
 import '../briefing/recipes.dart' show acpMcpServer;
 import '../driver.dart';
@@ -17,8 +18,10 @@ import '../event_journal.dart';
 import '../json_rpc.dart';
 import '../usage_limit.dart';
 import 'acp_agents.dart';
+import 'acp_cursor.dart';
 import 'acp_files.dart';
 import 'acp_mapping.dart';
+import 'acp_xai.dart';
 
 /// Starts an ACP agent's process (`spawnDriver`, or a recorded one in tests).
 typedef AcpConnect = Future<LineChannel> Function({
@@ -38,6 +41,8 @@ final class AcpLauncher {
     required this.command,
     required this.resolve,
     required this.connect,
+    required this.switchToTty,
+    required this.loginEnv,
     required this.initTimeout,
     required this.replayQuiet,
     required this.offered,
@@ -51,6 +56,14 @@ final class AcpLauncher {
   /// The executable's absolute path; throws [HarnessError] when it is missing.
   final Future<String> Function() resolve;
   final AcpConnect connect;
+
+  /// Starts later agents under a terminal of their own; false when the
+  /// channel given already ran under one (`AcpProfile.ttyFallback`).
+  final bool Function(LineChannel channel) switchToTty;
+
+  /// The login shell's environment, read only to pick an `authenticate`
+  /// method.
+  final Future<Map<String, String>> Function() loginEnv;
   final Duration initTimeout;
 
   /// How long a late `session/load` replay must stay quiet before the first
@@ -92,7 +105,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   @override
   final String id;
 
-  /// `<dataDir>/acp-sessions/<id>`: `meta.json`, `events.jsonl`, `stderr.log`.
+  /// `<dataDir>/acp-sessions/<id>`: `meta.json`, `events.jsonl`, `stderr.log`
+  /// (and `tty.log` under a terminal).
   final String dir;
   final String cwd;
   final String sessionTag;
@@ -165,6 +179,46 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   /// Messages sent with `run: false`, for the next prompt.
   final _held = <({String text, List<String> images})>[];
+
+  /// Cursor's question and plan requests waiting on their card, by its
+  /// tool call id: completing one gives the card up.
+  final _extWaits = <String, Completer<HostEnd>>{};
+
+  /// Tool call ids an extension request shows (cards, subagents): Cursor's
+  /// ordinary `tool_call` for the same id adds no second row.
+  final _extOwned = <String>{};
+
+  /// Cursor's to-do list, by id in order (`cursor/update_todos`).
+  var _todos = <String, Map<String, Object?>>{};
+
+  /// The prompt id sent with the running turn (Grok's `_meta.promptId`) and
+  /// what completes it when Grok says the prompt is complete before (or
+  /// instead of) replying.
+  String? _xaiPrompt;
+  Completer<Object?>? _xaiDone;
+
+  /// A prompt of ours is in flight (for every agent; [_xaiDone] is made for
+  /// each prompt).
+  bool get _prompting => _xaiDone != null;
+
+  /// Grok woke up on its own (a background task or subagent finished) and
+  /// works outside any prompt of ours: no prompt reply will end it, its
+  /// `task-completed-*` turn does.
+  var _waking = false;
+
+  /// The prompt id of Grok's last turn whose reply came without usage: a
+  /// later `turn_completed` for it still reports what it used.
+  String? _xaiUnreported;
+
+  /// Grok's subagents that run on in the background, by child session id:
+  /// their row waits for `subagent_finished`.
+  final _xaiChildren = <String, ActionCall>{};
+
+  /// Grok's background tasks, by task id: their rows, and which finished;
+  /// a task's tool call id leads to its task id (a kill can name either).
+  final _xaiTasks = <String, ActionCall>{};
+  final _xaiTasksDone = <String>{};
+  final _xaiTaskAlias = <String, String>{};
 
   ExecutionStatus get status => _status;
   String get _label => _launcher.info.label;
@@ -245,6 +299,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
             'terminal': false,
           },
           'clientInfo': {'name': 'everyai', 'title': 'EveryAI', 'version': '0.1.0'},
+          '_meta': ?_profile.initializeMeta,
         }, _launcher.initTimeout),
       );
       if (init['protocolVersion'] != 1) {
@@ -272,7 +327,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       if (reply == null) {
         _replaying = false;
         _cost = null;
-        reply = _map(await peer.request('session/new', {'cwd': cwd, 'mcpServers': mcp}));
+        reply = _map(await _newSession(peer, mcp));
         _acpSessionId = reply['sessionId'] as String?;
         if (_acpSessionId == null) throw HarnessError("$_label didn't start a session.");
         _firstPrompt = delivery?.firstPrompt;
@@ -317,10 +372,36 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     } on JsonRpcError catch (e) {
       final closed = peer.isClosed;
       await peer.close();
+      // Exited for want of a terminal (Grok started from the Dock): once more under one.
+      if (closed &&
+          _profile.ttyFallback &&
+          isNoTtyExit('${e.message}\n${channel.lastError}') &&
+          _launcher.switchToTty(channel)) {
+        return _connect(fresh: fresh);
+      }
       throw HarnessError(_errorText(e, closed: closed));
     } on Object {
       await peer.close();
       rethrow;
+    }
+  }
+
+  /// `session/new`; when it says the agent isn't signed in, the profile's
+  /// `authenticate` method once (if the agent offers it as its own), then
+  /// again.
+  Future<Object?> _newSession(JsonRpcPeer peer, List<Map<String, Object?>> mcp) async {
+    final params = {'cwd': cwd, 'mcpServers': mcp};
+    try {
+      return await peer.request('session/new', params);
+    } on JsonRpcError catch (e) {
+      if (e.code != -32000 || peer.isClosed) rethrow;
+      final want = await _profile.authMethod(_launcher.loginEnv);
+      final offered = _authMethods.whereType<Map<String, Object?>>().any(
+        (m) => m['id'] == want && (m['type'] == null || m['type'] == 'agent'),
+      );
+      if (want == null || !offered) rethrow;
+      await peer.request('authenticate', {'methodId': want});
+      return peer.request('session/new', params);
     }
   }
 
@@ -333,6 +414,37 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _cancelledResult(a.callId);
     }
     _asking.clear();
+    _endExtWaits(HostEnd.clientGone);
+    // Grok's background work went with it.
+    for (final id in _xaiTasks.keys.toList()) {
+      _xaiTaskEnded(id, text: 'Stopped when $_label exited.', failed: true);
+    }
+    for (final row in _xaiChildren.values) {
+      _emit(
+        resultEvent(
+          id: '${_resultId(row)}-done',
+          actionId: row.id,
+          toolName: row.toolName,
+          text: 'Stopped when $_label exited.',
+          isError: true,
+        ),
+      );
+    }
+    _xaiChildren.clear();
+    if (_waking) {
+      _waking = false;
+      _setStatus(ExecutionStatus.paused);
+    }
+  }
+
+  /// Gives up every card an extension request waits on ([why]); each request
+  /// then answers `cancelled` and its row closes.
+  void _endExtWaits(HostEnd why) {
+    for (final (callId, ended) in [for (final e in _extWaits.entries) (e.key, e.value)]) {
+      if (!ended.isCompleted) ended.complete(why);
+      _cancelledResult(callId);
+    }
+    _extWaits.clear();
   }
 
   Future<Delivery?> _delivery() async {
@@ -406,6 +518,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   /// Keeps the agent in its asking mode (or read-only for Plan), so the app's
   /// rules decide every call; never a mode that skips asking.
   Future<void> _pinMode() async {
+    await _pinConfig();
     final targets = [if (_mode == AgentMode.plan) ?_profile.planMode, ?_profile.askMode];
     for (final target in targets) {
       try {
@@ -423,6 +536,31 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       }
     }
   }
+
+  /// Sets the profile's pinned config options ([AcpProfile.configPins])
+  /// where the agent offers them. A refusal is an error: the agent would act
+  /// without asking.
+  Future<void> _pinConfig() async {
+    for (final MapEntry(key: id, :value) in _profile.configPins.entries) {
+      final o = acpOption(_config, null, id: id);
+      if (o == null || o.current == value || !o.choices.any((c) => c.value == value)) continue;
+      _absorb(
+        _map(
+          await _peer!.request('session/set_config_option', {
+            'sessionId': _acpSessionId,
+            'configId': id,
+            'value': value,
+          }),
+        ),
+      );
+    }
+  }
+
+  /// Whether a pinned config option has moved off its value.
+  bool get _pinsMoved => _profile.configPins.entries.any((e) {
+    final o = acpOption(_config, null, id: e.key);
+    return o != null && o.current != e.value && o.choices.any((c) => c.value == e.value);
+  });
 
   /// Moves the agent to [model] and [effort] where it offers them. [strict]:
   /// one it can't take is an error (a switch the user asked for).
@@ -547,30 +685,71 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     _cancelled = false;
     _parked = false;
     _paused = false;
+    _waking = false;
     _setStatus(ExecutionStatus.running);
+    // Grok can leave the reply hanging after it says the prompt is complete;
+    // whichever comes first ends the turn.
+    final promptId = _profile.agent == AcpAgent.grok ? _next('p') : null;
+    final done = _xaiDone = Completer<Object?>();
+    _xaiPrompt = promptId;
     try {
-      final reply = _map(await peer.request('session/prompt', {'sessionId': _acpSessionId, 'prompt': blocks}));
+      final reply = _map(
+        await Future.any([
+          peer.request('session/prompt', {
+            'sessionId': _acpSessionId,
+            'prompt': blocks,
+            if (promptId != null) '_meta': {'promptId': promptId, 'requestId': promptId},
+          }),
+          done.future,
+        ]),
+      );
       _afterLoad = false;
       _flush();
-      if (acpTurnUsage(reply['usage'], id: _next('usage')) case final u?) _emit(u);
+      final usage = promptId != null
+          ? xaiTurnUsage(reply['usage'], id: _next('usage'))
+          : acpTurnUsage(reply['usage'], id: _next('usage'));
+      if (usage != null) {
+        _emit(usage);
+      } else if (promptId != null) {
+        _xaiUnreported = promptId;
+      }
       final stop = reply['stopReason'];
       final note = switch (stop) {
         'max_tokens' => '$_label ran out of room for its reply.',
         'max_turn_requests' => '$_label stopped after its limit of steps in one turn.',
         'refusal' => '$_label refused to carry on with this request.',
+        'error' => switch (reply['agentResult']) {
+          final String why => '$_label ended the turn with an error: $why',
+          _ => '$_label ended the turn with an error.',
+        },
         _ => null,
       };
+      if (stop == 'rate_limit') {
+        _emit(usageLimitEvent(_next('n'), '$_label: its usage limit was reached. Try again later or switch harness.'));
+        _setStatus(ExecutionStatus.error);
+        return;
+      }
       if (note != null) _emit(acpNotice(_next('n'), note));
-      _setStatus(stop == 'cancelled' ? ExecutionStatus.paused : ExecutionStatus.finished);
+      _setStatus(switch (stop) {
+        'cancelled' => ExecutionStatus.paused,
+        'error' => ExecutionStatus.error,
+        _ => ExecutionStatus.finished,
+      });
     } on JsonRpcError catch (e) {
       _flush();
-      final limit = peer.isClosed ? null : acpUsageLimit(e, now: DateTime.now());
+      final grokLimit = _profile.agent == AcpAgent.grok && xaiUsageLimit(e);
+      final limit = peer.isClosed ? null : (grokLimit ? (resetsAt: null) : acpUsageLimit(e, now: DateTime.now()));
       _emit(
         limit == null
             ? acpNotice(_next('n'), _errorText(e, closed: peer.isClosed))
             : usageLimitEvent(_next('n'), '$_label: ${e.message}', resetsAt: limit.resetsAt),
       );
       _setStatus(ExecutionStatus.error);
+    } finally {
+      if (identical(_xaiDone, done)) {
+        _xaiDone = null;
+        _xaiPrompt = null;
+      }
     }
   }
 
@@ -599,7 +778,12 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final turn = _turn;
     if (_status != ExecutionStatus.running && _status != ExecutionStatus.waitingForConfirmation) return;
     _stopTurn();
-    if (turn == null) return;
+    // No prompt of ours runs (Grok woke up on its own): no reply will end it.
+    if (turn == null || !_prompting) {
+      _waking = false;
+      _setStatus(ExecutionStatus.paused);
+      return;
+    }
     // The agent replies `cancelled`; one that doesn't is ended.
     await turn.timeout(
       const Duration(seconds: 15),
@@ -619,6 +803,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _cancelledResult(entry.value.callId);
     }
     _asking.clear();
+    _endExtWaits(HostEnd.cancelled);
     _flush();
     for (final callId in _shown.keys.toList()) {
       if (!_done.contains(callId) && callId != running) _cancelledResult(callId);
@@ -628,7 +813,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   void _cancel() {
     if (_cancelled) return;
     _cancelled = true;
-    _peer?.notify('session/cancel', {'sessionId': _acpSessionId});
+    _peer?.notify('session/cancel', {'sessionId': _acpSessionId, '_meta': ?_profile.cancelMeta});
   }
 
   /// ACP has no pause: the turn is cancelled, and [resume] asks the agent to
@@ -705,7 +890,11 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         ),
       );
     }
-    if (_asking.isEmpty && _status == ExecutionStatus.waitingForConfirmation && !all) {
+    if (all && !_prompting) {
+      // A wake: no prompt reply comes to end it.
+      _waking = false;
+      _setStatus(ExecutionStatus.paused);
+    } else if (_asking.isEmpty && _status == ExecutionStatus.waitingForConfirmation && !all) {
       _setStatus(ExecutionStatus.running);
     }
   }
@@ -721,6 +910,10 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   };
 
   Future<Object?> _onRequest(String method, Object? params) async {
+    // ACP keeps `_` names for extensions; Cursor's doc writes them without.
+    if (xaiMethod(method) case final x?) return _xaiRequest(x, _map(xaiRedacted(params)));
+    final name = method.startsWith('_') ? method.substring(1) : method;
+    if (name.startsWith('cursor/')) return _cursorRequest(name, _map(params));
     if (method != 'session/request_permission') {
       throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');
     }
@@ -729,6 +922,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final callId = tc['toolCallId'] as String? ?? _next('perm');
     // Asked about a call that already finished or was cancelled: nobody waits for it.
     if (_done.contains(callId) || _cancelled || _closed) return _cancelledOutcome;
+    _wake();
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, tc);
     _asked.add(callId);
     _afterLoad = false;
@@ -740,9 +934,267 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     return reply.future;
   }
 
+  // ------------------------------------------------------ Cursor extensions
+
+  /// A `cursor/*` request. Questions and plans wait on their card; an
+  /// unknown one is answered `cancelled`, never with an error (Cursor can
+  /// hang the turn on a failed `cursor/create_plan`).
+  Future<Object?> _cursorRequest(String method, Map<String, Object?> p) async {
+    switch (method) {
+      case 'cursor/ask_question':
+        return _cursorCard(p, question: true);
+      case 'cursor/create_plan':
+        return _cursorCard(p, question: false);
+      case 'cursor/update_todos' || 'cursor/task':
+        _cursorUpdate(method, p);
+        return {
+          'outcome': {'outcome': method == 'cursor/task' ? 'completed' : 'accepted'},
+        };
+      default:
+        return cursorCancelled;
+    }
+  }
+
+  /// Shows a question or plan request as the card of the app's
+  /// `ask_user_question` / `present_plan` host tool (the row is named like
+  /// the agent's call to our MCP server, so the controller answers it the
+  /// same way) and replies with what the user decided.
+  Future<Object?> _cursorCard(Map<String, Object?> p, {required bool question}) async {
+    if (_closed || _cancelled) return cursorCancelled;
+    final host = briefing?.host;
+    if (host == null) {
+      return question
+          ? cursorSkipped('Nobody can answer questions in this session; decide yourself and say what you assumed.')
+          : cursorCancelled;
+    }
+    if (question) {
+      if (cursorQuestionProblem(p) case final why?) return cursorSkipped(why);
+    }
+    final callId = p['toolCallId'] as String? ?? _next('ext');
+    if (_extOwned.contains(callId)) return cursorCancelled;
+    _extOwned.add(callId);
+    final tool = question ? askUserQuestionTool : presentPlanTool;
+    final args = question ? cursorQuestionArgs(p) : cursorPlanArgs(p);
+    _flush();
+    final row = actionEvent(
+      id: _extRowId(callId, 'Shown as a card.'),
+      toolName: '${everyaiServerName}__$tool',
+      kind: 'MCPToolAction',
+      toolCallId: callId,
+      args: args,
+    );
+    _shown[callId] = row;
+    _emit(row);
+    final ended = _extWaits[callId] = Completer<HostEnd>();
+    HostResult result;
+    try {
+      result = await Future.any([
+        host.call(HostCall(id: row.id, sessionId: id, name: tool, args: args, ended: ended.future)),
+        ended.future.then((_) => (text: 'Cancelled.', isError: true)),
+      ]);
+    } on Object catch (e) {
+      result = (text: 'Error: $e', isError: true);
+    }
+    _extWaits.remove(callId);
+    if (ended.isCompleted || _closed) {
+      _cancelledResult(callId);
+      return cursorCancelled;
+    }
+    if (_done.add(callId)) {
+      _emit(
+        resultEvent(
+          id: _resultId(row),
+          actionId: row.id,
+          toolName: row.toolName,
+          text: result.text,
+          isError: result.isError,
+        ),
+      );
+    }
+    return question ? cursorAnswerReply(p, result) : cursorPlanReply(result);
+  }
+
+  /// Cursor's to-do list and subagent updates. While a conversation loads
+  /// nothing is shown (the journal has it), but the replayed to-dos are kept,
+  /// so a later merge changes the whole list.
+  void _cursorUpdate(String method, Map<String, Object?> p) {
+    switch (method) {
+      case 'cursor/update_todos':
+        _todos = cursorTodos(_todos, p);
+        if (_replaying) return;
+        _flush();
+        final (call, result) = cursorTodoEvents(_todos, id: _next('todos'));
+        _emit(call);
+        _emit(result);
+      case 'cursor/task':
+        if (_replaying) return;
+        final callId = p['toolCallId'] as String? ?? _next('task');
+        if (_done.contains(callId)) return;
+        _extOwned.add(callId);
+        var row = _shown[callId];
+        if (row == null || row.actionKind != 'TaskAction') {
+          _flush();
+          row = _shown[callId] = cursorTaskCall(p, id: _extRowId(callId, 'Shown as a subagent.'), toolCallId: callId);
+          _emit(row);
+        }
+        if (p['durationMs'] != null && _done.add(callId)) {
+          _emit(
+            resultEvent(
+              id: _resultId(row),
+              actionId: row.id,
+              toolName: row.toolName,
+              text: cursorTaskDone(p['durationMs']),
+            ),
+          );
+        }
+    }
+  }
+
+  /// The id for an extension's own row of [callId]. When Cursor's ordinary
+  /// `tool_call` showed a row for it first, that row is closed with
+  /// [closing] and the new one gets an id of its own.
+  String _extRowId(String callId, String closing) {
+    final old = _shown[callId];
+    if (old == null) return 'tc-$callId';
+    if (_done.add(callId)) {
+      _emit(resultEvent(id: _resultId(old), actionId: old.id, toolName: old.toolName, text: closing));
+    }
+    _done.remove(callId);
+    _calls.remove(callId);
+    return 'tc-$callId-ext';
+  }
+
+  /// The result id for [row] (`tc-…` gives `tr-…`).
+  static String _resultId(ActionCall row) => row.id.replaceFirst('tc-', 'tr-');
+
+  // -------------------------------------------------------- Grok extensions
+
+  /// A Grok `x.ai/*` request, its payload already redacted. Questions and
+  /// plans have no way back from the app's cards here, so a question is
+  /// declined (the app's own question tool asks instead) and a plan is shown
+  /// as a message, with Grok told to wait for the user's reply.
+  Future<Object?> _xaiRequest(String method, Map<String, Object?> p) async {
+    switch (method) {
+      case 'ask_user_question':
+        final asked = xaiQuestionTexts(p);
+        _emit(
+          acpNotice(
+            _next('n'),
+            "$_label tried to ask ${asked.isEmpty ? 'something' : '"${asked.join('", "')}"'} with its own question "
+            "tool, which the app can't show, so it was declined. Reply in chat if it needs an answer.",
+          ),
+        );
+        return xaiQuestionReply;
+      case 'exit_plan_mode':
+        _flush();
+        _emit(agentMessageEvent(_next('m'), xaiPlanText(p) ?? 'No plan was written yet.'));
+        return xaiPlanReply;
+      default:
+        throw const JsonRpcError(JsonRpcError.methodNotFound, 'Not supported by this client');
+    }
+  }
+
+  /// A Grok `x.ai/*` notification, its payload already redacted (MCP
+  /// servers' environment can hold keys). Unknown ones are dropped, so
+  /// nothing of them reaches the journal.
+  void _onXai(String method, Map<String, Object?> p) {
+    if (p['sessionId'] case final String s when _acpSessionId != null && s != _acpSessionId) return;
+    switch (method) {
+      case 'task_backgrounded' || 'task_completed':
+        if (!_replaying) _xaiTask(p, completed: method == 'task_completed');
+      case 'session/prompt_complete' || 'session_notification' || 'session/update':
+        if (xaiPromptDone(method, p) case final d?) _xaiTurnDone(d);
+        if (xaiSubagentDone(p) case final d? when !_replaying) _xaiSubagentFinished(d);
+    }
+  }
+
+  /// A Grok turn ended: our prompt (its reply may never come), or one of its
+  /// own wakes, which only this ends. What the turn used is reported when
+  /// the prompt reply didn't carry it.
+  void _xaiTurnDone(XaiPromptDone d) {
+    final done = _xaiDone;
+    if (!d.wake && done != null && !done.isCompleted && (d.promptId == null || d.promptId == _xaiPrompt)) {
+      done.complete({'stopReason': d.stopReason ?? 'end_turn', 'agentResult': ?d.agentResult, 'usage': ?d.usage});
+      return;
+    }
+    if (d.wake || (d.promptId != null && d.promptId == _xaiUnreported)) {
+      if (!d.wake) _xaiUnreported = null;
+      final usage = xaiTurnUsage(d.usage, id: _next('usage'));
+      if (usage != null && !_replaying) _emit(usage);
+    }
+    if (!d.wake || !_waking || _prompting || _asking.isNotEmpty) return;
+    _waking = false;
+    _flush();
+    _setStatus(d.stopReason == 'cancelled' ? ExecutionStatus.paused : ExecutionStatus.finished);
+  }
+
+  /// Grok works with no prompt of ours in flight: one of its background
+  /// wakes, which runs until its own turn ends ([_xaiTurnDone]).
+  void _wake() {
+    if (_profile.agent != AcpAgent.grok || _prompting || _replaying || _closed || _cancelled) return;
+    _waking = true;
+    if (_status != ExecutionStatus.waitingForConfirmation) _setStatus(ExecutionStatus.running);
+  }
+
+  /// A background task's row. It is closed at once ("still running"), so it
+  /// never waits among the calls to approve, and its end replaces that.
+  void _xaiTask(Map<String, Object?> p, {required bool completed}) {
+    final t = xaiTask(p, completed: completed);
+    if (t == null) return;
+    if (t.toolCallId case final c? when c != t.id) _xaiTaskAlias[c] = t.id;
+    if (_xaiTasksDone.contains(t.id)) return;
+    if (!_xaiTasks.containsKey(t.id)) {
+      _flush();
+      final row = _xaiTasks[t.id] = xaiTaskCall(t, id: 'xbg-${t.id}');
+      _emit(row);
+      _emit(
+        resultEvent(
+          id: 'xbr-${t.id}-bg',
+          actionId: row.id,
+          toolName: row.toolName,
+          text: 'Still running in the background.',
+        ),
+      );
+    }
+    if (completed) _xaiTaskEnded(t.id, text: xaiTaskResultText(t), failed: t.status == 'failed');
+  }
+
+  /// Background task [id] (its task or tool call id) ended: its row gets
+  /// [text].
+  void _xaiTaskEnded(String id, {required String text, bool failed = false}) {
+    final key = _xaiTaskAlias[id] ?? id;
+    final row = _xaiTasks[key];
+    if (row == null || !_xaiTasksDone.add(key)) return;
+    _emit(resultEvent(id: 'xbr-$key', actionId: row.id, toolName: row.toolName, text: text, isError: failed));
+  }
+
+  /// A subagent that ran in the background finished: its row gets the report.
+  void _xaiSubagentFinished(XaiSubagentDone d) {
+    final row = _xaiChildren.remove(d.child);
+    if (row == null) return;
+    final text =
+        d.result ??
+        (d.status == 'completed' ? 'Done.' : 'The subagent ${d.status == 'failed' ? 'failed' : 'was cancelled'}.');
+    _emit(
+      resultEvent(
+        id: '${_resultId(row)}-done',
+        actionId: row.id,
+        toolName: row.toolName,
+        text: text,
+        isError: d.status != 'completed',
+      ),
+    );
+  }
+
   // ----------------------------------------------------------------- updates
 
   void _onNotify(String method, Object? params) {
+    if (xaiMethod(method) case final x?) return _onXai(x, _map(xaiRedacted(params)));
+    final name = method.startsWith('_') ? method.substring(1) : method;
+    if (name.startsWith('cursor/')) {
+      _cursorUpdate(name, _map(params));
+      return;
+    }
     if (method != 'session/update') return;
     final p = _map(params);
     if (p['sessionId'] case final String s when _acpSessionId != null && s != _acpSessionId) return;
@@ -753,6 +1205,19 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
         _modes?['currentModeId'] = u['currentModeId'];
       case 'config_option_update':
         if (u['configOptions'] case final List<Object?> c) _config = c;
+        // The agent turned a pinned option back (its own command): set it again.
+        if (_pinsMoved && _peer != null) {
+          unawaited(
+            _pinConfig().catchError((Object e) {
+              _emit(
+                acpNotice(
+                  _next('n'),
+                  "$_label changed a setting that keeps it asking, and it couldn't be set back: $e",
+                ),
+              );
+            }),
+          );
+        }
       case 'usage_update' when _replaying:
         _cost = acpUsageTotal(u) ?? _cost;
       case _ when _replaying:
@@ -784,6 +1249,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
   void _toolUpdate(Map<String, Object?> u) {
     final callId = u['toolCallId'];
     if (callId is! String || _done.contains(callId)) return;
+    if (_extOwned.contains(callId)) return _extToolUpdate(callId, u);
+    final known = _calls.containsKey(callId) || _shown.containsKey(callId);
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, u);
     final status = call['status'] as String? ?? 'pending';
     final finished = status == 'completed' || status == 'failed';
@@ -794,6 +1261,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       return;
     }
     _afterLoad = false;
+    // A new call with no prompt of ours running: Grok woke up on its own.
+    if (!known && !finished) _wake();
     // A pending call's input may still be streaming: shown once it runs or asks.
     if (status == 'pending') return;
     final shown = _shown[callId] ?? _show(callId, call);
@@ -801,8 +1270,68 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     if (finished) {
       _done.add(callId);
       _calls.remove(callId);
+      if (_profile.agent == AcpAgent.grok) {
+        for (final task in xaiKilled(call)) {
+          _xaiTaskEnded(task, text: 'Stopped.');
+        }
+      }
+      if (_xaiSpawned(call, shown)) return;
       _emit(acpResultEvent(call, id: 'tr-$callId', actionId: shown.id, toolName: shown.toolName));
     }
+  }
+
+  /// Closes a Grok subagent row: with its report, or, when the subagent runs
+  /// on in the background, as running there (so it never waits among the
+  /// calls to approve), its report replacing that at `subagent_finished`.
+  /// False for any other call.
+  bool _xaiSpawned(Map<String, Object?> call, ActionCall shown) {
+    if (_profile.agent != AcpAgent.grok || shown.actionKind != 'TaskAction') return false;
+    final output = xaiOutputText(call);
+    final child = xaiChildId(output);
+    if (call['status'] == 'completed' && xaiAsyncAck(output) && child != null) {
+      _xaiChildren[child] = shown;
+      _emit(
+        resultEvent(
+          id: 'tr-${call['toolCallId']}',
+          actionId: shown.id,
+          toolName: shown.toolName,
+          text: 'Running in the background; its report comes when it finishes.',
+        ),
+      );
+      return true;
+    }
+    final failed = call['status'] == 'failed';
+    final report = xaiReport(output);
+    _emit(
+      resultEvent(
+        id: 'tr-${call['toolCallId']}',
+        actionId: shown.id,
+        toolName: shown.toolName,
+        text: report.isNotEmpty ? report : (failed ? 'Failed.' : 'Done.'),
+        isError: failed,
+      ),
+    );
+    return true;
+  }
+
+  /// Cursor's ordinary update for a call an extension shows: it adds no row,
+  /// but a finished one closes a subagent row (a card waits for the user).
+  void _extToolUpdate(String callId, Map<String, Object?> u) {
+    final row = _shown[callId];
+    final status = u['status'];
+    if (row == null || _extWaits.containsKey(callId) || (status != 'completed' && status != 'failed')) return;
+    if (!_done.add(callId)) return;
+    _calls.remove(callId);
+    final failed = status == 'failed';
+    _emit(
+      resultEvent(
+        id: _resultId(row),
+        actionId: row.id,
+        toolName: row.toolName,
+        text: failed ? 'Failed.' : cursorTaskDone(null),
+        isError: failed,
+      ),
+    );
   }
 
   /// A call that changes things ran without a permission request: the
@@ -834,7 +1363,9 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   ActionCall _show(String callId, Map<String, Object?> call, {List<Object?> options = const []}) {
     _flush();
-    final e = acpActionEvent(call, id: 'tc-$callId', mcpServers: _mcpNames, options: options, cwd: cwd);
+    final e = _profile.agent == AcpAgent.grok && xaiIsSpawn(call)
+        ? xaiSpawnCall(call, id: 'tc-$callId')
+        : acpActionEvent(call, id: 'tc-$callId', mcpServers: _mcpNames, options: options, cwd: cwd);
     _shown[callId] = e;
     _emit(e);
     return e;
@@ -846,7 +1377,13 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final shown = _shown[callId];
     if (shown == null) return;
     _emit(
-      resultEvent(id: 'tr-$callId', actionId: shown.id, toolName: shown.toolName, text: 'Cancelled.', isError: true),
+      resultEvent(
+        id: _resultId(shown),
+        actionId: shown.id,
+        toolName: shown.toolName,
+        text: 'Cancelled.',
+        isError: true,
+      ),
     );
   }
 
@@ -889,6 +1426,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     }
     _asking.clear();
     await _peer?.close();
+    // After the agent is gone, so nothing is sent to it.
+    _endExtWaits(HostEnd.sessionClosed);
     await _journal.close();
     for (final c in _listeners.toList()) {
       unawaited(c.close());

@@ -168,25 +168,29 @@ ToolResult acpRejectedEvent({
 
 /// An ACP `plan` (its entries replace the last) as the app's task list, plus
 /// its result so it never waits for approval.
-(ActionCall, ToolResult) acpPlanEvents(List<Object?> entries, {required String id}) {
-  final tasks = [
-    for (final e in entries.whereType<Map<String, Object?>>())
-      {
-        'title': _str(e['content']) ?? '',
-        'status': switch (e['status']) {
-          'in_progress' => 'in_progress',
-          'completed' => 'done',
-          _ => 'todo',
-        },
-        'notes': '',
+(ActionCall, ToolResult) acpPlanEvents(List<Object?> entries, {required String id}) => taskListEvents([
+  for (final e in entries.whereType<Map<String, Object?>>())
+    {
+      'title': _str(e['content']) ?? '',
+      'status': switch (e['status']) {
+        'in_progress' => 'in_progress',
+        'completed' => 'done',
+        _ => 'todo',
       },
-  ];
-  const name = '${acpToolPrefix}plan';
-  return (
-    actionEvent(id: id, toolName: name, kind: 'TaskTrackerAction', args: {'command': 'plan', 'task_list': tasks}),
-    resultEvent(id: '$id-r', actionId: id, toolName: name, text: 'Plan updated.'),
-  );
-}
+      'notes': '',
+    },
+], id: id);
+
+/// A task list (`{title, status: todo|in_progress|done, notes}` each) as a
+/// task-tracker call named [toolName], plus its result.
+(ActionCall, ToolResult) taskListEvents(
+  List<Map<String, Object?>> tasks, {
+  required String id,
+  String toolName = '${acpToolPrefix}plan',
+}) => (
+  actionEvent(id: id, toolName: toolName, kind: 'TaskTrackerAction', args: {'command': 'plan', 'task_list': tasks}),
+  resultEvent(id: '$id-r', actionId: id, toolName: toolName, text: 'Plan updated.'),
+);
 
 /// The agent's reply, flushed from its chunks.
 ChatMessage agentMessageEvent(String id, String text, {String reasoning = ''}) => HarnessEvent.decode({
@@ -277,8 +281,9 @@ String acpChunkText(Object? content) => _blockText(content);
 /// What a turn used (`PromptResponse.usage`, OpenCode). `inputTokens` leaves
 /// cache reads and writes out when the totals add up that way (OpenCode's
 /// `TokenUsage.total`); otherwise it is taken as the whole prompt. Paid by the
-/// agent's own account ([UsageReport.onPlan]).
-UsageReport? acpTurnUsage(Object? usage, {required String id}) {
+/// agent's own account ([UsageReport.onPlan]); [costMicros] when the agent
+/// says what it cost.
+UsageReport? acpTurnUsage(Object? usage, {required String id, int? costMicros}) {
   if (usage is! Map<String, Object?>) return null;
   int n(String k) => (usage[k] as num?)?.toInt() ?? 0;
   final input = n('inputTokens');
@@ -292,6 +297,7 @@ UsageReport? acpTurnUsage(Object? usage, {required String id}) {
     input: apart ? input + read + write : input,
     output: apart ? output + thought : output,
     cached: read,
+    costMicros: costMicros,
     onPlan: true,
   );
 }
@@ -339,10 +345,15 @@ double? acpUsageTotal(Map<String, Object?> update) {
 typedef AcpChoice = ({String value, String name});
 
 /// A session config option (`configOptions`, schema: session config
-/// options) of [category] (`mode`, `model`, `thought_level`), or null.
-({String id, String? current, List<AcpChoice> choices})? acpOption(List<Object?>? options, String category) {
+/// options) of [category] (`mode`, `model`, `thought_level`), or with [id]
+/// when that is given, or null.
+({String id, String? current, List<AcpChoice> choices})? acpOption(
+  List<Object?>? options,
+  String? category, {
+  String? id,
+}) {
   for (final o in (options ?? const []).whereType<Map<String, Object?>>()) {
-    if (o['category'] != category || o['id'] is! String) continue;
+    if ((id != null ? o['id'] != id : o['category'] != category) || o['id'] is! String) continue;
     return (id: o['id']! as String, current: _str(o['currentValue']), choices: _choices(o['options']));
   }
   return null;
