@@ -1,11 +1,10 @@
-import '../../../skills/domain/skill_format.dart';
+import '../../../skills/domain/skill_format.dart' show SkillManifest;
 
-/// [body] with everything an external CLI would run on load turned into text: `!`cmd`` (the shared escape) and the
-/// ```! fenced form Claude Code also runs.
-String defuseInlineCommands(String body) {
-  final fences = body.replaceAllMapped(RegExp(r'^([ \t]*)(`{3,}|~{3,})!', multiLine: true), (m) => '${m[1]}${m[2]} !');
-  return escapeInlineCommands(fences);
-}
+/// [body] with everything an external CLI would run on load turned into text. Claude Code runs `!`cmd`` anywhere
+/// (inside fences too, after whitespace) and a ```! fence anywhere in a line, so this does not skip fenced regions
+/// the way the shared escape does: every `!`` gets a backslash and every fence marker followed by `!` a space.
+String defuseInlineCommands(String body) =>
+    body.replaceAll(RegExp(r'(?<!\\)!`'), r'\!`').replaceAllMapped(RegExp(r'(`{3,}|~{3,})!'), (m) => '${m[1]} !');
 
 /// A `SKILL.md` for the export, rebuilt from [m] rather than copied: `allowed-tools` is dropped (Claude pre-approves
 /// tools from it, which would step around our permissions) and inline commands are defused.

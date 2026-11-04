@@ -8,7 +8,7 @@ BriefingInput input({String token = 'tok-SECRET-123', String root = '/data/s1/br
   mcpUrl: Uri.parse('http://127.0.0.1:5123/mcp'),
   mcpToken: token,
   skillDir: '$root/skills',
-  sessionSkill: '---\nname: everyai-session\ndescription: "Hi."\n---\n\n# Session\n\nBody text.\n',
+  sessionText: '# Session\n\nBody text.\n',
 );
 
 /// Writes a skill folder under [parent] and returns it as the scanner would.

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../../skills/data/skill_store_io.dart' show digestOfBytes;
 import '../../../skills/domain/skill_catalog.dart';
 import '../../../skills/domain/skill_format.dart';
 import 'briefing_types.dart';
@@ -9,23 +10,22 @@ import 'skill_render.dart';
 
 const _pluginJson = {'name': everyaiServerName, 'description': 'Skills and rules for this EveryAI session.'};
 
-/// A file to have in the briefing: generated [bytes], or a copy of [source].
+/// A file to have in the briefing. Copies are read into memory once, so what was checked is what is written.
 class _Want {
-  _Want.bytes(List<int> this.bytes) : source = null;
-  _Want.copy(String this.source) : bytes = null;
-  final List<int>? bytes;
-  final String? source;
+  _Want(this.bytes, {this.exec = false});
+  final List<int> bytes;
+  final bool exec;
 }
 
-Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills, String sessionSkillMd) async {
+Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills, String sessionText) async {
   final root = '$sessionDir/briefing';
   final skillDir = '$root/skills';
   final skipped = <String>[];
   final names = <String>[];
   // Relative to root; '/'-separated.
   final want = <String, _Want>{
-    '.claude-plugin/plugin.json': _Want.bytes(utf8.encode('${jsonEncode(_pluginJson)}\n')),
-    'skills/$sessionSkillName/SKILL.md': _Want.bytes(utf8.encode(sessionSkillMd)),
+    '.claude-plugin/plugin.json': _Want(utf8.encode('${jsonEncode(_pluginJson)}\n')),
+    sessionFileName: _Want(utf8.encode(sessionText)),
   };
 
   for (final s in skills) {
@@ -34,20 +34,38 @@ Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills
       skipped.add('${s.dirName}: not a valid skill');
     } else if (m.metadata.containsKey('tool')) {
       skipped.add('${m.name}: needs a chat tool');
-    } else if (m.name == sessionSkillName || skillNameProblems(m.name).isNotEmpty || names.contains(m.name)) {
+    } else if (skillNameProblems(m.name).isNotEmpty || names.contains(m.name)) {
       skipped.add('${m.name}: name not usable here');
     } else {
+      final dir = await _resolve(s.dir);
+      final copies = <String, _Want>{};
+      var dropped = false;
+      for (final rel in s.files) {
+        final p = await _sourceProblem(s.dir, dir, rel);
+        if (p != null) {
+          skipped.add('${m.name}/$rel: $p');
+          dropped = true;
+        } else {
+          copies[rel] = _Want(await File('${s.dir}/$rel').readAsBytes(), exec: _executable('${s.dir}/$rel'));
+        }
+      }
+      // A project skill was trusted at one digest: its files must still be exactly those.
+      if (s.source == SkillSource.project) {
+        final md = File('${s.dir}/SKILL.md');
+        final all = <(String, List<int>)>[
+          ('SKILL.md', await md.exists() ? await md.readAsBytes() : const []),
+          for (final e in copies.entries) (e.key, e.value.bytes),
+        ];
+        if (s.digest.isEmpty || dropped || digestOfBytes(all) != s.digest) {
+          skipped.add('${m.name}: changed since it was trusted');
+          continue;
+        }
+      }
       names.add(m.name);
       final base = 'skills/${m.name}';
-      want['$base/SKILL.md'] = _Want.bytes(utf8.encode(renderSkillMd(m)));
-      final dir = await _resolve(s.dir);
-      for (final rel in s.files) {
-        final problem = await _sourceProblem(s.dir, dir, rel);
-        if (problem != null) {
-          skipped.add('${m.name}/$rel: $problem');
-        } else {
-          want['$base/$rel'] = _Want.copy('${s.dir}/$rel');
-        }
+      want['$base/SKILL.md'] = _Want(utf8.encode(renderSkillMd(m)));
+      for (final e in copies.entries) {
+        want['$base/${e.key}'] = e.value;
       }
     }
   }
@@ -145,32 +163,26 @@ Future<bool> _put(String root, String rel, _Want w) async {
   final path = '$root/$rel';
   await _ensureParents(root, rel);
   final type = FileSystemEntity.typeSync(path, followLinks: false);
-  final exec = w.source != null && _executable(w.source!);
-  if (type == FileSystemEntityType.file && await _same(path, w, exec)) return false;
+  if (type == FileSystemEntityType.file && await _same(path, w)) return false;
   if (type == FileSystemEntityType.directory) await Directory(path).delete(recursive: true);
   final tmp = '$path.everyai-tmp';
   if (FileSystemEntity.typeSync(tmp, followLinks: false) != FileSystemEntityType.notFound) {
     await _removeAny(tmp);
   }
-  if (w.source != null) {
-    await File(w.source!).copy(tmp);
-    if (exec && !_executable(tmp)) await Process.run('chmod', ['+x', tmp]);
-  } else {
-    await File(tmp).writeAsBytes(w.bytes!);
-  }
+  await File(tmp).writeAsBytes(w.bytes);
+  if (w.exec) await Process.run('chmod', ['+x', tmp]);
   await File(tmp).rename(path);
   return true;
 }
 
-Future<bool> _same(String path, _Want w, bool exec) async {
-  final have = File(path);
-  final a = await have.readAsBytes();
-  final b = w.bytes ?? await File(w.source!).readAsBytes();
+Future<bool> _same(String path, _Want w) async {
+  final a = await File(path).readAsBytes();
+  final b = w.bytes;
   if (a.length != b.length) return false;
   for (var i = 0; i < a.length; i++) {
     if (a[i] != b[i]) return false;
   }
-  return w.source == null || _executable(path) == exec;
+  return !w.exec || _executable(path);
 }
 
 Future<void> _removeAny(String path) async {

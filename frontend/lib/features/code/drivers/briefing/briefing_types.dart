@@ -7,15 +7,17 @@ library;
 const everyaiServerName = 'everyai';
 
 /// The environment variable that carries the session's bearer token. Its own name, because Claude Code blanks
-/// credential-looking names (ANTHROPIC_API_KEY, ...) in remote headers.
+/// credential-looking names (ANTHROPIC_API_KEY, ...) in remote headers. Every process the CLI starts inherits it, so
+/// project code the agent runs can read it: the host must bind the token to one session, end it with the session and
+/// keep credit-spending tools behind that session's own approvals.
 const tokenEnvVar = 'EVERYAI_MCP_TOKEN';
 
-/// The generated skill every CLI is pointed at.
-const sessionSkillName = 'everyai-session';
+/// The generated session text, next to `skills/` in the briefing folder (outside it, so no CLI lists it as a skill).
+const sessionFileName = 'session.md';
 
-/// The facts a recipe needs. [skillDir] is `<sessionDir>/briefing/skills` (see `exportSkills`); [sessionSkill] is the
-/// text from `sessionSkill(...)`.
-typedef BriefingInput = ({Uri mcpUrl, String mcpToken, String skillDir, String sessionSkill});
+/// The facts a recipe needs. [skillDir] is `<sessionDir>/briefing/skills` (see `exportSkills`); [sessionText] is the
+/// text from `sessionBriefing(...)`, written once at session start.
+typedef BriefingInput = ({Uri mcpUrl, String mcpToken, String skillDir, String sessionText});
 
 /// One JSON-RPC call the driver sends after `initialize`.
 typedef RpcCall = ({String method, Map<String, Object?> params});
@@ -34,7 +36,7 @@ typedef Delivery = ({
   String? firstPrompt,
 });
 
-/// The folder that holds `skills/`: the Claude plugin root.
+/// The folder that holds `skills/` and [sessionFileName]: the Claude plugin root.
 String briefingRootOf(String skillDir) {
   final trimmed = skillDir.endsWith('/') ? skillDir.substring(0, skillDir.length - 1) : skillDir;
   final cut = trimmed.lastIndexOf('/');

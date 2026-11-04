@@ -1,21 +1,17 @@
 import 'dart:convert';
 
-import '../../../skills/domain/skill_format.dart' show parseFrontMatter;
 import 'briefing_types.dart';
 
 /// How each CLI gets the briefing, as pure data. Nothing writes to `~/.claude`, `~/.codex`, `~/.config/opencode`
 /// or `~/.gemini`, and the token never lands in an argument or on disk: it goes through [Delivery.env] or the ACP
-/// pipe. Flags are recorded with their sources in docs/research/batches/multi-harness/run1/s1.md.
-
-/// A constant pointer, so a recorded system prompt never changes between sessions.
-const _claudePointer =
-    'At the start of the task, load the $everyaiServerName:$sessionSkillName skill; it describes this workspace, the '
-    'mode rules and the $everyaiServerName MCP tools.';
+/// pipe (an env var is inherited by the CLI's child processes; see [tokenEnvVar]). Flags are recorded with their sources in docs/research/batches/multi-harness/run1/s1.md.
 
 String _bearer(String ref) => 'Bearer $ref';
 
 /// Claude Code (`claude -p --input-format stream-json ...`). The briefing folder is a session-only plugin
-/// (`--plugin-dir`), so the skills load for this run only. [strictMcp] ignores the user's own MCP servers.
+/// (`--plugin-dir`), so the skills load for this run only; the session text is appended to the system prompt (no
+/// extra model round trip to load it). Skill shell execution is switched off whatever a skill body says.
+/// [strictMcp] ignores the user's own MCP servers.
 Delivery claudeCode(BriefingInput i, {bool strictMcp = false, bool grantSkillAccess = true}) {
   final mcp = {
     'mcpServers': {
@@ -33,7 +29,9 @@ Delivery claudeCode(BriefingInput i, {bool strictMcp = false, bool grantSkillAcc
       '--mcp-config',
       jsonEncode(mcp),
       '--append-system-prompt',
-      _claudePointer,
+      i.sessionText,
+      '--settings',
+      jsonEncode({'disableSkillShellExecution': true}),
       if (grantSkillAccess) ...['--add-dir', i.skillDir],
       if (strictMcp) '--strict-mcp-config',
     ],
@@ -63,28 +61,26 @@ Delivery codex(BriefingInput i) => (
     ),
   ],
   // Goes in thread/start `developerInstructions`.
-  instructions: _bodyOf(i.sessionSkill),
+  instructions: i.sessionText,
   firstPrompt: null,
 );
 
 /// OpenCode (`opencode serve` / `opencode acp`, a process we start). `OPENCODE_CONFIG_CONTENT` outranks project
-/// config and writes no file. [legacyMcp] picks the `mcp.<name>` shape; false uses `mcp.servers.<name>` (which one
-/// 2.1.3 prefers is still to be confirmed live).
-Delivery openCode(BriefingInput i, {bool legacyMcp = true}) {
-  final headers = {'Authorization': _bearer('{env:$tokenEnvVar}')};
-  final mcp = legacyMcp
-      ? {
-          everyaiServerName: {'type': 'remote', 'url': i.mcpUrl.toString(), 'enabled': true, 'headers': headers},
-        }
-      : {
-          'servers': {
-            everyaiServerName: {'type': 'remote', 'url': i.mcpUrl.toString(), 'disabled': false, 'headers': headers},
-          },
-        };
+/// config and writes no file. The server goes under `mcp.servers.<name>`, the shape 2.1.3 documents itself.
+Delivery openCode(BriefingInput i) {
   final config = {
-    'mcp': mcp,
+    'mcp': {
+      'servers': {
+        everyaiServerName: {
+          'type': 'remote',
+          'url': i.mcpUrl.toString(),
+          'disabled': false,
+          'headers': {'Authorization': _bearer('{env:$tokenEnvVar}')},
+        },
+      },
+    },
     'skills': [i.skillDir],
-    'instructions': ['${i.skillDir}/$sessionSkillName/SKILL.md'],
+    'instructions': ['${briefingRootOf(i.skillDir)}/$sessionFileName'],
   };
   return (
     args: const [],
@@ -127,7 +123,7 @@ Map<String, Object?> acpMcpServer(BriefingInput i) => {
 };
 
 String _inlineBriefing(BriefingInput i, List<({String name, String description})> skills) {
-  final b = StringBuffer(_bodyOf(i.sessionSkill));
+  final b = StringBuffer(i.sessionText);
   if (skills.isNotEmpty) {
     b
       ..writeln()
@@ -140,13 +136,4 @@ String _inlineBriefing(BriefingInput i, List<({String name, String description})
     }
   }
   return b.toString();
-}
-
-/// The skill text without its front matter, for slots that take plain instructions.
-String _bodyOf(String skillMd) {
-  try {
-    return parseFrontMatter(skillMd).body;
-  } on FormatException {
-    return skillMd;
-  }
 }

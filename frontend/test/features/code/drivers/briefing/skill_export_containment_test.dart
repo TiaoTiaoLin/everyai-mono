@@ -17,7 +17,7 @@ void main() {
   late Directory src;
   late Directory outside;
   late String session;
-  const sessionMd = '---\nname: everyai-session\ndescription: "x"\n---\n\nhello\n';
+  const sessionMd = 'hello\n';
 
   setUp(() {
     tmp = Directory.systemTemp.createTempSync('briefing_contain_');
@@ -32,7 +32,7 @@ void main() {
     Directory(session).createSync();
     Link('$session/briefing').createSync(outside.path);
     final before = _snapshot(outside);
-    await expectLater(exportSkills(session, [writeSkill(src, 'alpha')], sessionSkillMd: sessionMd), throwsStateError);
+    await expectLater(exportSkills(session, [writeSkill(src, 'alpha')], sessionText: sessionMd), throwsStateError);
     expect(_snapshot(outside), before);
     // Removing deletes the link, not what it points at.
     await removeBriefing(session);
@@ -53,7 +53,7 @@ void main() {
       digest: s.digest,
       files: ['references/leak.md', 'references/ok.md'],
     );
-    final r = await exportSkills(session, [withLeak], sessionSkillMd: sessionMd);
+    final r = await exportSkills(session, [withLeak], sessionText: sessionMd);
     expect(File('$session/briefing/skills/alpha/references/leak.md').existsSync(), isFalse);
     expect(File('$session/briefing/skills/alpha/references/ok.md').existsSync(), isTrue);
     expect(r.skipped.single, contains('references/leak.md'));
@@ -71,26 +71,26 @@ void main() {
       digest: s.digest,
       files: ['docs/keep.txt'],
     );
-    final r = await exportSkills(session, [withLink], sessionSkillMd: sessionMd);
+    final r = await exportSkills(session, [withLink], sessionText: sessionMd);
     expect(r.skipped.single, contains('docs/keep.txt'));
     expect(File('$session/briefing/skills/alpha/docs/keep.txt').existsSync(), isFalse);
   });
 
   test('links already under skills/ are replaced, never written through', () async {
-    await exportSkills(session, [writeSkill(src, 'alpha')], sessionSkillMd: sessionMd);
+    await exportSkills(session, [writeSkill(src, 'alpha')], sessionText: sessionMd);
     final skillFolder = Directory('$session/briefing/skills/alpha')..deleteSync(recursive: true);
     Link(skillFolder.path).createSync(outside.path);
-    File('$session/briefing/skills/everyai-session/SKILL.md').deleteSync();
-    Link('$session/briefing/skills/everyai-session/SKILL.md').createSync('${outside.path}/keep.txt');
+    File('$session/briefing/session.md').deleteSync();
+    Link('$session/briefing/session.md').createSync('${outside.path}/keep.txt');
     final before = _snapshot(outside);
     await exportSkills(session, [
       writeSkill(src, 'alpha', files: {'references/a.md': 'ref'}),
-    ], sessionSkillMd: sessionMd);
+    ], sessionText: sessionMd);
     expect(_snapshot(outside), before);
     expect(File('${outside.path}/keep.txt').readAsStringSync(), 'mine');
     expect(FileSystemEntity.isLinkSync(skillFolder.path), isFalse);
     expect(File('${skillFolder.path}/references/a.md').readAsStringSync(), 'ref');
-    expect(FileSystemEntity.isLinkSync('$session/briefing/skills/everyai-session/SKILL.md'), isFalse);
+    expect(FileSystemEntity.isLinkSync('$session/briefing/session.md'), isFalse);
   });
 
   test('a files entry with ".." or an absolute path is rejected', () async {
@@ -105,7 +105,7 @@ void main() {
       digest: s.digest,
       files: ['../loose.txt', '/etc/hosts', 'a/../../loose.txt'],
     );
-    final r = await exportSkills(session, [bad], sessionSkillMd: sessionMd);
+    final r = await exportSkills(session, [bad], sessionText: sessionMd);
     expect(r.skipped, hasLength(3));
     expect(File('$session/briefing/skills/loose.txt').existsSync(), isFalse);
     expect(File('$session/briefing/skills/alpha/hosts').existsSync(), isFalse);
@@ -118,8 +118,8 @@ void main() {
     }
     final a = writeSkill(src, 'alpha', files: {'scripts/x.sh': 'echo'});
     final before = {..._snapshot(home), ..._snapshot(src), ..._snapshot(outside)};
-    await exportSkills(session, [a], sessionSkillMd: sessionMd);
-    await exportSkills(session, const [], sessionSkillMd: sessionMd);
+    await exportSkills(session, [a], sessionText: sessionMd);
+    await exportSkills(session, const [], sessionText: sessionMd);
     await removeBriefing(session);
     expect({..._snapshot(home), ..._snapshot(src), ..._snapshot(outside)}, before);
     expect(Directory('$session/briefing').existsSync(), isFalse);
