@@ -1,0 +1,16 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// Reopening thr_1 after a restart, signed in with an API key: thread/resume without its turns (our journal has the
+// transcript), the saved token count Codex sends after resuming (only a baseline), then one more turn.
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":true}}}
+{"dir":"out","msg":{"id":3,"method":"thread/resume","params":{"threadId":"thr_1","cwd":"{{cwd}}","excludeTurns":true,"approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"Run the tests","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr_1","turnId":"turn_1","tokenUsage":{"total":{"inputTokens":5000,"cachedInputTokens":3000,"outputTokens":300,"reasoningOutputTokens":100,"totalTokens":5300},"last":{"inputTokens":2000,"cachedInputTokens":1500,"outputTokens":100,"reasoningOutputTokens":50,"totalTokens":2100},"modelContextWindow":272000}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Carry on"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr_1","turnId":"turn_2","tokenUsage":{"total":{"inputTokens":7500,"cachedInputTokens":5000,"outputTokens":400,"reasoningOutputTokens":120,"totalTokens":7900},"last":{"inputTokens":2500,"cachedInputTokens":2000,"outputTokens":100,"reasoningOutputTokens":20,"totalTokens":2600},"modelContextWindow":272000}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[],"error":null}}}}

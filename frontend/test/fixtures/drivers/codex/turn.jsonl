@@ -1,0 +1,30 @@
+// UNVERIFIED: hand-built from openai/codex codex-rs/app-server-protocol schema @3a2788e6; replace with a live recording
+// One turn with a picture: reasoning summary, a plan update, a steer mid-turn, streamed text, two usage updates
+// (running totals), completion; then a steer with no turn running starts the next turn, in Plan mode.
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"everyai","title":"EveryAI","version":"0.1.0"},"capabilities":{"optOutNotificationMethods":["turn/diff/updated","item/commandExecution/outputDelta","item/fileChange/outputDelta"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"everyai/0.166.0 (Mac OS 15.0; arm64)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}}
+{"dir":"out","msg":{"id":3,"method":"thread/start","params":{"cwd":"{{cwd}}","model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandbox":"danger-full-access"}}}
+{"dir":"in","msg":{"id":3,"result":{"thread":{"id":"thr_1","preview":"","modelProvider":"openai","createdAt":1762200000,"cwd":"{{cwd}}","turns":[]},"model":"gpt-5.5-codex","modelProvider":"openai","cwd":"{{cwd}}","approvalPolicy":"untrusted","sandbox":{"type":"dangerFullAccess"}}}}
+{"dir":"out","msg":{"id":4,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"Fix the failing test"},{"type":"image","url":"data:image/png;base64,iVBORw0KGgo="}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"dangerFullAccess"}}}}
+{"dir":"in","msg":{"id":4,"result":{"turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/started","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"userMessage","id":"item_u1","content":[{"type":"text","text":"Fix the failing test"}]}}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"reasoning","id":"rs_1","summary":[],"content":[]}}}}
+{"dir":"in","msg":{"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"rs_1","delta":"Looking at the test.","summaryIndex":0}}}
+{"dir":"in","msg":{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"reasoning","id":"rs_1","summary":["Looking at the test."],"content":[]}}}}
+{"dir":"in","msg":{"method":"turn/plan/updated","params":{"threadId":"thr_1","turnId":"turn_1","explanation":null,"plan":[{"step":"Read the test","status":"completed"},{"step":"Fix the bug","status":"inProgress"},{"step":"Run the tests","status":"pending"}]}}}
+{"dir":"out","msg":{"id":5,"method":"turn/steer","params":{"threadId":"thr_1","input":[{"type":"text","text":"Also update the README"}],"expectedTurnId":"turn_1"}}}
+{"dir":"in","msg":{"id":5,"result":{"turnId":"turn_1"}}}
+{"dir":"in","msg":{"method":"item/started","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":""}}}}
+{"dir":"in","msg":{"method":"item/agentMessage/delta","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"msg_1","delta":"Fixed "}}}
+{"dir":"in","msg":{"method":"item/agentMessage/delta","params":{"threadId":"thr_1","turnId":"turn_1","itemId":"msg_1","delta":"the test."}}}
+{"dir":"in","msg":{"method":"item/completed","params":{"threadId":"thr_1","turnId":"turn_1","item":{"type":"agentMessage","id":"msg_1","text":"Fixed the test."}}}}
+{"dir":"in","msg":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr_1","turnId":"turn_1","tokenUsage":{"total":{"inputTokens":1000,"cachedInputTokens":200,"outputTokens":50,"reasoningOutputTokens":10,"totalTokens":1050},"last":{"inputTokens":1000,"cachedInputTokens":200,"outputTokens":50,"reasoningOutputTokens":10,"totalTokens":1050},"modelContextWindow":272000}}}}
+{"dir":"in","msg":{"method":"thread/tokenUsage/updated","params":{"threadId":"thr_1","turnId":"turn_1","tokenUsage":{"total":{"inputTokens":2500,"cachedInputTokens":1200,"outputTokens":90,"reasoningOutputTokens":20,"totalTokens":2590},"last":{"inputTokens":1500,"cachedInputTokens":1000,"outputTokens":40,"reasoningOutputTokens":10,"totalTokens":1540},"modelContextWindow":272000}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_1","status":"completed","items":[],"error":null}}}}
+{"dir":"out","msg":{"id":6,"method":"turn/start","params":{"threadId":"thr_1","input":[{"type":"text","text":"One more thing"}],"model":"gpt-5.5-codex","approvalPolicy":"untrusted","sandboxPolicy":{"type":"readOnly","networkAccess":true}}}}
+{"dir":"in","msg":{"id":6,"result":{"turn":{"id":"turn_2","status":"inProgress","items":[]}}}}
+{"dir":"in","msg":{"method":"turn/completed","params":{"threadId":"thr_1","turn":{"id":"turn_2","status":"completed","items":[],"error":null}}}}
