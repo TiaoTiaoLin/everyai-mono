@@ -15,6 +15,8 @@ import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentM
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/harness/events.dart';
+import 'package:every_ai/features/code/host/host.dart';
+import 'package:every_ai/features/code/host/host_prompts.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/code/workflows/workflow_engine.dart';
 import 'package:every_ai/features/code/workflows/workflow_runs.dart';
@@ -43,6 +45,8 @@ void main() {
   late FakeBridge bridge;
   late Map<String, UsageTotals> usage;
   late Preferences prefs;
+  Map<String, Object?>? startedArgs;
+  String? startedSource;
 
   Future<void> git(List<String> args) async {
     final r = await Process.run('git', args, workingDirectory: project.path);
@@ -66,7 +70,11 @@ void main() {
         ),
       ),
       codeSideModelProvider.overrideWithValue((messages) async => ''),
-      workflowBridgeProvider.overrideWithValue(({required dir, required source, required args}) async => bridge),
+      workflowBridgeProvider.overrideWithValue(({required dir, required source, required args}) async {
+        startedArgs = args;
+        startedSource = source;
+        return bridge;
+      }),
     ],
   );
 
@@ -147,6 +155,57 @@ void main() {
     final dir = '${tmp.path}/data/workflows/${c.sessionId}';
     expect(File('$dir/$runId.done.jsonl').existsSync(), isTrue);
     expect(File('$dir/$runId.jsonl').existsSync(), isFalse);
+  });
+
+  HostCall runCall(Map<String, Object?> args) =>
+      HostCall(id: 'h1', sessionId: '', name: runWorkflowTool, args: args, ended: Completer<HostEnd>().future);
+
+  test('run_workflow starts a listed workflow at once, and its result waits for the lead\'s turn to end', () async {
+    final c = await open();
+    expect([for (final p in await c.workflowPrompts()) p.id], ['ultra', 'bugfix', 'security_review']);
+    var r = await c.call(runCall({'id': 'nope'}));
+    expect(r.isError, isTrue);
+    expect(r.text, contains('It can run: ultra, bugfix, security_review'));
+    r = await c.call(runCall({'id': 'ultra', 'args': 'x'}));
+    expect(r.isError, isTrue);
+
+    r = await c.call(
+      runCall({
+        'id': 'security_review',
+        'args': {'base': 'main'},
+      }),
+    );
+    expect(r.isError, isFalse);
+    expect(r.text, startsWith('Started Security review (run '));
+    await pumpEventQueue();
+    expect(startedSource, contains("id: 'security_review'"));
+    expect(startedArgs!['base'], 'main');
+    // The script's ctx: the run, the lead, and no review model on an outside lead (it would spend).
+    final ctx = startedArgs!['_ctx']! as Map;
+    expect(r.text, contains('${ctx['runId']}'));
+    expect(ctx['lead'], {'harness': 'test', 'model': ''});
+    expect(ctx['review'], isNull);
+
+    // The lead is mid-turn when the run ends: the result goes after it.
+    final before = lead.sent.length;
+    lead.add(stateEvent('busy', ExecutionStatus.running));
+    await whenValue(container, codeSessionProvider(c.sessionId).select((s) => s.transcript.running), (bool b) => b);
+    bridge.finish({'findings': <Object>[]});
+    final queued = await whenValue(
+      container,
+      codeSessionProvider(c.sessionId).select((s) => s.queued),
+      (List<Outgoing> q) => q.isNotEmpty,
+    );
+    expect(queued.single.text, startsWith('<workflow-result name="Security review" status="done">'));
+    expect(lead.sent.length, before);
+    lead.add(stateEvent('idle', ExecutionStatus.finished));
+    await whenValue(
+      container,
+      codeSessionProvider(c.sessionId).select((s) => s.queued),
+      (List<Outgoing> q) => q.isEmpty,
+    );
+    await pumpEventQueue();
+    expect(lead.sent.where((m) => m.contains('<workflow-result')), hasLength(1));
   });
 
   test('a schema reply that misses gets its repair message in the same child', () async {

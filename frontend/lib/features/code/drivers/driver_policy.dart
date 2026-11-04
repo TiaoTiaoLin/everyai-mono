@@ -6,6 +6,7 @@ import '../domain/phases.dart' show bugCheckTool;
 import '../harness/events.dart';
 import '../harness/harness.dart';
 import '../host/host.dart' show savedPlansTool;
+import '../host/host_prompts.dart' show runWorkflowTool;
 import 'briefing/briefing_types.dart' show everyaiServerName;
 import 'driver.dart';
 import 'driver_process.dart' show noAnswerProblem, notBuiltProblem;
@@ -74,11 +75,12 @@ const _knownKinds = {
 };
 
 /// The tools the app's MCP host offers an outside agent (`host/host.dart`).
-const hostToolNames = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool, bugCheckTool};
+const hostToolNames = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool, bugCheckTool, runWorkflowTool};
 
 /// The host tools the policy lets run without asking: they only show the
 /// user a card or read and write the project's notes. bug_check runs a
-/// command, so it goes through the mode like any other.
+/// command and run_workflow starts agents, so they go through the mode like
+/// any other.
 const trustedHostTools = {askUserQuestionTool, presentPlanTool, 'memory', savedPlansTool};
 
 /// The host tool an outside agent's [call] is (`ask_user_question`, …), or

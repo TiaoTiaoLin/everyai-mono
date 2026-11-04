@@ -78,6 +78,7 @@ import 'harness/session_processes.dart';
 import 'harness/summarizer.dart';
 import 'host/host.dart';
 import 'host/host_notes.dart';
+import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
@@ -92,6 +93,8 @@ import 'workflows/workflow_bridge.dart'
     show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile, retireJournalFile;
 import 'workflows/workflow_engine.dart';
 import 'workflows/workflow_journal.dart';
+import 'workflows/workflow_library.dart';
+import 'workflows/workflow_prelude.dart' show workflowCtxKey;
 import 'workflows/workflow_runs.dart';
 
 part 'session_builtins.dart';
@@ -192,7 +195,22 @@ const _hostToolInfos = <HostToolInfo>[
         'user stated, pitfalls and their fixes.',
   ),
   (name: savedPlansTool, when: 'the task continues earlier work: list and read the plans the user approved before.'),
+  (
+    name: runWorkflowTool,
+    when:
+        'the task fits one of the workflows listed under "Workflows": it starts them in the app and returns at once; '
+        'the result comes later as a message.',
+  ),
 ];
+
+/// The workflows [projectDir] can run; none when they can't be read.
+Future<List<WorkflowEntry>> _workflowsOfIn(Ref ref, String projectDir) async {
+  try {
+    return await activeWorkflows(projectDir, ref.read(workflowTrustProvider));
+  } on Object {
+    return const [];
+  }
+}
 
 /// Ends the outside CLIs and the MCP host when the app quits (provider
 /// disposal doesn't run then). The shell listens to it from app start, so
@@ -299,7 +317,7 @@ final driverModelsProvider = FutureProvider.autoDispose.family<List<DriverModel>
 /// What an outside session's calls to the host reach: its controller
 /// ([controller], null once the session is gone), after the session is
 /// saved ([ready]); the token is minted before that.
-final class _HostForward implements HostTools {
+final class _HostForward implements HostTools, HostPrompts {
   _HostForward(this.controller, this.ready);
 
   final CodeSessionController? Function() controller;
@@ -311,6 +329,12 @@ final class _HostForward implements HostTools {
     final c = controller();
     if (c == null) return (text: 'Error: this session is closed.', isError: true);
     return c.call(call);
+  }
+
+  @override
+  Future<List<WorkflowPrompt>> workflowPrompts() async {
+    await ready;
+    return await controller()?.workflowPrompts() ?? const [];
   }
 }
 
@@ -714,6 +738,10 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
           projectRoot: projectDir,
           lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
           hostTools: _hostToolInfos,
+          workflows: [
+            for (final w in await _workflowsOfIn(ref, projectDir))
+              (id: w.id, when: w.whenToUse.isEmpty ? w.title : w.whenToUse),
+          ],
         ),
       ),
       // Volatile, so last; the memory is text earlier sessions wrote.
@@ -1377,7 +1405,9 @@ final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeS
   CodeSessionController.new,
 );
 
-final class CodeSessionController extends Notifier<CodeSessionState> with _SessionBuiltins implements HostTools {
+final class CodeSessionController extends Notifier<CodeSessionState>
+    with _SessionBuiltins
+    implements HostTools, HostPrompts {
   CodeSessionController(this.sessionId);
   @override
   final String sessionId;
@@ -1534,6 +1564,8 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return hostSavedPlans(dir, call.args);
       case bugCheckTool:
         return (text: "Error: bug_check is for Bug fix mode, which this session isn't in.", isError: true);
+      case runWorkflowTool:
+        return _runWorkflowCall(call.args);
       default:
         return (text: 'Error: there is no EveryAI tool called ${call.name}.', isError: true);
     }
@@ -3672,9 +3704,19 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   /// Runs the workflow [source] (a `.js` file's text, called [name]) with
   /// [args]: its agents are child sessions of this one, and what it returns
-  /// comes back to this session as one message. Returns the run's id.
-  Future<String> runWorkflow(String name, String source, {Map<String, Object?> args = const {}}) async {
+  /// comes back to this session as one message. [ctx] (and the run id) is
+  /// the script's `ctx`. Returns the run's id.
+  Future<String> runWorkflow(
+    String name,
+    String source, {
+    Map<String, Object?> args = const {},
+    Map<String, Object?> ctx = const {},
+  }) async {
     final runId = const Uuid().v7();
+    args = {
+      ...args,
+      workflowCtxKey: {...ctx, 'runId': runId},
+    };
     final path = '${await _workflowDir()}/$runId.jsonl';
     final journal = WorkflowJournal.fresh((line) => appendJournalFile(path, line));
     await journal.write({
@@ -3689,6 +3731,72 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   }
 
   void stopWorkflow(String runId) => _workflows[runId]?.stop();
+
+  /// The workflows this session's project can run.
+  Future<List<WorkflowEntry>> _workflowEntries() async {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null) return const [];
+    final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
+    return _workflowsOfIn(ref, project?.path ?? info.workingDir);
+  }
+
+  @override
+  Future<List<WorkflowPrompt>> workflowPrompts() async => [
+    for (final w in await _workflowEntries())
+      (id: w.id, title: w.title, description: w.description, whenToUse: w.whenToUse, args: w.args),
+  ];
+
+  /// run_workflow from the agent: starts the run and answers at once (a run
+  /// outlasts every client's tool timeout); the result comes as a message.
+  Future<HostResult> _runWorkflowCall(Map<String, Object?> call) async {
+    final id = call['id'];
+    final args = call['args'] ?? const <String, Object?>{};
+    if (id is! String || args is! Map<String, Object?>) {
+      return (text: 'Error: run_workflow takes {id, args}, with args an object.', isError: true);
+    }
+    final all = await _workflowEntries();
+    final entry = all.where((w) => w.id == id).firstOrNull;
+    if (entry == null) {
+      return (
+        text:
+            "Error: there is no workflow called $id that this project can run. It can run: ${all.map((w) => w.id).join(', ')}.",
+        isError: true,
+      );
+    }
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null) return (text: 'Error: this session is closed.', isError: true);
+    // A workflow's own agents would nest runs past its caps.
+    if (info.parentId != null) return (text: 'Error: only the lead session starts workflows.', isError: true);
+    // A review on another vendor's model only when this session spends on EveryAI already.
+    final review = info.harness == everyaiHarnessName
+        ? bugReviewModel(info.model, ref.read(libraryProvider).value ?? const [])
+        : null;
+    final runId = await runWorkflow(
+      entry.title,
+      entry.source,
+      args: args,
+      ctx: {
+        'lead': {'harness': info.harness, 'model': info.model},
+        'review': review == null ? null : {'harness': everyaiHarnessName, 'model': review},
+      },
+    );
+    return (
+      text:
+          'Started ${entry.title} (run $runId). It runs in the app, where the user follows it. Its result will '
+          'arrive as a message in a <workflow-result> block; tell the user it started and do not poll for it.',
+      isError: false,
+    );
+  }
+
+  /// [text] to the agent now, or after the turn that is running.
+  void _toLead(String text) {
+    final t = state.transcript;
+    if (_switching || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
+      state = state.copyWith(queued: [...state.queued, Outgoing(text)]);
+      return;
+    }
+    unawaited(_session?.send(text).catchError((Object _) {}));
+  }
 
   /// A workflow agent (by call id) waits for the user: this session shows it needs input.
   void _workflowChildWaiting(String callId, bool waiting) {
@@ -3761,7 +3869,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       end,
       save: dir == null || noLocalFolder(dir) ? null : (json) => saveSpill(dir, 'workflow-$runId.json', json),
     );
-    unawaited(_session?.send(message).catchError((Object _) {}));
+    _toLead(message);
   }
 
   // ------------------------------------------------------ orchestrating forks

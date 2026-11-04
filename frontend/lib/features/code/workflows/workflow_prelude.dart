@@ -14,9 +14,10 @@ import 'dart:convert';
 // already holds, matched by their content. A script that builds prompts from
 // Date.now() or Math.random() misses the journal and runs those agents again.
 
-/// The globals a workflow gets: `args`, `agent`, `parallel`, `pipeline`,
-/// `phase`, `log` (and `console.log` goes to `log`). `__ARGS__` is replaced
-/// by the run's arguments.
+/// The globals a workflow gets: `args`, `ctx`, `agent`, `parallel`,
+/// `pipeline`, `phase`, `log` (and `console.log` goes to `log`). `__ARGS__`
+/// is replaced by the run's arguments; their [workflowCtxKey] entry becomes
+/// `ctx` (`{runId, lead, review}`) and is taken out of `args`.
 const _prelude = r'''
 const __enc = new TextEncoder();
 let __id = 0;
@@ -56,7 +57,10 @@ function __note(fn, args) {
 })();
 const __text = (a) => a.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join(" ");
 const __g = globalThis;
-__g.args = __ARGS__;
+const __a = __ARGS__;
+__g.ctx = (__a && __a._ctx) || {};
+if (__a) delete __a._ctx;
+__g.args = __a;
 __g.agent = (prompt, opts = {}) => __call("agent", { ...opts, prompt: String(prompt) });
 __g.parallel = async (thunks) =>
   (await Promise.allSettled(thunks.map((t) => Promise.resolve().then(t)))).map((r) =>
@@ -81,6 +85,10 @@ try {
 }
 Deno.exit(0);
 ''';
+
+/// The key of the run's arguments the app fills with what the script may
+/// know about its session (`ctx`), so it is journalled with them.
+const workflowCtxKey = '_ctx';
 
 /// The prelude with [args] in place.
 String workflowPrelude(Map<String, Object?> args) => _prelude.replaceFirst('__ARGS__', jsonEncode(args));
