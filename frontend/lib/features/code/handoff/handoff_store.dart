@@ -15,3 +15,6 @@ Future<List<Handoff>> loadHandoffs(String sessionDir) => impl.loadHandoffs(sessi
 /// it never led (a full handoff).
 HandoffCoverage? lastSeenBy(List<Handoff> newestFirst, String harness) =>
     newestFirst.where((h) => h.fromHarness == harness).firstOrNull?.coverage;
+
+/// Deletes [dir]: a session's timeline and handoffs (the session is gone).
+Future<void> removeTimeline(String dir) => impl.removeTimeline(dir);

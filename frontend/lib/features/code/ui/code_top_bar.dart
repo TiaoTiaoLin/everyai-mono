@@ -13,6 +13,7 @@ import '../../usage/ui/usage_meter.dart' show ContextRing, UsageBreakdown;
 import '../../usage/usage_totals.dart';
 import '../code_providers.dart';
 import '../code_settings_providers.dart';
+import '../drivers/driver_registry.dart' show driverRegistryProvider;
 import '../mcp_providers.dart';
 import '../permissions_providers.dart';
 import '../../settings/settings_registry.dart';
@@ -288,6 +289,16 @@ class SessionMeter extends ConsumerWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (!totals.isEmpty) UsageBreakdown(totals: totals, contextWindow: window, modelName: spec?.name),
+            // A session that changed leads: what each harness used, and how it was paid.
+            if (ref.read(codeUsageProvider(sessionId).notifier).byHarness case final by when by.length > 1) ...[
+              const PopoverHeader('By harness'),
+              for (final MapEntry(key: harness, value: t) in by.entries)
+                PopoverRow(
+                  key: ValueKey('meter.harness.$harness'),
+                  title: ref.read(driverRegistryProvider).resolve(harness)?.info.label ?? harness,
+                  subtitle: harnessUsageLine(t),
+                ),
+            ],
             const PopoverHeader('Spending cap for this session'),
             for (final usd in [null, ...budgetPresets])
               PopoverRow(
@@ -339,3 +350,12 @@ class SessionMeter extends ConsumerWidget {
     );
   }
 }
+
+/// One harness's share of a session: "12.4K tokens · \$0.42 credits", or
+/// "· on your plan" for an outside CLI on the user's subscription.
+String harnessUsageLine(UsageTotals t) => [
+  '${formatTokens(t.totalTokens)} tokens',
+  if (t.chargedMicros > 0) '${formatMicros(t.chargedMicros)} credits',
+  if (t.ownKeyMicros > 0) '${formatMicros(t.ownKeyMicros)} on your key',
+  if (t.onPlan) 'on your plan',
+].join(' · ');

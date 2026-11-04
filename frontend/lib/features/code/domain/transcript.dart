@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import 'phases.dart';
 import '../drivers/driver_policy.dart' show hostToolOf;
+import '../drivers/usage_limit.dart';
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import 'agent_mode.dart';
@@ -20,11 +21,15 @@ sealed class TranscriptItem {
 }
 
 final class UserTurn extends TranscriptItem {
-  const UserTurn(super.key, this.text, {this.mode});
+  const UserTurn(super.key, this.text, {this.mode, this.lead = ''});
   final String text;
 
   /// The mode note the message carried (shown as a chip), if any.
   final AgentMode? mode;
+
+  /// The harness that got it, by name ('' when not known); shown once a
+  /// session has had more than one lead.
+  final String lead;
 }
 
 final class AgentText extends TranscriptItem {
@@ -188,12 +193,16 @@ const planApprovedReason =
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';
 
 final class NoticeItem extends TranscriptItem {
-  const NoticeItem(super.key, this.message, {this.error = false, this.detail = ''});
+  const NoticeItem(super.key, this.message, {this.error = false, this.detail = '', this.limit});
   final String message;
   final bool error;
 
   /// More to show on request (a compaction's summary), or ''.
   final String detail;
+
+  /// The lead stopped on a usage limit (its plan, or EveryAI credits): the
+  /// session offers to carry on with another harness.
+  final UsageLimit? limit;
 }
 
 /// Whether an error is the account running out of EveryAI credits (the
@@ -304,6 +313,10 @@ final class TranscriptBuilder {
   AgentMode? _notedMode;
   RetryState? _retry;
 
+  /// The harness the events come from now, by name: stamped on user turns,
+  /// and the lead a handoff went to. Set by a session that switched leads.
+  String lead = '';
+
   Transcript get snapshot => Transcript(
     items: List.unmodifiable(_items),
     streaming: _streaming.toString(),
@@ -376,12 +389,14 @@ final class TranscriptBuilder {
           return;
         }
         final (handedOver, said) = splitHandoff(text);
-        if (handedOver != null && said.isEmpty) {
+        if (handedOver != null) {
           final from = RegExp(r'from="([^"]*)"').firstMatch(handedOver)?[1] ?? '';
-          _items.add(NoticeItem(e.id, 'Handed over${from.isEmpty ? '' : ' from $from'}', detail: handedOver));
-          return;
+          final title = lead.isNotEmpty ? 'Handoff to $lead' : 'Handed over${from.isEmpty ? '' : ' from $from'}';
+          // The handoff, then what the user wrote with it (sent with their next message).
+          _items.add(NoticeItem(said.isEmpty ? e.id : '${e.id}-handoff', title, detail: handedOver));
+          if (said.isEmpty) return;
+          text = said;
         }
-        if (handedOver != null) text = said;
         if (_answer(text) || _reported(text)) return;
         if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
           final n = RegExp(r'reports="(\d+)"').firstMatch(text)?[1] ?? '';
@@ -404,7 +419,7 @@ final class TranscriptBuilder {
           );
           return;
         }
-        _items.add(UserTurn(e.id, text, mode: changed ? mode : null));
+        _items.add(UserTurn(e.id, text, mode: changed ? mode : null, lead: lead));
         _settleOpenCards(text);
       case ChatMessage(:final text, :final reasoning):
         if (text.trim().isEmpty && reasoning.trim().isEmpty) return;
@@ -414,7 +429,9 @@ final class TranscriptBuilder {
       case ToolResult():
         _result(e);
       case ConversationFailure(:final message):
-        _items.add(NoticeItem(e.id, message, error: true));
+        // EveryAI's own limit is the gateway's 402: no reset time.
+        final limit = usageLimitOf(e) ?? (isOutOfCredits(message) ? UsageLimit(message: message) : null);
+        _items.add(NoticeItem(e.id, message, error: true, limit: limit));
       case UnknownEvent() || ConnectionChange() || UsageReport():
         break;
     }

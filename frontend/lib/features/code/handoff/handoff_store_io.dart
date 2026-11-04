@@ -36,3 +36,8 @@ Future<List<Handoff>> loadHandoffs(String sessionDir) async {
   }
   return out..sort((a, b) => b.createdAt.compareTo(a.createdAt));
 }
+
+Future<void> removeTimeline(String dir) async {
+  final d = Directory(dir);
+  if (d.existsSync()) await d.delete(recursive: true);
+}

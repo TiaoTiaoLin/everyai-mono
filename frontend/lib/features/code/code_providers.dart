@@ -11,7 +11,7 @@ import '../../core/providers.dart';
 import '../agents/agents_providers.dart' show AgentDefinition, agentLibrarySettingsProvider, childSetup, codeAgentsFor;
 import '../attachments/attachment.dart';
 import '../models/domain/model_catalog.dart';
-import '../billing/billing_providers.dart' show formatMicros;
+import '../billing/billing_providers.dart' show billingProvider, formatMicros;
 import '../models/models_providers.dart';
 import '../settings/byok_keys.dart' show byokUltraCapProvider;
 import '../settings/domain/byok_providers.dart' show ModelBilling;
@@ -50,6 +50,12 @@ import 'domain/questions.dart';
 import 'domain/session_commands.dart';
 import 'domain/transcript.dart';
 import 'gateway_key.dart';
+import 'agent_models.dart' show codeAgentProvider;
+import 'drivers/usage_limit.dart';
+import 'handoff/handoff.dart';
+import 'handoff/handoff_git.dart';
+import 'handoff/handoff_store.dart';
+import 'handoff/lead_timeline.dart';
 import 'git/git_service.dart';
 import 'domain/transcript_export.dart';
 import 'drivers/briefing/briefing_types.dart' show everyaiServerName;
@@ -117,6 +123,21 @@ bool isOutsideLead(String harness, String workingDir) =>
 String? consentProblem(DriverInfo info, Set<String> ownClis) => info.needsConsent && !ownClis.contains(info.id)
     ? "Turn on 'Use my own installed CLIs' for ${info.label} in Settings → Code to use it."
     : null;
+
+/// The harnesses in [listed] a session on [current] can move to now:
+/// nothing in their way ([leadBlocked]: checked, installed, signed in, and
+/// allowed by the user's "Use my own installed CLIs", [ownClis]).
+List<DriverInfo> readyLeads(
+  Iterable<HarnessDriver> listed,
+  Map<String, DriverStatus>? statuses,
+  Set<String> ownClis, {
+  required String current,
+}) => [
+  for (final d in listed)
+    if (d.info.id != current &&
+        leadBlocked(d.info, statuses?[d.info.id], consented: ownClis.contains(d.info.id)) == null)
+      d.info,
+];
 
 /// The note a session shows when its outside agent's EveryAI tools expired.
 const hostToolsExpired =
@@ -602,9 +623,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     required HarnessDriver driver,
     required String model,
     Future<void>? ready,
+    List<RosterEntry>? others,
   }) async {
     if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
     ref.read(driverShutdownProvider);
+    // The harnesses that led the session before, so the new lead knows who did the earlier work.
+    others ??= _roster(byId(id)?.leads ?? const {}, except: driver.info.id);
     final host = ref.read(hostServerProvider);
     final tokens = ref.read(_hostTokensProvider);
     if (tokens.remove(id) case final old?) await host.revoke(old);
@@ -624,6 +648,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             worktree: workingDir,
             projectRoot: projectDir,
             lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
+            others: others,
             hostTools: _hostToolInfos,
           ),
         ),
@@ -645,6 +670,74 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   }
 
   Future<String> _driverDir(String id) async => '${await ref.read(driverDataDirProvider)()}/driver-sessions/$id';
+
+  /// Where session [id] keeps what earlier leads did (the timeline journal)
+  /// and the handoffs between them.
+  Future<String> timelineDir(String id) async => '${await ref.read(driverDataDirProvider)()}/code-timelines/$id';
+
+  /// [leads] as the session text names them, without [except].
+  List<RosterEntry> _roster(Map<String, LeadRecord> leads, {required String except}) => [
+    for (final MapEntry(key: harness, value: lead) in leads.entries)
+      if (harness != except)
+        (
+          name: ref.read(driverRegistryProvider).resolve(harness)?.info.label ?? harness,
+          model: lead.model.isEmpty ? 'its default model' : lead.model,
+        ),
+  ];
+
+  /// Starts a new conversation on [harness] for session [info], which is
+  /// moving to that lead: briefed like a new session when it is an outside
+  /// agent (host calls wait for [ready]; the roster is the session's stored
+  /// leads), with [initialMessage] run at once.
+  /// The tier and harness mode are the ones the new lead may use.
+  Future<HarnessSession> _startLead(
+    CodeSessionInfo info, {
+    required String harness,
+    required String model,
+    required String effort,
+    required AgentMode mode,
+    required HarnessTier tier,
+    required HarnessMode harnessMode,
+    String? initialMessage,
+    Future<void>? ready,
+  }) async {
+    final runner = await harnessFor(ref, info.workingDir, harness: harness);
+    final driver = runner is HarnessDriver && isOutsideLead(harness, info.workingDir) ? runner : null;
+    final projectDir = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull?.path;
+    final briefing = driver == null
+        ? null
+        : await _brief(
+            info.id,
+            projectDir: projectDir ?? info.workingDir,
+            workingDir: info.workingDir,
+            driver: driver,
+            model: model,
+            ready: ready,
+          );
+    try {
+      return await runner.start(
+        await specFor(
+          sessionId: info.id,
+          projectDir: projectDir ?? info.workingDir,
+          workingDir: info.workingDir,
+          model: model,
+          mode: mode,
+          effort: effort,
+          holdClientTools: info.holdClientTools,
+          sessionTag: info.billingTag,
+          initialMessage: initialMessage,
+          isolated: info.worktree != null,
+          tier: tier,
+          harnessMode: harnessMode,
+          harness: harness,
+          briefing: briefing,
+        ),
+      );
+    } on Object {
+      if (briefing != null) await _unbrief(info.id);
+      rethrow;
+    }
+  }
 
   Future<List<InstalledSkill>> _skillsFor(String? projectId) async {
     try {
@@ -983,9 +1076,14 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       for (final s in state)
         if (s.parentId == id) s.id,
     };
+    // Any outside lead the session had left a briefing (and maybe a token).
     final outside = [
       for (final s in state)
-        if (gone.contains(s.id) && isOutsideLead(s.harness, s.workingDir)) s.id,
+        if (gone.contains(s.id) && [s.harness, ...s.leads.keys].any((h) => isOutsideLead(h, s.workingDir))) s.id,
+    ];
+    final switched = [
+      for (final s in state)
+        if (gone.contains(s.id) && s.leads.isNotEmpty) s.id,
     ];
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
@@ -996,7 +1094,15 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         if (!gone.contains(s.id)) s,
     ];
     _save();
-    await Future.wait([for (final g in outside) _unbrief(g)]);
+    await Future.wait([for (final g in outside) _unbrief(g), for (final g in switched) _dropTimeline(g)]);
+  }
+
+  Future<void> _dropTimeline(String id) async {
+    try {
+      await removeTimeline(await timelineDir(id));
+    } on Object {
+      // Left behind, it is only disk space.
+    }
   }
 
   static String titleFor(String prompt) {
@@ -1017,9 +1123,14 @@ final class CodeSessionState {
     this.asides = const [],
     this.goal,
     this.decided = const {},
+    this.waited = '',
   });
 
   final Transcript transcript;
+
+  /// The usage-limit notice the user chose Wait on: its offer to carry on
+  /// with another harness stays closed.
+  final String waited;
 
   /// Answers given so far to the calls waiting for approval (action id →
   /// allowed), for sessions that take one answer per call: their rows on the
@@ -1066,8 +1177,10 @@ final class CodeSessionState {
     bool clearGoal = false,
     bool clearError = false,
     Map<String, bool>? decided,
+    String? waited,
   }) => CodeSessionState(
     decided: decided ?? this.decided,
+    waited: waited ?? this.waited,
     transcript: transcript ?? this.transcript,
     mode: mode ?? this.mode,
     queued: queued ?? this.queued,
@@ -1104,6 +1217,27 @@ enum CompactKind {
   busy,
   failed,
 }
+
+/// How [CodeSessionController.switchLead] went.
+@immutable
+final class LeadSwitchOutcome {
+  const LeadSwitchOutcome.switched(this.kind) : message = '', busy = false, failed = false;
+  const LeadSwitchOutcome.busy() : message = '', kind = null, busy = true, failed = false;
+  const LeadSwitchOutcome.failed(this.message) : kind = null, busy = false, failed = true;
+
+  /// The handoff the new lead got: full, or only what it missed.
+  final HandoffKind? kind;
+
+  /// The agent is working or waiting for an answer; stop it first.
+  final bool busy;
+  final bool failed;
+
+  /// Why it failed.
+  final String message;
+}
+
+/// The line that follows a handoff when the new lead should carry on at once.
+String carryOnMessage(String from) => 'Carry on with the work where $from stopped.';
 
 /// One session's live state; talks to the harness.
 final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeSessionState, String>(
@@ -1170,6 +1304,17 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   /// Events before this are history being replayed, which never raise a loop card.
   bool _live = false;
+
+  /// What earlier leads did, oldest first (a session that switched harness).
+  List<LeadSegment> _timeline = const [];
+
+  /// Ids of the current conversation's events already in [_timeline]: a lead
+  /// that came back replays them, and they are shown once.
+  final _replayed = <String>{};
+
+  /// The lead just changed: its first message carries the whole mode note.
+  bool _freshLead = false;
+  bool _switching = false;
 
   /// What the current conversation has seen (no deltas), for [compact].
   @override
@@ -1410,10 +1555,14 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
 
   Future<void> _connect(CodeSessionInfo info) async {
     try {
+      if (info.leads.isNotEmpty) await _loadTimeline(info);
+      _builder.lead = _leadLabel(info.harness);
       final live = ref.read(_liveProvider);
       final session = _session = live[sessionId] ?? await ref.read(codeSessionsProvider.notifier).attachSession(info);
       live[sessionId] = session;
       await _openContext(info);
+      // Closed meanwhile: nothing would cancel a subscription made now.
+      if (!ref.mounted) return;
       _sub = session.events.listen(_onEvent);
       Timer(const Duration(milliseconds: 1500), () {
         _live = true;
@@ -1426,6 +1575,53 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       state = state.copyWith(error: '$e');
     }
   }
+
+  /// Shows what earlier leads did, before the current one's history replays.
+  Future<void> _loadTimeline(CodeSessionInfo info) async {
+    if (info.leads.isEmpty || noLocalFolder(info.workingDir)) return;
+    try {
+      _timeline = await readTimeline(await ref.read(codeSessionsProvider.notifier).timelineDir(sessionId));
+    } on Object {
+      // Without it, only the current lead's turns show.
+      return;
+    }
+    for (final s in _timeline) {
+      _builder.lead = _leadLabel(s.harness);
+      s.events.forEach(_builder.add);
+      _settleSegment();
+    }
+    _carried = _builder.snapshot.items;
+    _markReplayed(info.conversationId);
+    state = state.copyWith(transcript: _builder.snapshot);
+  }
+
+  /// A lead's stint is over: whatever it last said about running or waiting no longer holds.
+  void _settleSegment() {
+    if (_builder.snapshot.status case ExecutionStatus.running || ExecutionStatus.waitingForConfirmation) {
+      _builder.add(
+        HarnessEvent.decode({
+          'id': '',
+          'kind': 'ConversationStateUpdateEvent',
+          'key': 'execution_status',
+          'value': 'idle',
+        }),
+      );
+    }
+  }
+
+  void _markReplayed(String conversationId) {
+    _replayed
+      ..clear()
+      ..addAll([
+        for (final s in _timeline)
+          if (s.conversationId == conversationId)
+            for (final e in s.events)
+              if (e.id.isNotEmpty) e.id,
+      ]);
+  }
+
+  /// [harness] as the user knows it.
+  String _leadLabel(String harness) => ref.read(driverRegistryProvider).resolve(harness)?.info.label ?? harness;
 
   /// Before the history replays, so files it shows delivered aren't sent again.
   Future<void> _openContext(CodeSessionInfo info) async {
@@ -1474,6 +1670,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   void _onEvent(HarnessEvent event) {
     if (event is ConnectionChange) {
       state = state.copyWith(connected: event.connected);
+      return;
+    }
+    // A lead that came back replays its conversation; the timeline already shows the old part.
+    if (event.id.isNotEmpty && _replayed.contains(event.id)) {
+      _events.add(event);
+      _trackContext(event);
       return;
     }
     if (_live && event is ConversationFailure && isGatewayAuthFailure(event.message)) {
@@ -1838,7 +2040,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _tierNote = '';
     final body = context.isEmpty ? text : (text.isEmpty ? context : '$context\n\n$text');
     final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
-    return modeNote(state.mode, body, full: told != state.mode, from: told, subagent: subagent);
+    final full = told != state.mode || _freshLead;
+    _freshLead = false;
+    return modeNote(state.mode, body, full: full, from: told, subagent: subagent);
   }
 
   Future<Outgoing?> _outgoing(String text, List<Attachment> files) async {
@@ -1889,7 +2093,13 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
           : repliedInChat;
       await session.respond(accept: false, reason: reason);
     }
-    await session.send(_noted(out.text), images: out.images);
+    // A handoff not sent yet (the user switched from the menu) goes with this message.
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final pending = sessions.byId(sessionId)?.pendingHandoff ?? '';
+    await session.send(_noted(pending.isEmpty ? out.text : '$pending\n\n${out.text}'), images: out.images);
+    if (pending.isNotEmpty) {
+      if (sessions.byId(sessionId) case final info?) sessions.update(info.copyWith(pendingHandoff: ''));
+    }
   }
 
   /// Keeps an outside session's host token alive at each turn; one that
@@ -2019,6 +2229,281 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
   }
 
+  /// The agent is working, or waits on the user or on subagents.
+  bool get _busy {
+    final t = state.transcript;
+    return t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty;
+  }
+
+  /// Stops the run and waits (up to 5 s) until the agent says it stopped.
+  /// False while it still runs.
+  Future<bool> _stopAndSettle() async {
+    if (!_busy) return true;
+    await stop();
+    final end = DateTime.now().add(const Duration(seconds: 5));
+    while (ref.mounted && state.transcript.running && DateTime.now().isBefore(end)) {
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+    return ref.mounted && !state.transcript.running;
+  }
+
+  /// The usage limit the lead stopped on, while the session offers to carry
+  /// on with another harness: the last thing shown is the limit, nothing
+  /// runs, and the user hasn't chosen Wait.
+  UsageLimit? get leadOffer {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || info.isSubagent || isDemoPath(info.workingDir) || _busy) return null;
+    return switch (state.transcript.items.lastOrNull) {
+      NoticeItem(:final key, :final limit?) when key != state.waited => limit,
+      _ => null,
+    };
+  }
+
+  /// "Wait" on the offer: the session stays on its lead.
+  void waitForLimit() {
+    if (state.transcript.items.lastOrNull case NoticeItem(:final key, limit: _?)) {
+      state = state.copyWith(waited: key);
+    }
+  }
+
+  /// The model and effort [harness] leads with: what it ran on in this
+  /// session, else what the user picked for new sessions on it.
+  ({String model, String effort}) leadModelFor(String harness) {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info?.leads[harness] case final rec?) return (model: rec.model, effort: rec.effort);
+    if (harness == everyaiHarnessName) {
+      final c = ref.read(codeAgentProvider);
+      return (model: c.model, effort: c.effort);
+    }
+    return ref.read(codeLeadProvider).of(harness);
+  }
+
+  /// Moves the session to another lead harness [to]. The old lead stops (its
+  /// conversation is kept), and the new one gets a handoff built from the
+  /// session and the repository: everything the first time, only what it
+  /// missed when it comes back to a conversation it can reopen. With [run]
+  /// it carries on at once; otherwise the handoff goes with the user's next
+  /// message. A busy session is stopped first only with [stopFirst] (the
+  /// user agreed). The worktree, mode and permissions stay the session's.
+  ///
+  /// [summarizer] replaces the gateway call for the handoff summary (tests).
+  Future<LeadSwitchOutcome> switchLead(
+    String to, {
+    required bool run,
+    bool stopFirst = false,
+    Summarizer? summarizer,
+  }) async {
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (info == null || _session == null) return const LeadSwitchOutcome.failed('The session is not connected.');
+    if (info.isSubagent || isDemoPath(info.workingDir)) {
+      return const LeadSwitchOutcome.failed("This session can't change harness.");
+    }
+    if (info.harness == to) return const LeadSwitchOutcome.failed('The session already runs on it.');
+    if (_compacting || _switching) return const LeadSwitchOutcome.busy();
+    final target = ref.read(driverRegistryProvider).resolve(to);
+    if (target == null) return LeadSwitchOutcome.failed("This version of the app doesn't have $to.");
+    final Map<String, DriverStatus> statuses;
+    try {
+      statuses = await ref.read(driverStatusesProvider.future);
+    } on Object catch (e) {
+      return LeadSwitchOutcome.failed('$e');
+    }
+    final own = ref.read(codeSettingsProvider).ownClis;
+    if (leadBlocked(target.info, statuses[to], consented: own.contains(to)) case final why?) {
+      return LeadSwitchOutcome.failed('${target.info.label}: $why');
+    }
+    if (_busy && (!stopFirst || !await _stopAndSettle())) return const LeadSwitchOutcome.busy();
+    if (!ref.mounted) return const LeadSwitchOutcome.failed('The session was closed.');
+    _switching = true;
+    try {
+      return await _switchLead(info, target, run: run, summarizer: summarizer);
+    } finally {
+      _switching = false;
+    }
+  }
+
+  Future<LeadSwitchOutcome> _switchLead(
+    CodeSessionInfo info,
+    HarnessDriver target, {
+    required bool run,
+    Summarizer? summarizer,
+  }) async {
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final old = _session!;
+    final from = info.harness;
+    final to = target.info.id;
+    final fromLabel = _leadLabel(from);
+    final dir = await sessions.timelineDir(sessionId);
+    final outside = isOutsideLead(to, info.workingDir);
+    final rec = info.leads[to];
+    final pick = rec == null ? leadModelFor(to) : (model: rec.model, effort: rec.effort);
+    // Max, Ultra and Bug fix need the EveryAI harness's phase control.
+    final tier = outside && info.tier.phased ? HarnessTier.thorough : info.tier;
+    final harnessMode = outside ? HarnessMode.build : info.harnessMode;
+
+    // The session's record: earlier leads' stints, then this one's own events.
+    final current = [
+      for (final e in _events)
+        if (!_replayed.contains(e.id)) e,
+    ];
+    final record = [for (final s in _timeline) ...s.events, ...current];
+    List<Handoff> stored;
+    try {
+      stored = await loadHandoffs(dir);
+    } on Object {
+      stored = const [];
+    }
+    final since = placedSince(_timeline, current, lastSeenBy(stored, to));
+    final git = noLocalFolder(info.workingDir) ? null : await handoffGit(info);
+    final summarize = await _handoffSummarizer(info, summarizer);
+    Future<Handoff> build({required bool resumable}) => summarizeHandoff(
+      buildHandoff(
+        record,
+        from: from,
+        fromConversation: info.conversationId,
+        to: to,
+        workingDir: info.workingDir,
+        since: since,
+        resumable: resumable,
+        git: git?.git,
+        diffs: git?.diffs ?? const {},
+      ),
+      handoffScope(record, since: since, resumable: resumable).events,
+      summarize,
+    );
+    var handoff = await build(
+      resumable: rec != null && rec.conversationId.isNotEmpty && target.caps.contains(DriverCap.resume),
+    );
+
+    // The old lead joins the roster before the new one is briefed, which names it.
+    final leads = {
+      ...info.leads,
+      from: LeadRecord(conversationId: info.conversationId, model: info.model, effort: info.effort),
+    }..remove(to);
+    sessions.update(info.copyWith(leads: leads));
+    // The files as they are now, so the handoff turn can be rewound to.
+    await _checkpoint();
+    final ready = Completer<void>();
+    HarnessSession? live;
+    try {
+      if (handoff.kind == HandoffKind.delta) {
+        try {
+          live = await sessions.attachSession(
+            info.copyWith(harness: to, conversationId: rec!.conversationId, model: pick.model, effort: pick.effort),
+          );
+        } on Object {
+          // Its conversation can't be reopened: a new one, with everything.
+          handoff = await build(resumable: false);
+        }
+      }
+      live ??= await sessions._startLead(
+        info,
+        harness: to,
+        model: pick.model,
+        effort: pick.effort,
+        mode: state.mode,
+        tier: tier,
+        harnessMode: harnessMode,
+        initialMessage: run
+            ? modeNote(state.mode, '${handoffMessage(handoff, fromName: fromLabel)}\n\n${carryOnMessage(fromLabel)}')
+            : null,
+        ready: ready.future,
+      );
+    } on Object catch (e) {
+      if (!ready.isCompleted) ready.complete();
+      if (ref.mounted) sessions.update(sessions.byId(sessionId)?.copyWith(leads: info.leads) ?? info);
+      return LeadSwitchOutcome.failed('$e');
+    }
+    final message = handoffMessage(handoff, fromName: fromLabel);
+    if (!ref.mounted) {
+      unawaited(live.close());
+      ready.complete();
+      return const LeadSwitchOutcome.failed('The session was closed.');
+    }
+
+    // The old lead stops for good before the new one runs (a CLI still
+    // closing would otherwise take the next reopen of its conversation).
+    await _sub?.cancel();
+    await old.close().timeout(const Duration(seconds: 3), onTimeout: () {});
+    final segment = (harness: from, conversationId: info.conversationId, events: current);
+    _timeline = [..._timeline, segment];
+    try {
+      await appendSegment(dir, segment);
+      await saveHandoff(dir, handoff);
+    } on Object {
+      // The next start shows only the current lead's turns; the handoff still went out.
+    }
+    // An outside lead's EveryAI tools end with it (a new outside lead was briefed afresh).
+    if (isOutsideLead(from, info.workingDir) && !outside) await sessions._unbrief(sessionId);
+    if (!ref.mounted) {
+      unawaited(live.close());
+      ready.complete();
+      return const LeadSwitchOutcome.failed('The session was closed.');
+    }
+    final next = (sessions.byId(sessionId) ?? info).copyWith(
+      harness: to,
+      conversationId: live.id,
+      model: pick.model,
+      effort: pick.effort,
+      leads: leads,
+      tier: tier,
+      harnessMode: harnessMode,
+      pendingHandoff: run ? '' : message,
+    );
+    sessions.update(next);
+
+    // Swap conversations as compaction does; the transcript stays one timeline.
+    ref.read(_liveProvider)[sessionId] = live;
+    _session = live;
+    _events.clear();
+    _markReplayed(live.id);
+    if (!_mirror.isClosed) _mirror.add(null);
+    _settleSegment();
+    _builder.lead = target.info.label;
+    _carried = _builder.snapshot.items;
+    _answered = '';
+    _doom.reset();
+    _doomOpen = false;
+    _freshLead = true;
+    state = state.copyWith(transcript: _builder.snapshot, waited: '');
+    if (ref.exists(codeUsageProvider(sessionId))) ref.read(codeUsageProvider(sessionId).notifier).leadChanged();
+    await _openContext(next);
+    if (!ref.mounted) {
+      ready.complete();
+      return const LeadSwitchOutcome.failed('The session was closed.');
+    }
+    _live = false;
+    _sub = live.events.listen(_onEvent);
+    Timer(const Duration(milliseconds: 1500), () => _live = true);
+    ready.complete();
+    if (!outside) _syncFlow();
+    if (run && handoff.kind == HandoffKind.delta) {
+      await live.send(_noted('$message\n\n${carryOnMessage(fromLabel)}'));
+    } else if (run) {
+      // It started with the whole note.
+      _freshLead = false;
+    }
+    return LeadSwitchOutcome.switched(handoff.kind);
+  }
+
+  /// The handoff's short summary, on the utility model through the gateway:
+  /// null when neither credits nor the user's key pay for it (the facts go
+  /// out alone).
+  Future<Summarizer?> _handoffSummarizer(CodeSessionInfo info, Summarizer? given) async {
+    if (given != null) return given;
+    final billing = ref.exists(billingProvider) ? ref.read(billingProvider).value : null;
+    if (!handoffSummaryPayable(ownKey: ModelBilling.current.ownKey(ModelId(compactionModel)), billing: billing)) {
+      return null;
+    }
+    return (List<Map<String, Object?>> request) async => gatewaySummarizer(
+      baseUrl: gatewayBaseUrl(ref),
+      apiKey: await gatewayKey(ref),
+      sessionTag: info.billingTag,
+      onUnauthorized: (k) => remintGatewayKey(ref, k),
+    )(request);
+  }
+
   /// Takes the session back to just before user turn [turn] (1-based): the
   /// agent's conversation moves its head to before that message, so it
   /// forgets it and everything after (the server keeps the old branch), and
@@ -2034,20 +2519,15 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (_compacting) return const RewindOutcome.busy();
     final turns = state.transcript.items.whereType<UserTurn>().toList();
     if (turn < 1 || turn > turns.length) return const RewindOutcome.nothing();
-    final t = state.transcript;
-    if (t.running || t.pending.isNotEmpty || t.held.isNotEmpty || t.openSubagents.isNotEmpty) {
-      await stop();
-      final end = DateTime.now().add(const Duration(seconds: 5));
-      while (ref.mounted && state.transcript.running && DateTime.now().isBefore(end)) {
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-      }
+    if (_busy) {
+      final settled = await _stopAndSettle();
       if (!ref.mounted) return const RewindOutcome.failed('The session was closed.');
-      if (state.transcript.running) return const RewindOutcome.busy();
+      if (!settled) return const RewindOutcome.busy();
     }
     final message = turns[turn - 1].key;
     var conversation = false;
     var note = '';
-    if (_events.any((e) => e.id == message)) {
+    if (_events.any((e) => e.id == message) && !_replayed.contains(message)) {
       final head = rewindHead(_events, message);
       try {
         await session.rewindTo(head);
@@ -2067,7 +2547,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         if (e is ChatMessage && e.fromUser) _trackContext(e);
       }
     } else {
-      note = 'The agent still remembers: that turn is from before the session was compacted.';
+      note =
+          'The agent still remembers: that turn is from an earlier conversation (before the session was compacted '
+          'or moved to another harness).';
     }
     var files = false;
     if (info.worktree != null) {
@@ -2086,9 +2568,12 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Folds the transcript again from [_events] (after a rewind), keeping
   /// what earlier conversations showed. Cards the app raised itself go.
   void _refold() {
-    _builder = TranscriptBuilder()..carry(_carried);
+    final lead = _builder.lead;
+    _builder = TranscriptBuilder()
+      ..carry(_carried)
+      ..lead = lead;
     for (final e in _events) {
-      _builder.add(e);
+      if (!_replayed.contains(e.id)) _builder.add(e);
     }
     // The server is idle now, whatever the kept branch last said.
     if (_builder.snapshot.status case ExecutionStatus.running || ExecutionStatus.waitingForConfirmation) {
@@ -3162,6 +3647,24 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
   UsageTotals _reported = UsageTotals.zero;
   final _reportIds = <String>{};
 
+  /// [_reported] split by the harness that reported it (a session that
+  /// changed leads shows one row each).
+  final _byHarness = <String, UsageTotals>{};
+
+  /// The lead changed and hasn't reported since: the context ring is empty.
+  bool _freshLead = false;
+
+  /// What each harness used: the drivers' own reports, plus the backend's
+  /// ledger (calls on EveryAI credits or the user's keys) under
+  /// [everyaiHarnessName].
+  Map<String, UsageTotals> get byHarness => {
+    if (!_backend.isEmpty) everyaiHarnessName: _backend,
+    for (final MapEntry(:key, :value) in _byHarness.entries)
+      key: key == everyaiHarnessName && !_backend.isEmpty ? _backend + value : value,
+  };
+
+  UsageTotals get _total => _freshLead ? (_backend + _reported).withContext(0) : _backend + _reported;
+
   String get _reportsKey => '$codeUsageReportsPrefix$sessionId';
 
   @override
@@ -3172,7 +3675,7 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
     });
     _loadReports();
     _backend = await _fetch();
-    return _backend + _reported;
+    return _total;
   }
 
   void _loadReports() {
@@ -3182,6 +3685,11 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
       final j = jsonDecode(raw) as Map<String, Object?>;
       _reported = UsageTotals.fromJson(j['totals'] as Map<String, Object?>? ?? const {});
       _reportIds.addAll([...?(j['ids'] as List<Object?>?)?.whereType<String>()]);
+      if (j['by_harness'] case final Map<String, Object?> by) {
+        for (final MapEntry(:key, :value) in by.entries) {
+          if (value case final Map<String, Object?> t) _byHarness[key] = UsageTotals.fromJson(t);
+        }
+      }
     } on Object {
       // A broken entry counts as none.
     }
@@ -3193,7 +3701,7 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
   void report(UsageReport r) {
     if (r.id.isNotEmpty && !_reportIds.add(r.id)) return;
     final cost = r.costMicros ?? 0;
-    var next = _reported.addCall(
+    UsageTotals add(UsageTotals to) => to.addCall(
       prompt: r.input,
       completion: r.output,
       cached: r.cached,
@@ -3202,13 +3710,27 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
       onPlan: r.onPlan,
       context: false,
     );
-    if (r.contextTokens case final c?) next = next.withContext(c);
+    var next = add(_reported);
+    if (r.contextTokens case final c?) {
+      next = next.withContext(c);
+      _freshLead = false;
+    }
     _reported = next;
+    final harness = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.harness ?? everyaiHarnessName;
+    _byHarness[harness] = add(_byHarness[harness] ?? UsageTotals.zero);
     ref.read(preferencesProvider)[_reportsKey] = jsonEncode({
       'totals': _reported.toJson(),
       'ids': [..._reportIds],
+      'by_harness': {for (final MapEntry(:key, :value) in _byHarness.entries) key: value.toJson()},
     });
-    state = AsyncData(_backend + _reported);
+    state = AsyncData(_total);
+  }
+
+  /// The session moved to another lead: its context starts empty, so the
+  /// ring shows nothing until the new lead's first reading.
+  void leadChanged() {
+    _freshLead = true;
+    if (state.hasValue) state = AsyncData(_total);
   }
 
   Future<UsageTotals> _fetch() async {
@@ -3240,8 +3762,10 @@ final class CodeUsage extends AsyncNotifier<UsageTotals> {
     final next = await AsyncValue.guard(_fetch);
     // Keep the last reading if the server can't be reached.
     if (!ref.mounted || !next.hasValue) return;
+    // A new call on the ledger is the new lead's (EveryAI) first reading.
+    if (next.requireValue.calls != _backend.calls) _freshLead = false;
     _backend = next.requireValue;
-    state = AsyncData(_backend + _reported);
+    state = AsyncData(_total);
   }
 }
 
