@@ -1204,6 +1204,103 @@ void main() {
       await s.close();
     });
 
+    test("Cursor's tool_call before its question request: that row closes, the card has its own id", () async {
+      final (r, s, seen, host) = await asking('cursor/ask_tool_first.jsonl');
+      final (step, card) = (seen.calls.first, seen.calls.last);
+      expect(seen.calls, hasLength(2));
+      expect(step.id, isNot(card.id));
+      expect(host.calls.single.id, card.id);
+      expect(seen.results.single, isA<ToolResult>().having((x) => x.actionId, 'actionId', step.id));
+      host.answer(
+        answersReason(Question.listFrom(host.calls.single.args), const [
+          QuestionAnswer(selected: {0}),
+        ]),
+      );
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect({for (final x in seen.results) x.actionId}, {step.id, card.id});
+      expect({for (final x in seen.results) x.id}, hasLength(2));
+      final items = _transcript(seen.all).items;
+      expect(items.whereType<QuestionItem>().single.answers, isNotNull);
+      final keys = [for (final i in items) i.key];
+      expect(keys.toSet(), hasLength(keys.length));
+      final steps = [
+        for (final i in items.whereType<StepItem>()) i.step,
+        for (final g in items.whereType<ExploreGroup>()) ...g.steps,
+      ];
+      expect(steps, isNotEmpty);
+      expect(steps.every((st) => st.done), isTrue);
+      await s.close();
+    });
+
+    test(
+      'a subagent whose only end is its tool_call_update closes; one shown first as a step becomes a subagent row',
+      () async {
+        final r = rig(['cursor/task_update_end.jsonl']);
+        final s = await r.driver('cursor', 'cursor-agent').start(r.spec());
+        final seen = _Seen(s);
+        await s.send('go');
+        await seen.untilStatus(ExecutionStatus.finished);
+        r.expectPlayed();
+        final tasks = seen.calls.where((c) => c.actionKind == 'TaskAction').toList();
+        expect([for (final t in tasks) t.toolCallId], ['task-1', 'ex-1']);
+        String? endOf(ActionCall c) => seen.results.where((x) => x.actionId == c.id).singleOrNull?.text;
+        expect([for (final t in tasks) endOf(t)], ['Done.', 'Failed.']);
+        // The step Cursor showed for ex-1 first is closed too.
+        expect(seen.calls.every((c) => endOf(c) != null), isTrue);
+        expect(_transcript(seen.all).items.whereType<SubagentItem>(), hasLength(2));
+        await s.close();
+      },
+    );
+
+    test('to-dos replayed while loading are kept: a merge after the reopen changes the whole list', () async {
+      final r = rig(['cursor/load_merge.jsonl']);
+      _stored(r, 'c1', 'cur-old');
+      final s = await r.driver('cursor', 'cursor-agent').attach('c1');
+      final seen = _Seen(s);
+      await s.send('Next');
+      await seen.untilStatus(ExecutionStatus.finished);
+      r.expectPlayed();
+      expect(seen.calls.single.action['task_list'], [
+        {'title': 'Old', 'status': 'todo', 'notes': ''},
+        {'title': 'Older', 'status': 'done', 'notes': ''},
+      ]);
+      await s.close();
+    });
+
+    test('Cursor refuses a project whose .cursor folder allows tools or has hooks', () async {
+      final r = rig(const []);
+      final p = acpProfileOf('cursor-agent');
+      Directory('${r.work}/.cursor').createSync();
+      File('${r.work}/.cursor/cli.json').writeAsStringSync('{"permissions":{"allow":[],"deny":["Shell(rm)"]}}');
+      expect(await p.preflight(r.work), isNull);
+      File('${r.work}/.cursor/cli.json').writeAsStringSync('{"permissions":{"allow":["Shell(*)"]}}');
+      expect(await p.preflight(r.work), contains('(cli.json "permissions.allow")'));
+      File('${r.work}/.cursor/hooks.json').writeAsStringSync('{}');
+      expect(await p.preflight(r.work), contains('.cursor folder can let Cursor CLI act'));
+      expect(await p.preflight(r.work), contains('hooks.json'));
+      expect(acpCommand('cursor-agent', const ['--trust', '--approve-mcps', '--model', 'x']).args, [
+        'acp',
+        '--model',
+        'x',
+      ]);
+    });
+
+    test("another program named `agent` isn't taken for Cursor CLI", () async {
+      final agent = File('${tmp.path}/agent')..writeAsStringSync('#!/bin/sh\necho "agent 0.3.1"\n');
+      await Process.run('chmod', ['+x', agent.path]);
+      AcpDriver driver() => AcpDriver(
+        id: 'cursor',
+        label: 'Cursor CLI',
+        command: 'cursor-agent',
+        which: (c) async => c == 'agent' ? agent.path : null,
+        signedIn: () async => null,
+      );
+      expect((await driver().detect()).problem, contains('not Cursor CLI'));
+      agent.writeAsStringSync('#!/bin/sh\necho "2026.10.22-3f1c2ab"\n');
+      expect((await driver().detect()).problem, isNull);
+    });
+
     test('signed in: a key in the environment; the keychain entry by exit code only', () async {
       final p = acpProfileOf('cursor-agent');
       expect(await p.signedIn('/x/cursor-agent', env: const {'CURSOR_API_KEY': 'k'}), isTrue);

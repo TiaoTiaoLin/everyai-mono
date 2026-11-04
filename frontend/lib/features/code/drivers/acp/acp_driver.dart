@@ -113,7 +113,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed {
       signedIn: signed,
       problem:
           s.problem ??
-          acpForeignProblem(resolved.profile, s.version) ??
+          acpForeignProblem(resolved.profile, s.version, path: s.path) ??
           acpVersionProblem(resolved.profile, label, s.version) ??
           (signed == false ? 'Not signed in. $hint.' : null),
     );

@@ -3639,8 +3639,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   Future<void> startBuilding() async {
     final open = state.transcript.openPlan;
     final held = open?.call;
-    if (state.mode == AgentMode.plan) await setMode(AgentMode.autoEdit);
+    final switching = state.mode == AgentMode.plan ? setMode(AgentMode.autoEdit) : Future<void>.value();
     // An outside agent's plan: the approval is its host call's result, and the plan is kept with the project.
+    // It is answered without waiting for the mode switch: an agent blocked on the plan request (Cursor's
+    // `cursor/create_plan`) may only take the switch once the plan is answered.
     final wait = open == null ? null : _hostFor(open.call.id);
     if (open != null && wait != null) {
       final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
@@ -3648,8 +3650,10 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       _answerHost(wait, planApprovedReason);
       _builder.settlePlan(open.call.id, PlanVerdict.approved);
       state = state.copyWith(transcript: _builder.snapshot);
+      await switching;
       return;
     }
+    await switching;
     final session = _session;
     if (session != null && held != null && _isHeld(held)) {
       await _replyInCall(session, planApprovedReason);

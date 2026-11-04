@@ -806,7 +806,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       case 'cursor/create_plan':
         return _cursorCard(p, question: false);
       case 'cursor/update_todos' || 'cursor/task':
-        if (!_replaying) _cursorUpdate(method, p);
+        _cursorUpdate(method, p);
         return {
           'outcome': {'outcome': method == 'cursor/task' ? 'completed' : 'accepted'},
         };
@@ -837,7 +837,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final args = question ? cursorQuestionArgs(p) : cursorPlanArgs(p);
     _flush();
     final row = actionEvent(
-      id: 'tc-$callId',
+      id: _extRowId(callId, 'Shown as a card.'),
       toolName: '${everyaiServerName}__$tool',
       kind: 'MCPToolAction',
       toolCallId: callId,
@@ -863,7 +863,7 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     if (_done.add(callId)) {
       _emit(
         resultEvent(
-          id: 'tr-$callId',
+          id: _resultId(row),
           actionId: row.id,
           toolName: row.toolName,
           text: result.text,
@@ -874,29 +874,33 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     return question ? cursorAnswerReply(p, result) : cursorPlanReply(result);
   }
 
-  /// Cursor's to-do list and subagent updates.
+  /// Cursor's to-do list and subagent updates. While a conversation loads
+  /// nothing is shown (the journal has it), but the replayed to-dos are kept,
+  /// so a later merge changes the whole list.
   void _cursorUpdate(String method, Map<String, Object?> p) {
     switch (method) {
       case 'cursor/update_todos':
-        _flush();
         _todos = cursorTodos(_todos, p);
+        if (_replaying) return;
+        _flush();
         final (call, result) = cursorTodoEvents(_todos, id: _next('todos'));
         _emit(call);
         _emit(result);
       case 'cursor/task':
+        if (_replaying) return;
         final callId = p['toolCallId'] as String? ?? _next('task');
         if (_done.contains(callId)) return;
         _extOwned.add(callId);
         var row = _shown[callId];
-        if (row == null) {
+        if (row == null || row.actionKind != 'TaskAction') {
           _flush();
-          row = _shown[callId] = cursorTaskCall(p, id: 'tc-$callId', toolCallId: callId);
+          row = _shown[callId] = cursorTaskCall(p, id: _extRowId(callId, 'Shown as a subagent.'), toolCallId: callId);
           _emit(row);
         }
         if (p['durationMs'] != null && _done.add(callId)) {
           _emit(
             resultEvent(
-              id: 'tr-$callId',
+              id: _resultId(row),
               actionId: row.id,
               toolName: row.toolName,
               text: cursorTaskDone(p['durationMs']),
@@ -906,12 +910,29 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     }
   }
 
+  /// The id for an extension's own row of [callId]. When Cursor's ordinary
+  /// `tool_call` showed a row for it first, that row is closed with
+  /// [closing] and the new one gets an id of its own.
+  String _extRowId(String callId, String closing) {
+    final old = _shown[callId];
+    if (old == null) return 'tc-$callId';
+    if (_done.add(callId)) {
+      _emit(resultEvent(id: _resultId(old), actionId: old.id, toolName: old.toolName, text: closing));
+    }
+    _done.remove(callId);
+    _calls.remove(callId);
+    return 'tc-$callId-ext';
+  }
+
+  /// The result id for [row] (`tc-…` gives `tr-…`).
+  static String _resultId(ActionCall row) => row.id.replaceFirst('tc-', 'tr-');
+
   // ----------------------------------------------------------------- updates
 
   void _onNotify(String method, Object? params) {
     final name = method.startsWith('_') ? method.substring(1) : method;
     if (name.startsWith('cursor/')) {
-      if (!_replaying) _cursorUpdate(name, _map(params));
+      _cursorUpdate(name, _map(params));
       return;
     }
     if (method != 'session/update') return;
@@ -967,7 +988,8 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
 
   void _toolUpdate(Map<String, Object?> u) {
     final callId = u['toolCallId'];
-    if (callId is! String || _done.contains(callId) || _extOwned.contains(callId)) return;
+    if (callId is! String || _done.contains(callId)) return;
+    if (_extOwned.contains(callId)) return _extToolUpdate(callId, u);
     final call = _calls[callId] = mergeToolCall(_calls[callId] ?? const {}, u);
     final status = call['status'] as String? ?? 'pending';
     final finished = status == 'completed' || status == 'failed';
@@ -987,6 +1009,26 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
       _calls.remove(callId);
       _emit(acpResultEvent(call, id: 'tr-$callId', actionId: shown.id, toolName: shown.toolName));
     }
+  }
+
+  /// Cursor's ordinary update for a call an extension shows: it adds no row,
+  /// but a finished one closes a subagent row (a card waits for the user).
+  void _extToolUpdate(String callId, Map<String, Object?> u) {
+    final row = _shown[callId];
+    final status = u['status'];
+    if (row == null || _extWaits.containsKey(callId) || (status != 'completed' && status != 'failed')) return;
+    if (!_done.add(callId)) return;
+    _calls.remove(callId);
+    final failed = status == 'failed';
+    _emit(
+      resultEvent(
+        id: _resultId(row),
+        actionId: row.id,
+        toolName: row.toolName,
+        text: failed ? 'Failed.' : cursorTaskDone(null),
+        isError: failed,
+      ),
+    );
   }
 
   /// A call that changes things ran without a permission request: the
@@ -1030,7 +1072,13 @@ final class AcpSession implements HarnessSession, PerCallApprovals {
     final shown = _shown[callId];
     if (shown == null) return;
     _emit(
-      resultEvent(id: 'tr-$callId', actionId: shown.id, toolName: shown.toolName, text: 'Cancelled.', isError: true),
+      resultEvent(
+        id: _resultId(shown),
+        actionId: shown.id,
+        toolName: shown.toolName,
+        text: 'Cancelled.',
+        isError: true,
+      ),
     );
   }
 

@@ -195,5 +195,23 @@ Future<String?> kiroWorkspaceProblem(String cwd) async {
       'Remove those, or add MCP servers in Settings → Code → MCP servers instead, then try again.';
 }
 
+/// Why Cursor CLI must not start in [cwd]: the project's `.cursor/cli.json`
+/// allowing tools ahead of time, or `.cursor/hooks.json` (hooks run commands
+/// and can allow shell calls). Null when there are neither.
+Future<String?> cursorWorkspaceProblem(String cwd) async {
+  final cli = await readJsonFile('$cwd/.cursor/cli.json');
+  final allow = switch (cli?['permissions']) {
+    {'allow': final List<Object?> a} => a,
+    _ => const <Object?>[],
+  };
+  final found = [
+    if (allow.isNotEmpty) 'cli.json "permissions.allow"',
+    if (await File('$cwd/.cursor/hooks.json').exists()) 'hooks.json',
+  ];
+  if (found.isEmpty) return null;
+  return "This project's .cursor folder can let Cursor CLI act without asking the app (${found.join(', ')}). "
+      'Remove those, then try again.';
+}
+
 /// `.gemini/settings.json` keys that can't widen what Gemini does unasked.
 const _geminiHarmless = {r'$schema', 'ui', 'general', 'model', 'privacy', 'telemetry', 'output', 'accessibility'};

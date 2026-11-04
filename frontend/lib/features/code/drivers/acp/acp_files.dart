@@ -49,6 +49,10 @@ Future<bool?> cursorSignedIn() => impl.cursorSignedIn();
 /// tools and run hooks) or `.kiro/settings/mcp.json`.
 Future<String?> kiroWorkspaceProblem(String cwd) => impl.kiroWorkspaceProblem(cwd);
 
+/// Why Cursor CLI must not start in [cwd], or null: the project's
+/// `.cursor/cli.json` allowing tools, or `.cursor/hooks.json`.
+Future<String?> cursorWorkspaceProblem(String cwd) => impl.cursorWorkspaceProblem(cwd);
+
 /// Why Gemini CLI must not start in [cwd], or null. It counts as headless
 /// under the app, so it trusts the folder and reads its `.gemini/settings.json`
 /// and policies; those can allow tools ahead of time or start MCP commands,

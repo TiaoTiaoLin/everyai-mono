@@ -118,6 +118,7 @@ final class AcpProfile {
     AcpAgent.gemini => geminiWorkspaceProblem(cwd),
     AcpAgent.qwen => geminiWorkspaceProblem(cwd, folder: '.qwen', label: 'Qwen Code'),
     AcpAgent.kiro => kiroWorkspaceProblem(cwd),
+    AcpAgent.cursor => cursorWorkspaceProblem(cwd),
     _ => Future.value(),
   };
 
@@ -152,12 +153,18 @@ String? acpVersionProblem(AcpProfile p, String label, String? versionLine) {
   return null;
 }
 
-/// Why [versionLine] shows the command isn't the agent of [p] (another
-/// program with the same name), or null.
-String? acpForeignProblem(AcpProfile p, String? versionLine) =>
-    versionLine != null && p.notThis != null && RegExp(p.notThis!.line).hasMatch(versionLine)
-    ? p.notThis!.problem
-    : null;
+/// Why [versionLine] shows the command at [path] isn't the agent of [p]
+/// (another program with the same name), or null. Cursor's generic `agent`
+/// name must print Cursor's dated version (`2026.10.22-…`).
+String? acpForeignProblem(AcpProfile p, String? versionLine, {String? path}) {
+  if (versionLine == null) return null;
+  if (p.agent == AcpAgent.cursor && path?.split('/').last == 'agent') {
+    return RegExp(r'\b20\d\d\.\d\d\.\d\d\b').hasMatch(versionLine)
+        ? null
+        : 'This `agent` is another program, not Cursor CLI.';
+  }
+  return p.notThis != null && RegExp(p.notThis!.line).hasMatch(versionLine) ? p.notThis!.problem : null;
+}
 
 /// Whether `kiro-cli whoami --format json` exiting with [code] and [stdout]
 /// means signed in: exit 0 is, `{"account":null}` with an error isn't, and
@@ -414,8 +421,9 @@ const _cursor = AcpProfile._(
   pinned: [
     ['acp'],
   ],
-  // Its headless skip-approval flags.
-  dropped: ['--force', '--yolo', '-f'],
+  // Its headless skip-approval flags, and the ones that trust the folder or
+  // approve every MCP server unasked.
+  dropped: ['--force', '--yolo', '-f', '--trust', '--approve-mcps'],
   caps: {..._shared, DriverCap.mcp, DriverCap.switchModel, DriverCap.subagents},
   askMode: 'agent',
   planMode: 'plan',
