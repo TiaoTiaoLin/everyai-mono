@@ -18,3 +18,5 @@ Future<DriverStatus> detectCli(
   List<String> versionArgs = const ['--version'],
   Future<String?> Function(String command)? which,
 }) async => const DriverStatus(problem: 'Needs the desktop app.');
+
+Future<void> closeAllDriverProcesses() async {}

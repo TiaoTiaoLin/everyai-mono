@@ -25,6 +25,9 @@ Future<DriverProcess> spawnDriver({
 }) =>
     impl.spawnDriver(executable: executable, args: args, cwd: cwd, sessionTag: sessionTag, logPath: logPath, env: env);
 
+/// Ends every driver process still running (the app is quitting).
+Future<void> closeAllDriverProcesses() => impl.closeAllDriverProcesses();
+
 /// Looks for [command] on the login shell's PATH (an app started from the
 /// Dock doesn't have the user's) and asks it for its version: installed,
 /// path and the first line of `[command] [versionArgs]`. Whether it is

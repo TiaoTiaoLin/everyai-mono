@@ -29,6 +29,10 @@ Future<DriverProcess> spawnDriver({
   return _Process(process, sessionTag, File(logPath).openWrite(mode: FileMode.append));
 }
 
+final _live = <_Process>{};
+
+Future<void> closeAllDriverProcesses() => Future.wait([for (final p in _live.toList()) p.close()]);
+
 final class _Process implements DriverProcess {
   _Process(this._process, this._tag, this._log) {
     _process.stderr.transform(const Utf8Decoder(allowMalformed: true)).listen((s) {
@@ -43,9 +47,11 @@ final class _Process implements DriverProcess {
     }, onDone: () => unawaited(_log.close()));
     // A write after the CLI died fails on the pipe; nobody else listens.
     unawaited(_process.stdin.done.catchError((Object _) {}));
+    _live.add(this);
     unawaited(
       _process.exitCode.then((_) {
         _exited = true;
+        _live.remove(this);
         unregisterDriverRoot(_tag, pid);
       }),
     );
@@ -82,6 +88,7 @@ final class _Process implements DriverProcess {
   Future<void> close() async {
     if (_closed) return;
     _closed = true;
+    _live.remove(this);
     unregisterDriverRoot(_tag, pid);
     await killTree(pid);
   }
