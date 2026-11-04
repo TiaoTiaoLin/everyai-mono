@@ -12,6 +12,7 @@ import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/git_commands.dart' show plainPrBody;
+import 'package:every_ai/features/code/domain/goal.dart' show GoalStatus;
 import 'package:every_ai/features/code/domain/no_spend.dart';
 import 'package:every_ai/features/code/domain/permissions.dart' show DenialKind, denialMessage;
 import 'package:every_ai/features/code/domain/questions.dart';
@@ -423,6 +424,27 @@ void main() {
       expect(check.text, allOf(startsWith('Goal: The tests pass'), contains('<goal-check>'), contains('sub-agent')));
     });
 
+    test('a goal set under the EveryAI lead is handed to an outside lead, with no judge', () async {
+      final info = await start();
+      final c = await open(info.id);
+      session.add(stateEvent('r0', ExecutionStatus.finished));
+      await pumpEventQueue();
+      final sessions = container.read(codeSessionsProvider.notifier);
+      sessions.update(sessions.byId(info.id)!.copyWith(harness: everyaiHarnessName));
+      expect(await c.setGoal('The tests pass'), isNull);
+      expect(stateOf(info.id).goal?.note, isNot(goalByLeadNote));
+      // The lead moves to an outside CLI: the next event hands the goal over once.
+      sessions.update(sessions.byId(info.id)!.copyWith(harness: 'test'));
+      session.add(stateEvent('r1', ExecutionStatus.running));
+      await pumpEventQueue();
+      expect((stateOf(info.id).goal?.status, stateOf(info.id).goal?.note), (GoalStatus.active, goalByLeadNote));
+      // Sent once the lead's turn ends (a message while it works waits in the queue).
+      session.add(stateEvent('r2', ExecutionStatus.finished));
+      await pumpEventQueue();
+      expect(session.sent.where((m) => m.endsWith(goalLeadMessage('The tests pass'))), hasLength(1));
+      expect(stateOf(info.id).goal?.status, GoalStatus.active);
+    });
+
     test('/learn writes no skill from the session or a page', () async {
       final info = await start();
       final c = await open(info.id);
@@ -594,6 +616,36 @@ void main() {
       }).result;
       expect(script.text, contains('decide is off here'));
     }
+  });
+
+  test('a host command runs once per approval, never for an open row nobody approved', () async {
+    final info = await start();
+    final c = await open(info.id);
+    const args = {'action': 'reproduced', 'command': 'touch ran'};
+    final ran = File('${project.path}/ran');
+    // Codex pre-approves MCP tools: its row is open and running, and the user was never asked.
+    session
+      ..add(actionEvent(id: 'x1', toolName: 'everyai__bug_check', kind: 'MCPToolAction', args: args))
+      ..add(stateEvent('x1-r', ExecutionStatus.running));
+    await pumpEventQueue();
+    var r = await hostCall(info.id, 'bug_check', args).result;
+    expect(r.isError, isTrue);
+    expect(r.text, contains('approval'));
+    expect(ran.existsSync(), isFalse);
+    session.add(resultEvent(id: 'x1-o', actionId: 'x1', toolName: 'everyai__bug_check', text: r.text));
+    // The same call asked about and approved by the user runs, once.
+    row('a1', 'bug_check', args);
+    await pumpEventQueue();
+    await c.approve();
+    session.add(stateEvent('a1-r', ExecutionStatus.running));
+    await pumpEventQueue();
+    r = await hostCall(info.id, 'bug_check', args).result;
+    expect(ran.existsSync(), isTrue);
+    ran.deleteSync();
+    r = await hostCall(info.id, 'bug_check', args).result;
+    expect(r.isError, isTrue);
+    expect(r.text, contains('approval'));
+    expect(ran.existsSync(), isFalse);
   });
 
   test('an expired token gets a note at the next turn', () async {

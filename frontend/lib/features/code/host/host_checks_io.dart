@@ -5,7 +5,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 
-import '../domain/permissions.dart' show commandPaths;
+import '../harness/everyai/repro_paths_io.dart';
 import '../harness/everyai/shell_io.dart';
 import 'host.dart';
 import 'host_checks.dart';
@@ -59,10 +59,10 @@ Future<HostResult> hostCheck(HostCheckContext c, List<String> files, Future<void
 
 String _tail(String out) => out.length > 3000 ? '…${out.substring(out.length - 3000)}' : out;
 
-/// The files [command] names that exist under [dir], with their digests.
-Map<String, String> _digests(String dir, String command) => {
-  for (final p in commandPaths(command))
-    if (!p.startsWith('/') && File('$dir/$p').existsSync()) p: '${sha256.convert(File('$dir/$p').readAsBytesSync())}',
+/// [paths] under [dir] with their digests (a gone file has none).
+Map<String, String> _digests(String dir, Iterable<String> paths) => {
+  for (final p in paths)
+    if (File('$dir/$p').existsSync()) p: '${sha256.convert(File('$dir/$p').readAsBytesSync())}',
 };
 
 Future<HostResult> hostBugCheck(HostCheckContext c, Map<String, Object?> args, Future<void> cancel) async {
@@ -96,7 +96,8 @@ Future<HostResult> hostBugCheck(HostCheckContext c, Map<String, Object?> args, F
           isError: true,
         );
       }
-      state = {'command': command, 'expect': expect, 'files': _digests(c.workingDir, command), 'verified': false};
+      final snapshot = await reproPaths(c.workingDir, command, output: r.out);
+      state = {'command': command, 'expect': expect, 'files': _digests(c.workingDir, snapshot), 'verified': false};
       save();
       return (
         text:
@@ -110,7 +111,7 @@ Future<HostResult> hostBugCheck(HostCheckContext c, Map<String, Object?> args, F
         return (text: 'Error: call bug_check reproduced first, with the command that shows the bug.', isError: true);
       }
       final before = (state['files'] as Map<String, Object?>? ?? const {}).cast<String, Object?>();
-      final now = _digests(c.workingDir, recorded);
+      final now = _digests(c.workingDir, before.keys);
       final changed = [
         for (final p in before.keys)
           if (now[p] != before[p]) p,

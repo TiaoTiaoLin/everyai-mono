@@ -296,6 +296,11 @@ void main() {
         'mcp_servers.everyai.tool_timeout_sec=330',
         '-c',
         'mcp_servers.everyai.default_tools_approval_mode="approve"',
+        // The tools that run a command in the app ask (an elicitation), so the session approves them.
+        '-c',
+        'mcp_servers.everyai.tools.bug_check.approval_mode="prompt"',
+        '-c',
+        'mcp_servers.everyai.tools.check.approval_mode="prompt"',
       ]);
       expect(launch.args.join(' '), isNot(contains('tok-secret')));
       expect(launch.env, {'EVERYAI_MCP_TOKEN': 'tok-secret'});

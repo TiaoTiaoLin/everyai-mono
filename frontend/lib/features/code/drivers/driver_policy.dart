@@ -106,13 +106,18 @@ const hostRunTools = {bugCheckTool, 'check'};
 
 /// The host tool an outside agent's [call] is (`ask_user_question`, …), or
 /// null when it calls another MCP server. CLIs name MCP tools their own
-/// way: `mcp__everyai__x` (Claude Code), `everyai__x`, `everyai.x`,
-/// `everyai/x`. Only the name counts: the call's own arguments are the
+/// way: `mcp__everyai__x` (Claude Code), `everyai__x`, `everyai_x`
+/// (OpenCode), `everyai.x`, `everyai/x`. Only the name counts: the call's own arguments are the
 /// agent's, so a field in them can't make a foreign tool ours.
 String? hostToolOf(ActionCall call) {
   if (!isMcpTool(call)) return null;
   final name = call.toolName;
-  for (final prefix in const ['mcp__${everyaiServerName}__', '${everyaiServerName}__', '$everyaiServerName.']) {
+  for (final prefix in const [
+    'mcp__${everyaiServerName}__',
+    '${everyaiServerName}__',
+    '${everyaiServerName}_',
+    '$everyaiServerName.',
+  ]) {
     if (name.startsWith(prefix)) return _host(name.substring(prefix.length));
   }
   if (name.startsWith('$everyaiServerName/')) return _host(name.substring(everyaiServerName.length + 1));

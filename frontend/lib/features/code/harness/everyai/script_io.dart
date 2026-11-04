@@ -261,7 +261,9 @@ final class ScriptRunner {
   /// readFile, grep and glob work, so nothing reaches a model or the web.
   final bool offline;
 
-  var _runs = 0;
+  /// Shared by every runner: the MCP host makes one per call, and two calls
+  /// in the same millisecond must not share a run folder.
+  static var _runs = 0;
 
   /// Runs [code] to the end, [timeout] or [cancel]. [depth] 2 lets its
   /// llmQuery write scripts of its own; [budget] is shared with those.

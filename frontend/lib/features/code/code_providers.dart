@@ -1533,8 +1533,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
             tool: name,
             args: call.args,
             command: command,
-            transcript: state.transcript,
-            decided: _decided,
+            approved: _hostRunGrants,
           ),
         );
         return hostFit(dir, 'host-${DateTime.now().millisecondsSinceEpoch}-$name', await hostCheckTool(call, context));
@@ -1886,6 +1885,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     if (_decided.isNotEmpty && (ended || _decided.containsKey(settled))) {
       if (ended) {
         _decided.clear();
+        _hostRunGrants.clear();
       } else {
         _decided.remove(settled);
       }
@@ -2067,6 +2067,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _answered = key;
     final session = _session;
     if (verdict.accept) {
+      _grantHostRuns(waiting);
       unawaited(session?.respond(accept: true));
     } else {
       // The server parks the conversation after a rejection; run it again so
@@ -2096,6 +2097,15 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
   /// Answers given to the calls waiting now (see [CodeSessionState.decided]).
   final _decided = <String, bool>{};
 
+  /// The host-run calls (bug_check, check) the user or the rules allowed in
+  /// this run, which the host may run once each (see [hostRunRefusal]).
+  /// Kept by arguments, not row: a driver may close its approval row before
+  /// its client calls the host (Codex).
+  final _hostRunGrants = <ActionCall>[];
+
+  void _grantHostRuns(Iterable<ActionCall> calls) =>
+      _hostRunGrants.addAll(calls.where((c) => hostRunTools.contains(hostToolOf(c))));
+
   void _markDecided(Iterable<String> ids, {required bool accept}) {
     for (final id in ids) {
       _decided[id] = accept;
@@ -2123,6 +2133,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
         return;
       }
       _markDecided([call.id], accept: verdict.accept);
+      if (verdict.accept) _grantHostRuns([call]);
       unawaited(session.respond(accept: verdict.accept, reason: verdict.reason, callIds: [call.id]));
     }
   }
@@ -3890,6 +3901,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
     if (!perCall || callIds == null) _answered = pending.map((c) => c.id).join(',');
     if (perCall) _markDecided([for (final c in targets) c.id], accept: true);
+    _grantHostRuns(targets);
     await _session?.respond(accept: true, callIds: perCall ? callIds : null);
     // A rule just remembered may settle other calls in the batch.
     if (perCall && callIds != null && scope != ApprovalScope.once) _autoRespond(state.transcript);

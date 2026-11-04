@@ -6,11 +6,11 @@ import 'package:every_ai/features/code/domain/goal.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/domain/phases.dart' show bugCheckTool;
 import 'package:every_ai/features/code/domain/spill.dart';
-import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/briefing/session_skill.dart';
 import 'package:every_ai/features/code/drivers/claude/claude_wire.dart' show answeredBySession;
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_policy.dart';
+import 'package:every_ai/features/code/drivers/opencode/opencode_session.dart' show openCodeSessionRules;
 import 'package:every_ai/features/code/git/git_models.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/everyai/script_io.dart' show findDeno;
@@ -202,6 +202,20 @@ void main() {
       expect(runs, hasLength(1));
     });
 
+    test('absolute paths in the session folder find their tests', () async {
+      write('pubspec.yaml', 'name: p\n');
+      write('lib/foo.dart');
+      write('test/foo_test.dart');
+      final runs = <String>[];
+      await hostCheckTool(
+        call(checkTool, {
+          'files': ['$dir/lib/foo.dart'],
+        }),
+        context(runs: runs),
+      );
+      expect(runs, ['dart test test/foo_test.dart']);
+    });
+
     test('nothing to test is said plainly', () async {
       write('notes.txt');
       final r = await hostCheckTool(
@@ -267,6 +281,43 @@ void main() {
       expect(runs, hasLength(1));
     });
 
+    test('verify refuses an edited repro named by an absolute path, a scratch script or a runner alone', () async {
+      write('test/abs_test.dart', 'expect(1, 2)');
+      write('.everyai/scratch/repro.sh', 'exit 1');
+      var exit = 1;
+      final ctx = context(answer: (_) => (exit: exit, out: ''));
+      await hostCheckTool(
+        call(bugCheckTool, {'action': 'reproduced', 'command': 'dart test $dir/test/abs_test.dart'}),
+        ctx,
+      );
+      write('test/abs_test.dart', 'expect(1, 1)');
+      exit = 0;
+      var r = await hostCheckTool(call(bugCheckTool, {'action': 'verify'}), ctx);
+      expect(r.isError, isTrue);
+      expect(r.text, contains('test/abs_test.dart'));
+      // `npm test` names no file; the scratch script still counts.
+      exit = 1;
+      await hostCheckTool(call(bugCheckTool, {'action': 'reproduced', 'command': 'npm test'}), ctx);
+      write('.everyai/scratch/repro.sh', 'exit 0');
+      exit = 0;
+      r = await hostCheckTool(call(bugCheckTool, {'action': 'verify'}), ctx);
+      expect(r.isError, isTrue);
+      expect(r.text, contains('.everyai/scratch/repro.sh'));
+    });
+
+    test('verify refuses an edited test that was new or changed at reproduced', () async {
+      Process.runSync('git', ['init', '-q'], workingDirectory: dir);
+      write('tests/test_bug.py', 'assert 1 == 2');
+      var exit = 1;
+      final ctx = context(answer: (_) => (exit: exit, out: ''));
+      await hostCheckTool(call(bugCheckTool, {'action': 'reproduced', 'command': 'pytest -k bug'}), ctx);
+      write('tests/test_bug.py', 'assert 1 == 1');
+      exit = 0;
+      final r = await hostCheckTool(call(bugCheckTool, {'action': 'verify'}), ctx);
+      expect(r.isError, isTrue);
+      expect(r.text, contains('tests/test_bug.py'));
+    });
+
     test('verify before reproduced, and a refused command', () async {
       var r = await hostCheckTool(call(bugCheckTool, {'action': 'verify'}), context());
       expect(r.text, contains('reproduced first'));
@@ -279,15 +330,8 @@ void main() {
   });
 
   group('the gate for commands the app runs', () {
-    ActionCall row(String id, Map<String, Object?> args) =>
-        actionEvent(id: id, toolName: 'mcp__everyai__check', kind: 'MCPToolAction', args: args);
-    Transcript transcript(List<HarnessEvent> events) {
-      final b = TranscriptBuilder();
-      for (final e in events) {
-        b.add(e);
-      }
-      return b.snapshot;
-    }
+    ActionCall row(String id, Map<String, Object?> args, {String name = 'mcp__everyai__check'}) =>
+        actionEvent(id: id, toolName: name, kind: 'MCPToolAction', args: args);
 
     const args = {
       'files': ['lib/a.dart'],
@@ -296,16 +340,14 @@ void main() {
       String command, {
       PermissionPolicy policy = const PermissionPolicy(hostTools: true),
       AgentMode mode = AgentMode.ask,
-      Transcript? t,
-      Map<String, bool> decided = const {},
+      List<ActionCall>? approved,
     }) => hostRunRefusal(
       policy: policy,
       mode: mode,
       tool: checkTool,
       args: args,
       command: command,
-      transcript: t ?? transcript(const []),
-      decided: decided,
+      approved: approved ?? [],
     );
 
     test('the floor and deny rules always refuse, Full auto included', () {
@@ -318,6 +360,8 @@ void main() {
         ),
         contains('dart test *'),
       );
+      // An approval doesn't lift the floor.
+      expect(gate('rm -rf ~', approved: [row('a1', args)]), startsWith('Not run:'));
     });
 
     test('Full auto and allow rules run', () {
@@ -331,29 +375,26 @@ void main() {
       );
     });
 
-    test('an ask runs only for an allowed row of the agent with the same arguments', () {
-      // No row: a process outside the agent's tool flow (curl with the token) is refused.
+    test('an ask runs only for an approved call with the same arguments, once', () {
+      // Nothing approved: a process outside the agent's tool flow (curl with the token) is refused,
+      // and so is the agent's own open row that nobody approved (Codex pre-approved MCP tools).
       expect(gate('dart test'), contains('approval'));
-      // A row waiting for approval, then decided yes.
-      final waiting = transcript([row('a1', args), stateEvent('w', ExecutionStatus.waitingForConfirmation)]);
-      expect(gate('dart test', t: waiting), contains('approval'));
-      expect(gate('dart test', t: waiting, decided: {'a1': false}), contains('approval'));
-      expect(gate('dart test', t: waiting, decided: {'a1': true}), isNull);
-      // Approved (no longer waiting) and not answered yet.
-      expect(gate('dart test', t: transcript([row('a1', args), stateEvent('r', ExecutionStatus.running)])), isNull);
-      // Other arguments, or a row that already has its result, don't count.
-      final other = transcript([
+      // Approved, under each CLI's naming: Claude Code, Codex, OpenCode.
+      for (final name in ['mcp__everyai__check', 'everyai__check', 'everyai_check']) {
+        final approved = [row('a1', args, name: name)];
+        expect(gate('dart test', approved: approved), isNull, reason: name);
+        // Used up: the same call again needs another approval.
+        expect(gate('dart test', approved: approved), contains('approval'), reason: name);
+      }
+      // Other arguments, or another tool, don't count.
+      final other = [
         row('a1', {
           'files': ['lib/b.dart'],
         }),
-        stateEvent('r', ExecutionStatus.running),
-      ]);
-      expect(gate('dart test', t: other), contains('approval'));
-      final answered = transcript([
-        row('a1', args),
-        resultEvent(id: 'o1', actionId: 'a1', toolName: 'mcp__everyai__check', text: 'done'),
-      ]);
-      expect(gate('dart test', t: answered), contains('approval'));
+        row('a2', args, name: 'mcp__everyai__bug_check'),
+      ];
+      expect(gate('dart test', approved: other), contains('approval'));
+      expect(other, hasLength(2));
     });
   });
 
@@ -365,6 +406,8 @@ void main() {
     test('the new tools are ours; the read-only ones run, the ones that run commands ask', () {
       for (final t in ['check', 'diff_stats', 'goal_check', 'run_script', 'bug_check']) {
         expect(hostToolOf(mcp(t)), t);
+        // OpenCode's naming.
+        expect(hostToolOf(actionEvent(id: 'o', toolName: 'everyai_$t', kind: 'MCPToolAction', args: const {})), t);
       }
       for (final t in ['diff_stats', 'goal_check', 'run_script']) {
         expect(policy.decide(mcp(t), AgentMode.ask).verdict, Verdict.allow, reason: t);
@@ -376,6 +419,15 @@ void main() {
     test("bug_check's command meets the floor", () {
       final d = policy.decide(mcp('bug_check', {'action': 'reproduced', 'command': 'rm -rf ~'}), AgentMode.fullAuto);
       expect((d.verdict, d.source), (Verdict.deny, DecisionSource.floor));
+    });
+
+    test('OpenCode asks the session before the tools that run commands (the last match wins)', () {
+      Object? effect(String tool) => openCodeSessionRules.lastWhere(
+        (r) => r['action'] == '*' || r['action'] == 'everyai_*' || r['action'] == tool,
+      )['effect'];
+      expect(effect('everyai_check'), 'ask');
+      expect(effect('everyai_bug_check'), 'ask');
+      expect(effect('everyai_diff_stats'), 'allow');
     });
 
     test('Claude Code asks the session before the tools that run commands', () {

@@ -166,8 +166,16 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
   void _goalTick({required bool turnEnded}) {
     final goal = state.goal;
     if (goal == null || goal.status.settled || _judging) return;
-    // An outside lead judges its goal itself (goal_check).
-    if (_info case final info? when _outside(info)) return;
+    // An outside lead judges its goal itself (goal_check). A goal set under
+    // the EveryAI lead is handed over once, as setGoal does on an outside lead.
+    if (_info case final info? when _outside(info)) {
+      if (goal.note == goalByLeadNote) return;
+      state = state.copyWith(
+        goal: goal.copyWith(status: GoalStatus.active, note: goalByLeadNote),
+      );
+      unawaited(send(goalLeadMessage(goal.objective)));
+      return;
+    }
     final t = state.transcript;
     if (t.running) {
       if (goal.status == GoalStatus.waiting) state = state.copyWith(goal: goal.copyWith(status: GoalStatus.active));
@@ -205,9 +213,6 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
       if (_harnessSession case final AsksAside self) {
         // The session's own model judges from its cached history.
         reply = await self.askAside(goalSelfCheck(start.objective));
-      } else if (_outside(info)) {
-        // The lead moved to an outside harness after the goal was set.
-        return _pauseGoal(goalOff(_leadLabel(info.harness)));
       } else {
         final model = await _sideModel(info);
         if (model == null) return _pauseGoal('Goals need a real session: the demo has no model to check with.');

@@ -6,7 +6,6 @@ import '../domain/agent_mode.dart';
 import '../domain/goal.dart';
 import '../domain/permissions.dart';
 import '../domain/phases.dart' show bugCheckTool;
-import '../domain/transcript.dart';
 import '../drivers/briefing/session_skill.dart' show HostToolInfo;
 import '../drivers/driver_policy.dart' show hostToolOf;
 import '../git/git_service.dart';
@@ -164,7 +163,12 @@ Future<HostResult> hostCheckTool(HostCall call, HostCheckContext c) async {
     case runScriptTool:
       return hostRunScript(c.workingDir, c.stateDir, call.args, cancel: call.ended);
     case checkTool:
-      var files = [...(call.args['files'] as List<Object?>? ?? const []).whereType<String>()];
+      // Outside agents often pass absolute paths; the detector works on relative ones.
+      final root = '${c.workingDir}/';
+      var files = [
+        for (final f in (call.args['files'] as List<Object?>? ?? const []).whereType<String>())
+          f.startsWith(root) ? f.substring(root.length) : f,
+      ];
       final w = c.worktree;
       if (files.isEmpty && w != null) files = [for (final f in await GitService.changes(w)) f.path];
       if (files.isEmpty) {
@@ -225,17 +229,17 @@ HostResult hostGoalCheck(Goal? goal) {
 /// the agent's sandbox, so the call needs the session's own permission:
 /// - the safety floor and the user's deny rules always refuse;
 /// - an allow (a rule, Full auto) runs it;
-/// - an ask runs only when the agent's own row for this call (same tool and
-///   arguments, no result yet) was allowed: decided yes in [decided], or no
-///   longer waiting for approval.
+/// - an ask runs only for a call the session approved: one of [approved]
+///   (the agent's own rows of this tool that the user or the session's
+///   rules allowed) with the same arguments. That one is used up, so one
+///   approval runs one call.
 String? hostRunRefusal({
   required PermissionPolicy policy,
   required AgentMode mode,
   required String tool,
   required Map<String, Object?> args,
   required String command,
-  required Transcript transcript,
-  Map<String, bool> decided = const {},
+  required List<ActionCall> approved,
 }) {
   final probe = ActionCall(
     id: 'host-$tool',
@@ -256,30 +260,15 @@ String? hostRunRefusal({
         _ => 'Not run: the session\'s permissions refuse it.',
       };
     case Verdict.ask:
-      final waiting = {
-        for (final c in [...transcript.pending, ...transcript.held]) c.id,
-      };
-      bool same(ActionCall c) =>
-          hostToolOf(c) == tool && args.entries.every((e) => jsonEncode(c.action[e.key]) == jsonEncode(e.value));
-      for (final step in _steps(transcript)) {
-        final c = step.call;
-        if (step.done || !same(c)) continue;
-        if (decided[c.id] ?? !waiting.contains(c.id)) return null;
+      final i = approved.indexWhere(
+        (c) => hostToolOf(c) == tool && args.entries.every((e) => jsonEncode(c.action[e.key]) == jsonEncode(e.value)),
+      );
+      if (i >= 0) {
+        approved.removeAt(i);
+        return null;
       }
       return 'Not run: this command needs the user\'s approval, and no approved $tool call of yours with these '
           'arguments is in the session. Call $tool through your MCP client so the user can approve it.';
-  }
-}
-
-Iterable<ToolStep> _steps(Transcript t) sync* {
-  for (final item in t.items) {
-    switch (item) {
-      case StepItem(:final step):
-        yield step;
-      case ExploreGroup(:final steps):
-        yield* steps;
-      default:
-    }
   }
 }
 

@@ -11,12 +11,6 @@ String btwOff(String lead) =>
     '/btw asks an EveryAI model, and EveryAI spends nothing while $lead leads this session. Ask $lead in the '
     'chat instead.';
 
-/// Why a goal stops being judged after the lead moved to outside harness
-/// [lead] while a check was due.
-String goalOff(String lead) =>
-    'Goals are checked by an EveryAI model after each turn, and EveryAI spends nothing while $lead leads this '
-    'session. Tell $lead the goal in a message instead.';
-
 /// `/goal` on an outside lead: no EveryAI judge reads the session after each
 /// turn, so the first message asks the lead to check the goal itself.
 String goalLeadMessage(String objective) =>
