@@ -46,6 +46,7 @@ import 'transcript/plan_card.dart';
 import 'transcript/retry_row.dart';
 import 'transcript/subagent_card.dart';
 import 'transcript/transcript_items.dart';
+import '../workflows/ui/workflow_card.dart';
 
 const _maxWidth = 780.0;
 
@@ -193,7 +194,10 @@ class CodeSessionScreen extends ConsumerWidget {
                       sessionId: sessionId,
                       workingDir: info.workingDir,
                       offer: pick?.change ?? true ? null : offer,
-                      trailing: [if (pick?.change ?? false) offer!],
+                      trailing: [
+                        WorkflowRunsView(key: const ValueKey('workflow-runs'), sessionId: sessionId),
+                        if (pick?.change ?? false) offer!,
+                      ],
                       onChangeHandoff: controller.changeHandoff,
                       showLeads: info.leads.isNotEmpty,
                     ),

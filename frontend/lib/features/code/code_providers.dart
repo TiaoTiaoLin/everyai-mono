@@ -87,6 +87,10 @@ import 'settings/settings.dart';
 import 'session_notifications.dart';
 import 'spill/spill.dart';
 import 'uploads/uploads.dart';
+import 'workflows/workflow_bridge.dart' show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile;
+import 'workflows/workflow_engine.dart';
+import 'workflows/workflow_journal.dart';
+import 'workflows/workflow_runs.dart';
 
 part 'session_builtins.dart';
 
@@ -1007,7 +1011,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// parent's folder, model and effort (unless [model] or [effort] say
   /// otherwise), [mode], billed to the parent. A `run_subagent` child has the
   /// call's id as [callId]; one the app starts itself (a `/review`) has its
-  /// own. [tools] and [rolePrompt] come from a library agent. An Ultra
+  /// own. [tools] and [rolePrompt] come from a library agent; [harness] runs
+  /// it on another driver than the parent's (a workflow's agent). An Ultra
   /// child may work in its own [workingDir] (a step worktree), bill under
   /// its own id ([ownTag], so its cost can be read alone) and get other
   /// [clientTools].
@@ -1028,18 +1033,20 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     bool fork = false,
     ForkCopy? forkCopy,
     List<String>? researchSites,
+    String? harness,
   }) async {
     model ??= parent.model;
     effort ??= parent.effort;
+    harness ??= parent.harness;
     final id = const Uuid().v7();
     projectDir ??=
         ref.read(codeProjectsProvider).where((p) => p.id == parent.projectId).firstOrNull?.path ?? parent.workingDir;
     workingDir ??= forkCopy?.path ?? parent.workingDir;
-    final harness = await harnessFor(ref, parent.workingDir, harness: parent.harness);
+    final runner = await harnessFor(ref, parent.workingDir, harness: harness);
     // A driver that can't fork can't start one from the parent's history yet.
-    if (harness case final HarnessDriver d when fork && !d.caps.contains(DriverCap.fork)) throw forkUnavailable(d.info);
+    if (runner case final HarnessDriver d when fork && !d.caps.contains(DriverCap.fork)) throw forkUnavailable(d.info);
     Future<HarnessSession> begin(SessionSpec spec) =>
-        (fork ? forkSession(harness, parent.conversationId, spec) : null) ?? harness.start(spec);
+        (fork ? forkSession(runner, parent.conversationId, spec) : null) ?? runner.start(spec);
     final live = await begin(
       await specFor(
         isolated: workingDir != parent.workingDir || parent.worktree != null,
@@ -1060,8 +1067,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         // The parent's, so a fork's prompt (and cache) matches it.
         tier: parent.tier,
         researchSites: researchSites,
-        // The child isn't saved yet, so its harness (the parent's) can't be looked up by id.
-        harness: parent.harness,
+        // The child isn't saved yet, so its harness can't be looked up by id.
+        harness: harness,
       ),
     );
     ref.read(_liveProvider)[id] = live;
@@ -1075,7 +1082,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       workingDir: workingDir,
       createdAt: DateTime.now(),
       branch: parent.branch,
-      harness: parent.harness,
+      harness: harness,
       effort: effort,
       parentId: parent.id,
       parentCallId: callId,
@@ -1589,6 +1596,9 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
       for (final s in [..._childSubs.values, ..._researchSubs.values]) {
         s.close();
       }
+      for (final w in _workflows.values) {
+        w.detach();
+      }
     });
     // Subagents and forks don't notify: an approval they wait on shows on the
     // parent (subagentNeedsInput), and their questions are the orchestrator's.
@@ -1609,6 +1619,7 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     }
     // After build returns, so the connected flag isn't overwritten.
     if (info != null) unawaited(Future.microtask(() => _connect(info)));
+    if (info != null && info.parentId == null) unawaited(Future.microtask(_resumeWorkflows));
     return CodeSessionState(mode: info?.mode ?? AgentMode.ask);
   }
 
@@ -3632,6 +3643,82 @@ final class CodeSessionController extends Notifier<CodeSessionState> with _Sessi
     _deliver();
   }
 
+  // ---------------------------------------------------------------- workflows
+
+  /// Workflow runs going on in this session, by run id.
+  final _workflows = <String, WorkflowEngine>{};
+
+  /// Runs the workflow [source] (a `.js` file's text, called [name]) with
+  /// [args]: its agents are child sessions of this one, and what it returns
+  /// comes back to this session as one message. Returns the run's id.
+  Future<String> runWorkflow(String name, String source, {Map<String, Object?> args = const {}}) async {
+    final runId = const Uuid().v7();
+    final path = '${await _workflowDir()}/$runId.jsonl';
+    final journal = WorkflowJournal.fresh((line) => appendJournalFile(path, line));
+    await journal.write({'t': 'start', 'name': name, 'source': source, 'args': args});
+    unawaited(_runWorkflow(runId, name, source, args, journal));
+    return runId;
+  }
+
+  void stopWorkflow(String runId) => _workflows[runId]?.stop();
+
+  Future<String> _workflowDir() async => '${await ref.read(driverDataDirProvider)()}/workflows/$sessionId';
+
+  /// Runs the app quit in the middle of carry on from their journals.
+  Future<void> _resumeWorkflows() async {
+    try {
+      for (final path in await listJournalFiles(await _workflowDir())) {
+        final runId = path.split('/').last.replaceFirst(RegExp(r'\.jsonl$'), '');
+        if (!ref.mounted || _workflows.containsKey(runId)) continue;
+        final journal = WorkflowJournal.parse(await readJournalFile(path), (line) => appendJournalFile(path, line));
+        final start = journal.start;
+        if (journal.ended || start == null) continue;
+        final args = (start['args'] as Map?)?.cast<String, Object?>() ?? const {};
+        unawaited(_runWorkflow(runId, '${start['name']}', '${start['source']}', args, journal));
+      }
+    } on Object {
+      // No data folder (tests, the web): nothing to resume.
+    }
+  }
+
+  Future<void> _runWorkflow(
+    String runId,
+    String name,
+    String source,
+    Map<String, Object?> args,
+    WorkflowJournal journal,
+  ) async {
+    final runs = ref.read(workflowRunsProvider(sessionId).notifier);
+    final WorkflowBridge bridge;
+    try {
+      bridge = await ref.read(workflowBridgeProvider)(
+        dir: '${await _workflowDir()}/$runId',
+        source: source,
+        args: args,
+      );
+    } on Object catch (e) {
+      final why = e is StateError ? e.message : '$e';
+      runs.put(WorkflowRun(runId: runId, name: name, status: WorkflowStatus.failed, error: why));
+      await journal.write({'t': 'end', 'status': WorkflowStatus.failed.name, 'error': why});
+      return;
+    }
+    if (!ref.mounted) return bridge.kill();
+    final engine = _workflows[runId] = WorkflowEngine(
+      runId: runId,
+      name: name,
+      bridge: bridge,
+      launcher: _WorkflowLauncher(ref, sessionId, 'wf-$runId', () => state.mode),
+      journal: journal,
+      onProgress: (run) {
+        if (ref.mounted) runs.put(run);
+      },
+    );
+    final end = await engine.run();
+    _workflows.remove(runId);
+    if (!ref.mounted || end.status == WorkflowStatus.stopped) return;
+    unawaited(_session?.send(workflowResultMessage(end)).catchError((Object _) {}));
+  }
+
   // ------------------------------------------------------ orchestrating forks
 
   /// Fork questions already passed to this agent, by call id.
@@ -4334,3 +4421,160 @@ final class CodeGit extends AsyncNotifier<GitSnapshot> {
 }
 
 String checkpointRef(SessionWorktree w, int turn) => 'refs/everyai/${w.slug}/turn-$turn';
+
+/// A workflow's agents as child sessions of [sessionId]: fresh children
+/// (never forks, so any driver will do) on the harness and model each call
+/// names, in their own worktree when asked, watched until their turn ends.
+final class _WorkflowLauncher implements AgentLauncher {
+  _WorkflowLauncher(this._ref, this._sessionId, this._prefix, this._mode);
+  final Ref _ref;
+  final String _sessionId;
+
+  /// Every child's call id starts with it (`wf-<run>`), the rest is its key.
+  final String _prefix;
+  final AgentMode Function() _mode;
+
+  CodeSessions get _sessions => _ref.read(codeSessionsProvider.notifier);
+
+  @override
+  Future<WorkflowChild> start(WorkflowAgentCall call) async {
+    final parent = _sessions.byId(_sessionId) ?? (throw const HarnessError('The session is gone.'));
+    final callId = '$_prefix-${call.key}';
+    // Started before the app quit, but not journalled yet.
+    if (_ref.read(codeSessionsProvider).where((s) => s.parentCallId == callId).firstOrNull case final s?) {
+      return (childId: s.id, harness: s.harness, model: s.model, note: null);
+    }
+    final harness = call.harness ?? parent.harness;
+    final runner = await harnessFor(_ref, parent.workingDir, harness: harness);
+    if (runner is HarnessDriver) {
+      if (consentProblem(runner.info, _ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
+      if (harness != parent.harness && !(await runner.detect()).installed) {
+        throw HarnessError("${runner.info.label} isn't installed on this computer.");
+      }
+    }
+    final (:model, :note) = await _modelFor(runner, call.model, harness, parent);
+    ForkCopy? copy;
+    if (call.worktree && !noLocalFolder(parent.workingDir)) {
+      copy = await GitService.forkCopy(
+        parent.workingDir,
+        worktreesDir: '${await _ref.read(driverDataDirProvider)()}/forks',
+        slug: sessionSlug(call.label, const Uuid().v7()),
+      );
+    }
+    // A writer in its own worktree may edit even when the lead is planning.
+    final mode = _mode() == AgentMode.plan && copy != null ? AgentMode.ask : _mode();
+    final info = await _sessions.startChild(
+      parent: parent,
+      title: call.label,
+      brief: call.brief,
+      mode: mode,
+      callId: callId,
+      model: model,
+      effort: call.effort,
+      forkCopy: copy,
+      harness: harness,
+      // Its own spend, so the run's cost cap can read it.
+      ownTag: harness == everyaiHarnessName,
+    );
+    return (childId: info.id, harness: harness, model: model, note: note);
+  }
+
+  /// The model [asked] for on [harness]: one it lists, else the newest
+  /// `opus`/`sonnet`/`haiku` it has, else the lead's (or the harness's
+  /// default), with a note saying so.
+  Future<({String model, String? note})> _modelFor(
+    Harness runner,
+    String? asked,
+    String harness,
+    CodeSessionInfo parent,
+  ) async {
+    final own = runner is HarnessDriver ? await runner.models() : const <DriverModel>[];
+    final ids = own.isNotEmpty
+        ? [for (final m in own) m.id]
+        : harness == everyaiHarnessName
+        ? [for (final m in _ref.read(libraryProvider).value ?? const <ModelSpec>[]) m.id.value]
+        : const <String>[];
+    final fallback = harness == parent.harness
+        ? parent.model
+        : (own.where((m) => m.isDefault).firstOrNull ?? own.firstOrNull)?.id ?? '';
+    if (asked == null || asked == fallback) return (model: fallback, note: null);
+    if (ids.contains(asked)) return (model: asked, note: null);
+    final alias = asked.toLowerCase();
+    if (const {'opus', 'sonnet', 'haiku'}.contains(alias)) {
+      final matches = ids.where((id) => id.toLowerCase().contains(alias)).toList()..sort(_byVersion);
+      if (matches.isNotEmpty) return (model: matches.last, note: null);
+    }
+    return (
+      model: fallback,
+      note: "$harness doesn't offer $asked here, so it runs on ${fallback.isEmpty ? 'its default model' : fallback}.",
+    );
+  }
+
+  /// Model ids by the numbers in them (`…-4-5` before `…-5-5`).
+  static int _byVersion(String a, String b) {
+    List<int> nums(String s) => [for (final m in RegExp(r'\d+').allMatches(s)) int.parse(m[0]!)];
+    final x = nums(a), y = nums(b);
+    for (var i = 0; i < x.length && i < y.length; i++) {
+      if (x[i] != y[i]) return x[i] - y[i];
+    }
+    return x.length != y.length ? x.length - y.length : a.compareTo(b);
+  }
+
+  @override
+  Future<WorkflowAgentResult> watch(String childId) => _turnEnd(childId, null);
+
+  @override
+  Future<WorkflowAgentResult> followUp(String childId, String text) async {
+    final before = _texts(_ref.read(codeSessionProvider(childId)).transcript);
+    await _ref.read(codeSessionProvider(childId).notifier).send(text);
+    return _turnEnd(childId, before);
+  }
+
+  static int _texts(Transcript t) => t.items.whereType<AgentText>().length;
+
+  /// The child's turn end: any ended turn, or after a follow-up ([after]
+  /// replies so far) one that ran or said something new.
+  Future<WorkflowAgentResult> _turnEnd(String childId, int? after) {
+    final done = Completer<WorkflowAgentResult>();
+    var busy = false;
+    final sub = _ref.listen(codeSessionProvider(childId), (_, next) {
+      if (done.isCompleted) return;
+      final outcome = subagentOutcome(next.transcript, error: next.error);
+      if (outcome == null) {
+        busy = true;
+        return;
+      }
+      if (after != null && !busy && _texts(next.transcript) <= after) return;
+      final ok = outcome.status == SubagentStatus.completed;
+      done.complete((text: outcome.text, error: ok ? null : outcome.text, spentMicros: _spentOf(childId)));
+    }, fireImmediately: true);
+    return done.future.whenComplete(sub.close);
+  }
+
+  /// What the child cost EveryAI: only one on the EveryAI harness spends.
+  int? _spentOf(String childId) {
+    if (_sessions.byId(childId)?.harness != everyaiHarnessName) return null;
+    return _ref.exists(codeUsageProvider(childId)) ? _ref.read(codeUsageProvider(childId)).value?.spentMicros : null;
+  }
+
+  @override
+  Future<String?> finish(String childId, {required bool ok}) async {
+    final info = _sessions.byId(childId);
+    final copy = info?.forkCopy;
+    if (info == null || copy == null) return null;
+    try {
+      final m = await CodeSessionController._mergeOneAtATime(
+        () => GitService.mergeFork(copy, slug: copy.root.split('/').last, merge: ok),
+      );
+      _sessions.update(info.copyWith(merged: true));
+      if (!ok) return 'Not merged into your folder; its work is kept at ${m.ref}.';
+      final note = withMergeNote(const SubagentReport(SubagentStatus.completed, ''), m).text.trim();
+      return note.isEmpty ? null : note;
+    } on Object catch (e) {
+      return "Its changes couldn't be merged back: $e";
+    }
+  }
+
+  @override
+  void stop(String childId) => unawaited(_ref.read(_liveProvider)[childId]?.interrupt());
+}
