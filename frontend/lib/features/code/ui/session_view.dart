@@ -45,6 +45,8 @@ import 'transcript/retry_row.dart';
 import 'transcript/subagent_card.dart';
 import 'transcript/transcript_items.dart';
 import '../workflows/ui/workflow_card.dart';
+import '../workflows/workflow_engine.dart' show WorkflowStatus;
+import '../workflows/workflow_runs.dart' show workflowRunsProvider;
 
 const _maxWidth = 780.0;
 
@@ -91,6 +93,9 @@ class CodeSessionScreen extends ConsumerWidget {
       // A workflow's own agents and subagents don't start workflows.
       workflow: controller.workflowPick,
       onWorkflow: info.isSubagent ? null : controller.pickWorkflow,
+      workflowBusy: ref.watch(workflowRunsProvider(sessionId)).any((r) => r.status == WorkflowStatus.running)
+          ? 'A workflow is running: pick another once its result is in'
+          : null,
       projectDir:
           ref.watch(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull?.path ?? info.workingDir,
       demo: isDemoPath(info.workingDir),
@@ -315,7 +320,7 @@ class CodeSessionScreen extends ConsumerWidget {
                               busy: busy,
                               mode: state.mode,
                               onModeChanged: controller.setMode,
-                              onSend: (text, files) => controller.send(text, files: files),
+                              onSend: (text, files) => controller.sendTyped(text, files: files),
                               onSteer: (text, files) => controller.steer(text, files: files),
                               onStop: controller.stop,
                               queued: [for (final q in state.queued) q.text],
@@ -596,11 +601,12 @@ class TranscriptList extends StatelessWidget {
   }
 
   Widget _itemView(TranscriptItem item) => switch (item) {
-    UserTurn(:final text, :final mode, :final lead) => Padding(
+    UserTurn(:final text, :final mode, :final lead, :final workflow) => Padding(
       padding: const EdgeInsets.only(top: 10),
       child: UserTurnView(
         text: text,
         mode: mode,
+        workflow: workflow,
         lead: showLeads ? lead : '',
         onRewind: onRewind == null
             ? null

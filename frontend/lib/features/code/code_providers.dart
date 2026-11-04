@@ -192,6 +192,15 @@ const _hostToolInfos = <HostToolInfo>[
   ),
 ];
 
+String _changedWhy(WorkflowEntry w) =>
+    "${w.title} changed since you picked it, so it didn't run. Review it and pick it again.";
+
+/// Why [picked] can't run in [projectDir] now (its file changed or isn't trusted any more), or null.
+Future<String?> _workflowProblem(Ref ref, String projectDir, WorkflowEntry picked) async =>
+    (await _workflowsOfIn(ref, projectDir)).any((w) => w.id == picked.id && w.digest == picked.digest)
+    ? null
+    : _changedWhy(picked);
+
 /// The workflows [projectDir] can run; none when they can't be read.
 Future<List<WorkflowEntry>> _workflowsOfIn(Ref ref, String projectDir) async {
   try {
@@ -477,6 +486,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (driver != null) {
       if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
     }
+    // A script workflow takes the prompt as its task: checked before the lead is told it started.
+    final script = workflow?.entry;
+    if (script != null) {
+      if (prompt.trim().isEmpty) throw HarnessError('${script.title} needs a task: type what it should work on.');
+      if (await _workflowProblem(ref, project.path, script) case final why?) throw HarnessError(why);
+    }
     final worktree = local && isolated ? await _worktreeFor(project, title, id) : null;
     final baseline = local && worktree == null ? await _baselineFor(project.path) : null;
     final workingDir = worktree?.path ?? project.path;
@@ -486,8 +501,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     // An outside agent's host calls wait until the session is saved below.
     final saved = Completer<void>();
     final HarnessSession live;
+    // The workflow's task: the prompt, with the paths of the files attached to it.
+    var task = prompt;
     try {
       final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
+      task = first.text;
       final briefing = driver == null
           ? null
           : await _brief(
@@ -549,9 +567,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       holdClientTools: hold,
       tier: tier,
       workflow: workflow?.isMax ?? false ? maxWorkflowId : null,
+      toldWorkflow: workflow?.isMax ?? false ? maxWorkflowId : null,
     );
     state = [info, ...state];
     _save();
+    if (script != null) await ref.read(codeSessionProvider(id).notifier).launchWorkflow(script, task);
     return info;
   }
 
@@ -641,8 +661,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       tools: tools,
       rolePrompt: rolePrompt,
       researchSites: researchSites,
-      // bug_check review's second opinion.
-      reviewModel: subagent || outside ? null : bugReviewModel(model, ref.read(libraryProvider).value ?? const []),
+      // No reviewModel: only old Bug fix sessions have bug_check, and their spec.json keeps theirs.
       clientTools: clientTools,
       autoCompactAt: ref.read(codeSettingsProvider).autoCompactPercent / 100,
       // run_script and the decider: the tier's limits, or the user's level.
@@ -2203,8 +2222,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   /// The user picked [pick] in the menu (null: none). A script workflow is
-  /// armed for the next message; Max turns on for the session, with a note
-  /// on the next message (the lead loads the skill itself). One at a time.
+  /// armed for the next message the user types; Max turns on for the
+  /// session, and the next message tells the lead (see [_workflowNote]; it
+  /// loads the skill itself). One at a time.
   void pickWorkflow(WorkflowPick? pick) {
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = sessions.byId(sessionId);
@@ -2212,11 +2232,6 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final maxOn = pick?.isMax ?? false;
     if (maxOn != (info.workflow == maxWorkflowId)) {
       sessions.update(maxOn ? info.copyWith(workflow: maxWorkflowId) : info.copyWith(clearWorkflow: true));
-      final note = maxWorkflowNote(on: maxOn);
-      // Turned on and off again before a message went out: nothing to tell.
-      _tierNote = _tierNote == maxWorkflowNote(on: !maxOn)
-          ? ''
-          : [_tierNote, note].where((n) => n.isNotEmpty).join('\n\n');
     }
     final w = pick?.entry;
     state = w != null ? state.copyWith(armed: w) : state.copyWith(clearArmed: true);
@@ -2226,12 +2241,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// be trusted with the same digest, and one run goes at a time.
   Future<({WorkflowEntry? entry, String why})> _checkWorkflow(WorkflowEntry picked) async {
     final now = (await _workflowEntries()).where((w) => w.id == picked.id && w.digest == picked.digest).firstOrNull;
-    if (now == null) {
-      return (
-        entry: null,
-        why: "${picked.title} changed since you picked it, so it didn't run. Review it and pick it again.",
-      );
-    }
+    if (now == null) return (entry: null, why: _changedWhy(picked));
     if (_activeRuns.isNotEmpty) {
       return (entry: null, why: 'A workflow is already running in this session. Wait for its result, then pick again.');
     }
@@ -2239,38 +2249,73 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   /// Starts [picked] on [task] (its lead was already told, as the session's
-  /// first message). Null when it started, else why not.
+  /// first message). Null when it started, else why not: the session shows
+  /// it, and the lead is told to do the task itself.
   Future<String?> launchWorkflow(WorkflowEntry picked, String task) async {
     final (:entry, :why) = await _checkWorkflow(picked);
-    if (entry == null) return why;
-    await _launch(entry, task);
-    return null;
+    final problem = entry == null ? why : await _launch(entry, task);
+    if (problem == null) return null;
+    _workflowNotice(picked, problem, task);
+    await send(workflowFailedNote(picked.id, picked.title, problem));
+    return problem;
   }
 
-  Future<void> _launch(WorkflowEntry entry, String task) async {
+  /// Starts [entry] on [task]; null when it started, else why not.
+  Future<String?> _launch(WorkflowEntry entry, String task) async {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
-    await runWorkflow(
-      entry.title,
-      entry.source,
-      args: workflowArgsFor(entry, task),
-      ctx: {
-        'lead': {'harness': info?.harness, 'model': info?.model},
-      },
-    );
+    final dir = info?.workingDir ?? '';
+    try {
+      await runWorkflow(
+        entry.title,
+        entry.source,
+        args: workflowArgsFor(
+          entry,
+          task,
+          gitRef: entry.id == 'security_review' && looksLikeRef(task) && await isGitCommit(dir, task),
+        ),
+        ctx: {
+          'lead': {'harness': info?.harness, 'model': info?.model},
+        },
+      );
+      return null;
+    } on Object catch (e) {
+      return "It couldn't start: $e.";
+    }
   }
 
-  /// The armed workflow [picked] takes [task]: the lead is told it started,
-  /// and the run goes on in the app.
-  Future<bool> _sendWorkflow(WorkflowEntry picked, String task, List<Attachment> files) async {
+  void _workflowNotice(WorkflowEntry w, String why, String task) {
+    // The task as typed, so it isn't lost with the composer's text.
+    _builder.addNotice(NoticeItem('workflow-${_events.length}-${w.id}', why, detail: task));
+    state = state.copyWith(transcript: _builder.snapshot);
+  }
+
+  /// What the user typed into the composer ([text], [files]): the task of
+  /// the workflow armed for it, else a plain message (see [send]). Messages
+  /// the app sends itself (plan approvals, carry-ons, slash commands) go
+  /// through [send] and leave an armed workflow alone.
+  Future<bool> sendTyped(String text, {List<Attachment> files = const []}) async {
+    final armed = state.armed;
+    if (armed == null || (text.trim().isEmpty && files.isEmpty)) return send(text, files: files);
+    if (!_withinBudget()) return false;
     state = state.copyWith(clearArmed: true);
-    final (:entry, :why) = await _checkWorkflow(picked);
-    if (entry == null) {
-      _builder.addNotice(NoticeItem('workflow-${_events.length}-${picked.id}', why));
-      state = state.copyWith(transcript: _builder.snapshot);
+    if (text.trim().isEmpty) {
+      _workflowNotice(armed, '${armed.title} needs a task: type what it should work on, then pick it again.', '');
       return false;
     }
-    if (!await send(workflowStartNote(entry, task), files: files)) return false;
-    await _launch(entry, task);
+    final (:entry, :why) = await _checkWorkflow(armed);
+    if (entry == null) {
+      _workflowNotice(armed, why, text.trim());
+      return false;
+    }
+    // Its agents get the attached files' paths with the task.
+    final out = await _outgoing(text, files);
+    if (out == null) return false;
+    final task = out.text;
+    if (!await _sendOut(Outgoing(workflowStartNote(entry, task), images: out.images))) return false;
+    if (await _launch(entry, task) case final problem?) {
+      _workflowNotice(entry, problem, task);
+      await send(workflowFailedNote(entry.id, entry.title, problem));
+    }
     return true;
   }
 
@@ -2278,13 +2323,26 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Nested instruction files found since the last message go first, after the mode note.
   String _noted(String text) {
     final told = state.transcript.notedMode;
-    final context = [_context?.takeNote() ?? '', _tierNote].where((n) => n.isNotEmpty).join('\n\n');
+    final context = [_context?.takeNote() ?? '', _workflowNote(), _tierNote].where((n) => n.isNotEmpty).join('\n\n');
     _tierNote = '';
     final body = context.isEmpty ? text : (text.isEmpty ? context : '$context\n\n$text');
     final subagent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isSubagent ?? false;
     final full = told != state.mode || _freshLead;
     _freshLead = false;
     return modeNote(state.mode, body, full: full, from: told, subagent: subagent);
+  }
+
+  /// The Max note, when the session's [CodeSessionInfo.workflow] isn't what
+  /// the lead was last told (it changed, the session predates the note, or
+  /// a new lead took over); marks the lead told.
+  String _workflowNote() {
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (info == null || info.workflow == info.toldWorkflow) return '';
+    final on = info.workflow == maxWorkflowId;
+    sessions.update(on ? info.copyWith(toldWorkflow: maxWorkflowId) : info.copyWith(clearToldWorkflow: true));
+    // A lead told about some other workflow than Max (none exist yet) needs no off note.
+    return on || info.toldWorkflow == maxWorkflowId ? maxWorkflowNote(on: on) : '';
   }
 
   Future<Outgoing?> _outgoing(String text, List<Attachment> files) async {
@@ -2306,9 +2364,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   @override
   Future<bool> send(String text, {List<Attachment> files = const []}) async {
     if (!_withinBudget()) return false;
-    if (state.armed case final w? when text.trim().isNotEmpty) return _sendWorkflow(w, text.trim(), files);
     final out = await _outgoing(text, files);
     if (out == null) return false;
+    return _sendOut(out);
+  }
+
+  /// Sends or queues [out] (see [send]).
+  Future<bool> _sendOut(Outgoing out) async {
     // An outside agent waiting on a card is mid-turn: free it, so the turn can end and the message go out.
     _releaseHostCards();
     final t = state.transcript;
@@ -2951,6 +3013,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       effort: pick.effort,
       leads: leads,
       tier: tier,
+      // The new lead hears of Max with its first message from us.
+      clearToldWorkflow: true,
       pendingHandoff: run
           ? ''
           : imported != null
@@ -4107,21 +4171,6 @@ Future<Map<String, SessionStatus>> sessionStatusesNow(Ref ref, List<CodeSessionI
 /// What [owner]'s budget has spent: its own ledger (subagents bill there
 /// too) plus children billed under their own ids (Ultra steps and the
 /// orchestrator), as far as [usage] has read them.
-/// Whether a session runs under the own-key Ultra cap: the Ultra tier on a
-/// model billed to one of the user's keys.
-/// The model that reviews a Bug fix step the harness refused: one of the
-/// user's models from another vendor than [model] (a featured one first),
-/// so the session's model doesn't mark its own work; null when there is
-/// none (the session's own model then reviews, with a fresh context).
-String? bugReviewModel(String model, Iterable<ModelSpec> library) {
-  String vendor(String id) => id.split('/').first;
-  final others = [
-    for (final m in library)
-      if (m.tools && !m.free && m.id.value != 'everyai/auto' && vendor(m.id.value) != vendor(model)) m,
-  ];
-  return (others.where((m) => m.featured).firstOrNull ?? others.firstOrNull)?.id.value;
-}
-
 int budgetSpentMicros(
   String owner, {
   required List<CodeSessionInfo> sessions,

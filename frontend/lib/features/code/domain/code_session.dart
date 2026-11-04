@@ -87,6 +87,7 @@ final class CodeSessionInfo {
     this.leads = const {},
     this.pendingHandoff = '',
     this.workflow,
+    this.toldWorkflow,
   });
 
   final String id;
@@ -145,6 +146,11 @@ final class CodeSessionInfo {
   /// null. Script workflows run once and aren't kept here.
   final String? workflow;
 
+  /// The session-long workflow the current lead was last told is on (see
+  /// `maxWorkflowNote`), or null: when it differs from [workflow], the next
+  /// message carries a note. A new lead hasn't been told anything.
+  final String? toldWorkflow;
+
   /// Question cards and plans are answered inside the held tool call (see
   /// `SessionSpec.holdClientTools`). Off for sessions started before it.
   final bool holdClientTools;
@@ -187,6 +193,8 @@ final class CodeSessionInfo {
     bool merged = false,
     String? workflow,
     bool clearWorkflow = false,
+    String? toldWorkflow,
+    bool clearToldWorkflow = false,
   }) => CodeSessionInfo(
     id: id,
     projectId: projectId,
@@ -213,6 +221,7 @@ final class CodeSessionInfo {
     leads: leads ?? this.leads,
     pendingHandoff: pendingHandoff ?? this.pendingHandoff,
     workflow: clearWorkflow ? null : workflow ?? this.workflow,
+    toldWorkflow: clearToldWorkflow ? null : toldWorkflow ?? this.toldWorkflow,
   );
 
   factory CodeSessionInfo.fromJson(Map<String, Object?> json) => CodeSessionInfo(
@@ -254,6 +263,8 @@ final class CodeSessionInfo {
     },
     pendingHandoff: json['pending_handoff'] as String? ?? '',
     workflow: json['workflow'] as String? ?? (json['tier'] == 'max' ? 'max' : null),
+    // An old Max session's lead never heard of the workflow, so it is told on the next message.
+    toldWorkflow: json['told_workflow'] as String?,
   );
 
   Map<String, Object?> toJson() => {
@@ -281,5 +292,6 @@ final class CodeSessionInfo {
     if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
     if (pendingHandoff.isNotEmpty) 'pending_handoff': pendingHandoff,
     'workflow': ?workflow,
+    'told_workflow': ?toldWorkflow,
   };
 }

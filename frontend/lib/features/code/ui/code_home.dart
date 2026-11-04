@@ -125,11 +125,6 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
             workflow: workflow,
           );
       if (_budget case final usd?) ref.read(codeSettingsProvider.notifier).setBudget(info.id, usd);
-      // A script workflow takes the prompt as its task; the lead was told so in its first message.
-      if (workflow?.entry case final w?) {
-        final why = await ref.read(codeSessionProvider(info.id).notifier).launchWorkflow(w, prompt);
-        if (why != null && mounted) showAdaptiveToast(context, why);
-      }
       if (mounted) setState(() => _workflow = null);
       if (mounted) context.go(Routes.codeSession(info.id));
     } on Object catch (e) {

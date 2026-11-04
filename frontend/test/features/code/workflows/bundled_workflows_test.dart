@@ -216,10 +216,40 @@ void main() {
       skip: skip,
     );
 
+    test('a whole task is split into items by a read-only agent first, then each is built', () async {
+      final agents = _Agents({
+        'split': (_) => {
+          'items': [
+            {'id': 'Dark Mode!', 'title': 'Dark mode', 'spec': 'Add a dark theme'},
+            {'id': 'dark-mode', 'title': 'Export', 'spec': 'Add CSV export'},
+            {'id': 'empty', 'title': 'Nothing', 'spec': ' '},
+          ],
+        },
+        ...answers(verdict: 'ship'),
+      });
+      final end = await run('ultra', {'task': 'Add dark mode and CSV export'}, agents);
+      expect(end.error, isNull);
+      expect(end.phases.first, 'Split');
+      final split = agents.byLabel('split');
+      expect(split.readOnly, isTrue);
+      expect(split.prompt, contains('Add dark mode and CSV export'));
+      // Ids become unique slugs; an item without a spec is dropped.
+      expect(agents.labels.where((l) => l.startsWith('impl:')), ['impl:dark-mode', 'impl:item-2']);
+    }, skip: skip);
+
+    test('a failed split builds the task as one item', () async {
+      final agents = _Agents({'split': (_) => null, ...answers(verdict: 'ship')});
+      final end = await run('ultra', {'task': 'Add dark mode'}, agents);
+      expect(end.status, WorkflowStatus.done);
+      expect(agents.labels.where((l) => l.startsWith('impl:')), ['impl:task']);
+      expect(agents.byLabel('research:task').prompt, contains('Add dark mode'));
+    }, skip: skip);
+
     test('missing items fail with a readable error', () async {
       final end = await run('ultra', {}, _Agents({}));
       expect(end.status, WorkflowStatus.failed);
       expect(end.error, contains('ultra needs args {items'));
+      expect(end.error, contains('{task}'));
     }, skip: skip);
   });
 
@@ -363,6 +393,26 @@ void main() {
         expect(c.prompt, contains('git diff abc1234def...HEAD'), reason: c.label);
         expect(c.prompt, isNot(contains(r'$(')), reason: c.label);
       }
+    }, skip: skip);
+
+    test('a focus from the user is quoted into the threat model and the lenses', () async {
+      final agents = _Agents({
+        'threat-model': (_) => {
+          'summary': 's',
+          'entry_points': <String>[],
+          'boundaries': <String>[],
+          'assets': <String>[],
+          'files': <String>[],
+        },
+        'lens:': (_) => {'findings': <Object>[]},
+      });
+      final end = await run('security_review', {'focus': 'the upload endpoint'}, agents);
+      expect(end.status, WorkflowStatus.done);
+      for (final c in agents.calls) {
+        expect(c.prompt, contains('```\nthe upload endpoint\n```'), reason: c.label);
+      }
+      final bad = await run('security_review', {'focus': 3}, _Agents({}));
+      expect(bad.status, WorkflowStatus.failed);
     }, skip: skip);
 
     test('no candidate findings skips the verify step; a bad base is refused', () async {

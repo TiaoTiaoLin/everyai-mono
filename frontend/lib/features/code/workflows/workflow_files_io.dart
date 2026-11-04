@@ -24,3 +24,20 @@ Future<List<({String stem, String path, String source})>> projectWorkflowFiles(S
   }
   return out;
 }
+
+/// [ref] names a commit in the repository at [dir] (Security review's base).
+Future<bool> isGitCommit(String dir, String ref) async {
+  // `--end-of-options` keeps a ref that starts with a dash from being read as an option.
+  try {
+    final r = await Process.run('git', [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      '--end-of-options',
+      '$ref^{commit}',
+    ], workingDirectory: dir);
+    return r.exitCode == 0;
+  } on Object {
+    return false;
+  }
+}

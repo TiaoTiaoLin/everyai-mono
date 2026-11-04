@@ -28,6 +28,7 @@ import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
+import 'package:every_ai/features/code/workflows/workflow_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -213,6 +214,23 @@ void main() {
     final timeline = await readTimeline(dir);
     expect([for (final s in timeline) (s.harness, s.conversationId)], [('alpha', 'alpha-c1')]);
     expect((await loadHandoffs(dir)).single.kind, HandoffKind.full);
+  });
+
+  test('with Max on, the new lead is told about it with its next message', () async {
+    final info = await start();
+    final c = await open(info.id);
+    c.pickWorkflow(const WorkflowPick.max());
+    await c.send('Use Max');
+    final a = d('alpha').latest!;
+    expect(a.sent.last, contains(maxWorkflowNote(on: true)));
+    await turn(a, 'a1', 'Loaded it.');
+    await c.switchLead('beta', run: false);
+    await handedOff(info.id, 'beta');
+    await c.send('Carry on');
+    expect(d('beta').latest!.sent.last, contains(maxWorkflowNote(on: true)));
+    await turn(d('beta').latest!, 'b1', 'Done.');
+    await c.send('And again');
+    expect(d('beta').latest!.sent.last, isNot(contains('<everyai-workflow')));
   });
 
   test('a handoff asks no model and fetches nothing; the whole conversation waits in a file', () async {

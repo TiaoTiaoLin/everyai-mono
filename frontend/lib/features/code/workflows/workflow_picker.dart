@@ -4,17 +4,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'workflow_library.dart';
+import 'workflow_notes.dart';
+
+export 'workflow_notes.dart';
 
 // What the agent menu's Workflow page offers: Max (an approach skill the
 // lead loads), the bundled script workflows, then the project's own. A
 // script is armed for the next message, which becomes its task; Max stays on
 // for the session. Both work the same on every harness.
-
-/// Max's id in `CodeSessionInfo.workflow`.
-const maxWorkflowId = 'max';
-
-/// The bundled skill Max turns on (the max lane ships it).
-const maxSkillId = 'everyai-max';
 
 const maxWorkflowDescription = 'Research, ask you, plan, then build in parts, following the everyai-max approach';
 
@@ -37,44 +34,28 @@ final class WorkflowPick {
   int get hashCode => Object.hash(id, entry?.digest);
 }
 
-/// The one-time note the next message carries when Max is turned on or off.
-/// Prompt reason: Max is an approach skill the model loads itself now, not
-/// phases the harness enforces.
-String maxWorkflowNote({required bool on}) => on
-    ? '<everyai-workflow name="$maxWorkflowId">The user turned on the Max workflow. Load the $maxSkillId skill now '
-          'and follow its approach for this task and the ones after it.</everyai-workflow>'
-    : '<everyai-workflow name="$maxWorkflowId">The user turned the Max workflow off: stop following the '
-          '$maxSkillId approach from here on.</everyai-workflow>';
+/// The message the lead gets when the user starts [w] on [task].
+String workflowStartNote(WorkflowEntry w, String task) => workflowStartNoteOf(w.id, w.title, task);
 
-/// The message the lead gets when the user starts [w] on [task]: the run
-/// goes on in the app, and its result comes back as a message.
-String workflowStartNote(WorkflowEntry w, String task) =>
-    '<everyai-workflow name="${w.id}">The user started the ${w.title} workflow on the task below. It runs in the '
-    'app with its own agents, and its result reaches you later in a <workflow-result> message. Don\'t work on the '
-    'task yourself meanwhile: reply in one short line that it started.</everyai-workflow>\n\n$task';
-
-/// [w]'s args for the user's [task] (what they typed after picking it).
-/// The bundled ones take their own shapes; a project file gets `{task}`.
-Map<String, Object?> workflowArgsFor(WorkflowEntry w, String task) {
+/// [w]'s args for the user's [task] (what they typed after picking it,
+/// with the paths of any files attached). The bundled ones take their own
+/// shapes; a project file gets `{task}`. For Security review, [gitRef] says
+/// the task is a ref the project has (the base to compare with); any other
+/// text is the focus its agents read.
+Map<String, Object?> workflowArgsFor(WorkflowEntry w, String task, {bool gitRef = false}) {
   if (w.origin != WorkflowOrigin.bundled) return {'task': task};
   return switch (w.id) {
     'bugfix' => {'bug': task},
-    // A lone git ref is the base to compare with; anything else is context the lead reads.
-    'security_review' when RegExp(r'^[\w./@^~-]+$').hasMatch(task) => {'base': task},
-    'security_review' => const {},
-    'ultra' => {
-      'items': [
-        {'id': 'task', 'title': _titleOf(task), 'spec': task},
-      ],
-    },
+    'security_review' when gitRef => {'base': task},
+    'security_review' when task.isEmpty => const {},
+    'security_review' => {'focus': task},
+    // Ultra's first agent splits it into independent items.
     _ => {'task': task},
   };
 }
 
-String _titleOf(String task) {
-  final line = task.split('\n').first.trim();
-  return line.length <= 80 ? line : '${line.substring(0, 79)}…';
-}
+/// Text that could be a git ref on its own (one word, ref characters only).
+bool looksLikeRef(String task) => RegExp(r'^[\w./@^~-]+$').hasMatch(task);
 
 /// What the Workflow page lists for [projectDir]: the bundled and trusted
 /// project workflows, and the locked project ones with why.

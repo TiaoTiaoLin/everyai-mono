@@ -65,6 +65,7 @@ class AgentMenu extends ConsumerWidget {
     this.onLevel,
     this.workflow,
     this.onWorkflow,
+    this.workflowBusy,
     this.projectDir = '',
     this.budget,
     this.onBudget,
@@ -101,6 +102,9 @@ class AgentMenu extends ConsumerWidget {
 
   /// Picks a workflow (null: none); null hides the row.
   final ValueChanged<WorkflowPick?>? onWorkflow;
+
+  /// Why no script workflow can be picked now (one is running), or null.
+  final String? workflowBusy;
 
   /// The project whose own workflows the Workflow page lists.
   final String projectDir;
@@ -165,6 +169,7 @@ class AgentMenu extends ConsumerWidget {
         onLevel: outside ? null : onLevel,
         workflow: workflow,
         onWorkflow: onWorkflow,
+        workflowBusy: workflowBusy,
         workflows: workflows,
         onTrust: (w) => ref.read(workflowTrustProvider.notifier).set(w, true),
         budget: budget,
@@ -232,6 +237,7 @@ class AgentMenuPanel extends StatefulWidget {
     this.onLevel,
     this.workflow,
     this.onWorkflow,
+    this.workflowBusy,
     this.workflows,
     this.onTrust,
     this.budget,
@@ -261,6 +267,9 @@ class AgentMenuPanel extends StatefulWidget {
   final ValueChanged<HarnessTier>? onLevel;
   final WorkflowPick? workflow;
   final ValueChanged<WorkflowPick?>? onWorkflow;
+
+  /// Why the script workflows can't be picked now, shown on their rows; null when they can.
+  final String? workflowBusy;
 
   /// The project workflows the Workflow page lists (null while they load,
   /// and in the demo).
@@ -598,13 +607,14 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
 extension on _AgentMenuPanelState {
   Widget _scriptRow(WorkflowEntry w, Widget Function(bool) check) {
     final on = _workflow?.entry?.id == w.id;
+    final busy = widget.workflowBusy;
     return PopoverRow(
       key: ValueKey('agent-menu.workflow.${w.id}'),
       title: w.title,
-      subtitle: w.description.isEmpty ? 'Runs on your next message' : w.description,
+      subtitle: busy ?? (w.description.isEmpty ? 'Runs on your next message' : w.description),
       selected: on,
       trailing: check(on),
-      onTap: () => _pickWorkflow(WorkflowPick.script(w)),
+      onTap: busy == null ? () => _pickWorkflow(WorkflowPick.script(w)) : null,
     );
   }
 }

@@ -197,3 +197,6 @@ final class WorkflowTrustNotifier extends Notifier<WorkflowTrust> {
 final workflowsProvider = FutureProvider.autoDispose.family<List<WorkflowEntry>, String>(
   (ref, projectDir) => activeWorkflows(projectDir, ref.watch(workflowTrustProvider)),
 );
+
+/// [ref] names a commit in the git repository at [dir].
+Future<bool> isGitCommit(String dir, String ref) => files.isGitCommit(dir, ref);

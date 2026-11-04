@@ -9,12 +9,16 @@ import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/core/platform/platform_kind.dart';
 import 'package:every_ai/core/ui/anchored_popover.dart';
+import 'package:every_ai/features/attachments/attachment.dart';
 import 'package:every_ai/features/code/agent_models.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_menu.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/compaction.dart' show userTextOf;
 import 'package:every_ai/features/code/domain/transcript.dart';
+import 'package:every_ai/features/code/harness/events.dart';
+import 'package:every_ai/features/code/harness/harness.dart' show HarnessError;
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
@@ -24,6 +28,7 @@ import 'package:every_ai/features/code/workflows/workflow_picker.dart';
 import 'package:every_ai/features/code/workflows/workflow_runs.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
+import 'package:flutter/services.dart' show Uint8List;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -45,6 +50,9 @@ const _catalog = AgentCatalog(
 
 WorkflowEntry _entry(String id, String title, {WorkflowOrigin origin = WorkflowOrigin.bundled}) =>
     WorkflowEntry(id: id, title: title, source: 'return 1', digest: id, origin: origin, description: '$title does it');
+
+Attachment _file(String name) =>
+    Attachment.from(id: name, name: name, bytes: Uint8List.fromList(utf8.encode('log line'))).attachment!;
 
 Widget _host(Widget child) => m.MaterialApp(
   home: EveryThemeScope(
@@ -141,15 +149,43 @@ void main() {
   });
 
   test('each bundled workflow gets its own args from the task; a project one gets {task}', () {
+    final review = _entry('security_review', 'Security review');
     expect(workflowArgsFor(_entry('bugfix', 'Bug fix'), 'It crashes'), {'bug': 'It crashes'});
-    expect(workflowArgsFor(_entry('security_review', 'Security review'), 'main'), {'base': 'main'});
-    expect(workflowArgsFor(_entry('security_review', 'Security review'), 'check the auth change'), isEmpty);
-    expect(workflowArgsFor(_entry('ultra', 'Ultra'), 'Dark mode\nwith a toggle'), {
-      'items': [
-        {'id': 'task', 'title': 'Dark mode', 'spec': 'Dark mode\nwith a toggle'},
-      ],
-    });
+    expect(workflowArgsFor(review, 'main', gitRef: true), {'base': 'main'});
+    // A word that isn't a ref of the project is a focus, like any other text.
+    expect(workflowArgsFor(review, 'auth'), {'focus': 'auth'});
+    expect(workflowArgsFor(review, 'check the auth change'), {'focus': 'check the auth change'});
+    expect(looksLikeRef('auth'), isTrue);
+    expect(looksLikeRef('check the auth change'), isFalse);
+    // Ultra's first agent splits the task into items.
+    expect(workflowArgsFor(_entry('ultra', 'Ultra'), 'Dark mode\nand export'), {'task': 'Dark mode\nand export'});
     expect(workflowArgsFor(_entry('bugfix', 'Mine', origin: WorkflowOrigin.project), 'x'), {'task': 'x'});
+  });
+
+  test('the transcript shows a workflow note as a chip, not in the bubble', () {
+    final b = TranscriptBuilder()
+      ..add(
+        ChatMessage(
+          id: 'u1',
+          raw: const {},
+          fromUser: true,
+          text: modeNote(AgentMode.ask, workflowStartNoteOf('bugfix', 'Bug fix', 'fix the crash')),
+        ),
+      )
+      ..add(ChatMessage(id: 'u2', raw: const {}, fromUser: true, text: '${maxWorkflowNote(on: true)}\n\nMake it blue'))
+      // The app's note alone (a workflow that didn't start) isn't a user turn.
+      ..add(
+        ChatMessage(
+          id: 'u3',
+          raw: const {},
+          fromUser: true,
+          text: workflowFailedNote('bugfix', 'Bug fix', 'It changed.'),
+        ),
+      );
+    final turns = b.snapshot.items.whereType<UserTurn>().toList();
+    expect([for (final t in turns) t.text], ['fix the crash', 'Make it blue']);
+    expect([for (final t in turns) t.workflow], ['Started Bug fix', 'Max on']);
+    expect(userTextOf(workflowStartNoteOf('ultra', 'Ultra', 'Add it')), 'Add it');
   });
 
   group('a pick in a session', () {
@@ -223,13 +259,47 @@ void main() {
 
     test('from the home page, Ultra takes the prompt as its task after the lead is told', () async {
       final ultra = await bundled('ultra');
-      final (c, _) = await open(workflow: WorkflowPick.script(ultra), prompt: 'Add dark mode');
-      expect(driver.specs.single.initialMessage, contains('<everyai-workflow name="ultra">'));
+      await open(workflow: WorkflowPick.script(ultra), prompt: 'Add dark mode');
+      expect(driver.specs.single.initialMessage, contains('<everyai-workflow name="ultra"'));
       expect(driver.specs.single.initialMessage, contains('Add dark mode'));
-      expect(await c.launchWorkflow(ultra, 'Add dark mode'), isNull);
       await pumpEventQueue();
       expect(started.single.source, ultra.source);
-      expect(((started.single.args['items']! as List).single as Map)['spec'], 'Add dark mode');
+      expect(started.single.args['task'], 'Add dark mode');
+    });
+
+    test('from the home page, a changed or empty workflow stops the start before the lead is told', () async {
+      final file = File('${project.path}/.everyai/workflows/notes.js')
+        ..createSync(recursive: true)
+        ..writeAsStringSync("export const meta = { name: 'Notes' }\nreturn 1\n");
+      final entry = (await loadProjectWorkflows(project.path)).single;
+      container.read(workflowTrustProvider.notifier).set(entry, true);
+      file.writeAsStringSync("export const meta = { name: 'Notes' }\nreturn 2\n");
+      await expectLater(
+        open(workflow: WorkflowPick.script(entry), prompt: 'Write them'),
+        throwsA(isA<HarnessError>().having((e) => e.message, 'message', contains('changed since you picked it'))),
+      );
+      await expectLater(
+        open(workflow: WorkflowPick.script(await bundled('bugfix')), prompt: ' '),
+        throwsA(isA<HarnessError>().having((e) => e.message, 'message', contains('needs a task'))),
+      );
+      expect(driver.specs, isEmpty);
+      expect(started, isEmpty);
+    });
+
+    test('a workflow that can\'t start after the lead was told sends it a note to do the task itself', () async {
+      final file = File('${project.path}/.everyai/workflows/notes.js')
+        ..createSync(recursive: true)
+        ..writeAsStringSync("export const meta = { name: 'Notes' }\nreturn 1\n");
+      final entry = (await loadProjectWorkflows(project.path)).single;
+      container.read(workflowTrustProvider.notifier).set(entry, true);
+      final (c, _) = await open();
+      file.writeAsStringSync("export const meta = { name: 'Notes' }\nreturn 2\n");
+      expect(await c.launchWorkflow(entry, 'Write them'), contains('changed since you picked it'));
+      expect(started, isEmpty);
+      expect(lead.sent.last, contains('state="failed"'));
+      expect(lead.sent.last, contains('yourself'));
+      final notice = container.read(codeSessionProvider(c.sessionId)).transcript.items.whereType<NoticeItem>().last;
+      expect(notice.message, contains('changed since you picked it'));
     });
 
     test('an armed Bug fix takes the next message as its task; the one after is a plain turn', () async {
@@ -237,17 +307,71 @@ void main() {
       c.pickWorkflow(WorkflowPick.script(await bundled('bugfix')));
       expect(container.read(codeSessionProvider(c.sessionId)).armed?.id, 'bugfix');
       expect(c.workflowPick?.id, 'bugfix');
-      expect(await c.send('Saving crashes'), isTrue);
+      expect(await c.sendTyped('Saving crashes', files: [_file('crash.log')]), isTrue);
       await pumpEventQueue();
-      expect(lead.sent.last, contains('<everyai-workflow name="bugfix">'));
+      expect(lead.sent.last, contains('<everyai-workflow name="bugfix"'));
       expect(lead.sent.last, contains('Saving crashes'));
-      expect(started.single.args['bug'], 'Saving crashes');
+      // The workflow's agents get the attached file's path with the task.
+      expect(started.single.args['bug'], allOf(startsWith('Saving crashes'), contains('crash.log')));
       expect(c.workflowPick, isNull);
 
-      expect(await c.send('And the title too'), isTrue);
+      expect(await c.sendTyped('And the title too'), isTrue);
       await pumpEventQueue();
       expect(lead.sent.last, isNot(contains('<everyai-workflow')));
       expect(started, hasLength(1));
+    });
+
+    test('messages the app sends itself leave an armed workflow alone', () async {
+      final (c, _) = await open();
+      c.pickWorkflow(WorkflowPick.script(await bundled('bugfix')));
+      expect(await c.send('Carry on from where you stopped.'), isTrue);
+      await pumpEventQueue();
+      expect(lead.sent.last, isNot(contains('<everyai-workflow')));
+      expect(started, isEmpty);
+      expect(container.read(codeSessionProvider(c.sessionId)).armed?.id, 'bugfix');
+    });
+
+    test('Max is told again to a new lead, and to an old Max session on its next message', () async {
+      // An old session saved with tier max: on, but its lead was never told.
+      final legacy = CodeSessionInfo.fromJson({
+        ...CodeSessionInfo(
+          id: 's',
+          projectId: 'p1',
+          title: 't',
+          conversationId: 'c',
+          model: '',
+          mode: AgentMode.ask,
+          workingDir: '/w',
+          createdAt: DateTime(2026),
+        ).toJson(),
+        'tier': 'max',
+      });
+      expect(legacy.workflow, maxWorkflowId);
+      expect(legacy.toldWorkflow, isNull);
+
+      final (c, info) = await open();
+      final sessions = container.read(codeSessionsProvider.notifier);
+      // As if it had loaded that way.
+      sessions.update(sessions.byId(info.id)!.copyWith(workflow: maxWorkflowId, clearToldWorkflow: true));
+      await c.send('Go on');
+      expect(lead.sent.last, contains(maxWorkflowNote(on: true)));
+      await c.send('More');
+      expect(lead.sent.last, isNot(contains('<everyai-workflow')));
+      // A lead switch clears what the lead was told (see switchLead), so the next message tells it again.
+      sessions.update(sessions.byId(info.id)!.copyWith(clearToldWorkflow: true));
+      await c.send('New lead here');
+      expect(lead.sent.last, contains(maxWorkflowNote(on: true)));
+    });
+
+    test('Max picked and the app restarted before a message: the next message still tells the lead', () async {
+      final (c, info) = await open();
+      c.pickWorkflow(const WorkflowPick.max());
+      // What survives a restart is the saved session, not the controller.
+      final saved = CodeSessionInfo.fromJson(container.read(codeSessionsProvider.notifier).byId(info.id)!.toJson());
+      expect(saved.workflow, maxWorkflowId);
+      expect(saved.toldWorkflow, isNull);
+      await c.send('Build a game');
+      expect(lead.sent.last, contains(maxWorkflowNote(on: true)));
     });
 
     test('Max is kept on the session and its note goes with the next message once', () async {
@@ -287,11 +411,13 @@ void main() {
       c.pickWorkflow(WorkflowPick.script(entry));
       file.writeAsStringSync("export const meta = { name: 'Notes' }\nreturn 2\n");
       final before = lead.sent.length;
-      expect(await c.send('Write them'), isFalse);
+      expect(await c.sendTyped('Write them'), isFalse);
       expect(started, isEmpty);
       expect(lead.sent.length, before);
       final t = container.read(codeSessionProvider(c.sessionId)).transcript;
       expect(t.items.whereType<NoticeItem>().last.message, contains('changed since you picked it'));
+      // What the user typed is kept with the notice.
+      expect(t.items.whereType<NoticeItem>().last.detail, 'Write them');
     });
   });
 }

@@ -3,8 +3,9 @@ export const meta = {
   name: 'Ultra',
   description: 'Several independent changes at once: a research note per item, then an implementation in its own worktree, a review through two lenses, a fix round, and one full test round at the end',
   whenToUse: 'The task splits into two or more independent changes that each need research, code and tests',
-  args: '{items: [{id, title, spec}], plan_ref?}: one entry per independent change; spec says what to build and how to tell it works; plan_ref names a plan file the agents read',
+  args: '{items: [{id, title, spec}], plan_ref?} or {task, plan_ref?}: one entry per independent change, spec saying what to build and how to tell it works; or the whole task, which a first agent splits into items; plan_ref names a plan file the agents read',
   phases: [
+    { title: 'Split', detail: 'given one task: split it into independent items' },
     { title: 'Research', detail: 'one read-only note per item, with a concrete plan' },
     { title: 'Implement', detail: 'each item in its own worktree, with its tests' },
     { title: 'Review', detail: 'two lenses per item: correctness, then cost and simplicity' },
@@ -17,13 +18,15 @@ export const meta = {
 //   items: [{ id: 'dark-mode', title: 'Dark mode toggle', spec: 'what to build, where, how to check it' }],
 //   plan_ref: '.everyai/plans/2026-11-04-theme.md',   // optional
 // }
+// or { task: 'the user\'s words' }: a read-only agent splits it into items first (one item when it is one change).
 // Each implement and refix agent works in its own worktree, which merges back into the session's folder when it
 // finishes; reviews and the integration run in the session's folder.
 
 const A = args || {}
-const ITEMS = Array.isArray(A.items) ? A.items : []
-if (!ITEMS.length || ITEMS.some((it) => !it || !it.id || !it.spec)) {
-  throw new Error('ultra needs args {items: [{id, title, spec}]} with at least one item, each with an id and a spec')
+const TASK = typeof A.task === 'string' ? A.task.trim() : ''
+const GIVEN = Array.isArray(A.items) ? A.items : null
+if (GIVEN ? !GIVEN.length || GIVEN.some((it) => !it || !it.id || !it.spec) : !TASK) {
+  throw new Error('ultra needs args {items: [{id, title, spec}]} with at least one item, each with an id and a spec, or {task}')
 }
 const C = (typeof ctx === 'object' && ctx) || {}
 const REVIEW = C.review || null
@@ -108,6 +111,57 @@ const LENSES = [
 
 const quote = (s) => '```\n' + String(s || '').replace(/```/g, '`​``') + '\n```'
 const reviewOpts = REVIEW ? { harness: REVIEW.harness, model: REVIEW.model } : {}
+
+const SPLIT_SCHEMA = {
+  type: 'object',
+  properties: {
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'string' }, title: { type: 'string' }, spec: { type: 'string' } },
+        required: ['id', 'title', 'spec'],
+      },
+    },
+  },
+  required: ['items'],
+}
+const MAX_ITEMS = 8
+
+// Ids name note files and labels: short slugs, unique.
+function itemsOf(list) {
+  const seen = new Set()
+  const out = []
+  for (const it of Array.isArray(list) ? list : []) {
+    if (!it || typeof it.spec !== 'string' || !it.spec.trim() || out.length >= MAX_ITEMS) continue
+    let id = String(it.id || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)
+    if (!id || seen.has(id)) id = `item-${out.length + 1}`
+    seen.add(id)
+    out.push({ id, title: String(it.title || id), spec: it.spec })
+  }
+  return out
+}
+
+let ITEMS = GIVEN
+if (!ITEMS) {
+  // Prompt reason: the workflow picker hands Ultra the user's whole message, and Ultra only pays off on
+  // independent items built in parallel, so a first agent splits it.
+  phase('Split')
+  const split = await agent(`${COMMON}
+SPLIT A TASK into the independent items a team builds in parallel.
+The task, in the user's words:
+${quote(TASK)}
+
+${READ_ONLY}
+Read enough of the code to see where the work goes. Each item must be a change one agent can build, test and commit
+on its own branch without waiting for another; keep work that touches the same code in one item. Don't add work the
+task doesn't ask for: one item is right when the task is one change. At most ${MAX_ITEMS} items. For each, give a short
+id (lowercase letters, digits and dashes), a title, and a spec that says what to build, where, and how to tell it works.`,
+    { label: 'split', phase: 'Split', schema: SPLIT_SCHEMA, readOnly: true })
+    .catch((e) => { log(`split failed: ${e.message}`); return null })
+  ITEMS = itemsOf(split && split.items)
+  if (!ITEMS.length) ITEMS = [{ id: 'task', title: TASK.split('\n')[0].slice(0, 80), spec: TASK }]
+}
 
 phase('Research')
 const notes = await parallel(ITEMS.map((it) => () => agent(`${COMMON}
