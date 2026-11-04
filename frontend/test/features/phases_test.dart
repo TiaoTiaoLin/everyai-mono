@@ -214,6 +214,41 @@ void main() {
     });
   });
 
+  test('research moves on when every researcher has reported and one finished', () {
+    final f = PhaseFlow();
+    const r = {'role': 'researcher', 'description': ''};
+    // Refused before it started, or failed: nothing was researched.
+    expect(f.onAnswer(taskTool, r, 'Not started: at most 4 subagents run at once.'), isFalse);
+    expect(
+      f.onAnswer(taskTool, r, subagentReason({'a': const SubagentReport(SubagentStatus.failed, 'x')}), callId: 'a'),
+      isFalse,
+    );
+    expect(f.phase, Phase.research);
+    // Two in the background (one without a description) and one held: the held one's report is not enough.
+    f.onAnswer(taskTool, r, subagentReason({'b': backgroundStarted('kid-b')}), callId: 'b');
+    f.onAnswer(taskTool, r, subagentReason({'c': backgroundStarted('kid-c')}), callId: 'c');
+    expect(f.researchPending, 2);
+    expect(
+      f.onAnswer(taskTool, r, subagentReason({'d': const SubagentReport(SubagentStatus.completed, 'ok')}), callId: 'd'),
+      isFalse,
+    );
+    expect(
+      f.onMessage(taskNotification('kid-b', 'Subagent', const SubagentReport(SubagentStatus.completed, 'ok'))),
+      isFalse,
+    );
+    expect(
+      f.onMessage(taskNotification('kid-c', 'Subagent', const SubagentReport(SubagentStatus.stopped, ''))),
+      isTrue,
+    );
+    expect(f.phase, Phase.questions);
+  });
+
+  test("in Ultra a researcher the agent starts itself doesn't end research; the workflow does", () {
+    final f = PhaseFlow(ultra: true);
+    expect(f.onAnswer(taskTool, {'role': 'researcher'}, 'Found it.'), isFalse);
+    expect(f.phase, Phase.research);
+  });
+
   test('a researcher that paused on a question is still pending, and its question may go to the user', () {
     final f = PhaseFlow();
     final args = {'role': 'researcher', 'description': 'stack'};

@@ -107,7 +107,6 @@ final class PhaseFlow {
     this.nudges = 0,
     Set<String>? researchers,
     this.researchReports = 0,
-    this.researchPending = 0,
     this.reproCommand = '',
     this.reproExpect = '',
     this.reproByUser = false,
@@ -152,8 +151,10 @@ final class PhaseFlow {
   final Set<String> researchers;
   int researchReports;
 
-  /// Researchers started in the background whose reports haven't come.
-  int researchPending;
+  /// Researchers running in the background whose reports haven't come.
+  int get researchPending => forks.values.where((r) => r == _researcher).length;
+
+  static const _researcher = 'researcher';
 
   /// Forks running in the background (child id → role, '' for a plain fork)
   /// whose task notification hasn't come: a build that waits for them isn't
@@ -246,7 +247,6 @@ final class PhaseFlow {
       nudges: (j['nudges'] as num?)?.toInt() ?? 0,
       researchers: {...?(j['researchers'] as List<Object?>?)?.whereType<String>()},
       researchReports: (j['research_reports'] as num?)?.toInt() ?? 0,
-      researchPending: (j['research_pending'] as num?)?.toInt() ?? 0,
       reproCommand: j['repro_command'] as String? ?? '',
       reproExpect: j['repro_expect'] as String? ?? '',
       reproByUser: j['repro_by_user'] == true,
@@ -267,7 +267,6 @@ final class PhaseFlow {
     'nudges': nudges,
     'researchers': [...researchers],
     'research_reports': researchReports,
-    'research_pending': researchPending,
     if (reproCommand.isNotEmpty) 'repro_command': reproCommand,
     if (reproExpect.isNotEmpty) 'repro_expect': reproExpect,
     if (reproByUser) 'repro_by_user': true,
@@ -288,7 +287,7 @@ final class PhaseFlow {
     nudges = 0;
     researchers.clear();
     researchReports = 0;
-    researchPending = 0;
+    forks.removeWhere((_, role) => role == _researcher);
     reproCommand = '';
     reproExpect = '';
     reproByUser = false;
@@ -396,9 +395,10 @@ final class PhaseFlow {
                 '(rank, or llmQuery per file) and return the few suspects with reasons; if it worked before, `git '
                 'bisect run <repro command>` from a clean worktree finds the commit. Then end your turn until they '
                 'report.'
-          : 'start one or more forks with role "researcher" (run_subagent, run_in_background true), one per question '
-                'worth answering: how this is best built, which libraries or reference code to borrow from, what '
-                'goes wrong. Then end your turn until they report.',
+          : 'start one or more forks with role "researcher" (run_subagent, run_in_background true; at most 4 run at '
+                'once), one per question worth answering: how this is best built, which libraries or reference code to '
+                'borrow from, what goes wrong. Then end your turn until they report. Research moves on once every '
+                'researcher has reported and at least one finished.',
     Phase.questions =>
       'ask the user about the directions research found with ask_user_question: the choices that change what gets '
           'built, your recommendation first.',
@@ -439,7 +439,7 @@ final class PhaseFlow {
 
   /// A call was made: remember researchers.
   void onCall(String tool, Map<String, Object?> args) {
-    if (tool != taskTool || (args['role'] ?? args['agent']) != 'researcher') return;
+    if (tool != taskTool || (args['role'] ?? args['agent']) != _researcher) return;
     researchers.add((args['description'] as String? ?? '').trim().toLowerCase());
   }
 
@@ -449,15 +449,14 @@ final class PhaseFlow {
     if (reason.contains('<fork-question')) forkAsking = true;
     if (tool == taskTool) _trackFork(args, reason, callId);
     switch (tool) {
-      case taskTool when (args['role'] ?? args['agent']) == 'researcher':
+      case taskTool when (args['role'] ?? args['agent']) == _researcher:
         // This call's own report when several came back together.
         final mine = callId == null ? null : parseSubagentReports(reason)[callId];
-        if (reason.startsWith('Started in the background') || mine?.status == SubagentStatus.background) {
-          researchPending++;
-          return false;
-        }
-        researchReports++;
-        return _advanceFrom(Phase.research);
+        final status = mine?.status ?? _statusOf(reason);
+        // Gone to the background (tracked above): its notification reports later.
+        if (status == SubagentStatus.background) return false;
+        if (status == SubagentStatus.completed) researchReports++;
+        return _researchDone();
       // Asking the user on a fork's behalf during research isn't the flow's questions step.
       case askUserQuestionTool when forkAsking && phase == Phase.research:
         forkAsking = false;
@@ -470,6 +469,20 @@ final class PhaseFlow {
     }
     return false;
   }
+
+  /// The status of a report that came back as plain text.
+  static SubagentStatus _statusOf(String reason) {
+    if (backgroundTaskId(reason) != null) return SubagentStatus.background;
+    if (reason.startsWith('Not started') || reason.startsWith("The subagent couldn't start")) {
+      return SubagentStatus.notStarted;
+    }
+    return SubagentStatus.completed;
+  }
+
+  /// Research moves on once a researcher has reported and none still runs.
+  /// A refused, failed or stopped researcher reported nothing. Ultra's
+  /// research is its workflow: researchers the agent starts itself are extra.
+  bool _researchDone() => !ultra && researchReports > 0 && researchPending == 0 && _advanceFrom(Phase.research);
 
   /// Remembers a fork that went on in the background (started there, moved
   /// there, or paused to ask), so a turn end while it runs is a wait.
@@ -499,11 +512,12 @@ final class PhaseFlow {
       return _advanceFrom(Phase.research);
     }
     final n = parseTaskNotification(text);
-    if (n != null) forks.remove(n.childId);
-    if (n == null || !researchers.contains(n.title.trim().toLowerCase())) return false;
-    if (researchPending > 0) researchPending--;
-    researchReports++;
-    return _advanceFrom(Phase.research);
+    if (n == null) return false;
+    final role = forks.remove(n.childId);
+    // By child id; flows saved before forks were tracked match by title.
+    if (role != _researcher && !(role == null && researchers.contains(n.title.trim().toLowerCase()))) return false;
+    if (n.status == SubagentStatus.completed) researchReports++;
+    return _researchDone();
   }
 
   /// The harness ran the repro: [shown] says whether the bug showed.
