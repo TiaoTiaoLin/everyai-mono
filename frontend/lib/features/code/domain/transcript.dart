@@ -496,7 +496,7 @@ final class TranscriptBuilder {
             handedOffFrom: raw['handed_off_from'] as String? ?? '',
           ),
         );
-      case UnknownEvent() || ConnectionChange() || UsageReport():
+      case UnknownEvent() || ConnectionChange() || UsageReport() || PlanLimits():
         break;
     }
   }

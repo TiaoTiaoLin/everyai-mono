@@ -11,6 +11,8 @@ import '../../code_providers.dart';
 import '../../domain/code_session.dart';
 import '../../git/git_service.dart';
 import '../../panes/panes_providers.dart';
+import '../console/console_state.dart';
+import '../console/git_button.dart' show mergeLocally;
 
 final _mono = EveryType.resolve().caption.mono.copyWith(height: 1.45);
 
@@ -35,7 +37,7 @@ class _DiffPaneState extends ConsumerState<DiffPane> {
   /// Scrolls to the file the transcript asked for (an edit row's link), once
   /// per request. Transcript paths are absolute; the diff's are repo-relative.
   void _scrollToFocus(GitSnapshot snapshot) {
-    final pane = ref.read(codePaneProvider(widget.session.id));
+    final pane = ref.read(consolePanelProvider(widget.session.id));
     final focus = pane.focus;
     if (focus == null || pane.focusSeq == _focusedSeq) return;
     final file = snapshot.files.where((f) => focus == f.path || focus.endsWith('/${f.path}')).firstOrNull;
@@ -76,34 +78,12 @@ class _DiffPaneState extends ConsumerState<DiffPane> {
     await _run(() async => await _git.commit(message.trim()) ? 'Committed' : 'Nothing to commit');
   }
 
-  Future<void> _merge(SessionWorktree w) async {
-    final message = await showAdaptivePrompt(
-      context,
-      title: 'Squash merge into ${w.baseBranch}',
-      confirmLabel: 'Merge',
-      initialValue: widget.session.title,
-    );
-    if (message == null || message.trim().isEmpty) return;
-    var merged = false;
-    await _run(() async {
-      final sha = await _git.squashMerge(message.trim());
-      merged = true;
-      return 'Merged into ${w.baseBranch} as ${sha.substring(0, 7)}';
-    });
-    if (!merged || !mounted) return;
-    final remove = await showAdaptiveConfirm(
-      context,
-      title: 'Remove the worktree?',
-      message:
-          'The work is on ${w.baseBranch} now. Removing deletes the worktree at ${w.path} and branch ${w.branch}; '
-          'cancel to keep it and go on working there.',
-      confirmLabel: 'Remove',
-    );
-    if (remove && mounted) {
-      await _run(() async {
-        await _git.discard();
-        return null;
-      });
+  Future<void> _merge() async {
+    setState(() => _busy = true);
+    try {
+      await mergeLocally(context, ref, widget.session);
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -145,7 +125,7 @@ class _DiffPaneState extends ConsumerState<DiffPane> {
     final baseline = widget.session.baseline;
     final snapshot = ref.watch(codeGitProvider(widget.session.id));
     final git = snapshot.value;
-    ref.watch(codePaneProvider(widget.session.id).select((p) => p.focusSeq));
+    ref.watch(consolePanelProvider(widget.session.id).select((p) => p.focusSeq));
     if (git != null) _scrollToFocus(git);
 
     return DecoratedBox(
@@ -260,7 +240,7 @@ class _DiffPaneState extends ConsumerState<DiffPane> {
                   AdaptiveButton(
                     label: 'Merge into ${w.baseBranch}',
                     busy: _busy,
-                    onPressed: (git?.files.isEmpty ?? true) && (git?.ahead ?? 0) == 0 ? null : () => _merge(w),
+                    onPressed: (git?.files.isEmpty ?? true) && (git?.ahead ?? 0) == 0 ? null : _merge,
                   ),
                 ],
               ),

@@ -152,6 +152,30 @@ DateTime? codexLimitResetsAt(Map<String, Object?>? snapshot) {
   return DateTime.fromMillisecondsSinceEpoch(times.reduce((a, b) => a > b ? a : b) * 1000, isUtc: true);
 }
 
+/// How much of each limit's windows the rate-limit snapshots ([byLimit],
+/// by `limitId`) say is used: `primary` and `secondary`, `usedPercent` 0
+/// to 100, `windowDurationMins`, `resetsAt` in epoch seconds. A warning at
+/// 75% used, Codex's own first warning step (its TUI's
+/// `RATE_LIMIT_WARNING_THRESHOLDS`). Null when no window has a number.
+PlanLimits? codexPlanLimits(Map<String, Map<String, Object?>> byLimit, {required String id}) {
+  final windows = [
+    for (final MapEntry(key: limit, value: snapshot) in byLimit.entries)
+      for (final slot in const ['primary', 'secondary'])
+        if (snapshot[slot] case {'usedPercent': final num used} && final Map<String, Object?> w)
+          PlanWindow(
+            name: '$limit/$slot',
+            used: (used / 100).clamp(0, 1).toDouble(),
+            resetsAt: switch (w['resetsAt']) {
+              final num at => DateTime.fromMillisecondsSinceEpoch((at * 1000).round(), isUtc: true),
+              _ => null,
+            },
+            minutes: (w['windowDurationMins'] as num?)?.toInt(),
+          ),
+  ];
+  if (windows.isEmpty) return null;
+  return PlanLimits.of(id: id, windows: windows, warning: windows.any((w) => w.used >= 0.75));
+}
+
 /// When a usage limit lifts, from the rate-limit snapshots by `limitId`
 /// ([byLimit]; recorded snapshots all had `limitId: "codex"`, and
 /// `account/rateLimits/read` has `rateLimitsByLimitId`, so a plan may have

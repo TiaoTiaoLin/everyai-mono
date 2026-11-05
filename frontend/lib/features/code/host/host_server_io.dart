@@ -14,6 +14,7 @@ import 'host.dart';
 import 'host_checks.dart';
 import 'host_script.dart';
 import 'host_prompts.dart';
+import 'host_report.dart' show reportIssueSpec;
 import 'host_max_tools.dart' show maxForkSpecs;
 
 // MCP over Streamable HTTP, tools only, stateless (no Mcp-Session-Id), on
@@ -47,6 +48,7 @@ final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   goalCheckSpec,
   if (hostScriptsAvailable) hostRunScriptSpec,
   runWorkflowSpec,
+  reportIssueSpec,
 ]);
 
 /// An OpenAI-style spec (flat or `{function: …}`) in MCP's shape.

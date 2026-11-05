@@ -43,6 +43,21 @@ void main() {
     expect(md, isNot(contains('Current mode')));
   });
 
+  test('tells every harness to prefer our tools and how to report EveryAI problems, in the shared prefix', () {
+    final a = sessionBriefing(_input());
+    for (final s in ["## Prefer EveryAI's tools", '## Reporting EveryAI problems']) {
+      expect(a, contains(s));
+      expect(a.indexOf(s), lessThan(a.indexOf('## This session')));
+    }
+    expect(a, contains('only after the user says yes'));
+    expect(a, contains('never again after a no'));
+    expect(a, contains('gh issue create -R xuckless/everyai-mono'));
+    expect(a, contains('`report_issue`'));
+    final b = sessionBriefing(_input(worktree: '/other', profiles: ['make test'], others: const []));
+    String prefix(String s) => s.substring(0, s.indexOf('## This session'));
+    expect(prefix(b), prefix(a));
+  });
+
   test('carries the rule and the host tools', () {
     final md = sessionBriefing(_input());
     expect(md, contains('Check per part, not per edit'));

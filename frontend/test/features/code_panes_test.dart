@@ -1,5 +1,12 @@
+import 'dart:convert';
+
+import 'package:every_ai/core/preferences.dart';
+import 'package:every_ai/features/code/code_providers.dart';
+import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/local_ports.dart';
 import 'package:every_ai/features/code/panes/panes_providers.dart';
+import 'package:every_ai/features/code/ui/console/console_state.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -96,20 +103,66 @@ void main() {
     expect(out, ['http://localhost:3000/app', 'http://localhost:5173/', 'http://localhost:9229/']);
   });
 
-  test('pane state opens, toggles and remembers the last tab', () {
-    final container = ProviderContainer();
-    addTearDown(container.dispose);
-    final panes = container.read(codePaneProvider('s').notifier);
-    expect(container.read(codePaneProvider('s')).open, isNull);
-    panes.toggleLast();
-    expect(container.read(codePaneProvider('s')).open, CodePane.terminal);
-    panes.show(CodePane.preview);
-    panes.toggle(CodePane.preview);
-    expect(container.read(codePaneProvider('s')).open, isNull);
-    panes.toggleLast();
-    expect(container.read(codePaneProvider('s')).open, CodePane.preview);
-    panes.toggle(CodePane.diff);
-    expect(container.read(codePaneProvider('s')).open, CodePane.diff);
-    expect(container.read(codePaneProvider('other')).open, isNull);
+  group('drawer state', () {
+    ProviderContainer containerWith(Preferences prefs) {
+      final c = ProviderContainer(overrides: [preferencesProvider.overrideWithValue(prefs)]);
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    test('starts closed, toggles, and remembers the last tab', () {
+      final c = containerWith(Preferences.inMemory());
+      final drawer = c.read(codePaneProvider('s').notifier);
+      expect(c.read(codePaneProvider('s')).open, isNull);
+      drawer.toggleDrawer();
+      expect(c.read(codePaneProvider('s')).open, CodePane.terminal);
+      drawer.show(CodePane.preview);
+      drawer.toggle(CodePane.preview);
+      expect(c.read(codePaneProvider('s')).open, isNull);
+      drawer.toggleDrawer();
+      expect(c.read(codePaneProvider('s')).open, CodePane.preview);
+      expect(c.read(codePaneProvider('other')).open, isNull);
+    });
+
+    test("each session remembers its drawer next to the panel's keys; deleting the session forgets both", () async {
+      final prefs = Preferences.inMemory();
+      prefs['code.sessions'] = jsonEncode([
+        CodeSessionInfo(
+          id: 'a',
+          projectId: 'p1',
+          title: 'A',
+          conversationId: 'c',
+          model: 'm',
+          mode: AgentMode.ask,
+          workingDir: '/tmp/x',
+          createdAt: DateTime(2026),
+        ).toJson(),
+      ]);
+      final first = containerWith(prefs);
+      first.read(consolePanelProvider('a').notifier).show(ConsoleView.diff);
+      first.read(codePaneProvider('a').notifier)
+        ..show(CodePane.processes)
+        ..setHeight(180, persist: false)
+        ..setHeight(310);
+      first.read(consolePanelProvider('a').notifier).setWidth(500);
+      expect(jsonDecode(prefs['${codeLayoutPrefix}a']!), {
+        'panel': 'diff',
+        'panel_width': 500,
+        'drawer': 'processes',
+        'drawer_last': 'processes',
+        'drawer_height': 310,
+      });
+
+      final again = containerWith(prefs);
+      expect(again.read(codePaneProvider('a')).open, CodePane.processes);
+      expect(again.read(codePaneProvider('a')).height, 310);
+      expect(again.read(consolePanelProvider('a')).view, ConsoleView.diff);
+      // Closed, it still opens on the last tab.
+      again.read(codePaneProvider('a').notifier).close();
+      expect(containerWith(prefs).read(codePaneProvider('a')).last, CodePane.processes);
+
+      await again.read(codeSessionsProvider.notifier).remove('a');
+      expect(prefs['${codeLayoutPrefix}a'], isNull);
+    });
   });
 }

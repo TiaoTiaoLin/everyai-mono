@@ -11,7 +11,10 @@ import '../mcp_providers.dart';
 /// or one project. Local commands need the user's approval of the exact
 /// command before any session starts them.
 class McpSettingsBody extends ConsumerStatefulWidget {
-  const McpSettingsBody({super.key});
+  const McpSettingsBody({super.key, this.projectId});
+
+  /// The project the page opens on (null: every project).
+  final String? projectId;
 
   @override
   ConsumerState<McpSettingsBody> createState() => _McpSettingsBodyState();
@@ -19,7 +22,7 @@ class McpSettingsBody extends ConsumerStatefulWidget {
 
 class _McpSettingsBodyState extends ConsumerState<McpSettingsBody> {
   /// Null: every project.
-  String? _projectId;
+  late String? _projectId = widget.projectId;
 
   /// The entry being edited: a server (new or existing) and the name it had.
   ({McpServer server, String? original})? _editing;

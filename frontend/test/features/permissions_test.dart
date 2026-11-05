@@ -142,6 +142,8 @@ void main() {
         'npm publish',
         'dart pub publish',
         'gh pr merge 12',
+        'gh issue create -R xuckless/everyai-mono --body x',
+        'gh issue comment 3 --body x',
         'psql -c "DROP TABLE users"',
         'echo key >> ~/.ssh/authorized_keys',
         'find . -name "*.o" -delete',

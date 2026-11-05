@@ -1,4 +1,4 @@
-import 'package:every_ai/features/code/ui/code_top_bar.dart';
+import 'package:every_ai/features/code/ui/console/console_state.dart';
 import 'package:every_ai/features/code/ui/transcript/transcript_items.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -17,9 +17,11 @@ void main() {
     });
   });
 
-  test('the header drops chips by the width it has', () {
-    expect(TopBarTier.forWidth(1400), TopBarTier.wide);
-    expect(TopBarTier.forWidth(900), TopBarTier.wide);
-    expect(TopBarTier.forWidth(700), TopBarTier.narrow);
+  test('the console fits the width it has: panel beside, then over the transcript, then icons in the menu', () {
+    expect(ConsoleTier.forWidth(1400), ConsoleTier.wide);
+    expect(ConsoleTier.forWidth(1000), ConsoleTier.wide);
+    expect(ConsoleTier.forWidth(900), ConsoleTier.medium);
+    expect(ConsoleTier.forWidth(700), ConsoleTier.medium);
+    expect(ConsoleTier.forWidth(650), ConsoleTier.narrow);
   });
 }

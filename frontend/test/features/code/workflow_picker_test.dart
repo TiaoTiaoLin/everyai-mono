@@ -101,7 +101,6 @@ void main() {
 
     testWidgets('lists None, Max, the bundled ones, then the project\'s own; a pick is reported', (tester) async {
       final picks = await show(tester);
-      expect(find.text('Effort level'), findsOneWidget);
       expect(find.text('None'), findsOneWidget);
       await tester.tap(find.byKey(const ValueKey('agent-menu.workflow')));
       await tester.pump();
@@ -130,7 +129,11 @@ void main() {
     testWidgets('an outside lead has the Workflow row but no effort level', (tester) async {
       await show(tester, outside: true);
       expect(find.byKey(const ValueKey('agent-menu.workflow')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.effort')));
+      await tester.pump();
       expect(find.text('Effort level'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.back')));
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('agent-menu.workflow')));
       await tester.pump();
       expect(find.byKey(const ValueKey('agent-menu.workflow.max')), findsOneWidget);

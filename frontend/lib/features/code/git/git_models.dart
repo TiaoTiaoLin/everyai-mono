@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 /// Where a session's work lives: its own checkout of the project on its own
@@ -292,3 +294,25 @@ final class ForkCopy {
 /// parent's version kept when they can't be merged as text), and the ref
 /// that keeps the fork's work either way.
 typedef ForkMerge = ({List<String> merged, List<String> conflicts, String ref});
+
+/// A branch's latest pull request: still [open], or merged or closed, and the commit it was opened (or merged) at.
+typedef BranchPr = ({int number, String url, bool open, String head});
+
+/// The pull request in `gh pr view --json number,url,state,headRefOid` output, whatever its state; null for output
+/// that isn't that JSON.
+BranchPr? parsePrView(String stdout) {
+  try {
+    return switch (jsonDecode(stdout)) {
+      {
+        'number': final int number,
+        'url': final String url,
+        'state': final String state,
+        'headRefOid': final String h,
+      } =>
+        (number: number, url: url, open: state == 'OPEN', head: h),
+      _ => null,
+    };
+  } on FormatException {
+    return null;
+  }
+}
