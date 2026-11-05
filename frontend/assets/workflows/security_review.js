@@ -131,7 +131,7 @@ ${quote(JSON.stringify(all, null, 1))}
 
 For each one, read the code and decide whether the exploit works as described. Keep it only when it does; drop it
 with a reason when the input can't reach that code, another check already stops it, or it needs an attacker who
-already has more access than they gain. Merge duplicates into one finding and keep its `lenses`. Order the kept ones by severity.`,
+already has more access than they gain. Merge duplicates into one finding and keep its lenses list. Order the kept ones by severity.`,
   { label: 'verify', phase: 'Verify', schema: VERIFIED_SCHEMA, readOnly: true })
   .catch((e) => { log(`verify failed: ${e.message}`); return null })
 
