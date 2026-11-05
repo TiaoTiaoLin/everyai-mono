@@ -193,6 +193,45 @@ void main() {
       expect(result['reviewed_on'], 'openai/gpt-6.1');
     }, skip: skip);
 
+    test(
+      'two lenses saying the same thing become one finding that names both, and the refix result has no commits',
+      () async {
+        final agents = _Agents({
+          'review:a:cost-simplicity': (_) => _review('fix-then-ship', [
+            {..._finding, 'summary': 'drops the last item in a list', 'failure_scenario': 'a list of exactly one item'},
+          ]),
+          ...answers(),
+        });
+        final end = await run('ultra', {
+          'items': [
+            {'id': 'a', 'spec': 'Build A'},
+          ],
+        }, agents);
+        final item = ((end.result! as Map)['items'] as List).single as Map;
+        final findings = item['findings'] as List;
+        expect(findings, hasLength(1));
+        expect((findings.single as Map)['lenses'], ['correctness', 'cost-simplicity']);
+        expect((findings.single as Map)['merged_from'], 2);
+        // The refix is asked about it once.
+        expect('"failure_scenario"'.allMatches(agents.byLabel('refix:a').prompt), hasLength(1));
+        // The commits are the item's; the refix keeps its other fields.
+        expect(item['commits'], ['abc impl:a', 'def refix']);
+        expect(item['refix'], isNot(contains('commits')));
+        expect((item['refix'] as Map)['fixed'], ['drops the last item']);
+      },
+      skip: skip,
+    );
+
+    test('the integration step is told not to commit', () async {
+      final agents = _Agents(answers(verdict: 'ship'));
+      await run('ultra', {
+        'items': [
+          {'id': 'a', 'spec': 'Build A'},
+        ],
+      }, agents);
+      expect(agents.byLabel('integrate').prompt, contains('do not commit'));
+    }, skip: skip);
+
     test('a ship verdict skips the refix, and no review model reviews on the lead\'s', () async {
       final agents = _Agents(answers(verdict: 'ship'));
       final end = await run('ultra', {
@@ -445,6 +484,19 @@ void main() {
       expect(result['repro_command'], 'dart test test/repro_test.dart');
     }, skip: skip);
 
+    test('the result says cause, fix, repro, files and commits once, not again inside refix', () async {
+      final agents = _Agents({
+        'fix': (c) => fix(c.label),
+        'review': (_) => _review('fix-then-ship', const [_finding]),
+        'refix': (c) => fix(c.label),
+      });
+      final end = await run('bugfix', {'bug': 'The last item is missing'}, agents);
+      final result = end.result! as Map;
+      expect(result['files'], ['lib/a.dart']);
+      expect(result['refix'], isNot(anyOf(contains('cause'), contains('fix_summary'), contains('commits'))));
+      expect('off by one'.allMatches(jsonEncode(result)), hasLength(1));
+    }, skip: skip);
+
     test("bug_check's record wins over the agent's own verified", () async {
       final agents = _Agents(
         {'fix': (c) => fix(c.label), 'review': (_) => _review('ship')},
@@ -556,6 +608,32 @@ void main() {
       expect([for (final f in result['findings'] as List) (f as Map)['summary']], ['fetches loopback addresses']);
       expect((result['dropped'] as List).single, containsPair('summary', 'no size limit'));
       expect(result['verified'], isTrue);
+    }, skip: skip);
+
+    test('the same finding from two lenses reaches the verifier once, naming both', () async {
+      final agents = _Agents({
+        'threat-model': (_) => {
+          'summary': 's',
+          'entry_points': <String>[],
+          'boundaries': <String>[],
+          'assets': <String>[],
+          'files': ['lib/net.dart'],
+        },
+        'lens:data': (_) => {
+          'findings': [finding('ssrf', 'fetches loopback addresses')],
+        },
+        'lens:injection': (_) => {
+          'findings': [finding('ssrf', 'fetches the loopback addresses')],
+        },
+        'lens:': (_) => {'findings': <Object>[]},
+        'verify': (_) => {'findings': <Object>[], 'dropped': <Object>[]},
+      });
+      final end = await run('security_review', {'base': 'main'}, agents);
+      expect(end.error, isNull);
+      final prompt = agents.byLabel('verify').prompt;
+      expect('"exploit"'.allMatches(prompt), hasLength(1));
+      expect(prompt, contains('"injection"'));
+      expect(prompt, contains('"data"'));
     }, skip: skip);
 
     test('a failed lens leaves the others\' labels right; a failed verify returns the findings unverified', () async {

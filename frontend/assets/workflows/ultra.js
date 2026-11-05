@@ -227,7 +227,8 @@ ${l.text}
 Report only real, concrete findings, each with a failure scenario. An empty list is a valid answer.`,
     { label: `review:${it.id}:${l.key}`, phase: 'Review', schema: REVIEW_SCHEMA, ...reviewOpts })))
   // By lens index before dropping the failed reviews, so each finding keeps its own lens.
-  const findings = reviews.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
+  // The lenses often name the same problem: one finding says which lenses saw it.
+  const findings = mergeFindings(reviews.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : [])))
   const actionable = findings.filter((f) => f.severity !== 'nit')
   let refix = null
   if (actionable.length) {
@@ -250,7 +251,8 @@ test for every real correctness bug. Run the checks and the touched tests again,
     summary: impl.summary,
     verdicts: reviews.filter(Boolean).map((r) => r.verdict),
     findings,
-    refix,
+    // The commits are the item's own field above.
+    refix: refix ? Object.fromEntries(Object.entries(refix).filter(([k]) => k !== 'commits')) : null,
   }
 }
 
@@ -268,8 +270,9 @@ for (const r of summary) {
 }
 const integration = await agent(`${COMMON}
 INTEGRATE: every item's worktree has merged back into this folder. Run the project's full checks and the whole test
-suite once. Fix breakage that comes from the items meeting each other, with a commit. If one item's own change fails,
-report it with the output instead of rewriting it.
+suite once. Fix breakage that comes from the items meeting each other, but do not commit: leave every change in the
+working tree, because the user chooses whether to commit it. If one item's own change fails, report it with the output
+instead of rewriting it.
 
 Items (JSON):
 ${quote(JSON.stringify(summary.map((r) => ({ id: r.id, status: r.status, commits: r.commits })), null, 1))}

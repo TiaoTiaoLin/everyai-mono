@@ -107,6 +107,24 @@ void main() {
     expect(await GitService.remoteUrl(w), 'git@github.com:acme/app.git');
   });
 
+  test('commitOnNewBranch carries the dirty tree to a new branch; a bad or taken name changes nothing', () async {
+    final w = await start();
+    File('${w.path}/lib/new.txt').writeAsStringSync('fresh\n');
+    final before = await _git(w.path, ['rev-parse', 'HEAD']);
+    await expectLater(GitService.commitOnNewBranch(w, 'bad name~', 'x'), throwsA(isA<GitError>()));
+    await expectLater(GitService.commitOnNewBranch(w, w.branch, 'x'), throwsA(isA<GitError>()));
+    await expectLater(GitService.commitOnNewBranch(w, 'main', 'x'), throwsA(isA<GitError>()));
+    expect(await _git(w.path, ['rev-parse', 'HEAD']), before);
+    expect(await _git(w.path, ['branch', '--show-current']), w.branch);
+    expect(await GitService.isDirty(w), isTrue);
+
+    final sha = await GitService.commitOnNewBranch(w, 'everyai/fix-1', 'Add new.txt');
+    expect(await _git(w.path, ['branch', '--show-current']), 'everyai/fix-1');
+    expect(sha, await _git(w.path, ['rev-parse', 'HEAD']));
+    expect(await _git(w.path, ['log', '-1', '--format=%s']), 'Add new.txt');
+    expect(await GitService.isDirty(w), isFalse);
+  });
+
   test('the commit hook strips AI credits and still runs the repo\'s own hook', () async {
     // The project's own commit-msg hook appends a marker.
     File('$repo/.git/hooks/commit-msg').writeAsStringSync('#!/bin/sh\necho "Reviewed-by: repo-hook" >> "\$1"\n');

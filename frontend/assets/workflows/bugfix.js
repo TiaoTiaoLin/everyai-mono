@@ -133,8 +133,10 @@ return {
   fix_summary: last.fix_summary,
   repro_command: check.available && check.command ? check.command : last.repro_command,
   commits: [...fix.commits, ...(refix ? refix.commits : [])],
+  files: last.files,
   review,
-  refix,
+  // The refix's cause, fix, repro, files and commits are the top-level fields above (taken from the last round).
+  refix: refix ? { verified: refix.verified } : null,
   ...(check.available
     ? { proof: 'bug_check', bug_check: { state: check.state, command: check.command } }
     : { proof: 'self-reported', proof_note: `bug_check couldn't run: ${check.why}` }),

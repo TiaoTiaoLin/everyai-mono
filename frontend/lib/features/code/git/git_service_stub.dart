@@ -26,6 +26,7 @@ Future<String> headCommit(SessionWorktree w) async => '';
 Future<BranchPr?> prFor(SessionWorktree w) async => null;
 Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) async => _unsupported();
 Future<bool> commitAll(SessionWorktree w, String message) async => _unsupported();
+Future<String> commitOnNewBranch(SessionWorktree w, String branch, String message) async => _unsupported();
 Future<String> checkpoint(SessionWorktree w, int turn) async => _unsupported();
 Future<void> restoreCheckpoint(SessionWorktree w, String ref) async => _unsupported();
 Future<({int ahead, int behind})> aheadBehind(SessionWorktree w) async => (ahead: 0, behind: 0);

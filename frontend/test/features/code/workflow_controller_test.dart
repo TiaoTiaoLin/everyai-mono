@@ -24,6 +24,7 @@ import 'package:every_ai/features/code/host/host_prompts.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
 import 'package:every_ai/features/code/workflows/bug_report.dart';
 import 'package:every_ai/features/code/workflows/workflow_engine.dart';
+import 'package:every_ai/features/code/workflows/workflow_landing.dart';
 import 'package:every_ai/features/code/workflows/workflow_library.dart' show loadBundledWorkflows;
 import 'package:every_ai/features/code/workflows/workflow_picker.dart' show WorkflowPick, workflowStartNote;
 import 'package:every_ai/features/code/workflows/workflow_runs.dart';
@@ -310,6 +311,93 @@ void main() {
     await c.runWorkflow('demo', 'source');
     await expectLater(bridge.agent('Fix', {'harness': 'cli'}), throwsA(contains('Use my own installed CLIs')));
     expect(drivers['cli']!.specs, isEmpty);
+  });
+
+  group('landing', () {
+    const run = WorkflowRun(runId: 'abcdef123', name: 'Bug fix', status: WorkflowStatus.done);
+
+    /// A session in a git repository with a file the workflow left uncommitted.
+    Future<(CodeSessionController, String)> dirty() async {
+      await git(['init', '-q']);
+      await git(['config', 'user.name', 't']);
+      await git(['config', 'user.email', 't@t']);
+      File('${project.path}/a.txt').writeAsStringSync('one\n');
+      await git(['add', '.']);
+      await git(['commit', '-qm', 'init']);
+      final c = await open();
+      final dir = container.read(codeSessionsProvider.notifier).byId(c.sessionId)!.diffTarget!.path;
+      File('$dir/b.txt').writeAsStringSync('two\n');
+      return (c, dir);
+    }
+
+    Future<String> told() async {
+      for (var i = 0; i < 50 && !lead.sent.any((m) => m.contains('<workflow-landing')); i++) {
+        await pumpEventQueue();
+      }
+      return lead.sent.singleWhere((m) => m.contains('<workflow-landing'));
+    }
+
+    WorkflowLanded? landed(CodeSessionController c) => container.read(workflowLandingProvider(c.sessionId))[run.runId];
+
+    Future<String> out(String dir, List<String> args) async =>
+        '${(await Process.run('git', ['-C', dir, ...args])).stdout}'.trim();
+
+    test('the card asks only when the folder is dirty', () async {
+      final (c, dir) = await dirty();
+      final key = (sessionId: c.sessionId, runId: run.runId);
+      expect(await container.read(workflowDirtyProvider(key).future), isTrue);
+      await c.landWorkflow(run, WorkflowLand.commit, message: 'Bug fix: two');
+      container.invalidate(workflowDirtyProvider(key));
+      expect(await container.read(workflowDirtyProvider(key).future), isFalse);
+      expect(await out(dir, ['log', '-1', '--format=%s']), 'Bug fix: two');
+    });
+
+    test('Commit here commits the folder and tells the lead once', () async {
+      final (c, dir) = await dirty();
+      await c.landWorkflow(run, WorkflowLand.commit, message: 'Bug fix: two');
+      expect(landed(c)!.ok, isTrue);
+      expect(landed(c)!.text, startsWith('Committed '));
+      final msg = await told();
+      expect(msg, contains('<workflow-landing run="abcdef123" choice="commit" commit="'));
+      expect(msg, isNot(contains('branch=')));
+      expect(await out(dir, ['status', '--porcelain']), isEmpty);
+    });
+
+    test('New branch commits on a branch of that name; a bad name changes nothing and tells no one', () async {
+      final (c, dir) = await dirty();
+      final before = await out(dir, ['rev-parse', 'HEAD']);
+      await c.landWorkflow(run, WorkflowLand.branch, message: 'x', branch: 'not a branch');
+      expect(landed(c)!.ok, isFalse);
+      expect(await out(dir, ['rev-parse', 'HEAD']), before);
+      expect(await out(dir, ['status', '--porcelain']), isNotEmpty);
+      expect(lead.sent.where((m) => m.contains('<workflow-landing')), isEmpty);
+
+      await c.landWorkflow(run, WorkflowLand.branch, message: 'Bug fix: two', branch: 'everyai/bug-fix-abcdef');
+      expect(landed(c)!.ok, isTrue);
+      expect(landed(c)!.text, contains('on everyai/bug-fix-abcdef'));
+      expect(await out(dir, ['branch', '--show-current']), 'everyai/bug-fix-abcdef');
+      expect(await told(), contains('choice="branch" branch="everyai/bug-fix-abcdef"'));
+    });
+
+    test('Leave uncommitted touches nothing and still tells the lead', () async {
+      final (c, dir) = await dirty();
+      await c.landWorkflow(run, WorkflowLand.leave);
+      expect(landed(c)!.text, 'Left uncommitted.');
+      expect(await out(dir, ['status', '--porcelain']), isNotEmpty);
+      expect(await told(), contains('choice="leave"'));
+    });
+  });
+
+  test('a finished run tells the lead its changes are not committed yet', () async {
+    final c = await open();
+    await c.runWorkflow('demo', 'source');
+    bridge.finish({'fixed': true});
+    for (var i = 0; i < 50 && !lead.sent.any((m) => m.contains('<workflow-result')); i++) {
+      await pumpEventQueue();
+    }
+    final msg = lead.sent.singleWhere((m) => m.contains('<workflow-result'));
+    expect(msg, contains('not committed'));
+    expect(msg, contains('you will be told'));
   });
 
   test('a worktree agent works in its own copy, merged back when it finishes', () async {

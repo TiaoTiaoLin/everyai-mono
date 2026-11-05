@@ -114,7 +114,10 @@ the attacker is, what they send, and what they get. An empty list is a valid ans
   { label: `lens:${l.key}`, phase: 'Lenses', schema: FINDINGS_SCHEMA, readOnly: true })))
 
 // By lens index before dropping the failed lenses, so each finding keeps its own lens.
-const all = lensed.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
+const raw = lensed.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
+// The same problem seen by several lenses becomes one candidate that names them all.
+const all = mergeFindings(raw)
+if (all.length < raw.length) log(`merged ${raw.length - all.length} duplicate findings across lenses`)
 log(`${all.length} candidate findings from ${lensed.filter(Boolean).length} of ${LENSES.length} lenses`)
 if (!all.length) return { findings: [], dropped: [], threat_model: model, lenses: lensed.map((r) => !!r) }
 

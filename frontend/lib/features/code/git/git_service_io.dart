@@ -271,6 +271,22 @@ Future<bool> commitAll(SessionWorktree w, String message) async {
   return true;
 }
 
+/// Switches to new branch [branch] (the changes come along) and commits everything there; returns the commit.
+/// A name git refuses or a branch that exists changes nothing.
+Future<String> commitOnNewBranch(SessionWorktree w, String branch, String message) async {
+  final name = branch.trim();
+  if ((await _git(w.path, ['check-ref-format', '--branch', name], check: false)).exitCode != 0 ||
+      name.startsWith('-')) {
+    throw GitError('"$name" is not a branch name git accepts.');
+  }
+  if ((await _git(w.path, ['show-ref', '--verify', '--quiet', 'refs/heads/$name'], check: false)).exitCode == 0) {
+    throw GitError('There is a branch called $name already.');
+  }
+  await _git(w.path, ['switch', '-q', '-c', name]);
+  await commitAll(w, message);
+  return headCommit(w);
+}
+
 Future<String> checkpoint(SessionWorktree w, int turn) => _withSnapshot(w, (env) async {
   final tree = await _out(w.path, ['write-tree'], env: env);
   final sha = await _out(w.path, ['commit-tree', tree, '-p', 'HEAD', '-m', 'EveryAI checkpoint before turn $turn']);

@@ -93,6 +93,7 @@ import 'workflows/workflow_bridge.dart'
     show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile, retireJournalFile;
 import 'workflows/workflow_engine.dart';
 import 'workflows/workflow_journal.dart';
+import 'workflows/workflow_landing.dart';
 import 'workflows/workflow_library.dart';
 import 'workflows/workflow_picker.dart';
 import 'workflows/workflow_prelude.dart' show workflowCtxKey;
@@ -4195,6 +4196,50 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   void stopWorkflow(String runId) => _workflows[runId]?.stop();
+
+  /// The user's pick for a finished run's uncommitted work: commits it here, commits it on a new branch, or
+  /// leaves it. The card shows the outcome (or why it failed, with the buttons kept) and the lead gets one note.
+  Future<void> landWorkflow(WorkflowRun run, WorkflowLand choice, {String message = '', String branch = ''}) async {
+    final landings = ref.read(workflowLandingProvider(sessionId).notifier);
+    try {
+      var sha = '';
+      var committed = true;
+      if (choice != WorkflowLand.leave) {
+        final target =
+            ref.read(codeSessionsProvider.notifier).byId(sessionId)?.diffTarget ??
+            (throw const GitError("This folder isn't in git."));
+        if (choice == WorkflowLand.commit) {
+          committed = await GitService.commitAll(target, message);
+        } else {
+          await GitService.commitOnNewBranch(target, branch, message);
+        }
+        if (committed) sha = (await GitService.headCommit(target)).substring(0, 7);
+      }
+      if (!ref.mounted) return;
+      final name = branch.trim();
+      landings.set(run.runId, (
+        ok: true,
+        text: switch (choice) {
+          WorkflowLand.leave => 'Left uncommitted.',
+          WorkflowLand.commit when !committed => 'Nothing was left to commit.',
+          WorkflowLand.commit => 'Committed $sha.',
+          WorkflowLand.branch => 'Committed $sha on $name.',
+        },
+      ));
+      if (ref.exists(codeGitProvider(sessionId))) unawaited(ref.read(codeGitProvider(sessionId).notifier).refresh());
+      _toLead(
+        workflowLandingMessage(
+          run,
+          choice,
+          branch: choice == WorkflowLand.branch ? name : '',
+          commit: sha,
+          committed: committed,
+        ),
+      );
+    } on Object catch (e) {
+      if (ref.mounted) landings.set(run.runId, (ok: false, text: '$e'.replaceFirst('Exception: ', '')));
+    }
+  }
 
   /// The workflows this session's project can run.
   Future<List<WorkflowEntry>> _workflowEntries() async {

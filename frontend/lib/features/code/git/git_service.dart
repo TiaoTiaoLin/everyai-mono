@@ -88,6 +88,11 @@ abstract final class GitService {
   /// Commits everything; false when there was nothing to commit.
   static Future<bool> commitAll(SessionWorktree w, String message) => impl.commitAll(w, message);
 
+  /// Switches to new branch [branch] with the changes and commits them there; returns the commit. Refuses a name
+  /// git rejects or a branch that exists, before touching anything.
+  static Future<String> commitOnNewBranch(SessionWorktree w, String branch, String message) =>
+      impl.commitOnNewBranch(w, branch, message);
+
   /// Snapshots the working tree under `refs/everyai/<slug>/turn-<turn>`.
   static Future<String> checkpoint(SessionWorktree w, int turn) => impl.checkpoint(w, turn);
 

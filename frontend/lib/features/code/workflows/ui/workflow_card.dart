@@ -1,5 +1,8 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
+import 'dart:convert';
+
+import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -12,7 +15,9 @@ import '../../../../core/ui/every_icons.dart';
 import '../../code_providers.dart';
 import '../../domain/code_session.dart' show SessionStatus;
 import '../workflow_engine.dart';
+import '../workflow_landing.dart';
 import '../workflow_runs.dart';
+import '../workflow_summary.dart';
 
 /// The session's workflow runs, newest last, for the end of the transcript.
 class WorkflowRunsView extends ConsumerWidget {
@@ -38,6 +43,7 @@ class WorkflowRunsView extends ConsumerWidget {
               run: run,
               onStop: () => ref.read(codeSessionProvider(sessionId).notifier).stopWorkflow(run.runId),
               onDismiss: () => store.dismiss(run.runId),
+              landing: _landingOf(context, ref, sessionId, run),
             ),
           ),
       ],
@@ -45,15 +51,71 @@ class WorkflowRunsView extends ConsumerWidget {
   }
 }
 
+WorkflowLanding? _landingOf(BuildContext context, WidgetRef ref, String sessionId, WorkflowRun run) {
+  final picked = ref.watch(workflowLandingProvider(sessionId))[run.runId];
+  if (picked != null && picked.ok) return WorkflowLanding.chosen(picked.text);
+  final ended = run.status == WorkflowStatus.done || run.status == WorkflowStatus.capped;
+  if (!ended) return null;
+  if (!(ref.watch(workflowDirtyProvider((sessionId: sessionId, runId: run.runId))).value ?? false)) return null;
+  final session = ref.read(codeSessionProvider(sessionId).notifier);
+  Future<void> ask(WorkflowLand choice) async {
+    final inPlace = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.worktree == null;
+    final message = await showAdaptivePrompt(
+      context,
+      title: choice == WorkflowLand.commit ? 'Commit message' : 'Commit message for the new branch',
+      confirmLabel: 'Next',
+      initialValue: workflowCommitMessage(run),
+    );
+    if (message == null || message.trim().isEmpty || !context.mounted) return;
+    var branch = '';
+    if (choice == WorkflowLand.branch) {
+      final named = await showAdaptivePrompt(
+        context,
+        title: inPlace ? 'Branch name (this switches your checkout to it)' : 'Branch name',
+        confirmLabel: 'Commit',
+        initialValue: workflowBranchName(run),
+      );
+      if (named == null || named.trim().isEmpty) return;
+      branch = named.trim();
+    }
+    await session.landWorkflow(run, choice, message: message.trim(), branch: branch);
+  }
+
+  return WorkflowLanding(
+    error: picked?.text,
+    onCommit: () => ask(WorkflowLand.commit),
+    onBranch: () => ask(WorkflowLand.branch),
+    onLeave: () => session.landWorkflow(run, WorkflowLand.leave),
+  );
+}
+
+/// What the user can do with a finished run's uncommitted work, or (once chosen) what they did.
+class WorkflowLanding {
+  const WorkflowLanding({required this.onCommit, required this.onBranch, required this.onLeave, this.error})
+    : chosen = null;
+  const WorkflowLanding.chosen(String this.chosen) : onCommit = null, onBranch = null, onLeave = null, error = null;
+
+  final String? chosen;
+  final VoidCallback? onCommit;
+  final VoidCallback? onBranch;
+  final VoidCallback? onLeave;
+
+  /// Why the last try failed.
+  final String? error;
+}
+
 /// One run: its phases, each with its agents (tap one to open its session)
 /// and log lines, then what it used of its caps.
 class WorkflowCard extends StatelessWidget {
-  const WorkflowCard({super.key, required this.run, this.onStop, this.onDismiss});
+  const WorkflowCard({super.key, required this.run, this.onStop, this.onDismiss, this.landing});
   final WorkflowRun run;
   final VoidCallback? onStop;
 
   /// Closes a finished run's card (done, failed, capped or stopped); a running one has Stop instead.
   final VoidCallback? onDismiss;
+
+  /// The commit choice for a finished run whose work is waiting uncommitted; null when there is none.
+  final WorkflowLanding? landing;
 
   @override
   Widget build(BuildContext context) {
@@ -85,7 +147,7 @@ class WorkflowCard extends StatelessWidget {
                   style: theme.type.callout.semibold.tint(theme.text),
                 ),
               ),
-              Text(_statusText(run.status), style: theme.type.caption.tint(_statusColor(theme, run.status))),
+              Text(workflowStatusText(run.status), style: theme.type.caption.tint(_statusColor(theme, run.status))),
               if (running && onStop != null) ...[
                 const SizedBox(width: 8),
                 AdaptiveButton(label: 'Stop', emphasis: ButtonEmphasis.plain, onPressed: onStop),
@@ -132,24 +194,121 @@ class WorkflowCard extends StatelessWidget {
               style: theme.type.caption.tint(theme.textMuted),
             ),
           ),
+          if (!running && (run.result != null || run.error != null)) _Result(run: run),
+          if (landing case final l?) _LandingRow(landing: l),
         ],
       ),
     );
   }
-
-  static String _statusText(WorkflowStatus s) => switch (s) {
-    WorkflowStatus.running => 'Running',
-    WorkflowStatus.done => 'Done',
-    WorkflowStatus.failed => 'Failed',
-    WorkflowStatus.capped => 'Hit its limit',
-    WorkflowStatus.stopped => 'Stopped',
-  };
 
   static Color _statusColor(EveryTheme theme, WorkflowStatus s) => switch (s) {
     WorkflowStatus.done => theme.success,
     WorkflowStatus.failed || WorkflowStatus.capped => theme.danger,
     _ => theme.textMuted,
   };
+}
+
+/// The verdict-first summary of a finished run, with the full result folded under Details.
+class _Result extends StatefulWidget {
+  const _Result({required this.run});
+  final WorkflowRun run;
+
+  @override
+  State<_Result> createState() => _ResultState();
+}
+
+class _ResultState extends State<_Result> {
+  var _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    final run = widget.run;
+    // The first line is the card's own header and footer; the rest is what the result says.
+    final lines = workflowSummary(run).split('\n').skip(1).join('\n');
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (lines.isNotEmpty) SelectableText(lines, style: theme.type.caption.tint(theme.text)),
+          if (run.result != null) ...[
+            GestureDetector(
+              key: ValueKey('workflow.details.${run.runId}'),
+              behavior: HitTestBehavior.opaque,
+              onTap: () => setState(() => _open = !_open),
+              child: Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Row(
+                  children: [
+                    AdaptiveIcon(
+                      _open ? EveryIcon.chevronDown : EveryIcon.chevronRight,
+                      size: 12,
+                      color: theme.textMuted,
+                    ),
+                    const SizedBox(width: 4),
+                    Text('Details', style: theme.type.caption.tint(theme.textMuted)),
+                  ],
+                ),
+              ),
+            ),
+            if (_open)
+              Container(
+                margin: const EdgeInsets.only(top: 4),
+                padding: const EdgeInsets.all(8),
+                constraints: const BoxConstraints(maxHeight: 280),
+                decoration: BoxDecoration(
+                  border: Border.all(color: theme.border),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    const JsonEncoder.withIndent('  ').convert(run.result),
+                    style: theme.type.caption.mono.tint(theme.text),
+                  ),
+                ),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _LandingRow extends StatelessWidget {
+  const _LandingRow({required this.landing});
+  final WorkflowLanding landing;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    if (landing.chosen case final done?) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Text(done, style: theme.type.caption.tint(theme.textMuted)),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Its changes are in your folder, not committed.', style: theme.type.caption.tint(theme.textMuted)),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              AdaptiveButton(label: 'Commit here', onPressed: landing.onCommit),
+              AdaptiveButton(label: 'New branch', emphasis: ButtonEmphasis.secondary, onPressed: landing.onBranch),
+              AdaptiveButton(label: 'Leave uncommitted', emphasis: ButtonEmphasis.plain, onPressed: landing.onLeave),
+            ],
+          ),
+          if (landing.error case final e?) Text(e, style: theme.type.caption.tint(theme.danger)),
+        ],
+      ),
+    );
+  }
 }
 
 class _AgentRow extends ConsumerWidget {
