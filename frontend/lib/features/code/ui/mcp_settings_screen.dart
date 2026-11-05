@@ -182,9 +182,7 @@ class _McpSettingsBodyState extends ConsumerState<McpSettingsBody> {
         ),
         AdaptiveSectionHeader(_projectId == null ? 'Every project' : 'Only ${_scopeLabel(_projectId)}'),
         if (list.isEmpty && editing == null)
-          AdaptiveListTile(
-            title: Text('No servers yet', style: TextStyle(color: theme.textMuted)),
-          ),
+          AdaptiveListTile(title: Text('No servers yet', style: theme.type.body.tint(theme.textMuted))),
         for (final s in list)
           if (editing != null && editing.original == s.name)
             _ServerEditor(

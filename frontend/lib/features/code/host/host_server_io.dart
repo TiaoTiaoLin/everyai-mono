@@ -10,11 +10,13 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../domain/agent_mode.dart' show askUserQuestionTool, clientToolSpecs, presentPlanTool;
 import '../harness/everyai/project_notes_io.dart' show memoryToolSpec;
+import '../harness/everyai/tools_io.dart' show builtInToolSpecs;
 import 'host.dart';
 import 'host_checks.dart';
 import 'host_script.dart';
 import 'host_prompts.dart';
 import 'host_report.dart' show reportIssueSpec;
+import 'host_screen.dart';
 import 'host_max_tools.dart' show maxForkSpecs;
 
 // MCP over Streamable HTTP, tools only, stateless (no Mcp-Session-Id), on
@@ -35,7 +37,8 @@ const _maxBody = 4 << 20;
 
 /// `ask_user_question` and `present_plan` with the held wording (the answer
 /// is the call's result), then memory, saved plans, the Max fork tools, the checks,
-/// run_script where Deno is found and run_workflow.
+/// run_script where Deno is found, run_workflow, report_issue, then the
+/// screen tools: browser, screenshot, app_run.
 final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   for (final name in [askUserQuestionTool, presentPlanTool])
     _mcpTool(clientToolSpecs(held: true).firstWhere((s) => s['name'] == name)),
@@ -49,6 +52,13 @@ final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   if (hostScriptsAvailable) hostRunScriptSpec,
   runWorkflowSpec,
   reportIssueSpec,
+  {
+    ..._mcpTool(builtInToolSpecs(only: [browserTool]).single),
+    // Not read-only: clicks and typing change the page, and calls share one page, so a client runs them in turn.
+    'annotations': {'readOnlyHint': false, 'destructiveHint': false},
+  },
+  screenshotSpec,
+  appRunSpec,
 ]);
 
 /// An OpenAI-style spec (flat or `{function: …}`) in MCP's shape.
@@ -78,8 +88,7 @@ HostServer createHostServer({
   bind ?? () => HttpServer.bind(InternetAddress.loopbackIPv4, 0),
 );
 
-/// A live token. Stage 5's grants for outside agents would be a second kind
-/// of this record, with their own tool list.
+/// A live token, with the tool list it was minted with.
 final class _Grant {
   _Grant(this.token, this.sessionId, this.tools, this.specs, this.lastUsed);
   final String token;
@@ -136,10 +145,16 @@ final class _HostServer implements HostServer {
   }
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools) async {
+  Future<HostToken> mint(String sessionId, HostTools tools, {Set<String>? only}) async {
     _sweep();
+    final specs = only == null
+        ? hostToolSpecs
+        : [
+            for (final s in hostToolSpecs)
+              if (only.contains(s['name'])) s,
+          ];
     final token = 'eai_host_${base64Url.encode(List.generate(32, (_) => _random.nextInt(256))).replaceAll('=', '')}';
-    final grant = _Grant(token, sessionId, tools, hostToolSpecs, now());
+    final grant = _Grant(token, sessionId, tools, specs, now());
     _grants.add(grant);
     try {
       await _serial(() async {
@@ -386,7 +401,7 @@ final class _HostServer implements HostServer {
           {'progressToken': final Object t} => t,
           _ => null,
         };
-        return _call(req, grant, id, name, args, progress, (r) => done(_toolResult(r)));
+        return _call(req, grant, id, name, args, progress, (r, images) => done(_toolResult(r, images)));
       default:
         return _reply(req, modern != null ? 404 : 200, _error(id, -32601, 'Method not found: $method'));
     }
@@ -402,7 +417,7 @@ final class _HostServer implements HostServer {
     String name,
     Map<String, Object?> args,
     Object? progress,
-    Map<String, Object?> Function(HostResult) reply,
+    Map<String, Object?> Function(HostResult, List<HostImage>) reply,
   ) async {
     final ended = Completer<HostEnd>();
     final call = HostCall(id: 'h${++_calls}', sessionId: grant.sessionId, name: name, args: args, ended: ended.future);
@@ -440,7 +455,7 @@ final class _HostServer implements HostServer {
     // Revoked while the socket was detached: answer, but run nothing.
     if (!_grants.contains(grant)) {
       pending.finish(_ended, HostEnd.sessionClosed);
-      send('event: message\ndata: ${jsonEncode(reply(_ended))}\n\n');
+      send('event: message\ndata: ${jsonEncode(reply(_ended, const []))}\n\n');
       try {
         await socket.flush();
       } on Object {
@@ -481,7 +496,7 @@ final class _HostServer implements HostServer {
     limit?.cancel();
     grant.pending.remove(pending);
     if (_grants.contains(grant)) _used(grant);
-    send('event: message\ndata: ${jsonEncode(reply(result))}\n\n');
+    send('event: message\ndata: ${jsonEncode(reply(result, call.images))}\n\n');
     try {
       await socket.flush();
     } on Object {
@@ -502,9 +517,11 @@ final class _HostServer implements HostServer {
   }
 }
 
-Map<String, Object?> _toolResult(HostResult r) => {
+/// [r] as an MCP result: its text, then [images] (a screenshot).
+Map<String, Object?> _toolResult(HostResult r, List<HostImage> images) => {
   'content': [
     {'type': 'text', 'text': r.text},
+    for (final i in images) {'type': 'image', 'data': i.data, 'mimeType': i.mime},
   ],
   'isError': r.isError,
 };

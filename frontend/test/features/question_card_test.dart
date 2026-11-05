@@ -5,6 +5,7 @@ import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/ui/session_view.dart';
+import 'package:every_ai/features/questions/domain/questions.dart';
 import 'package:every_ai/features/questions/ui/question_card.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -111,6 +112,59 @@ void main() {
     expect(find.text('Recommended'), findsOneWidget);
     expect(find.textContaining('(Recommended)'), findsNothing);
     expect(find.text('Relational, runs anywhere'), findsOneWidget);
+  });
+
+  group('a long typed answer', () {
+    final one = Question.listFrom({
+      'questions': [
+        {
+          'question': 'Anything else?',
+          'options': [
+            {'label': 'No', 'description': ''},
+          ],
+        },
+      ],
+    });
+    final long = List.filled(30, 'the answer goes on').join(' ');
+
+    Widget narrow(Widget card) => m.MaterialApp(
+      home: m.Material(
+        child: EveryThemeScope(
+          theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
+          child: Center(
+            child: SizedBox(width: 320, child: SingleChildScrollView(child: card)),
+          ),
+        ),
+      ),
+    );
+
+    testWidgets('wraps in a growing Other box, and Enter still submits', (tester) async {
+      List<QuestionAnswer>? sent;
+      await tester.pumpWidget(narrow(QuestionCard(questions: one, onSubmit: (a) => sent = a)));
+      final field = find.byType(m.TextField);
+      final before = tester.getSize(field).height;
+      await tester.enterText(field, long);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(field).height, greaterThan(before));
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(sent?.single.other, long);
+    });
+
+    testWidgets('wraps in the answered summary', (tester) async {
+      await tester.pumpWidget(
+        narrow(
+          QuestionCard(
+            questions: one,
+            onSubmit: (_) {},
+            answers: [QuestionAnswer(other: long)],
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(find.text(long), findsOneWidget);
+    });
   });
 
   testWidgets('tabs jump between questions', (tester) async {

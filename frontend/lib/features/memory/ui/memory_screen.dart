@@ -44,9 +44,7 @@ class MemoryBody extends ConsumerWidget {
         children: [
           AdaptiveSectionHeader('${target.label} · $size/${target.limit}'),
           if (entries.isEmpty)
-            AdaptiveListTile(
-              title: Text('Nothing saved yet', style: TextStyle(color: theme.textMuted)),
-            ),
+            AdaptiveListTile(title: Text('Nothing saved yet', style: theme.type.body.tint(theme.textMuted))),
           for (final (i, entry) in entries.indexed)
             AdaptiveListTile(
               title: Text(entry),

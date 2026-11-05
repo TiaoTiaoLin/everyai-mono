@@ -8,6 +8,7 @@ import '../settings/context_files.dart' show splitContextNotes;
 import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
 import 'agent_mode.dart';
 import 'compaction.dart' show splitCompacted, splitHandoff;
+import 'notice.dart';
 import 'questions.dart';
 import 'rewind.dart' show splitRewindNote;
 import 'subagents.dart';
@@ -205,8 +206,8 @@ const planApprovedMessage = 'The plan is approved. Build it now, then verify it 
 
 /// The same approval as the result of the held `present_plan` call.
 const planApprovedReason =
-    'Not an error and not a refusal: the user approved this plan in the app, and Plan mode has ended. You may '
-    'now edit files and run commands. $planApprovedMessage';
+    'Not an error and not a refusal: the user approved this plan in the app (Plan mode, if it was on, has ended). '
+    'You may now edit files and run commands. $planApprovedMessage';
 
 /// Opens the result of a held `present_plan` call when the user wants changes.
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';
@@ -449,6 +450,25 @@ final class TranscriptBuilder {
           _items.add(NoticeItem(said.isEmpty ? e.id : '${e.id}-handoff', title, detail: handedOver));
           if (said.isEmpty) return;
           text = said;
+        }
+        // Notices to an outside lead: one row each, as if the body had come bare.
+        if (noticeBodies(text) case final bodies when bodies.isNotEmpty) {
+          for (final (i, body) in bodies.indexed) {
+            final id = bodies.length == 1 ? e.id : '${e.id}-$i';
+            if (parseTaskNotification(body) case final n?) {
+              _items.add(
+                NoticeItem(
+                  id,
+                  '${n.title} ${n.status == SubagentStatus.completed ? 'finished' : n.status.label.toLowerCase()} in the background',
+                  error: n.status == SubagentStatus.failed,
+                  detail: n.result,
+                ),
+              );
+            } else {
+              _items.add(UserTurn(id, body, mode: i == 0 && changed ? mode : null, lead: lead));
+            }
+          }
+          return;
         }
         if (_answer(text) || _reported(text)) return;
         if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
@@ -770,7 +790,7 @@ final class TranscriptBuilder {
 /// [TranscriptBuilder] shows none of these as a [UserTurn]; nor is any of
 /// them a request a handoff finishes.
 bool isHarnessNote(String text) {
-  final t = text.trimLeft();
+  final t = unwrapNotice(text.trimLeft());
   return splitCompacted(t) != null ||
       t.startsWith('<$researchWorkflowTag') ||
       parsePhaseNote(t) != null ||

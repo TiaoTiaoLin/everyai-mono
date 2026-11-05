@@ -14,6 +14,8 @@ import 'host.dart';
 import 'host_checks_stub.dart' if (dart.library.io) 'host_checks_io.dart' as impl;
 import 'host_script.dart';
 
+export 'host_checks_stub.dart' if (dart.library.io) 'host_checks_io.dart' show readBugCheckState, writeBugCheckState;
+
 // Checks for an outside agent that cost EveryAI nothing: no model call, only
 // what the app can run or read itself. bug_check and check run a command in
 // the app (outside the agent's sandbox), so each run passes [hostRunRefusal]
@@ -22,6 +24,26 @@ import 'host_script.dart';
 const checkTool = 'check';
 const diffStatsTool = 'diff_stats';
 const goalCheckTool = 'goal_check';
+
+/// What a workflow script reads of an agent's bug_check: `{available:
+/// true, state, command, expect, files}` from its [saved] state (null:
+/// nothing reproduced), state one of verified, reproduced, not_reproduced;
+/// or `{available: false, why}` when the agent had no host ([hostless]).
+Map<String, Object?> bugCheckRecord(Map<String, Object?>? saved, {String? hostless}) {
+  if (hostless != null) return {'available': false, 'why': hostless};
+  final command = saved?['command'] as String? ?? '';
+  return {
+    'available': true,
+    'state': command.isEmpty
+        ? 'not_reproduced'
+        : saved?['verified'] == true
+        ? 'verified'
+        : 'reproduced',
+    'command': command,
+    'expect': saved?['expect'] as String? ?? '',
+    'files': saved?['files'] is Map ? saved!['files'] : const <String, Object?>{},
+  };
+}
 
 /// The host's own bug_check: the deterministic steps of Bug fix mode's
 /// (no triage, no review by another model), which a workflow sequences.
@@ -157,7 +179,9 @@ Future<HostResult> hostCheckTool(HostCall call, HostCheckContext c) async {
   switch (call.name) {
     case diffStatsTool:
       final w = c.worktree;
-      return hostDiffStats(w, w == null ? null : await GitService.changes(w));
+      // No worktree of its own: the uncommitted changes in the folder it works in.
+      if (w == null) return impl.hostDiffStatsHere(c, call.ended);
+      return hostDiffStats(w, await GitService.changes(w));
     case goalCheckTool:
       return hostGoalCheck(c.goal);
     case runScriptTool:
@@ -241,24 +265,12 @@ String? hostRunRefusal({
   required String command,
   required List<ActionCall> approved,
 }) {
-  final probe = ActionCall(
-    id: 'host-$tool',
-    raw: const {},
-    toolName: 'bash',
-    toolCallId: '',
-    action: {'kind': 'TerminalAction', 'command': command},
-  );
-  final d = policy.decide(probe, mode);
+  final d = _probe(policy, mode, tool, command);
   switch (d.verdict) {
     case Verdict.allow:
       return null;
     case Verdict.deny:
-      return switch (d.source) {
-        DecisionSource.floor => 'Not run: ${d.why}. EveryAI never runs this for an agent.',
-        DecisionSource.rule => 'Not run: the user\'s rule ${d.rule} refuses it.',
-        DecisionSource.plan => 'Not run: Plan mode runs no commands that may change things.',
-        _ => 'Not run: the session\'s permissions refuse it.',
-      };
+      return _denial(d);
     case Verdict.ask:
       final i = approved.indexWhere(
         (c) => hostToolOf(c) == tool && args.entries.every((e) => jsonEncode(c.action[e.key]) == jsonEncode(e.value)),
@@ -271,6 +283,38 @@ String? hostRunRefusal({
           'arguments is in the session. Call $tool through your MCP client so the user can approve it.';
   }
 }
+
+/// Why the session's permissions refuse [command] for host tool [tool]
+/// outright (the safety floor, a deny rule, Plan mode), or null when they
+/// allow it or would ask (the caller's own card is the approval then).
+String? hostRunDenial({
+  required PermissionPolicy policy,
+  required AgentMode mode,
+  required String tool,
+  required String command,
+}) {
+  final d = _probe(policy, mode, tool, command);
+  return d.verdict == Verdict.deny ? _denial(d) : null;
+}
+
+/// [policy]'s decision on [command] as if the agent ran it in a shell.
+Decision _probe(PermissionPolicy policy, AgentMode mode, String tool, String command) => policy.decide(
+  ActionCall(
+    id: 'host-$tool',
+    raw: const {},
+    toolName: 'bash',
+    toolCallId: '',
+    action: {'kind': 'TerminalAction', 'command': command},
+  ),
+  mode,
+);
+
+String _denial(Decision d) => switch (d.source) {
+  DecisionSource.floor => 'Not run: ${d.why}. EveryAI never runs this for an agent.',
+  DecisionSource.rule => 'Not run: the user\'s rule ${d.rule} refuses it.',
+  DecisionSource.plan => 'Not run: Plan mode runs no commands that may change things.',
+  _ => 'Not run: the session\'s permissions refuse it.',
+};
 
 /// A test command and the project folder (relative, '' for the session
 /// folder) it runs in.
@@ -301,7 +345,7 @@ typedef CheckRun = ({String dir, String command});
       if (dir.isEmpty) break;
     }
     if (hit == null) {
-      unmatched.add(raw);
+      unmatched.add('$raw (no project file such as pubspec.yaml, package.json or go.mod in its folder or above)');
     } else {
       (groups[hit] ??= []).add(hit.$1.isEmpty ? file : file.substring(hit.$1.length + 1));
     }
@@ -327,7 +371,16 @@ typedef CheckRun = ({String dir, String command});
         _ => null,
       };
       if (found == null) {
-        unmatched.add(join(dir, f));
+        // Say where the test was looked for, so the agent can pass the right file.
+        final looked = switch (marker) {
+          'pubspec.yaml' when f.startsWith('lib/') && f.endsWith('.dart') =>
+            ' (looked for ${join(dir, 'test/${f.substring(4, f.length - 5)}_test.dart')})',
+          _ when f.endsWith('.py') =>
+            ' (looked for ${join(dir, join(_parent(f), 'test_${_base(f)}'))} and ${join(dir, 'tests/test_${_base(f)}')})',
+          'pubspec.yaml' => ' (only lib/ files map to tests under test/)',
+          _ => '',
+        };
+        unmatched.add('${join(dir, f)}$looked');
       } else {
         tests.add(found);
       }

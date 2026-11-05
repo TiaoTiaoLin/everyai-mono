@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../../core/theme/every_theme.dart';
 import '../../../core/ui/adaptive.dart';
+import '../../../core/ui/layout.dart';
 import '../../../core/ui/adaptive_page.dart';
 import '../../../core/ui/every_icons.dart';
 
@@ -19,26 +20,22 @@ class ComingSoonScreen extends StatelessWidget {
     final theme = EveryTheme.of(context);
     return AdaptivePage(
       title: title,
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AdaptiveIcon(icon, size: 44, color: theme.accent),
-                const SizedBox(height: 16),
-                Text(title, style: theme.type.title.tint(theme.text)),
-                const SizedBox(height: 8),
-                Text(
-                  message,
-                  textAlign: TextAlign.center,
-                  style: theme.type.body.copyWith(color: theme.textMuted, height: 1.4),
-                ),
-              ],
+      body: CenteredScroll(
+        maxWidth: 420,
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AdaptiveIcon(icon, size: 44, color: theme.accent),
+            const SizedBox(height: 16),
+            Text(title, style: theme.type.title.tint(theme.text)),
+            const SizedBox(height: 8),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: theme.type.body.copyWith(color: theme.textMuted, height: 1.4),
             ),
-          ),
+          ],
         ),
       ),
     );

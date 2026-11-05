@@ -33,7 +33,7 @@ const devBuildTerms = [
   'The software is licensed under FSL-1.1-ALv2 (see LICENSE).',
 ];
 
-/// The pre-alpha entry screen: a short guided tour that ends with the user
+/// The alpha entry screen: a short guided tour that ends with the user
 /// accepting the dev-build terms. Shown once per [appVersion].
 class OnboardingScreen extends ConsumerStatefulWidget {
   const OnboardingScreen({super.key, this.desktop});
@@ -78,9 +78,24 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                 children: [
                   const BrandMark(size: 22),
                   const SizedBox(width: 10),
-                  Text('EveryAI', style: theme.type.headline.semibold.tint(theme.text)),
-                  const Spacer(),
-                  Text('$appVersion · pre-alpha', style: theme.type.caption.mono.tint(theme.textMuted)),
+                  Flexible(
+                    child: Text(
+                      'EveryAI',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.type.headline.semibold.tint(theme.text),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      '$appVersion · alpha',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.end,
+                      style: theme.type.caption.mono.tint(theme.textMuted),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -107,42 +122,52 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(28, 0, 28, 22),
+              // Back at the start; the others at the end, wrapping onto a second line when they don't fit.
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  if (_index > 0)
+                  if (_index > 0) ...[
                     AdaptiveButton(
                       key: const ValueKey('onboarding.back'),
                       label: 'Back',
                       emphasis: ButtonEmphasis.secondary,
                       onPressed: _back,
                     ),
-                  const Spacer(),
-                  if (_step == _Step.keys) ...[
-                    AdaptiveButton(
-                      key: const ValueKey('onboarding.skip'),
-                      label: 'Skip for now',
-                      emphasis: ButtonEmphasis.plain,
-                      onPressed: _next,
-                    ),
                     const SizedBox(width: 8),
                   ],
-                  if (last)
-                    AdaptiveButton(
-                      key: const ValueKey('onboarding.enter'),
-                      label: 'Enter EveryAI',
-                      icon: const AdaptiveIcon(EveryIcon.spark, size: 15),
-                      onPressed: _agreed ? () => ref.read(onboardingAcceptedProvider.notifier).accept() : null,
-                    )
-                  else
-                    AdaptiveButton(
-                      key: const ValueKey('onboarding.next'),
-                      label: switch (_step) {
-                        _Step.welcome => 'Show me around',
-                        _Step.bugs => 'Got it',
-                        _ => 'Next',
-                      },
-                      onPressed: _next,
+                  Expanded(
+                    child: Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (_step == _Step.keys)
+                          AdaptiveButton(
+                            key: const ValueKey('onboarding.skip'),
+                            label: 'Skip for now',
+                            emphasis: ButtonEmphasis.plain,
+                            onPressed: _next,
+                          ),
+                        if (last)
+                          AdaptiveButton(
+                            key: const ValueKey('onboarding.enter'),
+                            label: 'Enter EveryAI',
+                            icon: const AdaptiveIcon(EveryIcon.spark, size: 15),
+                            onPressed: _agreed ? () => ref.read(onboardingAcceptedProvider.notifier).accept() : null,
+                          )
+                        else
+                          AdaptiveButton(
+                            key: const ValueKey('onboarding.next'),
+                            label: switch (_step) {
+                              _Step.welcome => 'Show me around',
+                              _Step.bugs => 'Got it',
+                              _ => 'Next',
+                            },
+                            onPressed: _next,
+                          ),
+                      ],
                     ),
+                  ),
                 ],
               ),
             ),
@@ -337,7 +362,7 @@ class _Welcome extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     return Text(
-      'This is a pre-alpha developer build of EveryAI: one workspace for chatting with any model and coding with '
+      'This is an alpha build of EveryAI: one workspace for chatting with any model and coding with '
       "any agent. It isn't finished, it isn't signed, and it changes every day. Here's what you need to know "
       'before you start.',
       style: theme.type.body.tint(theme.textMuted),
@@ -723,7 +748,7 @@ class _AgreeState extends State<_Agree> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    "I understand this is an experimental pre-alpha build that may have bugs and lose data. I'll "
+                    "I understand this is an experimental alpha build that may have bugs and lose data. I'll "
                     'use it for testing until it is stable, and I accept the Dev Build Terms.',
                     style: theme.type.body.tint(theme.text),
                   ),

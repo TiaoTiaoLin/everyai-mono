@@ -15,6 +15,16 @@ final class WorkflowRuns extends Notifier<List<WorkflowRun>> {
   @override
   List<WorkflowRun> build() => const [];
 
+  /// Finished runs the user closed in the transcript; they still show under Session info's Running work.
+  final dismissed = <String>{};
+
+  /// Takes finished run [runId]'s card out of the transcript (a running one stays).
+  void dismiss(String runId) {
+    if (state.any((r) => r.runId == runId && r.status == WorkflowStatus.running)) return;
+    dismissed.add(runId);
+    state = [...state];
+  }
+
   void put(WorkflowRun run) {
     final i = state.indexWhere((r) => r.runId == run.runId);
     state = i < 0 ? [...state, run] : [...state.sublist(0, i), run, ...state.sublist(i + 1)];

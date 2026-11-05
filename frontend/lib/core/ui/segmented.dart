@@ -40,7 +40,11 @@ class AdaptiveSegmented<T> extends StatelessWidget {
         borderRadius: BorderRadius.circular(9),
         border: Border.all(color: theme.border),
       ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [for (final v in values) _segment(theme, v)]),
+      // Segments share the width when it runs short; each label ellipsizes rather than overflowing.
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [for (final v in values) Flexible(child: _segment(theme, v))],
+      ),
     );
   }
 
@@ -77,7 +81,14 @@ class AdaptiveSegmented<T> extends StatelessWidget {
                 if (glyph != null) AdaptiveIcon(glyph, size: 14, color: color),
                 if (glyph != null && text.isNotEmpty) const SizedBox(width: 5),
                 if (text.isNotEmpty)
-                  Text(text, style: (on ? theme.type.callout.semibold : theme.type.callout.medium).tint(color)),
+                  Flexible(
+                    child: Text(
+                      text,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: (on ? theme.type.callout.semibold : theme.type.callout.medium).tint(color),
+                    ),
+                  ),
               ],
             ),
           ),

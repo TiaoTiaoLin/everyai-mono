@@ -38,8 +38,10 @@ class PageBackScope extends InheritedWidget {
 /// - Fluent: page header with a command row, on Mica
 /// - Material 3: top app bar; Adwaita: compact centered header bar
 ///
-/// [body] should let its scroll views consume `MediaQuery.padding` (the default
-/// for ListView), so content can slide under translucent bars.
+/// [body] starts below the bar on its own: no screen has to remember the bar's
+/// height. A body whose scroll view consumes `MediaQuery.padding` (a ListView
+/// does) may set [scrollsUnderBar] so its content slides under a translucent
+/// bar; nothing else sees that padding.
 class AdaptivePage extends StatelessWidget {
   const AdaptivePage({
     super.key,
@@ -49,6 +51,7 @@ class AdaptivePage extends StatelessWidget {
     this.onBack,
     this.backTooltip = 'Back',
     this.header,
+    this.scrollsUnderBar = false,
     required Widget body,
   }) : _body = body; // ignore: prefer_initializing_formals
 
@@ -66,20 +69,41 @@ class AdaptivePage extends StatelessWidget {
   /// Stays put below the bar while [body] scrolls (a search field, filters).
   /// The body then starts below it, not under the bar.
   final Widget? header;
+
+  /// The body's own scroll view takes the bar's height as padding (a ListView
+  /// with no padding of its own) and wants its content to slide under the bar.
+  /// Off: the body starts below the bar.
+  final bool scrollsUnderBar;
   final Widget _body;
 
   /// The page's content: [header] pinned below the bar, then the body. Under
   /// a translucent bar a header in a plain Column would sit beneath the bar.
   Widget get body {
     final top = header;
-    if (top == null) return _body;
-    return Builder(
-      builder: (context) => Column(
+    if (top == null) {
+      if (scrollsUnderBar) return _body;
+      return Builder(
+        builder: (context) {
+          final inset = MediaQuery.paddingOf(context).top;
+          if (inset == 0) return _body;
+          return Padding(
+            padding: EdgeInsets.only(top: inset),
+            child: MediaQuery.removePadding(context: context, removeTop: true, child: _body),
+          );
+        },
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, box) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
             padding: EdgeInsets.only(top: MediaQuery.paddingOf(context).top),
-            child: top,
+            // On a short window the header never takes more than half the height; past that it scrolls itself.
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: box.maxHeight.isFinite ? box.maxHeight / 2 : double.infinity),
+              child: SingleChildScrollView(primary: false, child: top),
+            ),
           ),
           Expanded(
             child: MediaQuery.removePadding(context: context, removeTop: true, child: _body),
@@ -196,5 +220,22 @@ class AdaptivePage extends StatelessWidget {
           body: body,
         );
     }
+  }
+}
+
+/// Puts [child] below a translucent bar when it sits in a body that scrolls under one ([AdaptivePage.scrollsUnderBar]):
+/// a side panel next to such a list. Nothing changes where the body already starts below the bar.
+class BelowBar extends StatelessWidget {
+  const BelowBar({super.key, required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final top = MediaQuery.paddingOf(context).top;
+    if (top == 0) return child;
+    return Padding(
+      padding: EdgeInsets.only(top: top),
+      child: MediaQuery.removePadding(context: context, removeTop: true, child: child),
+    );
   }
 }

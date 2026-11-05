@@ -11,13 +11,17 @@ import '../../code/domain/code_session.dart';
 import '../data/skill_import.dart';
 import '../data/skill_store.dart';
 import '../skills_providers.dart';
+import 'lead_skills_section.dart';
 
 /// Settings → Skills: the Agent Skills Code sessions (and, without project
 /// skills or script skills, Chat) can use. Skills in the
 /// EveryAI library and `~/.agents/skills` are on unless turned off; skills
 /// that came with a project stay off until the user reviews and trusts them.
 class SkillsSettingsBody extends ConsumerWidget {
-  const SkillsSettingsBody({super.key});
+  const SkillsSettingsBody({super.key, this.projectId});
+
+  /// The project whose Claude Code skills are listed first (from the Code settings link).
+  final String? projectId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -34,9 +38,7 @@ class SkillsSettingsBody extends ConsumerWidget {
           children: [
             AdaptiveSectionHeader(title),
             if (items.isEmpty && empty != null)
-              AdaptiveListTile(
-                title: Text(empty, style: TextStyle(color: theme.textMuted)),
-              ),
+              AdaptiveListTile(title: Text(empty, style: theme.type.body.tint(theme.textMuted))),
             for (final s in items)
               _SkillTile(
                 skill: s,
@@ -75,7 +77,8 @@ class SkillsSettingsBody extends ConsumerWidget {
           ),
         ),
         if (skills case AsyncError(:final error))
-          Text("Couldn't read the skills folders: $error", style: TextStyle(color: theme.danger)),
+          Text("Couldn't read the skills folders: $error", style: theme.type.body.tint(theme.danger)),
+        LeadSkillsSection(projectId: projectId),
         section('EveryAI library', [
           ...all.where((s) => s.source == SkillSource.library),
         ], empty: 'Nothing imported yet'),

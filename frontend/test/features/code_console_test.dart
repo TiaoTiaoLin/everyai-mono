@@ -27,6 +27,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:every_ai/features/code/harness/events.dart' show PlanLimits, PlanWindow;
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
@@ -247,6 +248,21 @@ void main() {
       expect(find.textContaining('estimated from length'), findsOneWidget);
     });
 
+    test('usage lines: each plan window the lead reported, with its reset', () {
+      final now = DateTime(2026, 11, 5, 12);
+      final plan = PlanLimits.of(
+        id: 'x',
+        windows: [
+          PlanWindow(name: 'seven_day', used: 0.35, resetsAt: DateTime(2026, 11, 5, 19, 59).toUtc(), minutes: 10080),
+          const PlanWindow(name: 'five_hour', used: 0.1, minutes: 300),
+        ],
+      );
+      final lines = usageLines(totals: UsageTotals.zero, plan: plan, outsideLabel: 'Claude Code', now: now);
+      expect(lines, containsAllInOrder(['This week: 35% used · resets 19:59', '5-hour window: 10% used']));
+      expect(lines.any((l) => l.contains('not reported')), isFalse);
+      expect(planWindowName(const PlanWindow(name: 'seven_day_opus', used: 0, minutes: 10080)), 'This week (Opus)');
+    });
+
     test('Usage shows a reached limit with its reset time, and says when a harness reports none', () {
       final now = DateTime(2026, 11, 4, 9);
       final lines = usageLines(
@@ -392,12 +408,24 @@ void main() {
         size: const Size(1200, 1000),
       );
       expect(find.text('Running work'), findsOneWidget);
+      // A finished fork starts folded under its group; the header opens it.
+      expect(find.byKey(const ValueKey('console.running.c')), findsNothing);
+      await tester.ensureVisible(find.text('Forks and subagents · 1 done'));
+      await tester.tap(find.text('Forks and subagents · 1 done'));
+      await tester.pump();
       await tester.ensureVisible(find.byKey(const ValueKey('console.running.c')));
       await tester.tap(find.byKey(const ValueKey('console.running.c')));
       await tester.pump();
       expect(container.read(consolePanelProvider('p')).child, 'c');
       expect(find.byKey(const ValueKey('console.child.back')), findsOneWidget);
       expect(find.text('Research the tests'), findsOneWidget);
+      // It says plainly this isn't the main chat; the banner goes back too.
+      expect(find.textContaining('A subagent of'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('subagent.banner')));
+      await tester.pump();
+      expect(find.text('Running work'), findsOneWidget);
+      container.read(consolePanelProvider('p').notifier).openChild('c');
+      await tester.pump();
 
       await tester.tap(find.byKey(const ValueKey('console.child.back')));
       await tester.pump();
@@ -446,9 +474,10 @@ void main() {
       panel.show(ConsoleView.info);
       await tester.pump();
       expect(find.text('my draft'), findsOneWidget);
+      // Below the header's wide tier, a 1200 px window still has room for both side by side.
       wide.value = false;
       await tester.pump();
-      expect(find.byKey(const ValueKey('console.overlay')), findsOneWidget);
+      expect(find.byKey(const ValueKey('console.split')), findsOneWidget);
       expect(find.text('my draft'), findsOneWidget);
       await unmount(tester);
     });
@@ -457,10 +486,11 @@ void main() {
       final s = _session('s');
       await pump(
         tester,
-        ConsoleLayout(session: s, tier: ConsoleTier.medium, child: const Text('transcript')),
+        ConsoleLayout(session: s, tier: ConsoleTier.narrow, child: const Text('transcript')),
         sessions: [s],
-        size: const Size(850, 800),
+        size: const Size(650, 800),
       );
+      expect(find.byKey(const ValueKey('console.overlay')), findsOneWidget);
       expect(container.read(consolePanelProvider('s')).open, isTrue);
       final controller = container.read(codeSessionProvider('s').notifier);
       controller.state = controller.state.copyWith(
@@ -471,6 +501,22 @@ void main() {
       );
       await tester.pump();
       expect(container.read(consolePanelProvider('s')).open, isFalse);
+      await unmount(tester);
+    });
+
+    testWidgets('beside the transcript, a card or question leaves the panel open', (tester) async {
+      final s = _session('s');
+      await pump(
+        tester,
+        ConsoleLayout(session: s, tier: ConsoleTier.medium, child: const Text('transcript')),
+        sessions: [s],
+        size: const Size(850, 800),
+      );
+      expect(find.byKey(const ValueKey('console.split')), findsOneWidget);
+      final controller = container.read(codeSessionProvider('s').notifier);
+      controller.state = controller.state.copyWith(asides: [const Aside(id: 1, kind: AsideKind.commit)]);
+      await tester.pump();
+      expect(container.read(consolePanelProvider('s')).open, isTrue);
       await unmount(tester);
     });
 
@@ -528,7 +574,7 @@ void main() {
       await unmount(tester);
     });
 
-    for (final (width, kind) in [(1200.0, 'split'), (850.0, 'overlay'), (650.0, 'overlay')]) {
+    for (final (width, kind) in [(1200.0, 'split'), (850.0, 'split'), (650.0, 'overlay')]) {
       testWidgets('at $width wide the panel is a $kind${width < 700 ? ' and the icons fold into ⋯' : ''}', (
         tester,
       ) async {

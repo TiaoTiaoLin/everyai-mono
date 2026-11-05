@@ -85,7 +85,7 @@ class AdaptiveIconButton extends StatelessWidget {
         ),
       ),
       DesignLanguage.material ||
-      DesignLanguage.adwaita => m.IconButton(tooltip: tooltip, icon: glyph, onPressed: onPressed),
+      DesignLanguage.adwaita => onMaterial(context, m.IconButton(tooltip: tooltip, icon: glyph, onPressed: onPressed)),
     };
   }
 }
@@ -193,7 +193,7 @@ class AdaptiveButton extends StatelessWidget {
           ),
         ),
       },
-      DesignLanguage.material || DesignLanguage.adwaita => switch (emphasis) {
+      DesignLanguage.material || DesignLanguage.adwaita => onMaterial(context, switch (emphasis) {
         ButtonEmphasis.primary => m.FilledButton(style: materialSize, onPressed: onPressed, child: content),
         ButtonEmphasis.secondary => m.FilledButton.tonal(style: materialSize, onPressed: onPressed, child: content),
         ButtonEmphasis.plain => m.TextButton(style: materialSize, onPressed: onPressed, child: content),
@@ -202,7 +202,7 @@ class AdaptiveButton extends StatelessWidget {
           onPressed: onPressed,
           child: content,
         ),
-      },
+      }),
     };
     return expand ? SizedBox(width: double.infinity, child: button) : button;
   }
@@ -310,32 +310,35 @@ class AdaptiveTextField extends StatelessWidget {
         highlightColor: borderless ? const Color(0x00000000) : null,
         unfocusedColor: borderless ? const Color(0x00000000) : null,
       ),
-      DesignLanguage.material || DesignLanguage.adwaita => m.TextField(
-        controller: controller,
-        focusNode: focusNode,
-        obscureText: obscureText,
-        autofillHints: autofillHints,
-        keyboardType: keyboardType,
-        textInputAction: textInputAction,
-        onSubmitted: onSubmitted,
-        onChanged: onChanged,
-        minLines: minLines,
-        maxLines: maxLines,
-        autofocus: autofocus,
-        decoration: borderless
-            ? m.InputDecoration.collapsed(hintText: placeholder)
-            : m.InputDecoration(
-                hintText: placeholder,
-                prefixIcon: prefix,
-                filled: true,
-                isDense: true,
-                border: m.OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(theme.radius),
-                  borderSide: theme.design == DesignLanguage.adwaita
-                      ? BorderSide(color: theme.border)
-                      : BorderSide.none,
+      DesignLanguage.material || DesignLanguage.adwaita => onMaterial(
+        context,
+        m.TextField(
+          controller: controller,
+          focusNode: focusNode,
+          obscureText: obscureText,
+          autofillHints: autofillHints,
+          keyboardType: keyboardType,
+          textInputAction: textInputAction,
+          onSubmitted: onSubmitted,
+          onChanged: onChanged,
+          minLines: minLines,
+          maxLines: maxLines,
+          autofocus: autofocus,
+          decoration: borderless
+              ? m.InputDecoration.collapsed(hintText: placeholder)
+              : m.InputDecoration(
+                  hintText: placeholder,
+                  prefixIcon: prefix,
+                  filled: true,
+                  isDense: true,
+                  border: m.OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(theme.radius),
+                    borderSide: theme.design == DesignLanguage.adwaita
+                        ? BorderSide(color: theme.border)
+                        : BorderSide.none,
+                  ),
                 ),
-              ),
+        ),
       ),
     };
   }
@@ -352,7 +355,8 @@ class AdaptiveSwitch extends StatelessWidget {
     DesignLanguage.cupertino => c.CupertinoSwitch(value: value, onChanged: onChanged),
     DesignLanguage.macos => mac.MacosSwitch(value: value, onChanged: onChanged),
     DesignLanguage.fluent => f.ToggleSwitch(checked: value, onChanged: onChanged),
-    DesignLanguage.material || DesignLanguage.adwaita => m.Switch(value: value, onChanged: onChanged),
+    DesignLanguage.material ||
+    DesignLanguage.adwaita => onMaterial(context, m.Switch(value: value, onChanged: onChanged)),
   };
 }
 
@@ -393,7 +397,20 @@ class AdaptiveListTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A wide trailing widget (a value, a picker) never takes the title's room, in any design: at most 55% of the row.
+    return LayoutBuilder(builder: (context, box) => _tile(context, box.maxWidth));
+  }
+
+  Widget? _cappedTrailing(double width) => trailing == null
+      ? null
+      : ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: width.isFinite ? width * 0.55 : double.infinity),
+          child: trailing,
+        );
+
+  Widget _tile(BuildContext context, double width) {
     final theme = EveryTheme.of(context);
+    final trailing = _cappedTrailing(width);
     switch (theme.design) {
       case DesignLanguage.fluent:
         return f.ListTile.selectable(
@@ -405,15 +422,18 @@ class AdaptiveListTile extends StatelessWidget {
           onPressed: onTap,
         );
       case DesignLanguage.material || DesignLanguage.adwaita:
-        return m.ListTile(
-          leading: leading,
-          title: title,
-          subtitle: subtitle,
-          trailing: trailing,
-          selected: selected,
-          dense: dense,
-          onTap: onTap,
-          shape: m.RoundedRectangleBorder(borderRadius: BorderRadius.circular(theme.radius)),
+        return onMaterial(
+          context,
+          m.ListTile(
+            leading: leading,
+            title: title,
+            subtitle: subtitle,
+            trailing: trailing,
+            selected: selected,
+            dense: dense,
+            onTap: onTap,
+            shape: m.RoundedRectangleBorder(borderRadius: BorderRadius.circular(theme.radius)),
+          ),
         );
       case DesignLanguage.cupertino || DesignLanguage.macos:
         // Apple lists: a rounded highlight for the selection, and secondary text in the label color.
@@ -423,36 +443,38 @@ class AdaptiveListTile extends StatelessWidget {
           highlight: highlight,
           radius: theme.radius,
           padding: EdgeInsets.symmetric(horizontal: 10, vertical: dense ? 6 : 10),
-          child: Row(
-            children: [
-              if (leading != null) ...[leading!, const SizedBox(width: 10)],
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    DefaultTextStyle.merge(
-                      style: (theme.design == DesignLanguage.macos ? theme.type.callout : theme.type.body).tint(
-                        theme.text,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      child: title,
-                    ),
-                    if (subtitle != null)
+          child: Builder(
+            builder: (context) => Row(
+              children: [
+                if (leading != null) ...[leading!, const SizedBox(width: 10)],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
                       DefaultTextStyle.merge(
-                        style: (theme.design == DesignLanguage.macos ? theme.type.footnote : theme.type.caption).tint(
-                          theme.textMuted,
+                        style: (theme.design == DesignLanguage.macos ? theme.type.callout : theme.type.body).tint(
+                          theme.text,
                         ),
-                        maxLines: 2,
+                        maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        child: subtitle!,
+                        child: title,
                       ),
-                  ],
+                      if (subtitle != null)
+                        DefaultTextStyle.merge(
+                          style: (theme.design == DesignLanguage.macos ? theme.type.footnote : theme.type.caption).tint(
+                            theme.textMuted,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          child: subtitle!,
+                        ),
+                    ],
+                  ),
                 ),
-              ),
-              if (trailing != null) ...[const SizedBox(width: 8), trailing!],
-            ],
+                if (trailing != null) ...[const SizedBox(width: 8), trailing],
+              ],
+            ),
           ),
         );
     }
@@ -1018,3 +1040,8 @@ class GlassSurface extends StatelessWidget {
     ];
   }
 }
+
+/// [child] (a Material widget: ListTile, TextField, InkWell) on a transparent Material when nothing above gives it
+/// one, so it works in any parent instead of throwing "No Material widget found".
+Widget onMaterial(BuildContext context, Widget child) =>
+    m.Material.maybeOf(context) != null ? child : m.Material(type: m.MaterialType.transparency, child: child);

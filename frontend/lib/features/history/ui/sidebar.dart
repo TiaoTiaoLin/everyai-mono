@@ -19,6 +19,7 @@ import '../../code/domain/code_session.dart';
 import '../../code/ui/code_home.dart';
 import '../../remote/ui/remote_code.dart' show RemoteSessionList;
 import '../../settings/ui/account_menu.dart';
+import '../../updates/ui/update_banner.dart';
 
 /// Width of the collapsed rail. macOS needs room for the traffic lights above it.
 double sidebarRailWidth(DesignLanguage design) => Host.hasTrafficLights ? 92 : 60;
@@ -206,64 +207,82 @@ class _SidebarState extends ConsumerState<Sidebar> {
             ),
     );
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        header,
-        if (collapsed && lights) Center(child: _toggleButton()),
-        // Code runs on desktop hosts; other devices follow a paired one's
-        // sessions (and offer pairing until there is one).
-        if (!collapsed)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-            child: _SpaceSwitch(
-              code: codeMode,
-              onChanged: (code) => widget.onNavigate(code ? Routes.code : Routes.newChat),
-            ),
-          ),
+    final top = <Widget>[
+      header,
+      if (collapsed && lights) Center(child: _toggleButton()),
+      // Code runs on desktop hosts; other devices follow a paired one's
+      // sessions (and offer pairing until there is one).
+      if (!collapsed)
         Padding(
-          padding: EdgeInsets.symmetric(horizontal: collapsed ? 0 : 8, vertical: 2),
-          child: Column(
-            crossAxisAlignment: collapsed ? CrossAxisAlignment.center : CrossAxisAlignment.stretch,
-            children: [
-              for (final d in destinations)
-                _NavItem(
-                  icon: d.icon,
-                  label: d.label,
-                  selected: d.selected,
-                  accent: d.accent,
-                  glyph: d.glyph,
-                  collapsed: collapsed,
-                  onTap: d.onTap ?? () => widget.onNavigate(d.route!),
-                ),
-            ],
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+          child: _SpaceSwitch(
+            code: codeMode,
+            onChanged: (code) => widget.onNavigate(code ? Routes.code : Routes.newChat),
           ),
         ),
-        if (!collapsed && _searching && (!codeMode || Host.isDesktop))
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
-            child: CallbackShortcuts(
-              bindings: {const SingleActivator(LogicalKeyboardKey.escape): _closeSearch},
-              child: AdaptiveTextField(
-                controller: _search,
-                focusNode: _searchFocus,
-                placeholder: codeMode ? 'Search sessions' : 'Search chats',
-                prefix: AdaptiveIcon(EveryIcon.search, size: 15, color: theme.textMuted),
-                onChanged: _onQuery,
-                textInputAction: TextInputAction.search,
+      Padding(
+        padding: EdgeInsets.symmetric(horizontal: collapsed ? 0 : 8, vertical: 2),
+        child: Column(
+          crossAxisAlignment: collapsed ? CrossAxisAlignment.center : CrossAxisAlignment.stretch,
+          children: [
+            for (final d in destinations)
+              _NavItem(
+                icon: d.icon,
+                label: d.label,
+                selected: d.selected,
+                accent: d.accent,
+                glyph: d.glyph,
+                collapsed: collapsed,
+                onTap: d.onTap ?? () => widget.onNavigate(d.route!),
+              ),
+          ],
+        ),
+      ),
+      if (!collapsed && _searching && (!codeMode || Host.isDesktop))
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+          child: CallbackShortcuts(
+            bindings: {const SingleActivator(LogicalKeyboardKey.escape): _closeSearch},
+            child: AdaptiveTextField(
+              controller: _search,
+              focusNode: _searchFocus,
+              placeholder: codeMode ? 'Search sessions' : 'Search chats',
+              prefix: AdaptiveIcon(EveryIcon.search, size: 15, color: theme.textMuted),
+              onChanged: _onQuery,
+              textInputAction: TextInputAction.search,
+            ),
+          ),
+        ),
+    ];
+    return LayoutBuilder(
+      builder: (context, box) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // On a short window the fixed top (header, switch, destinations, search) takes at most 60% of the height and
+          // scrolls; the list keeps the rest.
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: box.maxHeight.isFinite ? box.maxHeight * 0.6 : double.infinity),
+            child: SingleChildScrollView(
+              primary: false,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: top,
               ),
             ),
           ),
-        Expanded(
-          child: collapsed
-              ? const SizedBox.shrink()
-              : codeMode
-              ? CodeSessionList(location: loc, query: _codeQuery, onNavigate: widget.onNavigate)
-              : _Recents(location: loc, matches: _matches, onNavigate: widget.onNavigate),
-        ),
-        Container(height: 1, color: theme.border),
-        AccountRow(collapsed: collapsed),
-      ],
+          Expanded(
+            child: collapsed
+                ? const SizedBox.shrink()
+                : codeMode
+                ? CodeSessionList(location: loc, query: _codeQuery, onNavigate: widget.onNavigate)
+                : _Recents(location: loc, matches: _matches, onNavigate: widget.onNavigate),
+          ),
+          UpdateBanner(collapsed: collapsed),
+          Container(height: 1, color: theme.border),
+          AccountRow(collapsed: collapsed),
+        ],
+      ),
     );
   }
 

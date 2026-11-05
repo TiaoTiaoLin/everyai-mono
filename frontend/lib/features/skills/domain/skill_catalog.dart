@@ -119,8 +119,9 @@ String? skillStatus(InstalledSkill s, SkillSettings settings, {InstalledSkill? s
   return null;
 }
 
-/// The bundled Max approach skill. It reaches a session only when the
-/// user picks Max for it, never by default (it starts forks).
+/// The bundled Max approach skill. Main Code sessions carry it, but its
+/// description says to load it only when the Max note turns it on (it
+/// starts forks); chat and forks never get it.
 const maxSkillName = 'everyai-max';
 
 /// The skills a session in [projectId] gets: active ones, sorted by name so

@@ -41,7 +41,11 @@ typedef ClaudeSpawn = Future<LineChannel> Function(
 /// journal is the transcript.
 final class ClaudeDriver
     implements HarnessDriver, AttachesBriefed, ChecksResume, StartsInNativeMode, AdoptsNativeSession {
-  ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run, this.configDir});
+  ClaudeDriver({this.which, this.dataDir = GitService.dataDir, this.spawn, this.run, this.configDir, this.onSkills});
+
+  /// Told the skill names the CLI lists when it starts (its `initialize` reply and `system/init`), for the
+  /// per-project switches in Settings.
+  final void Function(List<String> names)? onSkills;
 
   /// Replaces the CLI's config folder (tests).
   final String? configDir;
@@ -61,6 +65,12 @@ final class ClaudeDriver
   final _live = <String, ClaudeSession>{};
   List<DriverModel>? _models;
   Future<String?>? _path;
+
+  /// Whether each model has Claude's `auto` mode, from any `initialize`
+  /// reply so far. A new session (a fork above all) on a known model lists
+  /// `auto` from the start; without it, a Full auto fork fell back to Accept
+  /// edits before its own reply came, and every command asked.
+  final _autoModes = <String, bool>{};
 
   @override
   DriverInfo get info => const DriverInfo(
@@ -139,7 +149,9 @@ final class ClaudeDriver
             .timeout(const Duration(seconds: 20));
         c.send(jsonEncode(controlRequest('req_1', {'subtype': 'initialize'})));
         final r = (await reply)?['response'] as Map<String, Object?>?;
-        if (modelsOf(r?['response'] as Map<String, Object?>? ?? const {}) case final m?) return _models = m;
+        final init = r?['response'] as Map<String, Object?>? ?? const {};
+        _learnAutoModes(init);
+        if (modelsOf(init) case final m?) return _models = m;
       } finally {
         await c.close();
       }
@@ -160,11 +172,13 @@ final class ClaudeDriver
       effort: spec.effort,
       mode: spec.mode,
       sent: false,
+      autoMode: _autoModes[spec.model] ?? false,
     );
     await writeTextFile('$dir/$id.json', jsonEncode(meta.toJson()));
     final briefing = await _briefing(spec.briefing);
     // The CLI starts with the first message that runs, not before.
-    final session = _live[id] = ClaudeSession._(this, id, dir, meta, briefing, openEventJournal(dir, id));
+    final session = _live[id] = ClaudeSession._(this, id, dir, meta, briefing, openEventJournal(dir, id))
+      .._skillsOff = spec.skillsOff;
     if (spec.initialMessage case final text?) {
       await session.send(text, run: spec.runInitial, images: spec.initialImages);
     }
@@ -261,15 +275,30 @@ final class ClaudeDriver
     };
   }
 
+  /// Records which models [init] (an `initialize` reply) says have `auto`.
+  void _learnAutoModes(Map<String, Object?> init) {
+    for (final m in init['models'] as List<Object?>? ?? const []) {
+      if (m case {'value': final String v}) _autoModes[v] = m['supportsAutoMode'] == true;
+    }
+  }
+
+  /// Whether [model] (the app's name for it) has `auto`, as [init] says; also remembered for new sessions.
+  bool _autoModeIn(Map<String, Object?> init, String model) {
+    _learnAutoModes(init);
+    final auto = claudeAutoMode(init, model);
+    _autoModes[model] = auto;
+    return auto;
+  }
+
   Future<String> _dir() async => '${await dataDir()}/driver-sessions/${info.id}';
 
   /// The briefing as Claude takes it; the session text is the file the
   /// briefing wrote next to its skills.
-  Future<Delivery?> _briefing(DriverBriefing? b) async {
+  Future<_Briefed?> _briefing(DriverBriefing? b) async {
     if (b == null) return null;
     final skills = b.skillDir;
     final text = skills == null ? '' : await readTextFile('${briefingRootOf(skills)}/$sessionFileName') ?? '';
-    return claudeDelivery(b, sessionText: text);
+    return (Set<String> off) => claudeDelivery(b, sessionText: text, skillsOff: off);
   }
 
   Future<LineChannel> _spawn(
@@ -299,6 +328,13 @@ Map<String, Object?>? _json(String line) {
     return null;
   }
 }
+
+/// Claude Code's skill names: `initialize` and `system/init` list strings or `{name}` objects (a plugin's skill is
+/// `plugin:skill`). Sorted, once each.
+List<String> claudeSkillNames(List<Object?> list) => ({
+  for (final s in list)
+    if (s is String && s.isNotEmpty) s else if (s case {'name': final String n} when n.isNotEmpty) n,
+}.toList()..sort());
 
 /// Claude Code's command list: `initialize` gives `{name, description,
 /// argumentHint}`, `system/init` bare names.
@@ -418,13 +454,24 @@ final class _Meta {
   );
 }
 
+/// The briefing as Claude takes it, for the skills that are off now.
+typedef _Briefed = Delivery Function(Set<String> skillsOff);
+
 /// A call the CLI is waiting on us for: the request to answer, whether it
 /// came from our hook (else `can_use_tool`), and the call's input.
 typedef _Held = ({String requestId, bool hook, String name, Map<String, Object?> input});
 
 /// One Claude Code conversation. Refusing a call doesn't stop the run (the
 /// model is told and carries on); [resume] runs a stopped or failed turn on.
-final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes {
+final class ClaudeSession
+    implements
+        HarnessSession,
+        PerCallApprovals,
+        HasNativeCommands,
+        NativeModes,
+        AnswersSideQuestion,
+        ReportsPlanUsage,
+        TakesSkillOverrides {
   ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal)
     : _commands = NativeCommandList(_meta.commands),
       _modes = NativeModeFeed((modes: claudeModes(autoMode: _meta.autoMode), current: _meta.permissionMode));
@@ -434,7 +481,29 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
   final String id;
   final String _dir;
   _Meta _meta;
-  final Delivery? _briefing;
+  final _Briefed? _briefing;
+
+  /// The skills turned off for this project; the process runs with the set it started with.
+  Set<String> _skillsOff = const {};
+
+  /// A new set restarts the CLI (the setting is read at start): now when no turn runs, else when the turn ends.
+  @override
+  void setSkillsOff(Set<String> off) {
+    if (off.length == _skillsOff.length && off.containsAll(_skillsOff)) return;
+    _skillsOff = off;
+    if (_closed) return;
+    // Still starting: it was launched with the old set.
+    if (_channel == null) {
+      if (_starting != null) _respawn = true;
+      return;
+    }
+    if (!_running) {
+      unawaited(_drop());
+    } else {
+      _respawn = true;
+    }
+  }
+
   final EventJournal _journal;
 
   final _history = <HarnessEvent>[];
@@ -684,6 +753,70 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
     await c?.close();
   }
 
+  /// `/usage`: Claude Code's own report of the plan's windows, from a short
+  /// headless process that calls no model ([claudeUsageArgs]).
+  @override
+  Future<String> planUsage() async {
+    final c = await _driver._spawn(
+      claudeUsageArgs,
+      cwd: _meta.cwd,
+      env: const {},
+      sessionTag: _meta.sessionTag,
+      logPath: '$_dir/$id-usage.log',
+    );
+    try {
+      final reply = await c.lines
+          .map(_json)
+          .firstWhere((j) => j?['type'] == 'result', orElse: () => null)
+          .timeout(const Duration(seconds: 45));
+      return claudeUsageText(reply) ?? (throw const HarnessError("Claude Code didn't report your plan usage."));
+    } on TimeoutException {
+      throw const HarnessError('Claude Code took too long to report your plan usage.');
+    } finally {
+      await c.close();
+    }
+  }
+
+  /// `/btw`: a second CLI process on a fork of this conversation that isn't
+  /// saved ([claudeAsideArgs]), so the running turn goes on untouched.
+  @override
+  Future<String> sideAnswer(String question) async {
+    final c = await _driver._spawn(
+      claudeAsideArgs(
+        sessionId: id,
+        resume: _meta.sent,
+        model: _meta.model,
+        effort: _meta.effort,
+        skillsOff: _skillsOff,
+      ),
+      cwd: _meta.cwd,
+      env: const {},
+      sessionTag: _meta.sessionTag,
+      logPath: '$_dir/$id-aside.log',
+    );
+    try {
+      final result = c.lines
+          .map(_json)
+          .firstWhere((j) => j?['type'] == 'result', orElse: () => null)
+          .timeout(const Duration(minutes: 3));
+      c.send(jsonEncode(userLine(asideMessage(question))));
+      final r = await result;
+      final text = switch (r?['result']) {
+        final String t => t.trim(),
+        _ => '',
+      };
+      if (r == null) throw const HarnessError('Claude Code stopped before it answered.');
+      if (r['is_error'] == true || text.isEmpty) {
+        throw HarnessError(text.isEmpty ? 'Claude Code gave no answer.' : text);
+      }
+      return text;
+    } on TimeoutException {
+      throw const HarnessError('Claude Code took too long to answer.');
+    } finally {
+      await c.close();
+    }
+  }
+
   /// The CLI's process, started when missing: a new conversation under our
   /// id, or the old one continued.
   Future<LineChannel> _ensure() async {
@@ -699,7 +832,8 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
       nativeMode: _meta.native,
       model: _meta.model,
       effort: _meta.effort,
-      briefing: _briefing,
+      briefing: _briefing?.call(_skillsOff),
+      skillsOff: _skillsOff,
     );
     final c = await _driver._spawn(
       launch.args,
@@ -739,12 +873,14 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
             _listed(claudeCommands(list));
           }
           _initialized(init);
+          _skillsListed(init['skills']);
         }
       default:
         if (line case {'type': 'system', 'subtype': 'init', 'slash_commands': final List<Object?> l}
             when !_initListed) {
           _listed(claudeCommands(l));
         }
+        if (line case {'type': 'system', 'subtype': 'init', 'skills': final List<Object?> l}) _skillsListed(l);
         if (line case {'type': 'system', 'permissionMode': final String mode}) _modeSaid(mode);
         final events = _decoder.decode(line);
         for (final e in events) {
@@ -755,9 +891,15 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
     }
   }
 
+  void _skillsListed(Object? list) {
+    if (list is! List<Object?>) return;
+    final names = claudeSkillNames(list);
+    if (names.isNotEmpty) _driver.onSkills?.call(names);
+  }
+
   /// What `initialize` says about modes: whether the model has `auto`, and the mode it runs in.
   void _initialized(Map<String, Object?> init) {
-    final auto = claudeAutoMode(init, _meta.model);
+    final auto = _driver._autoModeIn(init, _meta.model);
     if (auto != _meta.autoMode) unawaited(_save(_meta.copyWith(autoMode: auto)));
     _modes.set(modes: claudeModes(autoMode: auto));
     if (init['current_permission_mode'] case final String mode) _modeSaid(mode);

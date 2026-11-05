@@ -13,11 +13,13 @@ import '../../../settings/settings_registry.dart';
 import '../../../settings/ui/settings_modal.dart';
 import '../../../usage/usage_totals.dart';
 import '../../code_providers.dart';
+import '../../limit_providers.dart' show codePlanLimitsProvider;
 import '../../code_settings_providers.dart' show codeSettingsProvider;
 import '../../domain/code_session.dart';
 import '../../drivers/driver_policy.dart' show fidelityNote;
 import '../../drivers/driver_registry.dart';
 import '../../drivers/usage_limit.dart';
+import '../../harness/events.dart' show PlanLimits, PlanWindow;
 import '../../settings/code_settings.dart' show SettingsScope, budgetFill;
 import '../code_top_bar.dart' show harnessUsageLine;
 import '../../domain/transcript.dart' show NoticeItem;
@@ -67,12 +69,29 @@ String _clock(DateTime t, DateTime now) {
   return '${const ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][t.weekday - 1]} $hm';
 }
 
-/// Session info's Usage + limits, as lines: what was used and how it was paid, the cap, and a plan limit only when the
-/// harness reported one ([limit]); an [outsideLabel] lead that reported none says so rather than showing a guess.
+/// A plan window's name for people: Claude Code's `five_hour`, `seven_day`, `seven_day_opus`; others by length.
+String planWindowName(PlanWindow w) {
+  final model = switch (w.name.split('seven_day_')) {
+    [_, final m] when m.isNotEmpty => ' (${m[0].toUpperCase()}${m.substring(1)})',
+    _ => '',
+  };
+  return switch (w.minutes) {
+    300 => '5-hour window',
+    10080 => 'This week$model',
+    final m? when m % 1440 == 0 => '${m ~/ 1440}-day window',
+    final m? when m % 60 == 0 => '${m ~/ 60}-hour window',
+    _ => w.name,
+  };
+}
+
+/// Session info's Usage + limits, as lines: what was used and how it was paid, the cap, and the plan: the limit when
+/// it was hit ([limit]), else each window the harness last reported ([plan]: "This week: 35% used · resets Mon 19:59").
+/// An [outsideLabel] lead that reported neither says so rather than showing a guess.
 List<String> usageLines({
   required UsageTotals totals,
   double? budget,
   UsageLimit? limit,
+  PlanLimits? plan,
   String? outsideLabel,
   DateTime? now,
 }) => [
@@ -84,6 +103,10 @@ List<String> usageLines({
         '${((budgetFill(totals.chargedMicros, budget) ?? 0) * 100).round()}% spent',
   if (limit != null)
     'Limit reached${limit.resetsAt == null ? '' : ' · resets ${_clock(limit.resetsAt!.toLocal(), now ?? DateTime.now())}'}'
+  else if (plan != null && plan.windows.isNotEmpty)
+    for (final w in plan.windows)
+      '${planWindowName(w)}: ${(w.used * 100).round()}% used'
+          '${w.resetsAt == null ? '' : ' · resets ${_clock(w.resetsAt!.toLocal(), now ?? DateTime.now())}'}'
   else if (outsideLabel != null)
     'Plan limits: not reported by $outsideLabel',
 ];
@@ -191,6 +214,7 @@ class _SessionInfoViewState extends ConsumerState<SessionInfoView> {
                 totals: totals,
                 budget: settings.budgets[id],
                 limit: controller.limitPick?.limit,
+                plan: ref.watch(codePlanLimitsProvider(id)),
                 outsideLabel: outside ? label : null,
               ),
             ),

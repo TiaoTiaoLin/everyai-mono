@@ -9,12 +9,11 @@
 
 <br/><br/>
 
-<a href="#-get-started"><img alt="macOS" src="https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white"/></a>
-<a href="https://github.com/xuckless/everyai-mono/actions/workflows/dev-builds.yml"><img alt="Windows" src="https://img.shields.io/badge/Windows-download-0078D4?style=for-the-badge&logo=windows11&logoColor=white"/></a>
-<a href="https://github.com/xuckless/everyai-mono/actions/workflows/dev-builds.yml"><img alt="Linux" src="https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black"/></a>
+<a href="https://github.com/xuckless/everyai-mono/releases/latest"><img alt="macOS" src="https://img.shields.io/badge/macOS-download-000000?style=for-the-badge&logo=apple&logoColor=white"/></a>
+<a href="https://apps.microsoft.com/detail/9PHCKCV3J9S9"><img alt="Windows" src="https://img.shields.io/badge/Microsoft%20Store-get%20it-0078D4?style=for-the-badge&logo=windows11&logoColor=white"/></a>
+<a href="https://github.com/xuckless/everyai-mono/releases/latest"><img alt="Linux" src="https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black"/></a>
 <br/>
-<a href="TERMS-DEV.md"><img alt="pre-alpha dev build" src="https://img.shields.io/badge/pre--alpha-dev%20build%200.1.0-FF6B9A?style=flat-square"/></a>
-
+<a href="https://github.com/xuckless/everyai-mono/releases"><img alt="alpha 0.1.0-alpha.2, signed" src="https://img.shields.io/badge/alpha-0.1.0--alpha.2%20·%20signed-FF6B9A?style=flat-square"/></a>
 <br/><br/>
 
 <img src="docs/readme/console.webp" alt="A Code session: each turn's work folded into a box, a subagent, and Session info in the right panel" width="92%"/>
@@ -88,15 +87,25 @@ flowchart LR
 
 ## ✦ Get started
 
+| | Install | |
+|---|---|---|
+| **macOS** | [Download the DMG](https://github.com/xuckless/everyai-mono/releases/latest) or `brew trust xuckless/tap && brew install --cask xuckless/tap/everyai` | signed and notarized |
+| **Windows** | [Microsoft Store](https://apps.microsoft.com/detail/9PHCKCV3J9S9) or `winget install --source msstore 9PHCKCV3J9S9` | signed by the Store |
+| **Linux** | [AppImage or .deb](https://github.com/xuckless/everyai-mono/releases/latest) | GPG-signed ([key](packaging/linux/everyai-release-key.asc)) |
+
+Check a Linux download with `gpg --import everyai-release-key.asc && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c --ignore-missing SHA256SUMS`.
+The first launch walks you through a short tour: adding a key, the agents found on your computer, and the
+[Dev Build Terms](TERMS-DEV.md).
+
+**From source:**
+
 ```sh
 scripts/launch.sh               # run the app on this computer (installs Flutter on macOS if needed)
-scripts/launch.sh build macos   # an unsigned build (also: linux · windows · web · apk)
+scripts/launch.sh build macos   # an unsigned local build (also: linux · windows · web · apk)
 ```
 
-On a Mac, double-click **`Launch Flutter (macOS).command`**. Windows and Linux builds come from the
-[Dev builds](https://github.com/xuckless/everyai-mono/actions/workflows/dev-builds.yml) workflow (open the latest run,
-then Artifacts). The first launch walks you through a short tour: adding a key, the agents found on your computer, and
-the [Dev Build Terms](TERMS-DEV.md).
+On a Mac you can also double-click **`Launch Flutter (macOS).command`**. Unsigned builds of any branch come from the
+[Dev builds](https://github.com/xuckless/everyai-mono/actions/workflows/dev-builds.yml) workflow.
 
 ## ✦ More
 

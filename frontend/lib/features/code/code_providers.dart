@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../core/api/decide_client.dart' show decideClientProvider;
 import '../../core/preferences.dart';
 import '../../core/providers.dart';
 import '../agents/agents_providers.dart' show AgentDefinition, agentLibrarySettingsProvider, childSetup, codeAgentsFor;
@@ -25,18 +26,22 @@ import '../slash/skills/learn_sources.dart';
 import '../slash/skills/skill_draft.dart' show skillDrafterProvider;
 import '../usage/usage_totals.dart';
 import 'domain/agent_mode.dart';
+import 'domain/approval_reason.dart';
 import 'domain/code_session.dart';
 import 'domain/compaction.dart';
 import 'domain/floor_advice.dart';
 import 'domain/doom_loop.dart';
 import 'domain/git_commands.dart';
 import 'domain/goal.dart';
+import 'domain/local_ports.dart' show detectLocalUrls;
 import 'domain/no_spend.dart';
 import 'domain/review.dart';
 import 'domain/rewind.dart';
 import 'domain/spill.dart';
 import 'domain/fork_files.dart';
+import 'domain/notice.dart';
 import 'domain/subagents.dart';
+import 'domain/temp_dirs.dart';
 import 'domain/questions.dart';
 import 'domain/session_commands.dart';
 import 'domain/transcript.dart';
@@ -57,8 +62,9 @@ import 'drivers/briefing/skill_export.dart';
 import 'drivers/briefing/skill_render.dart' show defuseInlineCommands;
 import 'drivers/driver.dart';
 import 'drivers/driver_policy.dart';
-import 'drivers/driver_process.dart' show closeAllDriverProcesses;
+import 'drivers/driver_process.dart' show DriverProcess, closeAllDriverProcesses;
 import 'drivers/driver_registry.dart';
+import 'drivers/lead_skills.dart';
 import 'drivers/terminal/terminal_driver.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
@@ -74,6 +80,7 @@ import 'host/host_output.dart';
 import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
 import 'host/host_report.dart';
+import 'host/host_screen.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'limit_providers.dart';
 import 'mcp_providers.dart';
@@ -87,16 +94,19 @@ import 'spill/spill.dart';
 import 'resume/past_sessions.dart';
 import 'resume/resume_providers.dart' show resumedJournal, saveResumedHistory;
 import 'uploads/uploads.dart';
+import 'workflows/bug_report.dart';
 import 'workflows/workflow_bridge.dart'
     show WorkflowBridge, appendJournalFile, listJournalFiles, readJournalFile, retireJournalFile;
 import 'workflows/workflow_engine.dart';
 import 'workflows/workflow_journal.dart';
+import 'workflows/workflow_landing.dart';
 import 'workflows/workflow_library.dart';
 import 'workflows/workflow_picker.dart';
 import 'workflows/workflow_prelude.dart' show workflowCtxKey;
 import 'workflows/workflow_runs.dart';
 
 part 'session_builtins.dart';
+part 'session_screen.dart';
 
 /// Projects under this scheme run on the scripted [FakeHarness].
 const demoScheme = 'demo://';
@@ -171,13 +181,20 @@ final driverDataDirProvider = Provider<Future<String> Function()>((ref) => GitSe
 /// id. Never stored: tokens die with the app.
 final _hostTokensProvider = Provider<Map<String, String>>((ref) => {});
 
+/// Why a workflow agent started in this run has no EveryAI host (no
+/// bug_check record then), by session id.
+final _hostlessProvider = Provider<Map<String, String>>((ref) => {});
+
 /// The briefing text each outside session's agent was last sent (the transcript's "EveryAI briefing" row).
 final _briefingTextsProvider = Provider<Map<String, String>>((ref) => {});
+
+/// Each outside session's notice nonce (see [wrapNotice]), kept with its briefing folder; empty when none.
+final _noticeNoncesProvider = Provider<Map<String, String>>((ref) => {});
 
 /// What the session text tells an outside agent about each host tool it is
 /// offered, in `hostToolSpecs` order.
 List<HostToolInfo> get _hostToolInfos => [
-  for (final t in [..._baseToolInfos, ...checkToolInfos])
+  for (final t in [..._baseToolInfos, ...checkToolInfos, ..._screenToolInfos])
     if (hostToolSpecs.any((s) => s['name'] == t.name)) t,
 ];
 
@@ -200,7 +217,12 @@ const _baseToolInfos = <HostToolInfo>[
         'you learned something a later session would otherwise rediscover: how to build and test, conventions the '
         'user stated, pitfalls and their fixes.',
   ),
-  (name: savedPlansTool, when: 'the task continues earlier work: list and read the plans the user approved before.'),
+  (
+    name: savedPlansTool,
+    when:
+        'the user names an earlier plan or asks to continue that work: list the plans the user approved before and '
+        'read that one (a fork or workflow agent reads only the plan its task names).',
+  ),
   (
     name: runWorkflowTool,
     when:
@@ -212,6 +234,20 @@ const _baseToolInfos = <HostToolInfo>[
     when: 'the user said yes to reporting an EveryAI problem and `gh` is not signed in: it builds the issue link.',
   ),
   ...maxHostToolInfos,
+];
+
+const _screenToolInfos = <HostToolInfo>[
+  (
+    name: browserTool,
+    when: 'you changed a web page: open it (the local URL), click through it and look, in a browser of your own.',
+  ),
+  (name: screenshotTool, when: 'you changed a desktop UI: look at the app\'s window before you say it works.'),
+  (
+    name: appRunTool,
+    when:
+        'you need the app you changed running to look at it: it starts it the way the user confirmed once and '
+        'returns its window ids (or its local URL).',
+  ),
 ];
 
 /// [_hostToolInfos] for a fork: no Max tools, and no plan (its task is a
@@ -717,7 +753,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         : {...ref.read(codeMcpServersProvider).mcpConfigFor(projectId)};
     if (outside) mcpConfig.remove(everyaiServerName);
     // Skills likewise: the app's enabled ones, and project skills only once trusted.
-    final skills = !local ? const <Map<String, Object?>>[] : await codeSkillsFor(ref, projectId);
+    // The Max skill too in a main session: the Max note asks the lead to load it.
+    final skills = !local ? const <Map<String, Object?>>[] : await codeSkillsFor(ref, projectId, max: !subagent);
     return SessionSpec(
       workingDir: workingDir,
       model: model,
@@ -753,6 +790,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       script: !demo && !outside ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
       pathMap: pathMap,
       briefing: briefing,
+      skillsOff: !outside
+          ? const {}
+          : leadSkillsOff(ref.read(preferencesProvider), projectId, harness ?? byId(sessionId)?.harness ?? ''),
     );
   }
 
@@ -761,7 +801,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// folder under the app's data (our skills, and the session text with the
   /// project's notes). Throws when the user hasn't let the app run this CLI.
   /// The session's current token is revoked first, unless [keepCurrent] (a
-  /// lead switch, which revokes it only once the new lead is up).
+  /// lead switch, which revokes it only once the new lead is up). With
+  /// [hostOnly] (a workflow agent) the token and the briefing have just
+  /// those tools, and no workflows.
   Future<DriverBriefing> _brief(
     String id, {
     required String projectDir,
@@ -771,6 +813,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     Future<void>? ready,
     bool keepCurrent = false,
     bool asFork = false,
+    Set<String>? hostOnly,
   }) async {
     if (consentProblem(driver.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
     ref.read(driverShutdownProvider);
@@ -779,12 +822,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (!keepCurrent) {
       if (tokens.remove(id) case final old?) await host.revoke(old);
     }
-    final forward = _HostForward(
-      () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
-      ready ?? Future<void>.value(),
-      () => _workflowPromptsIn(ref, projectDir),
-    );
-    final token = await host.mint(id, forward);
+    final forward = _forwardTo(id, projectDir, ready, workflows: hostOnly == null);
+    final token = await host.mint(id, forward, only: hostOnly);
     try {
       final export = await _exportBriefing(
         id,
@@ -793,6 +832,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         driver: driver,
         model: model,
         asFork: asFork,
+        hostOnly: hostOnly,
       );
       tokens[id] = token.token;
       final briefing = DriverBriefing(
@@ -811,11 +851,20 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     }
   }
 
+  /// Session [id]'s calls to the host reach its controller once [ready].
+  /// Without [workflows] (a workflow agent) it offers no workflow prompts.
+  _HostForward _forwardTo(String id, String projectDir, Future<void>? ready, {bool workflows = true}) => _HostForward(
+    () => ref.mounted && byId(id) != null ? ref.read(codeSessionProvider(id).notifier) : null,
+    ready ?? Future<void>.value(),
+    workflows ? () => _workflowPromptsIn(ref, projectDir) : () async => const [],
+  );
+
   /// Writes session [id]'s briefing folder for [driver] on [model]: our
   /// skills, and the session text. The text names only the lead: it is the
   /// start of a resumed conversation's prompt, so it must not change when
   /// other harnesses lead meanwhile (the handoff names them). A fork
-  /// ([asFork]) can't start forks, so its text leaves the Max tools out.
+  /// ([asFork]) can't start forks, so its text leaves the Max tools out; a
+  /// workflow agent ([hostOnly]) sees only those tools and no workflows.
   Future<({String skillDir, String text})> _exportBriefing(
     String id, {
     required String projectDir,
@@ -823,29 +872,46 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     required HarnessDriver driver,
     required String model,
     bool asFork = false,
+    Set<String>? hostOnly,
   }) async {
     final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
     final notes = await hostProjectNotes(workingDir);
+    // A fork gets no notices; the others keep one nonce for the session's whole life.
+    final nonce = asFork ? '' : await sessionNoticeNonce(await _driverDir(id), newNoticeNonce);
+    ref.read(_noticeNoncesProvider)[id] = nonce;
     final text = [
       sessionBriefing(
         SessionSkillInput(
           worktree: workingDir,
           projectRoot: projectDir,
           lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
-          hostTools: asFork ? _forkHostToolInfos : _hostToolInfos,
+          noticeNonce: nonce,
+          hostTools: hostOnly != null
+              ? [
+                  for (final t in _hostToolInfos)
+                    if (hostOnly.contains(t.name)) t,
+                ]
+              : asFork
+              ? _forkHostToolInfos
+              : _hostToolInfos,
           // The bundled ones only: they are fixed per app version, so a resumed
           // conversation's prompt stays the same when the user trusts a project
           // workflow. Those show in prompts/list and run_workflow's errors.
           workflows: [
-            for (final w in await _workflowsOfIn(ref, projectDir))
-              if (w.origin == WorkflowOrigin.bundled) (id: w.id, when: w.whenToUse.isEmpty ? w.title : w.whenToUse),
+            if (hostOnly == null)
+              for (final w in await _workflowsOfIn(ref, projectDir))
+                if (w.origin == WorkflowOrigin.bundled) (id: w.id, when: w.whenToUse.isEmpty ? w.title : w.whenToUse),
           ],
         ),
       ),
       // Volatile, so last; the memory is text earlier sessions wrote.
       if (notes.isNotEmpty) defuseInlineCommands(notes),
     ].join('\n');
-    final export = await exportSkills(await _driverDir(id), await _skillsFor(projectId), sessionText: text);
+    final export = await exportSkills(
+      await _driverDir(id),
+      await _skillsFor(projectId, max: !asFork && hostOnly == null),
+      sessionText: text,
+    );
     return (skillDir: export.skillDir, text: text);
   }
 
@@ -931,9 +997,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     }
   }
 
-  Future<List<InstalledSkill>> _skillsFor(String? projectId) async {
+  Future<List<InstalledSkill>> _skillsFor(String? projectId, {bool max = false}) async {
     try {
-      return await codeInstalledSkillsFor(ref, projectId);
+      return await codeInstalledSkillsFor(ref, projectId, max: max);
     } on Object {
       // Unreadable skill folders only lose the skills.
       return const [];
@@ -944,6 +1010,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   Future<void> _unbrief(String id) async {
     ref.read(_hostTokensProvider).remove(id);
     ref.read(_briefingTextsProvider).remove(id);
+    ref.read(_noticeNoncesProvider).remove(id);
     try {
       await ref.read(hostServerProvider).revokeSession(id);
       await removeBriefing(await _driverDir(id));
@@ -955,7 +1022,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// Reopens [info]'s conversation on its harness. An outside agent gets a
   /// fresh briefing (the old token died with the app) when its driver can
   /// take one; otherwise it reopens without EveryAI's tools. A child session
-  /// (subagent, review, fork) started without a briefing, so it reopens without one.
+  /// (subagent, review, fork) started without a briefing, so it reopens without one;
+  /// a workflow agent gets its restricted host again ([_attachWorkflowAgent]).
   /// With [keepCurrent] (a lead switch) the session's current token stays.
   Future<HarnessSession> attachSession(CodeSessionInfo info, {bool keepCurrent = false}) async {
     final harness = await harnessFor(ref, info.workingDir, harness: info.harness);
@@ -966,6 +1034,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       if (!noLocalFolder(project?.path ?? info.workingDir))
         ...ref.read(codeMcpServersProvider).mcpConfigFor(project?.id),
     }..remove(everyaiServerName);
+    if (info.isWorkflowAgent) return _attachWorkflowAgent(info, harness, project?.path ?? info.workingDir, mcp);
     if (harness is! HarnessDriver || info.parentId != null || !isOutsideLead(info.harness, info.workingDir)) {
       // A child session has no briefing, but an ACP agent still gets the user's servers back.
       if (harness is AcpDriver && info.parentId != null) return harness.attachWithMcp(info.conversationId, mcp);
@@ -988,6 +1057,56 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     } on Object {
       ref.read(_hostTokensProvider).remove(info.id);
       await ref.read(hostServerProvider).revoke(briefing.mcpToken);
+      rethrow;
+    }
+  }
+
+  /// Reopens workflow agent [info] (the app restarted mid-run) with a fresh
+  /// restricted host, as at its start: the old token died with the app. When
+  /// none can be made it reopens without one, and its bug_check record says
+  /// why instead of claiming proof it can no longer get.
+  Future<HarnessSession> _attachWorkflowAgent(
+    CodeSessionInfo info,
+    Harness harness,
+    String projectDir,
+    Map<String, Object?> mcp,
+  ) async {
+    DriverBriefing? briefing;
+    // Its token is still live in this run of the app: the session kept its host.
+    if (!ref.read(_hostTokensProvider).containsKey(info.id)) {
+      try {
+        if (harness is! AttachesBriefed) throw const HarnessError("this harness can't reach EveryAI's tools");
+        briefing = harness is HarnessDriver && isOutsideLead(info.harness, info.workingDir)
+            ? await _brief(
+                info.id,
+                projectDir: projectDir,
+                workingDir: info.workingDir,
+                driver: harness,
+                model: info.model,
+                hostOnly: workflowHostTools,
+              )
+            : await _restrictedHost(
+                info.id,
+                info.harness,
+                info.workingDir,
+                projectDir,
+                workflowHostTools,
+                Future<void>.value(),
+              );
+        ref.read(_hostlessProvider).remove(info.id);
+      } on Object catch (e) {
+        ref.read(_hostlessProvider)[info.id] =
+            "the app restarted and couldn't give it EveryAI's tools again (${e is HarnessError ? e.message : e})";
+      }
+    }
+    if (briefing == null) {
+      if (harness is AcpDriver) return harness.attachWithMcp(info.conversationId, mcp);
+      return harness.attach(info.conversationId);
+    }
+    try {
+      return await (harness as AttachesBriefed).attachBriefed(info.conversationId, briefing, mcpConfig: mcp);
+    } on Object {
+      await _unbrief(info.id);
       rethrow;
     }
   }
@@ -1142,7 +1261,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// it on another driver than the parent's (a workflow's agent). An Ultra
   /// child may work in its own [workingDir] (a step worktree), bill under
   /// its own id ([ownTag], so its cost can be read alone) and get other
-  /// [clientTools].
+  /// [clientTools]. A workflow agent gets a host with only [hostOnly] (on
+  /// any harness that speaks MCP), and [bugCheckSeed] as its bug_check
+  /// state before its first turn.
   Future<CodeSessionInfo> startChild({
     required CodeSessionInfo parent,
     required String title,
@@ -1156,12 +1277,15 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     String? rolePrompt,
     String? workingDir,
     bool ownTag = false,
+    bool ownApprovals = false,
     List<Map<String, Object?>>? clientTools,
     bool fork = false,
     ForkCopy? forkCopy,
     List<String>? researchSites,
     String? harness,
     bool briefed = false,
+    Set<String>? hostOnly,
+    Map<String, Object?>? bugCheckSeed,
   }) async {
     model ??= parent.model;
     effort ??= parent.effort;
@@ -1175,18 +1299,30 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     if (runner case final HarnessDriver d when fork && !d.caps.contains(DriverCap.fork)) throw forkUnavailable(d.info);
     // A briefed outside child gets its own host token, so it can ask (a Max fork's question reaches its lead).
     final saved = Completer<void>();
-    final driver = briefed && runner is HarnessDriver && isOutsideLead(harness, workingDir) ? runner : null;
-    final briefing = driver == null
-        ? null
-        : await _brief(
-            id,
-            projectDir: projectDir,
-            workingDir: workingDir,
-            driver: driver,
-            model: model,
-            ready: saved.future,
-            asFork: true,
-          );
+    final outside = runner is HarnessDriver && isOutsideLead(harness, workingDir);
+    final driver = (briefed || hostOnly != null) && outside ? runner : null;
+    DriverBriefing? briefing;
+    try {
+      if (driver != null) {
+        briefing = await _brief(
+          id,
+          projectDir: projectDir,
+          workingDir: workingDir,
+          driver: driver,
+          model: model,
+          ready: saved.future,
+          asFork: hostOnly == null,
+          hostOnly: hostOnly,
+        );
+      } else if (hostOnly != null) {
+        briefing = await _restrictedHost(id, harness, workingDir, projectDir, hostOnly, saved.future);
+      }
+    } on Object catch (e) {
+      // A workflow agent still runs without the host; its result says why bug_check couldn't prove anything.
+      if (hostOnly == null) rethrow;
+      ref.read(_hostlessProvider)[id] = e is HarnessError ? e.message : '$e';
+    }
+    if (bugCheckSeed != null && bugCheckSeed.isNotEmpty) await _seedBugCheck(id, bugCheckSeed, workingDir);
     Future<HarnessSession> begin(SessionSpec spec) async {
       try {
         return await ((fork ? forkSession(runner, parent.conversationId, spec) : null) ?? runner.start(spec));
@@ -1237,13 +1373,46 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       parentId: parent.id,
       parentCallId: callId,
       ownTag: ownTag,
+      ownApprovals: ownApprovals,
       forkCopy: forkCopy,
       tier: parent.tier,
+      // The parent's own mode (Claude's `auto` over Accept edits) when the child runs as it does.
+      nativeMode: mode == parent.mode && harness == parent.harness ? parent.nativeMode : '',
     );
     state = [...state, info];
     _save();
     saved.complete();
     return info;
+  }
+
+  /// The restricted host for EveryAI-harness workflow agent [id]: a token
+  /// for [only], handed over in its spec (never written to disk), which its
+  /// harness connects to as the `everyai` MCP server.
+  Future<DriverBriefing> _restrictedHost(
+    String id,
+    String harness,
+    String workingDir,
+    String projectDir,
+    Set<String> only,
+    Future<void> ready,
+  ) async {
+    if (harness != everyaiHarnessName || noLocalFolder(workingDir)) {
+      throw const HarnessError("this harness can't reach EveryAI's tools");
+    }
+    final forward = _forwardTo(id, projectDir, ready, workflows: false);
+    final token = await ref.read(hostServerProvider).mint(id, forward, only: only);
+    ref.read(_hostTokensProvider)[id] = token.token;
+    return DriverBriefing(mcpUrl: '${token.url}', mcpToken: token.token, host: forward);
+  }
+
+  /// Writes [seed] (an earlier agent's bug_check record) as session [id]'s
+  /// bug_check state in [workingDir], so its verify reruns that repro.
+  Future<void> _seedBugCheck(String id, Map<String, Object?> seed, String workingDir) async {
+    try {
+      await writeBugCheckState(await _driverDir(id), seed, workingDir: workingDir);
+    } on Object {
+      // Unwritten, the agent reproduces afresh.
+    }
   }
 
   /// The user's models a child may run on besides [own]: those that can call tools, a few.
@@ -1315,7 +1484,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     // Any outside lead the session had left a briefing (and maybe a token).
     final outside = [
       for (final s in state)
-        if (gone.contains(s.id) && [s.harness, ...s.leads.keys].any((h) => isOutsideLead(h, s.workingDir))) s.id,
+        if (gone.contains(s.id) &&
+            (s.isWorkflowAgent || [s.harness, ...s.leads.keys].any((h) => isOutsideLead(h, s.workingDir))))
+          s.id,
     ];
     final switched = [
       for (final s in state)
@@ -1323,6 +1494,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     ];
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
+      // Its app (app_run) and headless browser end with it; the controller itself lives on unused.
+      if (ref.exists(codeSessionProvider(g))) unawaited(ref.read(codeSessionProvider(g).notifier)._closeScreen());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
       ref.read(preferencesProvider)['$codeLayoutPrefix$g'] = null;
       ref.read(preferencesProvider)['$codeLimitBannerPrefix$g'] = null;
@@ -1583,7 +1756,7 @@ final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeS
 );
 
 final class CodeSessionController extends Notifier<CodeSessionState>
-    with _SessionBuiltins
+    with _SessionBuiltins, _SessionScreen
     implements HostTools, HostPrompts, HostForks {
   CodeSessionController(this.sessionId);
   @override
@@ -1623,6 +1796,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// The lead has said which of its own modes it is in since [_watchModes].
   var _modesSeen = false;
+
+  /// The mode the session started in when the lead didn't list it yet (see
+  /// [retargetFor]); null once it moved there or the user picked a mode.
+  AgentMode? _wantedMode;
+  @override
   var _builder = TranscriptBuilder();
 
   /// What earlier conversations showed (before a compaction): kept on screen
@@ -1713,6 +1891,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// and their report goes to this session as a task notification.
   final _background = <String, ({String childId, String title})>{};
 
+  /// Forks that reported, oldest first (check_forks sums them up; the reports themselves went to the lead).
+  final _forksReported = <({String childId, String title, SubagentStatus status})>[];
+
   /// Puts whether background agents run or a rewind is under way into the state ([CodeSessionState.sideWork]).
   void _syncSideWork() {
     final now = _background.isNotEmpty || _rewinding;
@@ -1776,6 +1957,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         return hostFit(dir, 'host-${DateTime.now().millisecondsSinceEpoch}-$name', await hostCheckTool(call, context));
       case runWorkflowTool:
         return _runWorkflowCall(call.args);
+      case final name when screenHostTools.contains(name):
+        final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        if (info == null) return (text: 'Error: this session is closed.', isError: true);
+        return _screenCall(call, info);
       case reportIssueTool:
         final lead = ref.read(codeSessionsProvider.notifier).byId(sessionId);
         return hostReportIssue(
@@ -1839,6 +2024,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// says the user replied in chat (for a plan, that they want changes), and
   /// the message follows once the agent's turn ends.
   void _releaseHostCards() {
+    _refuseLocalAsks();
     for (final w in [..._hostWaits]) {
       _answerHost(w, w.call.name == presentPlanTool ? '$planRevisionLead see their next message.' : repliedInChat);
     }
@@ -1853,6 +2039,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(_mirror.close());
       _gitTimer?.cancel();
       _disposeBuiltins();
+      unawaited(_closeScreen());
       for (final s in _childSubs.values) {
         s.close();
       }
@@ -1870,6 +2057,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       ref.onDispose(alerts.dispose);
       listenSelf((prev, next) => alerts.onChange(prev?.status, next.status));
     }
+    // A switch in Settings → Skills reaches the lead's next process.
+    ref.listen(leadSkillsProvider, (_, _) => _applySkillsOff());
     // The budget holds whether or not the session is on screen: every new
     // reading (and a lowered budget) is checked here.
     if (info != null) {
@@ -1960,6 +2149,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       live[sessionId] = session;
       // After attaching: a reopen briefs the agent then, and that is the text to show.
       _showBriefing();
+      _applySkillsOff();
       await _openContext(info);
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
@@ -2111,15 +2301,62 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   /// What decides this session's actions: stored rules (global, project),
-  /// then `settings.json` rules, plus approvals remembered for the session.
+  /// then `settings.json` rules, plus approvals remembered for the session
+  /// (a fork's or subagent's include its parent's, shared by all its forks,
+  /// unless it is a stricter child that keeps its own: see
+  /// [CodeSessionInfo.ownApprovals]).
+  @override
   PermissionPolicy get policy {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     return PermissionPolicy(
       rules: ref.read(codePermissionsProvider).rulesFor(info?.projectId) + _settingsRules,
-      session: {..._sessionAllowed},
+      session: {..._sessionAllowed, ...?(info?.ownApprovals ?? false ? null : _parentController?._sessionAllowed)},
       workingDir: info == null || isDemoPath(info.workingDir) ? null : info.workingDir,
-      hostTools: info != null && isOutsideLead(info.harness, info.workingDir),
+      // A workflow agent on the EveryAI harness reaches the host too (its proof tools).
+      hostTools: info != null && (info.isWorkflowAgent || isOutsideLead(info.harness, info.workingDir)),
+      tempDirs: systemTempDirs(),
+      isLink: isSymlink,
     );
+  }
+
+  /// The live controller of the session that started this one, if any.
+  /// Through the container: the parent listens to this session.
+  CodeSessionController? get _parentController {
+    final parent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.parentId;
+    if (parent == null || !ref.container.exists(codeSessionProvider(parent))) return null;
+    return ref.container.read(codeSessionProvider(parent).notifier);
+  }
+
+  /// Why each of [calls] (default: the pending ones) waits for the user, by
+  /// call id (see [askReason]).
+  Map<String, String> askReasons([List<ActionCall>? calls]) {
+    final outside = _driver.info.id == everyaiHarnessName ? null : _driver.info.label;
+    return approvalReasons(
+      policy,
+      calls ?? state.transcript.pending,
+      state.mode,
+      outsideKind: outside == null ? null : (c) => autoDecidable(c) ? null : outside,
+    );
+  }
+
+  /// Remembers [patterns] "for this session": a fork's or subagent's go to
+  /// its parent, so they cover every fork of the session. The other live
+  /// children (and the parent) then settle what they wait on that now runs.
+  /// A child that keeps its own approvals keeps these too.
+  void _allowForSession(List<String> patterns) {
+    final own = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.ownApprovals ?? false;
+    final root = (own ? null : _parentController) ?? this;
+    root._sessionAllowed.addAll(patterns);
+    final sessions = ref.read(codeSessionsProvider);
+    for (final id in [
+      root.sessionId,
+      for (final s in sessions)
+        if (s.parentId == root.sessionId) s.id,
+    ]) {
+      if (id == sessionId || !ref.container.exists(codeSessionProvider(id))) continue;
+      final c = ref.container.read(codeSessionProvider(id).notifier);
+      c._autoRespond(c.state.transcript);
+    }
   }
 
   void _onEvent(HarnessEvent event) {
@@ -2163,6 +2400,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (!_mirror.isClosed) _mirror.add(event);
     final transcript = _builder.snapshot;
     state = state.copyWith(transcript: transcript);
+    if (_bugAsk != null) _watchBugAsk();
     if (_hostWaits.isNotEmpty) {
       _bindHostWaits();
       _childHostWait();
@@ -2215,13 +2453,19 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
     // A workflow's result first: the app made it, so Stop and the user's queue don't touch it.
     if (_workflowResults.isNotEmpty && _session != null) {
-      unawaited(_session!.send(_workflowResults.removeAt(0)).catchError((Object _) {}));
+      final r = _workflowResults.removeAt(0);
+      final text = _onOutsideLead ? _notice('workflow-result', r.id, r.text) : r.text;
+      unawaited(_session!.send(text).catchError((Object _) {}));
       return;
     }
     if (state.queued.isEmpty) return;
     final [next, ...rest] = state.queued;
     state = state.copyWith(queued: rest);
-    if (_withinBudget()) unawaited(_checkpoint().then((_) => _sendNow(next)));
+    if (_withinBudget()) {
+      unawaited(_checkpoint().then((_) => _sendNow(next)));
+    } else {
+      _droppedNote(next);
+    }
   }
 
   /// [event] with a result over the output limits cut to a preview; the whole
@@ -2530,30 +2774,31 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// it, and the lead is told to do the task itself.
   Future<String?> launchWorkflow(WorkflowEntry picked, String task) async {
     final (:entry, :why) = await _checkWorkflow(picked);
-    final problem = entry == null ? why : await _launch(entry, task);
+    // A new session: its first turn is the start note.
+    final problem = entry == null ? why : await _launch(entry, task, turnsBefore: const {});
     if (problem == null) return null;
     _workflowNotice(picked, problem, task);
     await send(workflowFailedNote(picked.id, picked.title, problem));
     return problem;
   }
 
-  /// Starts [entry] on [task]; null when it started, else why not.
-  Future<String?> _launch(WorkflowEntry entry, String task) async {
+  /// Starts [entry] on [task]; null when it started (or Bug fix asks the
+  /// user for the bug first, see [_askForBug]), else why not. [turnsBefore]:
+  /// the user turns before the start note, whose card waits for it.
+  Future<String?> _launch(WorkflowEntry entry, String task, {required Set<String> turnsBefore}) async {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final dir = info?.workingDir ?? '';
     try {
-      await runWorkflow(
-        entry.title,
-        entry.source,
-        args: workflowArgsFor(
-          entry,
-          task,
-          gitRef: entry.id == 'security_review' && looksLikeRef(task) && await isGitCommit(dir, task),
-        ),
-        ctx: {
-          'lead': {'harness': info?.harness, 'model': info?.model},
-        },
+      final args = workflowArgsFor(
+        entry,
+        task,
+        gitRef: entry.id == 'security_review' && looksLikeRef(task) && await isGitCommit(dir, task),
       );
+      final ctx = {
+        'lead': {'harness': info?.harness, 'model': info?.model},
+      };
+      if (await _askForBug(entry, args, ctx, fromCall: false, turnsBefore: turnsBefore)) return null;
+      await runWorkflow(entry.title, entry.source, args: args, ctx: ctx);
       return null;
     } on Object catch (e) {
       return "It couldn't start: $e.";
@@ -2588,8 +2833,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final out = await _outgoing(text, files);
     if (out == null) return false;
     final task = out.text;
+    final before = {
+      for (final i in state.transcript.items)
+        if (i is UserTurn) i.key,
+    };
     if (!await _sendOut(Outgoing(workflowStartNote(entry, task), images: out.images))) return false;
-    if (await _launch(entry, task) case final problem?) {
+    if (await _launch(entry, task, turnsBefore: before) case final problem?) {
       _workflowNotice(entry, problem, task);
       await send(workflowFailedNote(entry.id, entry.title, problem));
     }
@@ -2855,6 +3104,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(old.close());
       ref.read(_liveProvider)[sessionId] = live;
       _session = live;
+      _applySkillsOff();
       _events.clear();
       if (!_mirror.isClosed) _mirror.add(null);
       _carried = _builder.snapshot.items;
@@ -3573,10 +3823,18 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     _doom.reset();
     _doomOpen = false;
     if (!_mirror.isClosed) _mirror.add(null);
+    final dropped = state.queued;
     state = state.copyWith(transcript: _builder.snapshot, queued: const []);
+    dropped.forEach(_droppedNote);
+    // A Bug fix card it dropped can't be answered now.
+    _watchBugAsk();
   }
 
-  void unqueue(int index) => state = state.copyWith(queued: [...state.queued]..removeAt(index));
+  void unqueue(int index) {
+    final dropped = state.queued[index];
+    state = state.copyWith(queued: [...state.queued]..removeAt(index));
+    _droppedNote(dropped);
+  }
 
   @override
   int _asideIds = 0;
@@ -3600,14 +3858,31 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// picked in the composer), reading the session so far (`/btw`). The agent
   /// is neither interrupted nor told: the call is separate, and the answer
   /// shows as an aside card. Billed to the session (or the model's key).
-  /// Off on an outside lead, where EveryAI spends nothing.
+  /// An outside lead answers in a throwaway fork of its own conversation
+  /// ([AnswersSideQuestion], on the user's account for that CLI); one that can't is
+  /// refused, since EveryAI spends nothing there.
   /// [summarizer] replaces the gateway call (tests).
   Future<void> askAside(String question, {Summarizer? summarizer}) async {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final aside = Aside(id: ++_asideIds, kind: AsideKind.btw, question: question.trim(), busy: true);
     _putAside(aside);
     if (info != null && isOutsideLead(info.harness, info.workingDir)) {
-      _putAside(aside.failed(btwOff(_leadLabel(info.harness))));
+      final session = _session;
+      if (session is! AnswersSideQuestion) {
+        _putAside(
+          aside.failed(
+            session == null ? 'The agent is still starting. Ask again in a moment.' : btwOff(_leadLabel(info.harness)),
+          ),
+        );
+        return;
+      }
+      try {
+        final answer = await (session as AnswersSideQuestion).sideAnswer(question);
+        if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.done(answer));
+      } on Object catch (e) {
+        final why = e is HarnessError ? e.message : '$e';
+        if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.failed(why));
+      }
       return;
     }
     if (info == null || (summarizer == null && isDemoPath(info.workingDir))) {
@@ -3632,13 +3907,25 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
   }
 
-  /// Shows the session's tokens and spend as an aside card (`/cost`).
-  void showCost() {
+  /// Shows the session's tokens and spend as an aside card (`/usage`). A lead that reports the plan's usage itself
+  /// ([ReportsPlanUsage], Claude Code's own `/usage`) adds its report to the card (the answer; an error when it can't).
+  Future<void> showCost() async {
     if (state.asides.any((a) => a.kind == AsideKind.cost)) return;
     if (ref.exists(codeUsageProvider(sessionId))) {
       ref.read(codeUsageProvider(sessionId).notifier).refreshSoon(delay: Duration.zero, force: true);
     }
-    _putAside(Aside(id: ++_asideIds, kind: AsideKind.cost));
+    final session = _session;
+    final reports = session is ReportsPlanUsage;
+    final aside = Aside(id: ++_asideIds, kind: AsideKind.cost, busy: reports);
+    _putAside(aside);
+    if (!reports) return;
+    try {
+      final text = await (session as ReportsPlanUsage).planUsage();
+      if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.done(text));
+    } on Object catch (e) {
+      final why = e is HarnessError ? e.message : '$e';
+      if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.failed(why));
+    }
   }
 
   /// Moves the session to [model] and/or [effort] ('' is the model's default)
@@ -3731,11 +4018,14 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   Future<void> stop() async {
     _doomOpen = false;
+    // A Bug fix card still waiting for its start note won't show now.
+    if (_bugAsk case final ask? when !ask.shown) _endBugAsk();
     _pauseGoal('Stopped by you. Set the goal again to carry on.');
     state = state.copyWith(queued: const []);
     for (final w in [..._hostWaits]) {
       _answerHost(w, denialMessage(DenialKind.cancelled), isError: true);
     }
+    await _closeScreen();
     await _stopSubagents();
     final pending = state.transcript.pending;
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
@@ -3750,7 +4040,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     if (pending.isNotEmpty || state.transcript.held.any(isTaskCall)) {
       _answered = [...pending, ...state.transcript.held].map((c) => c.id).join(',');
-      await _session?.respond(accept: false, reason: denialMessage(DenialKind.cancelled));
+      final asked = askedLine(askReasons(pending).values);
+      await _session?.respond(accept: false, reason: denialMessage(DenialKind.cancelled, asked: asked));
     }
     // Ctrl-C reaches only the terminal's foreground command; background jobs,
     // servers and commands left running after a timeout are ended here. A
@@ -3954,8 +4245,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         subagentNeedsInput: _childWaiting.isNotEmpty,
         sideWork: _background.isNotEmpty || _rewinding,
       );
+      _forksReported.add((childId: bg.childId, title: bg.title, status: report.status));
       // While the agent works this joins its next step; when idle it wakes it.
-      _notifyLead(taskNotification(bg.childId, bg.title, report));
+      _notifyLead(taskNotification(bg.childId, bg.title, report), id: bg.childId);
       return;
     }
     _reports[callId] = report;
@@ -3976,7 +4268,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   final _activeRuns = <String>{};
 
   /// Ended runs' results the agent hasn't been sent yet (see [_toLead]).
-  final _workflowResults = <String>[];
+  final _workflowResults = <({String id, String text})>[];
+
+  /// The folder's tree when each run started, by run id.
+  final _startTrees = <String, String>{};
+
+  /// Runs whose landing is being done, so a second click does nothing.
+  final _landing = <String>{};
 
   /// Runs the workflow [source] (a `.js` file's text, called [name]) with
   /// [args]: its agents are child sessions of this one, and what it returns
@@ -3995,6 +4293,15 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     };
     final path = '${await _workflowDir()}/$runId.jsonl';
     final journal = WorkflowJournal.fresh((line) => appendJournalFile(path, line));
+    // What the folder holds now, so the end can tell which files this run changed (not the user's own).
+    final target = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.diffTarget;
+    if (target != null) {
+      try {
+        _startTrees[runId] = await GitService.snapshotTree(target);
+      } on Object {
+        // Not in git: nothing to commit, nothing to ask.
+      }
+    }
     await journal.write({
       't': 'start',
       'name': name,
@@ -4007,6 +4314,63 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   void stopWorkflow(String runId) => _workflows[runId]?.stop();
+
+  /// The user's pick for a finished run's uncommitted work: commits it here, commits it on a new branch, or
+  /// leaves it. The card shows the outcome (or why it failed, with the buttons kept) and the lead gets one note.
+  Future<void> landWorkflow(WorkflowRun run, WorkflowLand choice, {String message = '', String branch = ''}) async {
+    if (!_landing.add(run.runId)) return;
+    final landings = ref.read(workflowLandingProvider(sessionId).notifier);
+    try {
+      var sha = '';
+      var committed = true;
+      if (choice != WorkflowLand.leave) {
+        final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        final target = info?.diffTarget ?? (throw const GitError("This folder isn't in git."));
+        // The files this run changed; the user's own work in the same folder stays out of the commit.
+        final paths = ref.read(workflowOwnPathsProvider(sessionId))[run.runId] ?? const <String>[];
+        if (choice == WorkflowLand.branch && info!.worktree != null) {
+          throw const GitError(
+            'This session has its own branch; commit here, and merge or open a PR from the diff pane.',
+          );
+        }
+        if (paths.isEmpty) {
+          committed = false;
+        } else if (choice == WorkflowLand.commit) {
+          committed = await GitService.commitAll(target, message, paths: paths);
+        } else {
+          committed = await GitService.commitOnNewBranch(target, branch, message, paths: paths) != null;
+        }
+        if (committed) sha = (await GitService.headCommit(target)).substring(0, 7);
+      }
+      if (!ref.mounted) return;
+      final name = branch.trim();
+      landings.set(run.runId, (
+        ok: true,
+        text: switch (choice) {
+          WorkflowLand.leave => 'Left uncommitted.',
+          _ when !committed => 'Nothing was left to commit.',
+          WorkflowLand.commit => 'Committed $sha.',
+          WorkflowLand.branch => 'Committed $sha on $name.',
+        },
+      ));
+      // Other finished runs' cards re-check what is still uncommitted.
+      ref.invalidate(workflowDirtyProvider);
+      if (ref.exists(codeGitProvider(sessionId))) unawaited(ref.read(codeGitProvider(sessionId).notifier).refresh());
+      _toLead(
+        workflowLandingMessage(
+          run,
+          choice,
+          branch: choice == WorkflowLand.branch && committed ? name : '',
+          commit: sha,
+          committed: committed,
+        ),
+      );
+    } on Object catch (e) {
+      if (ref.mounted) landings.set(run.runId, (ok: false, text: '$e'.replaceFirst('Exception: ', '')));
+    } finally {
+      _landing.remove(run.runId);
+    }
+  }
 
   /// The workflows this session's project can run.
   Future<List<WorkflowEntry>> _workflowEntries() async {
@@ -4042,11 +4406,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (info.parentId != null) return (text: 'Error: only the lead session starts workflows.', isError: true);
     // One at a time, or an agent could multiply every run's caps by starting many.
     if (_activeRuns.isNotEmpty) {
-      final running = _activeRuns.firstWhere((r) => r != _reserved, orElse: () => '');
+      final running = _activeRuns.firstWhere((r) => r != _reserved && r != _askingBug, orElse: () => '');
       return (
-        text:
-            'Error: a workflow is already running in this session${running.isEmpty ? '' : ' (run $running)'}. Wait '
-            'for its <workflow-result> before starting another.',
+        text: _activeRuns.contains(_askingBug)
+            ? 'Error: Bug fix is waiting for the user to answer its card in the app. Wait for its <workflow-result> '
+                  'before starting another workflow.'
+            : 'Error: a workflow is already running in this session${running.isEmpty ? '' : ' (run $running)'}. '
+                  'Wait for its <workflow-result> before starting another.',
         isError: true,
       );
     }
@@ -4056,14 +4422,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     _activeRuns.add(_reserved);
     final String runId;
     try {
-      runId = await runWorkflow(
-        entry.title,
-        entry.source,
-        args: args,
-        ctx: {
-          'lead': {'harness': info.harness, 'model': info.model},
-        },
-      );
+      final ctx = {
+        'lead': {'harness': info.harness, 'model': info.model},
+      };
+      if (await _askForBug(entry, args, ctx, fromCall: true)) return (text: bugAskedResult, isError: false);
+      runId = await runWorkflow(entry.title, entry.source, args: args, ctx: ctx);
     } finally {
       _activeRuns.remove(_reserved);
     }
@@ -4079,8 +4442,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Kept apart from the user's queue, which Stop and a reset clear (and a
   /// spent budget skips): the run's journal is retired by now, so this is
   /// the only copy.
-  void _toLead(String text) {
-    _workflowResults.add(text);
+  void _toLead(String text, {String? runId}) {
+    _workflowResults.add((id: runId ?? 'workflow', text: text));
     _sendQueued();
   }
 
@@ -4099,6 +4462,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     try {
       for (final path in await listJournalFiles(await _workflowDir())) {
         final runId = path.split('/').last.replaceFirst(RegExp(r'\.jsonl$'), '');
+        if (runId == _askingBug) {
+          await _bugAskLost(path);
+          continue;
+        }
         if (!ref.mounted || _workflows.containsKey(runId)) continue;
         final journal = WorkflowJournal.parse(await readJournalFile(path), (line) => appendJournalFile(path, line));
         final start = journal.start;
@@ -4128,6 +4495,199 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// A run_workflow call holds this in [_activeRuns] while its run starts.
   static const _reserved = '';
+
+  /// Held in [_activeRuns] while Bug fix waits for the user's report.
+  static const _askingBug = 'bugask';
+
+  /// Bug fix waiting for the user's answers to its card.
+  _BugAsk? _bugAsk;
+
+  /// Whether bundled Bug fix needs the user's report first (see
+  /// [_bugNeedsDetails]): then a card asks for it, and the run starts from
+  /// [_answerBugAsk]. [fromCall]: the lead's run_workflow asked for it.
+  Future<bool> _askForBug(
+    WorkflowEntry entry,
+    Map<String, Object?> args,
+    Map<String, Object?> ctx, {
+    required bool fromCall,
+    Set<String>? turnsBefore,
+  }) async {
+    if (entry.origin != WorkflowOrigin.bundled || entry.id != 'bugfix') return false;
+    final bug = args['bug'] is String ? args['bug'] as String : '';
+    _activeRuns.add(_askingBug);
+    bool needs;
+    try {
+      needs = await _bugNeedsDetails(bug);
+    } on Object {
+      needs = bugLooksVague(bug);
+    }
+    if (!needs) {
+      _activeRuns.remove(_askingBug);
+      return false;
+    }
+    _bugAsk = _BugAsk('bugask-${const Uuid().v7()}', entry, args, ctx, fromCall: fromCall, turnsBefore: turnsBefore);
+    _showBugAsk();
+    await _bugAskFile;
+    return true;
+  }
+
+  /// Whether [bug] names no symptom: empty, or vague by [bugLooksVague] on an
+  /// outside lead (EveryAI spends nothing there) and in the demo, else by one
+  /// decide call, which falls back to the heuristic when it is unsure.
+  Future<bool> _bugNeedsDetails(String bug) async {
+    if (bug.trim().isEmpty) return true;
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || _onOutsideLead || noLocalFolder(info.workingDir)) return bugLooksVague(bug);
+    String? apiKey;
+    try {
+      apiKey = await ref.read(gatewayKeysProvider).key();
+    } on Object {
+      apiKey = null;
+    }
+    final r = await ref
+        .read(decideClientProvider)
+        .decide(
+          job: 'bug_report',
+          text: 'Bug report:\n$bug',
+          instructions: bugConcreteInstructions,
+          questions: const [bugConcreteQuestion],
+          apiKey: apiKey,
+          session: info.billingTag,
+        );
+    return switch (r[bugConcreteQuestion.id].asBool) {
+      false => true,
+      true => false,
+      null => bugLooksVague(bug),
+    };
+  }
+
+  /// Shows the pending Bug fix card, once the start note it follows is in
+  /// the transcript (a card before it would close as answered in chat).
+  /// While open it is kept on disk, so a restart can tell the lead.
+  void _showBugAsk() {
+    final ask = _bugAsk;
+    if (ask == null || ask.shown) return;
+    if (ask.turnsBefore case final before?
+        when !state.transcript.items.any((i) => i is UserTurn && i.workflow.isNotEmpty && !before.contains(i.key))) {
+      return;
+    }
+    ask.shown = true;
+    _builder.addLocalQuestion(
+      ActionCall(id: ask.card, raw: const {}, toolName: askUserQuestionTool, toolCallId: ask.card, action: const {}),
+      bugQuestions,
+    );
+    state = state.copyWith(transcript: _builder.snapshot);
+    final saved = jsonEncode({'id': ask.entry.id, 'title': ask.entry.title, 'from_call': ask.fromCall});
+    _bugAskFile = _bugAskFile.then((_) async {
+      try {
+        await appendJournalFile(await _bugAskPath(), saved);
+      } on Object {
+        // No data folder (the web): a restart just loses the card.
+      }
+    });
+  }
+
+  /// The pending card's file writes, in order (a quick answer must not
+  /// leave the file behind).
+  Future<void> _bugAskFile = Future<void>.value();
+
+  Future<String> _bugAskPath() async => '${await _workflowDir()}/$_askingBug.jsonl';
+
+  /// Shows the pending card when it may, and ends the ask when its card
+  /// closed without its answers: a reply in chat is the report then, and a
+  /// card a rewind dropped tells the lead the run didn't start.
+  void _watchBugAsk() {
+    final ask = _bugAsk;
+    if (ask == null) return;
+    if (!ask.shown) return _showBugAsk();
+    final items = state.transcript.items;
+    final at = items.indexWhere((i) => i is QuestionItem && i.call.id == ask.card);
+    if (at >= 0 && (items[at] as QuestionItem).answers == null) return;
+    if (at < 0) {
+      unawaited(
+        _startBugAsk(ask, const [], problem: 'the conversation was rewound before the user answered its card.'),
+      );
+      return;
+    }
+    final reply = items.skip(at + 1).whereType<UserTurn>().where((t) => t.workflow.isEmpty).firstOrNull?.text ?? '';
+    unawaited(_startBugAsk(ask, [QuestionAnswer(other: reply)]));
+  }
+
+  /// [dropped] left the queue unsent: when it was the start note a Bug fix
+  /// card waits for, the card won't show, and nothing started.
+  void _droppedNote(Outgoing dropped) {
+    final ask = _bugAsk;
+    if (ask == null || ask.shown) return;
+    if (dropped.text == workflowStartNote(ask.entry, '${ask.args['bug'] ?? ''}')) _endBugAsk();
+  }
+
+  /// Bug fix no longer waits for the user: runs may start again.
+  void _endBugAsk() {
+    _bugAsk = null;
+    _activeRuns.remove(_askingBug);
+    _bugAskFile = _bugAskFile.then((_) async {
+      try {
+        await retireJournalFile(await _bugAskPath());
+      } on Object {
+        // Nothing was saved.
+      }
+    });
+  }
+
+  /// A Bug fix card open when the app quit (saved at [path]): the run never
+  /// started, and the lead, told it would, hears that it didn't.
+  Future<void> _bugAskLost(String path) async {
+    final saved = const LineSplitter().convert(await readJournalFile(path)).lastOrNull;
+    await retireJournalFile(path);
+    if (saved == null || !ref.mounted) return;
+    final j = jsonDecode(saved) as Map<String, Object?>;
+    // Once the history is in, so it goes after the lead's last turn, not into one that only seems idle.
+    await _historyIn.future;
+    if (!ref.mounted) return;
+    _toLead(workflowFailedNote('${j['id']}', '${j['title']}', 'the app closed before the user answered its card.'));
+  }
+
+  /// The user's report for the pending Bug fix (the card's answers): the
+  /// run starts with it.
+  Future<void> _answerBugAsk(QuestionItem item, List<QuestionAnswer> answers) async {
+    _builder.settleLocal(item.call.id, answers);
+    state = state.copyWith(transcript: _builder.snapshot);
+    final ask = _bugAsk;
+    if (ask == null || ask.card != item.call.id) return;
+    await _startBugAsk(ask, answers);
+  }
+
+  /// Ends [ask] and starts Bug fix with [answers], or doesn't when they are
+  /// all empty or there is a [problem] (the lead is told then).
+  Future<void> _startBugAsk(_BugAsk ask, List<QuestionAnswer> answers, {String? problem}) async {
+    _endBugAsk();
+    await _bugAskFile;
+    final entry = ask.entry;
+    final original = ask.args['bug'] is String ? ask.args['bug'] as String : '';
+    if (problem == null && answers.every((a) => a.isEmpty)) {
+      problem = original.trim().isEmpty ? 'no bug was given.' : 'the bug report was too thin, and no details came.';
+    }
+    if (problem == null) {
+      try {
+        await runWorkflow(
+          entry.title,
+          entry.source,
+          args: {...ask.args, 'bug': bugWithAnswers(original, answers)},
+          ctx: ask.ctx,
+        );
+        return;
+      } on Object catch (e) {
+        problem = "it couldn't start: $e.";
+      }
+    }
+    _workflowNotice(entry, "${entry.title} didn't start: $problem", original);
+    final note = workflowFailedNote(entry.id, entry.title, problem);
+    if (ask.fromCall) {
+      _notifyLead(note);
+    } else {
+      await send(note);
+    }
+  }
 
   Future<void> _runWorkflowSteps(
     String runId,
@@ -4168,12 +4728,28 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     // Detached (the session closed mid-run): the journal stays for the resume.
     if (journal.ended) await retireJournalFile(journalPath);
     if (!ref.mounted || end.status == WorkflowStatus.stopped) return;
-    final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    final dir = info?.workingDir;
+    // The files this run changed, and whether the card will ask what to do with them.
+    final tree = _startTrees.remove(runId);
+    var asks = false;
+    if (tree != null && info?.diffTarget != null) {
+      try {
+        final paths = await GitService.changedSince(info!.diffTarget!, tree);
+        if (!ref.mounted) return;
+        ref.read(workflowOwnPathsProvider(sessionId).notifier).set(runId, paths);
+        asks = workflowAsksLanding(end) && await GitService.isDirtyAmong(info.diffTarget!, paths);
+      } on Object {
+        // Not in git any more: the folder is the user's to look at.
+      }
+    }
+    if (!ref.mounted) return;
     final message = workflowResultMessage(
       end,
+      asksLanding: asks,
       save: dir == null || noLocalFolder(dir) ? null : (json) => saveSpill(dir, 'workflow-$runId.json', json),
     );
-    _toLead(message);
+    _toLead(message, runId: runId);
   }
 
   // ------------------------------------------------------ orchestrating forks
@@ -4203,7 +4779,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         ),
     ]);
     if (_background.containsKey(callId)) {
-      _notifyLead(forkQuestionMessage(childId, title, text));
+      _notifyLead(forkQuestionMessage(childId, title, text), kind: 'fork-question', id: childId);
       return;
     }
     for (final MapEntry<String, String>(key: id, value: kid) in [..._childOf.entries]) {
@@ -4220,7 +4796,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// Background fork reports and questions for an outside lead that was busy
   /// (an ACP prompt sent mid-turn can fail), sent together once it is idle.
-  final _forkNotices = <String>[];
+  final _forkNotices = <({String kind, String id, String text})>[];
 
   /// Whether the session is led by an outside harness now.
   bool get _onOutsideLead {
@@ -4231,13 +4807,28 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends [text] (a background fork's report or question) to this agent: at
   /// once on the EveryAI harness, which takes it into its next step; an
   /// outside lead gets it when its turn ends.
-  void _notifyLead(String text) {
+  void _notifyLead(String text, {String kind = 'fork-report', String id = 'fork'}) {
     if (!_onOutsideLead) {
       unawaited(_session?.send(text).catchError((Object _) {}));
       return;
     }
-    _forkNotices.add(text);
+    _forkNotices.add((kind: kind, id: id, text: text));
     _sendForkNotices();
+  }
+
+  /// Tells an outside lead which of its skills are off in this project.
+  void _applySkillsOff() {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || _session is! TakesSkillOverrides) return;
+    (_session as TakesSkillOverrides).setSkillsOff(
+      leadSkillsOff(ref.read(preferencesProvider), info.projectId, info.harness),
+    );
+  }
+
+  /// [body] as a signed notice for an outside lead ([wrapNotice]); as it is when the session has no nonce.
+  String _notice(String kind, String id, String body) {
+    final nonce = ref.read(_noticeNoncesProvider)[sessionId] ?? '';
+    return nonce.isEmpty ? body : wrapNotice(kind: kind, id: id, nonce: nonce, body: body);
   }
 
   /// Not through [send]: that would close the lead's own open cards. A
@@ -4248,7 +4839,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_forkNotices.isEmpty || session == null || t.running || t.pending.isNotEmpty || state.queued.isNotEmpty) {
       return;
     }
-    final text = _forkNotices.join('\n\n');
+    // Wrapped now, for the lead that gets them.
+    final text = [for (final n in _forkNotices) _notice(n.kind, n.id, n.text)].join('\n\n');
     _forkNotices.clear();
     unawaited(session.send(text).catchError((Object _) {}));
   }
@@ -4410,13 +5002,19 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     switch (name) {
       case checkForksTool:
         // Reports and questions held for the end of an outside lead's turn come with the answer instead.
-        final held = [..._forkNotices];
+        // A tool result, not a user message: no notice wrapper (the briefing names this result as EveryAI's own).
+        final held = [for (final n in _forkNotices) n.text];
         _forkNotices.clear();
         return [
           if (_activeForks.isEmpty)
             held.isEmpty ? 'No forks are running. Every fork you started has reported.' : 'No forks are running.'
           else
             for (final id in _activeForks.keys) _forkStatus(id),
+          if (_forksReported.isNotEmpty)
+            [
+              'Forks that reported (you got each report as a task notification):',
+              for (final f in _forksReported) '- ${f.childId} "${f.title}": ${f.status.name}',
+            ].join('\n'),
           ...held,
         ].join('\n\n');
       case answerForkTool:
@@ -4583,7 +5181,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (scope != ApprovalScope.once) {
       final patterns = rememberable(targets) ?? const <String>[];
       if (scope == ApprovalScope.session) {
-        _sessionAllowed.addAll(patterns);
+        _allowForSession(patterns);
       } else {
         final projectId = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.projectId;
         final store = ref.read(codePermissionsProvider.notifier);
@@ -4605,6 +5203,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// denial text with [reason] word for word.
   Future<void> deny([String? reason, List<String>? callIds]) async {
     final pending = state.transcript.pending;
+    final asked = askReasons();
+    final refused = [
+      for (final c in pending)
+        if (callIds == null ? !_decided.containsKey(c.id) : callIds.contains(c.id)) ?asked[c.id],
+    ];
     if (!perCall || callIds == null) _answered = pending.map((c) => c.id).join(',');
     if (perCall) {
       _markDecided([
@@ -4614,7 +5217,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     await _session?.respond(
       accept: false,
-      reason: denialMessage(DenialKind.denied, reason: reason),
+      reason: denialMessage(DenialKind.denied, reason: reason, asked: askedLine(refused)),
       callIds: perCall ? callIds : null,
     );
   }
@@ -4622,12 +5225,14 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends the card's answers: as the held call's result when the server is
   /// holding it, else as a new user message.
   Future<void> answer(QuestionItem item, List<QuestionAnswer> answers) async {
+    if (_localAsks.containsKey(item.call.id)) return _settleLocalAsk(item.call.id, answers);
     if (_hostFor(item.call.id) case final wait?) {
       _answerHost(wait, answersReason(item.questions, answers));
       _builder.settleLocal(item.call.id, answers);
       state = state.copyWith(transcript: _builder.snapshot);
       return;
     }
+    if (item.call.id.startsWith('bugask-')) return _answerBugAsk(item, answers);
     final session = _session;
     if (session == null) return;
     if (item.call.id.startsWith('doom-')) return _answerDoomLoop(item, answers);
@@ -4649,6 +5254,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   Future<void> setMode(AgentMode mode) async {
+    _wantedMode = null;
     // A lead with its own modes moves to the one that maps to [mode] (`/plan`, Start building, a handoff).
     if (_session is NativeModes && state.nativeModes.isNotEmpty) {
       final to = nativeModeFor(state.nativeModes, mode);
@@ -4674,6 +5280,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// mode's, kept with the session. Null once moved, else why not (the mode
   /// is greyed, or the harness refused; nothing changes then).
   Future<String?> setNativeMode(String id) async {
+    _wantedMode = null;
     final session = _session;
     if (session is! NativeModes) return 'This agent has no modes of its own.';
     final m = nativeModeOf(state.nativeModes, id);
@@ -4703,6 +5310,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     unawaited(_modesSub?.cancel());
     _modesSub = null;
     _modesSeen = false;
+    _wantedMode = null;
     if (session is! NativeModes) {
       state = state.copyWith(nativeModes: const [], clearNativeMode: true);
       return;
@@ -4735,7 +5343,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
           ? now
           : nativeModeFor(set.modes, state.mode);
       if (target == null) return;
-      if (target.policy != state.mode && saved == null) {
+      final wanted = target.policy != state.mode && saved == null ? state.mode : null;
+      if (wanted != null) {
         _builder.addNotice(
           NoticeItem(
             'mode-${_events.length}-${target.id}',
@@ -4746,12 +5355,22 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       }
       if (target.id != set.current) {
         unawaited(setNativeMode(target.id));
+      } else {
+        // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
+        state = state.copyWith(mode: target.policy);
+        if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
+      }
+      // After setNativeMode, which clears it: a later list may offer the mode wanted.
+      _wantedMode = wanted;
+      return;
+    }
+    // The mode the session started in is listed now (Claude's `auto` once the model's modes are known).
+    if ((_wantedMode == null ? null : retargetFor(_wantedMode!, set.modes)) case final to?) {
+      _wantedMode = null;
+      if (to.id != set.current) {
+        unawaited(setNativeMode(to.id));
         return;
       }
-      // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
-      state = state.copyWith(mode: target.policy);
-      if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
-      return;
     }
     final now = nativeModeOf(set.modes, set.current);
     if (now == null || now.blocked != null || set.current == before) return;
@@ -5342,8 +5961,19 @@ final class _WorkflowLauncher implements AgentLauncher {
       harness: harness,
       // Its own spend, so the run's cost cap can read it.
       ownTag: harness == everyaiHarnessName,
+      hostOnly: workflowHostTools,
+      bugCheckSeed: call.bugCheck,
+      // The lead's "for this session" approvals don't loosen a read-only agent.
+      ownApprovals: call.readOnly,
     );
     return (childId: info.id, harness: harness, model: model, note: note);
+  }
+
+  @override
+  Future<Map<String, Object?>> bugCheckOf(String childId) async {
+    final hostless = _ref.read(_hostlessProvider)[childId];
+    if (hostless != null) return bugCheckRecord(null, hostless: hostless);
+    return bugCheckRecord(await readBugCheckState(await _sessions._driverDir(childId)));
   }
 
   /// The model [asked] for on [harness]: one it lists, else the newest
@@ -5503,6 +6133,26 @@ final class _WorkflowLauncher implements AgentLauncher {
     unawaited(_ref.read(_liveProvider)[childId]?.interrupt());
   }
 }
+
+/// Bug fix waits for the user's report: the card [card] asks for it, and
+/// the run starts with [args] and the answers. [turnsBefore]: the card shows
+/// once a start note not among them is in the transcript (null: at once).
+final class _BugAsk {
+  _BugAsk(this.card, this.entry, this.args, this.ctx, {required this.fromCall, this.turnsBefore});
+  final String card;
+  final WorkflowEntry entry;
+  final Map<String, Object?> args;
+  final Map<String, Object?> ctx;
+  final bool fromCall;
+  final Set<String>? turnsBefore;
+  bool shown = false;
+}
+
+/// run_workflow's result when Bug fix asked the user for the bug first.
+const bugAskedResult =
+    'Not started yet: the bug report is too thin, so the app asked the user what goes wrong, how to make it happen '
+    'and what should happen instead. Bug fix starts with their answers, and its result comes as a <workflow-result> '
+    "message. Tell the user to answer the card in the app; don't ask them yourself.";
 
 /// Sent to a workflow agent whose turn the app's restart cut off.
 const workflowCarryOn =

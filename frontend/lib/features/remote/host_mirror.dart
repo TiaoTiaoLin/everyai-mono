@@ -48,8 +48,10 @@ Map<String, Object?> mirrorState(
   CodeSessionState state, {
   required List<String>? remember,
   required Map<String, String> flags,
+  Map<String, String> reasons = const {},
   Map<String, String> rememberBy = const {},
   bool perCall = false,
+  bool forks = false,
 }) => {
   'mode': state.mode.name,
   'queued': [for (final q in state.queued) q.text],
@@ -58,8 +60,10 @@ Map<String, Object?> mirrorState(
   'subagent_needs_input': state.subagentNeedsInput,
   'remember': ?remember,
   'flags': flags,
+  'reasons': reasons,
   'remember_by': rememberBy,
   'per_call': perCall,
+  if (forks) 'forks': true,
   'decided': state.decided,
 };
 
@@ -211,7 +215,9 @@ final class HostMirror {
       remember: controller.rememberable(),
       rememberBy: controller.rememberBy(),
       perCall: controller.perCall,
+      forks: _ref.read(codeSessionsProvider.notifier).byId(id)?.sharesApprovals ?? false,
       flags: approvalFlags(controller.policy, state.transcript.pending, state.mode),
+      reasons: controller.askReasons(),
     );
   }
 

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
+import 'package:every_ai/features/code/drivers/briefing/recipes.dart' show claudeSettingsJson;
 import 'package:every_ai/features/code/drivers/claude/claude_driver.dart';
 import 'package:every_ai/features/code/drivers/claude/claude_wire.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
@@ -182,6 +183,35 @@ void main() {
         expect(a, isNot(contains('--disallowedTools')));
       }
       expect(fresh.env, {'MCP_TOOL_TIMEOUT': '330000', 'CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT': '330000'});
+    });
+
+    test('one --settings JSON: sorted skill overrides beside the shell switch, from every builder', () {
+      expect(claudeSettingsJson(), '{"disableSkillShellExecution":true}');
+      expect(
+        claudeSettingsJson(skillsOff: {'pdf', 'plugin:x:lint', 'docx'}),
+        '{"disableSkillShellExecution":true,"skillOverrides":{"docx":"off","pdf":"off","plugin:x:lint":"off"}}',
+      );
+      const off = {'pdf'};
+      final json = claudeSettingsJson(skillsOff: off);
+      List<String> settings(List<String> args) => [
+        for (var i = 0; i < args.length; i++)
+          if (args[i] == '--settings') args[i + 1],
+      ];
+      expect(claudeLaunch(sessionId: 'a', resume: false, mode: AgentMode.ask, skillsOff: off).args, contains(json));
+      expect(settings(claudeLaunch(sessionId: 'a', resume: false, mode: AgentMode.ask, skillsOff: off).args), [json]);
+      expect(settings(claudeAsideArgs(sessionId: 'a', resume: false, skillsOff: off)), [json]);
+      const b = DriverBriefing(mcpUrl: 'http://127.0.0.1:7000/mcp', mcpToken: 't', skillDir: '/s/briefing/skills');
+      for (final withSkillDir in [true, false]) {
+        final briefing = withSkillDir ? b : const DriverBriefing(mcpUrl: 'http://127.0.0.1:7000/mcp', mcpToken: 't');
+        final l = claudeLaunch(
+          sessionId: 'a',
+          resume: false,
+          mode: AgentMode.ask,
+          briefing: claudeDelivery(briefing, sessionText: 'x', skillsOff: off),
+          skillsOff: off,
+        );
+        expect(settings(l.args), [json]);
+      }
     });
 
     test('our modes map onto Claude permission modes', () {
@@ -484,6 +514,64 @@ void main() {
         (23127, 12932, 120, 2228, 23127, true),
       );
       expect(_isState(shown.last, ExecutionStatus.finished), isTrue);
+      await session.close();
+    });
+
+    test('the skill names the CLI lists (initialize, system/init: strings or objects) reach the driver', () async {
+      // init_skills.jsonl is init_image_turn.jsonl cut down, with skills added by hand: the recorded CLI had none.
+      final channel = ReplayChannel(_fixture('init_skills.jsonl'));
+      final seen = <List<String>>[];
+      final d = ClaudeDriver(dataDir: () async => tmp.path, spawn: _Spawner([channel]).call, onSkills: seen.add);
+      final session = await d.start(_spec());
+      await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
+      await _played(channel);
+      expect(seen, [
+        ['pdf', 'review'],
+        ['pdf', 'plugin:demo:lint', 'review'],
+      ]);
+      await session.close();
+    });
+
+    test('skills turned off reach the next process only: now when idle, after the turn when busy', () async {
+      final one = ReplayChannel(_script([_init, _say('Hi.'), _done('r1')]));
+      final two = ReplayChannel(_script([_init, _say('Again.'), _done('r2')]));
+      final s = _Spawner([one, two]);
+      final spec = SessionSpec(
+        workingDir: '/work/repo',
+        model: 'haiku',
+        mode: AgentMode.ask,
+        llmBaseUrl: '',
+        llmApiKey: '',
+        sessionTag: 'tag-1',
+        initialMessage: 'Hi.',
+        skillsOff: const {'pdf'},
+      );
+      final session = await driver(s).start(spec);
+      await _played(one);
+      expect(s.calls[0].args, contains(claudeSettingsJson(skillsOff: {'pdf'})));
+
+      (session as TakesSkillOverrides).setSkillsOff({'pdf', 'docx'});
+      await session.send('Again.');
+      await _played(two);
+      expect(s.calls[1].args, contains(claudeSettingsJson(skillsOff: {'pdf', 'docx'})));
+      expect(s.calls[1].args.where((a) => a == '--settings'), hasLength(1));
+      await session.close();
+    });
+
+    test('skills turned off while the process starts reach the next one', () async {
+      final one = ReplayChannel(_script([_init, _say('Hi.'), _done('r1')]));
+      final two = ReplayChannel(_script([_init, _say('Again.'), _done('r2')]));
+      final s = _Spawner([one, two]);
+      final session = await driver(s).start(_spec());
+      final first = session.send('Hi.');
+      // The process is being launched with the old set.
+      (session as TakesSkillOverrides).setSkillsOff({'pdf'});
+      await first;
+      await _played(one);
+      await session.send('Again.');
+      await _played(two);
+      expect(s.calls, hasLength(2));
+      expect(s.calls[1].args, contains(claudeSettingsJson(skillsOff: {'pdf'})));
       await session.close();
     });
 
@@ -874,6 +962,87 @@ void main() {
       expect(s.calls, hasLength(1));
       expect(s.calls.single.env.containsKey(tokenEnvVar), isFalse);
       await one.close();
+    });
+
+    test(
+      '/btw: a fork of the conversation that isn\'t kept, with read-only tools; the session isn\'t touched',
+      () async {
+        final first = ReplayChannel(_fixture('init_image_turn.jsonl'));
+        String line(String dir, Object msg) => jsonEncode({'dir': dir, 'msg': msg});
+        final aside = ReplayChannel(
+          [
+            line('out', userLine(asideMessage('What is it testing?'))),
+            line('in', {'type': 'result', 'subtype': 'success', 'is_error': false, 'result': ' The widget tests. '}),
+          ].join('\n'),
+        );
+        final s = _Spawner([first, aside]);
+        final session = await driver(s).start(_spec());
+        _record(session);
+        await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
+        await _played(first);
+
+        final answer = await (session as AnswersSideQuestion).sideAnswer('What is it testing?');
+        expect(answer, 'The widget tests.');
+        final args = s.calls.last.args;
+        expect(args, containsAllInOrder(['--resume', session.id, '--fork-session']));
+        expect(args, containsAll(['--no-session-persistence', '--strict-mcp-config']));
+        expect(args, containsAllInOrder(['--tools', 'Read,Grep,Glob']));
+        expect(args, isNot(contains('--permission-prompt-tool')));
+        expect(s.calls.last.cwd, '/work/repo');
+        // The main conversation got nothing.
+        expect(first.sent.where((m) => m['type'] == 'user'), hasLength(1));
+        await session.close();
+      },
+    );
+
+    test("/usage: Claude Code's own report from a headless run that calls no model", () async {
+      const report = 'Current week (all models): 35% used · resets Nov 10 at 7:59pm';
+      final usage = ReplayChannel(
+        jsonEncode({
+          'dir': 'in',
+          'msg': {'type': 'result', 'subtype': 'success', 'is_error': false, 'result': '$report\n'},
+        }),
+      );
+      final s = _Spawner([usage]);
+      final session = await driver(s).start(_spec());
+      expect(await (session as ReportsPlanUsage).planUsage(), report);
+      final args = s.calls.single.args;
+      expect(args, containsAllInOrder(['-p', '/usage']));
+      expect(args, containsAll(['--no-session-persistence', '--strict-mcp-config']));
+      expect(args, isNot(contains('--resume')));
+      await session.close();
+    });
+
+    test('/usage that errors says so', () async {
+      final usage = ReplayChannel(
+        jsonEncode({
+          'dir': 'in',
+          'msg': {'type': 'result', 'subtype': 'success', 'is_error': true, 'result': 'Not signed in'},
+        }),
+      );
+      final session = await driver(_Spawner([usage])).start(_spec());
+      await expectLater((session as ReportsPlanUsage).planUsage(), throwsA(isA<HarnessError>()));
+      await session.close();
+    });
+
+    test('/btw before the first message ran asks a fresh, unsaved process', () async {
+      final aside = ReplayChannel(
+        [
+          jsonEncode({'dir': 'out', 'msg': userLine(asideMessage('hi'))}),
+          jsonEncode({
+            'dir': 'in',
+            'msg': {'type': 'result', 'subtype': 'error_during_execution', 'is_error': true, 'result': 'Not signed in'},
+          }),
+        ].join('\n'),
+      );
+      final s = _Spawner([aside]);
+      final session = await driver(s).start(_spec());
+      await expectLater(
+        (session as AnswersSideQuestion).sideAnswer('hi'),
+        throwsA(isA<HarnessError>().having((e) => e.message, 'message', 'Not signed in')),
+      );
+      expect(s.calls.single.args, isNot(contains('--resume')));
+      await session.close();
     });
 
     test('a session without a record says so', () async {

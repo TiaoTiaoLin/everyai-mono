@@ -319,8 +319,8 @@ const presentFilesSpec = <String, Object?>{
 const presentPlanSpec = <String, Object?>{
   'name': presentPlanTool,
   'description':
-      'Present your implementation plan to the user for approval. Use it in Plan mode once you have read enough '
-      'of the code to be specific. Each step says what changes and in which files. $_planEndsTurn',
+      'Present your implementation plan to the user for approval, in Plan mode or whenever an approach (such as Max) '
+      'asks for a plan, once you have read enough of the code to be specific. Each step says what changes and in which files. $_planEndsTurn',
   'parameters': {
     'type': 'object',
     'properties': {

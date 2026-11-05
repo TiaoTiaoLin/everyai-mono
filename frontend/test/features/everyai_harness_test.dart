@@ -16,6 +16,7 @@ import 'package:every_ai/features/code/domain/transcript.dart' show isOutOfCredi
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/everyai/scrub.dart';
 import 'package:every_ai/features/code/harness/everyai/tools_io.dart';
+import 'package:every_ai/features/code/host/host.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -144,6 +145,17 @@ final class FakeGateway {
   }
 
   Future<void> close() => _server.close(force: true);
+}
+
+/// The app's side of the host: answers every call, keeping their names.
+final class _HostCalls implements HostTools {
+  final names = <String>[];
+
+  @override
+  Future<HostResult> call(HostCall call) async {
+    names.add(call.name);
+    return (text: '2 files changed', isError: false);
+  }
 }
 
 void main() {
@@ -610,6 +622,36 @@ void main() {
     await shell.killAll();
   });
 
+  test("a fork's write to the parent's scratch is judged on its own copy's path, and runs in Ask", () async {
+    final copy = Directory('${tmp.path}/copy')..createSync();
+    gateway
+      ..reply(
+        calls: [
+          ('write', {'file_path': '$work/.everyai/scratch/probe.py', 'content': 'print(1)'}),
+        ],
+      )
+      ..reply(text: 'Done.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: copy.path,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.ask,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-1',
+        initialMessage: 'probe',
+        pathMap: {work: copy.path},
+      ),
+    );
+    final events = await drive(session);
+    final write = events.whereType<ActionCall>().single;
+    expect(write.str('path'), '${copy.path}/.everyai/scratch/probe.py');
+    // The model's own words stay as it sent them.
+    expect(write.raw['tool_call'].toString(), contains('$work/.everyai/scratch/probe.py'));
+    expect(PermissionPolicy(workingDir: copy.path).decide(write, AgentMode.ask).verdict, Verdict.allow);
+    expect(File('${copy.path}/.everyai/scratch/probe.py').existsSync(), isTrue);
+  });
+
   test('cd carries over between commands and a timeout kills the command', () async {
     Directory('$work/sub').createSync();
     final shell = SessionShell(root: work, sessionTag: 't', scratchDir: '${tmp.path}/sh');
@@ -738,6 +780,123 @@ for line in sys.stdin:
     final second = gateway.requests[1]['messages']! as List<Object?>;
     final last = second.last! as Map;
     expect(jsonEncode(last['content']), contains('data:image/png;base64,'));
+    await session.close();
+  });
+
+  test("a briefed session reaches the app's host as everyai__ tools, in place of its own memory", () async {
+    final host = createHostServer();
+    addTearDown(host.stop);
+    final tools = _HostCalls();
+    final token = await host.mint('child', tools, only: workflowHostTools);
+    gateway
+      ..reply(calls: [('everyai__diff_stats', <String, Object?>{})])
+      ..reply(text: 'Done.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-1',
+        initialMessage: 'fix the bug',
+        // A workflow agent: a child, so no client tools of its own.
+        subagent: true,
+        briefing: DriverBriefing(mcpUrl: '${token.url}', mcpToken: token.token),
+      ),
+    );
+    final events = await drive(session);
+    final names = [
+      for (final t in gateway.requests.first['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+    expect(names, containsAll(['everyai__bug_check', 'everyai__check', 'everyai__diff_stats']));
+    // No memory of its own or the host's: it reads it in its prompt, and the lead decides what is kept.
+    expect(names.where((n) => '$n'.contains('memory')), isEmpty);
+    expect(names.where((n) => '$n'.contains('fork') || '$n'.contains('run_workflow')), isEmpty);
+    final call = events.whereType<ActionCall>().single;
+    expect(call.actionKind, 'MCPToolAction');
+    expect(call.toolName, 'everyai__diff_stats');
+    expect(tools.names, ['diff_stats']);
+    expect(events.whereType<ToolResult>().single.text, contains('2 files changed'));
+    // The token lives in memory only.
+    final spec = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
+    expect(spec, isNot(contains(token.token)));
+    await session.close();
+  });
+
+  test('a workflow agent reopened after a restart gets its new host, and never its own memory', () async {
+    final host = createHostServer();
+    addTearDown(host.stop);
+    final tools = _HostCalls();
+    final old = await host.mint('child', tools, only: workflowHostTools);
+    gateway.reply(text: 'Reproduced.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-1',
+        initialMessage: 'fix the bug',
+        subagent: true,
+        briefing: DriverBriefing(mcpUrl: '${old.url}', mcpToken: old.token),
+      ),
+    );
+    await drive(session);
+    await session.close();
+    await host.revoke(old.token);
+    List<Object?> toolNames() => [
+      for (final t in gateway.requests.last['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+    EveryAIHarness app() => EveryAIHarness(dataDir: () async => '${tmp.path}/data', gatewayKey: () async => 'sk-test');
+
+    // With a fresh token: the host's tools again.
+    final fresh = await host.mint('child', tools, only: workflowHostTools);
+    gateway
+      ..reply(calls: [('everyai__diff_stats', <String, Object?>{})])
+      ..reply(text: 'Verified.');
+    final reopened = await app().attachBriefed(
+      session.id,
+      DriverBriefing(mcpUrl: '${fresh.url}', mcpToken: fresh.token),
+    );
+    // Not drive: the replayed history ends finished already.
+    Future<void> carryOn(HarnessSession s, String last) async {
+      final approve = s.events.listen((e) {
+        if (e is StateChange && e.executionStatus == ExecutionStatus.waitingForConfirmation) {
+          unawaited(s.respond(accept: true));
+        }
+      });
+      final said = s.events.firstWhere((e) => e is ChatMessage && !e.fromUser && e.text == last);
+      await s.send('Carry on');
+      await said.timeout(const Duration(seconds: 20));
+      await approve.cancel();
+    }
+
+    await carryOn(reopened, 'Verified.');
+    expect(toolNames(), contains('everyai__diff_stats'));
+    expect(toolNames(), isNot(contains('memory')));
+    expect(tools.names, ['diff_stats']);
+    await reopened.close();
+
+    // Without one (no host could be made): still no memory tool of its own.
+    gateway.reply(text: 'Done.');
+    final bare = await app().attach(session.id);
+    await carryOn(bare, 'Done.');
+    expect(toolNames(), isNot(contains('memory')));
+    expect(toolNames().where((n) => '$n'.startsWith('everyai__')), isEmpty);
+    await bare.close();
+  });
+
+  test('without a briefing a session keeps its own memory and has no everyai tools', () async {
+    gateway.reply(text: 'Done.');
+    final session = await harness.start(spec('hello'));
+    await drive(session);
+    final names = [
+      for (final t in gateway.requests.first['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+    expect(names, contains('memory'));
+    expect(names.where((n) => '$n'.startsWith('everyai__')), isEmpty);
     await session.close();
   });
 

@@ -1,7 +1,7 @@
 name: every_ai
 description: "EveryAI: every AI model in one app."
 publish_to: 'none'
-version: 0.1.0-dev-nonsigned+1
+version: 0.1.0-alpha.2+3
 
 environment:
   sdk: ^3.13.0
@@ -75,6 +75,7 @@ dev_dependencies:
   build_runner: ^2.17.1
   drift_dev: ^2.35.2
   flutter_native_splash: ^2.4.8
+  msix: ^3.18.0
 
 flutter:
   uses-material-design: true
@@ -118,3 +119,20 @@ flutter_native_splash:
     image_dark: assets/brand/splash/android12-splash-icon-1152.png
     color_dark: "#000000"
   web: false
+
+# Microsoft Store package (`dart run msix:create --store`). The Store re-signs it, so there is no certificate here.
+# Identity from Partner Center → EveryAI → Product identity (Store ID 9PHCKCV3J9S9). msix_version is set by CI per
+# release (the Store needs a.b.c.0).
+msix_config:
+  display_name: EveryAI
+  publisher_display_name: Ali Direct
+  identity_name: AliDirect.EveryAI
+  publisher: CN=AD3B1E5B-D432-4FA0-84BD-EB258B046DF7
+  msix_version: 0.1.0.0
+  logo_path: windows/runner/resources/store_logo.png
+  # runFullTrust (the Code workspace runs CLIs, a ConPTY terminal and Deno) is always added by the msix package as a
+  # restricted capability; listing it here puts it in the wrong namespace and MakeAppx rejects the manifest.
+  capabilities: internetClient, internetClientServer, privateNetworkClientServer
+  languages: en-us
+  store: true
+  install_certificate: false

@@ -1,7 +1,5 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
-import 'dart:convert';
-
 import '../../domain/agent_mode.dart';
 import '../../harness/events.dart';
 import '../../harness/harness.dart' show NativeMode;
@@ -110,15 +108,15 @@ String? claudeModelArg(String model) {
 
 /// The briefing as Claude takes it ([claudeCode]); without a skill folder
 /// only the MCP server and the settings apply.
-Delivery claudeDelivery(DriverBriefing b, {String sessionText = ''}) {
+Delivery claudeDelivery(DriverBriefing b, {String sessionText = '', Set<String> skillsOff = const {}}) {
   final input = (
     mcpUrl: Uri.parse(b.mcpUrl),
     mcpToken: b.mcpToken,
     skillDir: b.skillDir ?? '',
     sessionText: sessionText,
   );
-  if (b.skillDir != null) return claudeCode(input);
-  final all = claudeCode(input, grantSkillAccess: false);
+  if (b.skillDir != null) return claudeCode(input, skillsOff: skillsOff);
+  final all = claudeCode(input, grantSkillAccess: false, skillsOff: skillsOff);
   return (
     args: [
       for (var i = 0; i + 1 < all.args.length; i += 2)
@@ -137,10 +135,6 @@ Delivery claudeDelivery(DriverBriefing b, {String sessionText = ''}) {
 /// trust prompt), so a cloned repo could run code just by being opened.
 const _userSettingsOnly = ['--setting-sources', 'user'];
 
-/// Skill bodies' inline `!` shell lines never run (the briefing's recipe
-/// sets the same; without a briefing the driver does).
-final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
-
 /// How to start one session's process. [resume] continues the conversation
 /// [sessionId] (it has had a message); otherwise it starts under that id.
 /// Never `--dangerously-skip-permissions`: every call comes to our hook.
@@ -152,6 +146,7 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
   String model = '',
   String? effort,
   Delivery? briefing,
+  Set<String> skillsOff = const {},
 }) {
   final m = claudeModelArg(model);
   return (
@@ -175,11 +170,73 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
       // Briefed sessions ask the user through our question cards.
       if (briefing != null) ...['--disallowedTools', 'AskUserQuestion'],
       ...?briefing?.args,
-      if (briefing == null) ...['--settings', _noSkillShell],
+      if (briefing == null) ...['--settings', claudeSettingsJson(skillsOff: skillsOff)],
     ],
     env: {...?briefing?.env, 'MCP_TOOL_TIMEOUT': _mcpTimeoutMs, 'CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT': _mcpTimeoutMs},
   );
 }
+
+/// A `/btw` side question's process: a fork of conversation [sessionId] (a
+/// fresh one before its first message ran) that isn't saved, with only the
+/// read-only tools and none of the user's MCP servers.
+List<String> claudeAsideArgs({
+  required String sessionId,
+  required bool resume,
+  String model = '',
+  String? effort,
+  Set<String> skillsOff = const {},
+}) {
+  final m = claudeModelArg(model);
+  return [
+    '-p',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--strict-mcp-config',
+    '--no-session-persistence',
+    ..._userSettingsOnly,
+    if (resume) ...['--resume', sessionId, '--fork-session'],
+    '--tools',
+    'Read,Grep,Glob',
+    '--permission-mode',
+    'default',
+    if (m != null) ...['--model', m],
+    if (effort != null && effort.isNotEmpty) ...['--effort', effort],
+    '--settings',
+    claudeSettingsJson(skillsOff: skillsOff),
+  ];
+}
+
+/// Claude Code's own `/usage`, run headless: a local command (no model call, nothing spent) that answers with the
+/// plan's windows ("Current week (all models): 35% used · resets …") and what used them. Nothing is saved.
+const claudeUsageArgs = [
+  '-p',
+  '/usage',
+  '--output-format',
+  'json',
+  '--no-session-persistence',
+  '--strict-mcp-config',
+  ..._userSettingsOnly,
+];
+
+/// The text of `/usage`'s reply ([claudeUsageArgs]), or null when it gave none or an error.
+String? claudeUsageText(Object? reply) {
+  if (reply is! Map<String, Object?> || reply['is_error'] == true) return null;
+  final text = switch (reply['result']) {
+    final String t => t.trim(),
+    _ => '',
+  };
+  return text.isEmpty ? null : text;
+}
+
+/// The `/btw` message the side process gets.
+/// Prompt reason: the fork must answer, not carry on with the session's task.
+String asideMessage(String question) =>
+    '<side-question>The user asks this off to the side while you work. Your main conversation never sees this reply, '
+    'so answer only the question, briefly, from what you know of the session (you may read files). Don\'t carry on '
+    'with the task or change anything.</side-question>\n\n${question.trim()}';
 
 /// The process `models()` asks once: no session saved, none of the user's
 /// MCP servers started, no model call.

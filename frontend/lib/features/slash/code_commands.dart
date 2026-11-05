@@ -17,6 +17,20 @@ SlashCommand _code(
   String? argsHint,
 }) => SlashCommand(name: name, description: description, argsHint: argsHint, scope: SlashScope.code, run: run);
 
+/// EveryAI's commands that an outside lead's `/` menu shows next to its own:
+/// they work on every lead, and a CLI's own of the same name can't run in the
+/// app (its headless mode has no `/usage` or `/btw`).
+const everyLeadCommandNames = {'usage', 'btw'};
+
+/// [native] (an outside lead's own commands) with [everyLeadCommandNames] in
+/// front, replacing the lead's own of those names.
+List<SlashCommand> withEveryLeadCommands(List<SlashCommand> native) => [
+  for (final c in codeBuiltIns)
+    if (everyLeadCommandNames.contains(c.name)) c,
+  for (final c in native)
+    if (!everyLeadCommandNames.contains(c.name)) c,
+];
+
 /// The Code composer's built-in session commands.
 final codeBuiltIns = <SlashCommand>[
   _code('plan', 'Switch to Plan mode: read and propose before editing', argsHint: '[what to plan]', (ctx, args) {
@@ -52,6 +66,9 @@ final codeBuiltIns = <SlashCommand>[
     stop();
   }),
   _code('cost', 'Show tokens and spend for this session', (ctx, _) {
+    _withSession(ctx, ctx.code?.cost, (f) => f());
+  }),
+  _code('usage', 'Show usage, spend and plan limits for this session', (ctx, _) {
     _withSession(ctx, ctx.code?.cost, (f) => f());
   }),
   _code('btw', 'Ask a side question without interrupting the agent', argsHint: '<question>', (ctx, args) {

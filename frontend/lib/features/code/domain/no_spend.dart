@@ -8,8 +8,8 @@
 
 /// `/btw` on an outside lead [lead].
 String btwOff(String lead) =>
-    '/btw asks an EveryAI model, and EveryAI spends nothing while $lead leads this session. Ask $lead in the '
-    'chat instead.';
+    "/btw isn't available with $lead yet: it can't answer a side question apart from the session, and EveryAI spends "
+    'nothing while $lead leads it. Ask $lead in the chat instead.';
 
 /// `/goal` on an outside lead: no EveryAI judge reads the session after each
 /// turn, so the first message asks the lead to check the goal itself.

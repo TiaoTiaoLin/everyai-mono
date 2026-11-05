@@ -25,9 +25,7 @@ class NoticesBody extends ConsumerWidget {
           child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 760), child: ChatMarkdown(value)),
         ),
       ),
-      AsyncError() => Center(
-        child: Text("Couldn't load the notices.", style: TextStyle(color: theme.textMuted)),
-      ),
+      AsyncError() => Center(child: Text("Couldn't load the notices.", style: theme.type.body.tint(theme.textMuted))),
       _ => const SizedBox.shrink(),
     };
   }

@@ -740,7 +740,7 @@ class _PartView extends StatelessWidget {
       ),
       final ToolCallPart call when allLocalChatTools.contains(call.toolName) => LocalToolChip(part: call),
       final ToolCallPart call => InlineVisual(part: call, conversationId: conversationId),
-      ArtifactPart(:final title) => Text(title, style: TextStyle(color: theme.accent)),
+      ArtifactPart(:final title) => Text(title, style: theme.type.body.tint(theme.accent)),
       // The route shows as a chip in the header.
       UsagePart() || AttachmentPart() || RoutePart() => const SizedBox.shrink(),
     };

@@ -1,6 +1,6 @@
 ---
 name: everyai-max
-description: How to take on a large or unclear coding task. Research it, ask the user what only they can decide, present a plan, build it in parallel forks, then verify. Use when the user picks Max.
+description: How to take on a large or unclear coding task. Research it, ask the user what only they can decide, present a plan, build it in parallel forks, then verify. Load it only when an everyai-workflow note says the user turned Max on.
 license: Apache-2.0
 compatibility: Code sessions only (a shell, git and the EveryAI coding tools).
 ---
@@ -8,7 +8,7 @@ compatibility: Code sessions only (a shell, git and the EveryAI coding tools).
 
 This is an approach, not a script. Take the steps in order when the task needs them, skip what it doesn't need, and keep a small task small.
 
-On the EveryAI harness, `fork` is `run_subagent` with `run_in_background: true`, and `worktree` on is `isolation: "worktree"`. Elsewhere these tools come from the `everyai` MCP server.
+The tools named here (`fork`, `check_forks`, `answer_fork`, `present_plan`, `ask_user_question`) come from the `everyai` MCP server. Only on the EveryAI harness itself, which has no such server, is `fork` its `run_subagent` tool with `run_in_background: true` (and `worktree` on is `isolation: "worktree"`).
 
 ## 1. Research
 - Read enough to know which parts of the code the task touches, how they fit, and how the project builds and tests.
@@ -30,7 +30,7 @@ On the EveryAI harness, `fork` is `run_subagent` with `run_in_background: true`,
 - Give each independent step to a `fork`, with `worktree` on so parallel forks don't edit the same files. At most 4 run at once.
 - A fork sees nothing of this conversation. Its task must stand alone: the goal, the files, the plan step, the conventions to keep, and how to check the work.
 - Do the steps that depend on others yourself, or start their fork once the step before has reported.
-- Don't sleep or poll. Each fork's report comes as a `<task-notification>` message. Use `check_forks` when you want to see how they are doing.
+- Don't sleep or poll. Each fork's report comes as a `<task-notification>` inside an `<everyai-notice>` (see the notices rule in the session briefing). Use `check_forks` when you want to see how they are doing.
 - A `<fork-question>` is yours to answer with `answer_fork`. When the user should decide, ask them with `ask_user_question` first and pass their answer on.
 - When `check_forks` says a fork waits for an approval, tell the user: only they can approve it.
 - Stop a fork that is stuck, looping or off its task with `stop_fork`. Then redo that step yourself or start a fork with a clearer task.

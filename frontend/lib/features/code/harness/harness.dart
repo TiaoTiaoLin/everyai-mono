@@ -60,12 +60,16 @@ final class SessionSpec {
     this.script,
     this.reviewModel,
     this.briefing,
+    this.skillsOff = const {},
   });
 
   /// What an outside harness (a coding CLI driven by the app) is handed to
   /// reach EveryAI's own tools and the session's skill; null for the EveryAI
   /// harness, which has them built in.
   final DriverBriefing? briefing;
+
+  /// Skills of an outside lead that are off in this project (by the lead's own names).
+  final Set<String> skillsOff;
 
   /// The agent has bug_check, to prove a reproduction and a fix (Bug fix).
   final bool bugCheck;
@@ -377,6 +381,20 @@ abstract interface class HasContextParts {
   List<ContextPart> get contextParts;
 }
 
+/// A session led by an outside CLI that can answer a side question (`/btw`)
+/// in a throwaway fork of its conversation: the session itself is neither
+/// interrupted nor told, and the fork isn't kept. It runs on the user's own
+/// account for that CLI (EveryAI spends nothing).
+/// A session whose harness reports the user's plan usage and limits itself (Claude Code's `/usage`), as text to show.
+abstract interface class ReportsPlanUsage {
+  Future<String> planUsage();
+}
+
+abstract interface class AnswersSideQuestion {
+  /// The answer to [question], or a [HarnessError] saying why there is none.
+  Future<String> sideAnswer(String question);
+}
+
 /// A session led by an outside CLI that has `/` commands of its own. The `/`
 /// menu shows these instead of EveryAI's; sessions without it have none.
 abstract interface class HasNativeCommands {
@@ -465,6 +483,14 @@ NativeMode? nativeModeFor(List<NativeMode> modes, AgentMode mode) {
     if (best == null || rank(m.policy) > rank(best.policy)) best = m;
   }
   return best;
+}
+
+/// The native mode a session that fell back from [wanted] (its own mode
+/// wasn't listed yet: Claude's `auto` before the model's modes are known)
+/// moves to once [modes] offers one with that policy, or null.
+NativeMode? retargetFor(AgentMode wanted, List<NativeMode> modes) {
+  final m = nativeModeFor(modes, wanted);
+  return m != null && m.policy == wanted ? m : null;
 }
 
 /// A session whose mode picker shows the harness's own modes instead of
@@ -556,4 +582,10 @@ final class HarnessError implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// A session whose lead has skills that can be switched off per project (Claude Code). A new set takes effect
+/// from the next process the session starts.
+abstract interface class TakesSkillOverrides {
+  void setSkillsOff(Set<String> off);
 }

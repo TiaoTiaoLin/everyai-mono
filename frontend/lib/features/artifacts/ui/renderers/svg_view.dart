@@ -52,7 +52,7 @@ class SvgView extends StatelessWidget {
           sanitizeSvg(svg),
           fit: BoxFit.contain,
           errorBuilder: (context, error, _) =>
-              Text('This illustration could not be drawn.', style: TextStyle(color: theme.textMuted)),
+              Text('This illustration could not be drawn.', style: theme.type.body.tint(theme.textMuted)),
         ),
       ),
     );

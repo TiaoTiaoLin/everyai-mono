@@ -55,7 +55,7 @@ class _FlashcardsViewState extends ConsumerState<FlashcardsView> {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final cards = _cards;
-    if (cards.isEmpty) return Text('No cards.', style: TextStyle(color: theme.textMuted));
+    if (cards.isEmpty) return Text('No cards.', style: theme.type.body.tint(theme.textMuted));
     final progress = ref.watch(flashcardProgressProvider(widget.visual.callId));
     final index = progress.index.clamp(0, cards.length - 1);
     final (front, back) = cards[index];

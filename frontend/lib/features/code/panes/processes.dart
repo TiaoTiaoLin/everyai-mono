@@ -31,15 +31,26 @@ final class SessionProcess {
 }
 
 /// The processes the agent's terminal left running for session [tag] (see
-/// `killSessionProcesses`) plus everything below the user's own terminal
-/// shells [terminalShells], with the ports they listen on. Empty where
-/// processes can't be listed.
+/// `killSessionProcesses`), the trees of [agentRoots] (the app app_run
+/// started), and everything below the user's own terminal shells
+/// [terminalShells], with the ports they listen on. Empty where processes
+/// can't be listed.
 Future<List<SessionProcess>> listSessionProcesses({
   required String tag,
   required String workingDir,
   required bool ownsDir,
+  Set<int> agentRoots = const {},
   Set<int> terminalShells = const {},
-}) => impl.listSessionProcesses(tag: tag, workingDir: workingDir, ownsDir: ownsDir, terminalShells: terminalShells);
+}) => impl.listSessionProcesses(
+  tag: tag,
+  workingDir: workingDir,
+  ownsDir: ownsDir,
+  agentRoots: agentRoots,
+  terminalShells: terminalShells,
+);
+
+/// The TCP ports [pids] listen on (none where that can't be found).
+Future<List<ListeningPort>> listeningPorts(Iterable<int> pids) => impl.listeningPorts(pids);
 
 /// Sends SIGTERM (or SIGKILL with [force]) to [pid].
 bool killProcess(int pid, {bool force = false}) => impl.killProcess(pid, force: force);

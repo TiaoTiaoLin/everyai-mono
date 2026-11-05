@@ -17,10 +17,12 @@ String _attr(String s) => s.replaceAll('"', "'");
 
 /// The note the next message carries when Max is turned on or off.
 /// Prompt reason: Max is an approach skill the model loads itself now, not
-/// phases the harness enforces.
+/// phases the harness enforces. If the skill can't be loaded the lead says so,
+/// so a Max that does nothing isn't silent (issue #10).
 String maxWorkflowNote({required bool on}) => on
     ? '${_open}name="$maxWorkflowId" state="on">The user turned on the Max workflow. Load the $maxSkillId skill now '
-          'and follow its approach for this task and the ones after it.$_close'
+          'and follow its approach for this task and the ones after it. If you can\'t load it, tell the user in one '
+          'line that Max isn\'t available in this session, then do the task your own way.$_close'
     : '${_open}name="$maxWorkflowId" state="off">The user turned the Max workflow off: stop following the '
           '$maxSkillId approach from here on.$_close';
 

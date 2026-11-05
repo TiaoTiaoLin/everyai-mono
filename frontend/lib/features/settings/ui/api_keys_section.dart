@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/theme/every_theme.dart';
 import '../../../core/ui/adaptive.dart';
+import '../../../core/ui/layout.dart';
 import '../../../core/ui/every_icons.dart';
 import '../byok_keys.dart';
 import '../domain/byok_providers.dart';
@@ -153,40 +154,45 @@ class _ProviderCardState extends ConsumerState<_ProviderCard> {
         borderRadius: BorderRadius.circular(theme.radius),
         border: Border.all(color: theme.border),
       ),
-      child: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(9),
-            child: Image.asset(provider.logo, width: 34, height: 34, fit: BoxFit.cover),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(provider.name, style: theme.type.body.medium.tint(theme.text)),
-                Text(provider.blurb, style: theme.type.caption.tint(theme.textMuted)),
-                Text(
-                  status,
-                  key: ValueKey('byok.${provider.id}.status'),
-                  style: (connected ? theme.type.caption.mono : theme.type.caption).tint(
-                    !connected
-                        ? theme.textMuted
-                        : _works == false
-                        ? theme.danger
-                        : theme.success,
-                  ),
-                ),
-              ],
+      // On a narrow window the buttons go below the name instead of squeezing it.
+      child: WrapRow(
+        minLead: 200,
+        lead: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(9),
+              child: Image.asset(provider.logo, width: 34, height: 34, fit: BoxFit.cover),
             ),
-          ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(provider.name, style: theme.type.body.medium.tint(theme.text)),
+                  Text(provider.blurb, style: theme.type.caption.tint(theme.textMuted)),
+                  Text(
+                    status,
+                    key: ValueKey('byok.${provider.id}.status'),
+                    style: (connected ? theme.type.caption.mono : theme.type.caption).tint(
+                      !connected
+                          ? theme.textMuted
+                          : _works == false
+                          ? theme.danger
+                          : theme.success,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
           if (!connected) ...[
             AdaptiveButton(
               label: 'Get a key',
               emphasis: ButtonEmphasis.plain,
               onPressed: () => launchUrl(Uri.parse(provider.keysUrl), mode: LaunchMode.externalApplication),
             ),
-            const SizedBox(width: 6),
             AdaptiveButton(
               key: ValueKey('byok.${provider.id}.add'),
               label: 'Add key',
@@ -200,7 +206,6 @@ class _ProviderCardState extends ConsumerState<_ProviderCard> {
               emphasis: ButtonEmphasis.plain,
               onPressed: _checking ? null : _check,
             ),
-            const SizedBox(width: 6),
             AdaptiveMenuButton(
               key: ValueKey('byok.${provider.id}.more'),
               actions: [

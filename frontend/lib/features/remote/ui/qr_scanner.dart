@@ -49,7 +49,7 @@ class _QrScannerState extends State<QrScanner> {
           child: Text(
             "The camera isn't available (${error.errorCode.name}). Type the code instead.",
             textAlign: TextAlign.center,
-            style: TextStyle(color: theme.textMuted),
+            style: theme.type.body.tint(theme.textMuted),
           ),
         ),
       ),

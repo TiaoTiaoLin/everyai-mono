@@ -43,7 +43,7 @@ void main() {
     }
     expect(m.body, contains('run_subagent'));
     expect(m.body, contains('isolation: "worktree"'));
-    expect(m.description, endsWith('Use when the user picks Max.'));
+    expect(m.description, endsWith('Load it only when an everyai-workflow note says the user turned Max on.'));
   });
 
   test('seeding installs once, respects removal and updates on a new digest', () async {

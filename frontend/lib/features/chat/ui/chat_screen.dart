@@ -112,6 +112,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           AdaptiveIconButton(icon: EveryIcon.newChat, tooltip: 'New chat', onPressed: () => context.go(Routes.newChat)),
         ],
       ],
+      // The transcript's list pads itself by the bar's height and slides under it; the home starts below the bar.
+      scrollsUnderBar: !home,
       body: _WithPanel(
         conversationId: widget.conversationId,
         child: switch (phase) {
@@ -362,7 +364,9 @@ class _WithPanel extends ConsumerWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final fullScreen = constraints.maxWidth < 720;
-        final panel = ArtifactPanel(conversationId: conversationId, fullScreen: fullScreen);
+        final panel = BelowBar(
+          child: ArtifactPanel(conversationId: conversationId, fullScreen: fullScreen),
+        );
         if (fullScreen) {
           return Stack(
             children: [

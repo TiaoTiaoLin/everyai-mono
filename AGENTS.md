@@ -672,6 +672,45 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
     Headlines type themselves out (`TypewriterText`). Gate: `onboardingAcceptedProvider` in the shell.
   - Unsigned macOS Release: `keychain-access-groups` removed from `Release.entitlements` (needs a team); add it back
     for the signed release. macOS shows the version as 0.1.0 (Flutter drops the pre-release part there).
+- **Signed releases (2026-11-04, commit "Signed releases…").** macOS: `frontend/macos/scripts/release_macos.sh`
+  (Developer ID re-sign inside out, Deno with JIT entitlements, embedded Developer ID profile for
+  `keychain-access-groups` via `Runner/DeveloperID.entitlements`, DMG, notarytool, staple, spctl); `asc.py` renews the
+  profile (expires 2027-12-05). Windows: `msix_config` (Store identity `AliDirect.EveryAI`, 9PHCKCV3J9S9; the Store
+  signs). `.github/workflows/release.yml` on `v*`: DMG + Store MSIX as a draft Partner Center submission + draft GitHub
+  Release; secrets are set on the repo. Credentials and IDs: `TODO-deployment.md` → Credentials (local copies in
+  `~/.applesigning/`). Verified: notarization accepted, stapled, the app from the DMG launches.
+  Linux: `packaging/linux/package.sh` → AppImage + .deb (Deno next to the binary), SHA256SUMS, GPG `.asc` signatures
+  (key `packaging/linux/everyai-release-key.asc`); release job on Ubuntu 22.04. Checked in an Ubuntu 22.04 container:
+  the .deb installs, desktop file valid, signatures verify. Flathub is off the table (no AI-written manifests/PRs).
+- **0.1.0-alpha.1, the first signed release (2026-11-05).** `-dev-nonsigned` dropped: pubspec `0.1.0-alpha.1+2`,
+  `appVersion`, the terms, README (downloads → latest GitHub Release, the Microsoft Store listing 9PHCKCV3J9S9, the
+  Homebrew tap `xuckless/homebrew-tap`), CHANGELOG. Tag `v0.1.0-alpha.1` runs `release.yml`. Dev builds stay unsigned
+  (`0.1.0-alpha.1-unsigned`). Next versions: bump pubspec + `appVersion` together, tag `v<version>`.
+- **In-app updates (2026-11-05).** `features/updates/`: each launch (`shell.dart`) and Settings → About ("Check now",
+  "Get pre-releases", pref `updates.prereleases`) ask the GitHub releases API (`/releases/latest`, or the list with
+  pre-releases on). By install (`data/install*.dart`): the signed macOS release → Sparkle 2.9 (`UpdaterBridge` in
+  `macos/Runner/MainFlutterWindow.swift`, channel `everyai/updater`; only when signed by team 2MGLZ5685D; Dart passes
+  that release's `appcast.xml`, Sparkle downloads quietly, holds the install; the sidebar's `UpdateBanner` "Restart to
+  update" runs it, else it installs on quit). Linux AppImage → downloads beside `$APPIMAGE`, checks `SHA256SUMS.sig`
+  (Ed25519) and the SHA-256, renames over itself, restarts. .deb → a download button. Store/dev builds → nothing.
+  One Ed25519 key signs both: private `UPDATE_ED25519_KEY` (repo secret; owner copy
+  `~/.applesigning/everyai/update_ed25519.key`), public in Info.plist `SUPublicEDKey` and `updates/update_key.dart`;
+  `packaging/updates.py` (keygen/sign/appcast). `release.yml` adds `appcast.xml` and `SHA256SUMS.sig`.
+  **Bump the pubspec build number (+N) every release**: Sparkle compares it. `EVERYAI_UPDATES_API` points the
+  updater at another releases endpoint (testing). Verified on macOS with two locally signed builds (2 → 3): quiet
+  download, install on quit, signature intact. The AppImage path is unit-tested only. Homebrew cask should say
+  `auto_updates true`. Linux repos next: own signed apt/dnf repos on GitHub Pages, maybe COPR (the owner allows an
+  `Assisted-by:` line there as a one-time exception), AUR pushed by the owner.
+
+- **Prober fixes + 0.1.0-alpha.2 (2026-11-05; merge 2fe40cb, release 2713b25, PR #12).** Lane batch (6 items, notes
+  `docs/research/batches/harness/prober-fixes/`): workflow agents get `workflowHostTools` (bug_check, check,
+  diff_stats, memory read-only, report_issue) through a filtered host token; Bug fix proves with bug_check and asks for
+  a thin bug (`workflows/bug_report.dart`); Ultra runs phases per item, `plan_ref` only from saved_plans; verdict-first
+  results, merged lens findings, landing choice (commit here / new branch / leave); host `screenshot`, `browser`,
+  `app_run` for outside leads (own apps free, others ask once); `<everyai-notice nonce>` wrapping; Claude Code skills
+  off per project (`--settings skillOverrides`); approvals say why, scratch/temp writes free, sibling forks, mode
+  inheritance. The bundled workflow tests need Deno (`frontend/.deno`); worktrees without it skip them (a parse error
+  in security_review.js slipped through that way). Release: tag `v0.1.0-alpha.2` on main after the merge.
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).

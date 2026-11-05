@@ -179,6 +179,18 @@ void main() {
     expect(read('skills/alpha/references/a.md'), 'new');
   });
 
+  test('the notice nonce is made once, kept across calls, and removed with the briefing', () async {
+    var made = 0;
+    String make() => '${++made}'.padLeft(32, '0');
+    final first = await sessionNoticeNonce(session, make);
+    expect(first, matches(RegExp(r'^[0-9a-f]{32}$')));
+    expect(await sessionNoticeNonce(session, make), first);
+    expect(made, 1);
+    await removeBriefing(session);
+    expect(File('$session/notice-nonce').existsSync(), isFalse);
+    expect(await sessionNoticeNonce(session, make), isNot(first));
+  });
+
   test('removeBriefing leaves siblings', () async {
     final a = writeSkill(src, 'alpha');
     await exportSkills(session, [a], sessionText: sessionMd);

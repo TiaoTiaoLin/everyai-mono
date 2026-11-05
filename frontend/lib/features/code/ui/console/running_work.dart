@@ -9,12 +9,14 @@ import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../code_providers.dart';
+import '../subagent_banner.dart';
 import '../../domain/code_session.dart';
 import '../../harness/harness.dart' show BackgroundTask;
 import '../../workflows/workflow_engine.dart' show WorkflowAgentStatus, WorkflowStatus;
 import '../../workflows/workflow_runs.dart' show workflowRunsProvider;
 import '../session_view.dart' show StatusPill, TranscriptList;
 import '../transcript/transcript_items.dart' show TranscriptScope;
+import '../transcript/session_approval.dart';
 import 'console_state.dart';
 
 /// Session info's Running work: the session's workflows and their agents, its forks and subagents (custom agents
@@ -31,6 +33,34 @@ class RunningWork extends ConsumerStatefulWidget {
 
 class _RunningWorkState extends ConsumerState<RunningWork> {
   Timer? _tick;
+
+  /// Groups the user opened or folded, by key, per session: kept while a child's chat covers the list. A group not
+  /// here follows [_isOpen]'s default.
+  static final _openBySession = <String, Map<String, bool>>{};
+  Map<String, bool> get _open => _openBySession[widget.session.id] ??= {};
+
+  /// A group with work still going starts open; a finished one starts folded.
+  bool _isOpen(String key, {required bool active}) => _open[key] ?? active;
+
+  void _toggle(String key, {required bool active}) => setState(() => _open[key] = !_isOpen(key, active: active));
+
+  /// A group header that folds its rows ([count] of them when folded).
+  Widget _group(String key, String title, {required bool active, required int count, required List<Widget> rows}) {
+    final open = _isOpen(key, active: active);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _Header(
+          title,
+          open: open,
+          count: count,
+          onTap: () => _toggle(key, active: active),
+        ),
+        if (open) ...rows,
+      ],
+    );
+  }
 
   @override
   void initState() {
@@ -85,6 +115,20 @@ class _RunningWorkState extends ConsumerState<RunningWork> {
       onStop: () => ref.read(codeSessionProvider(child.id).notifier).stop(),
     );
 
+    final forks = [
+      for (final c in children.reversed)
+        if (!inRuns.contains(c.id)) c,
+    ];
+    bool over(CodeSessionInfo c) =>
+        const {SessionStatus.done, SessionStatus.failed, SessionStatus.idle}.contains(_statusOf(ref, c.id));
+    final working = [
+      for (final c in forks)
+        if (!over(c)) c,
+    ];
+    final finished = [
+      for (final c in forks)
+        if (over(c)) c,
+    ];
     if (runs.isEmpty && children.isEmpty && shells.isEmpty) {
       return Text(
         'Workflows, forks, subagents and commands the agent leaves running in the background show up here.',
@@ -94,42 +138,90 @@ class _RunningWorkState extends ConsumerState<RunningWork> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final run in runs) ...[
-          _Header(
+        for (final (i, run) in runs.indexed)
+          _group(
+            'run-$i-${run.name}-${run.agents.firstOrNull?.childId ?? ''}',
             '${run.name} · ${run.status.name} · '
-            '${run.agents.where((a) => a.status == WorkflowAgentStatus.done).length}/${run.agents.length} agents done',
+                '${run.agents.where((a) => a.status == WorkflowAgentStatus.done).length}/${run.agents.length} agents done',
+            active: run.status == WorkflowStatus.running,
+            count: run.agents.length,
+            rows: [
+              for (final a in run.agents)
+                if (a.childId case final c? when byId.containsKey(c))
+                  childRow(byId[c]!)
+                else
+                  _Line(title: a.label, subtitle: '${a.phase} · ${a.status.name}'),
+            ],
           ),
-          for (final a in run.agents)
-            if (a.childId case final c? when byId.containsKey(c))
-              childRow(byId[c]!)
-            else
-              _Line(title: a.label, subtitle: '${a.phase} · ${a.status.name}'),
+        if (forks.isNotEmpty) ...[
+          // Working (or waiting) forks always show; the finished ones fold into their own group.
+          if (working.isNotEmpty) ...[const _Header('Forks and subagents'), for (final c in working) childRow(c)],
+          if (finished.isNotEmpty)
+            _group(
+              'forks-done',
+              working.isEmpty ? 'Forks and subagents · ${finished.length} done' : '${finished.length} done',
+              active: false,
+              count: finished.length,
+              rows: [for (final c in finished) childRow(c)],
+            ),
         ],
-        if (children.any((c) => !inRuns.contains(c.id))) ...[
-          const _Header('Forks and subagents'),
-          for (final child in children.reversed)
-            if (!inRuns.contains(child.id)) childRow(child),
-        ],
-        if (shells.isNotEmpty) ...[
-          const _Header('Background commands'),
-          for (final t in shells.reversed)
-            _ShellRow(task: t, onStop: () => ref.read(codeSessionProvider(id).notifier).stopBackground(t.id)),
-        ],
+        if (shells.isNotEmpty)
+          _group(
+            'shells',
+            'Background commands',
+            active: shells.any((t) => t.running),
+            count: shells.length,
+            rows: [
+              for (final t in shells.reversed)
+                _ShellRow(task: t, onStop: () => ref.read(codeSessionProvider(id).notifier).stopBackground(t.id)),
+            ],
+          ),
       ],
     );
   }
 }
 
 class _Header extends StatelessWidget {
-  const _Header(this.text);
+  const _Header(this.text, {this.open, this.count = 0, this.onTap});
   final String text;
+
+  /// Null: a plain heading; else a fold toggle that shows whether its rows are open.
+  final bool? open;
+  final int count;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
-    return Padding(
+    final open = this.open;
+    final label = Padding(
       padding: const EdgeInsets.fromLTRB(2, 6, 2, 4),
-      child: Text(text, style: theme.type.caption.semibold.tint(theme.textMuted)),
+      child: Row(
+        children: [
+          if (open != null) ...[
+            AdaptiveIcon(open ? EveryIcon.chevronDown : EveryIcon.chevronRight, size: 12, color: theme.textMuted),
+            const SizedBox(width: 4),
+          ],
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: theme.type.caption.semibold.tint(theme.textMuted),
+            ),
+          ),
+          if (open == false && count > 0) Text('$count', style: theme.type.caption.tint(theme.textMuted)),
+        ],
+      ),
+    );
+    if (open == null || onTap == null) return label;
+    return Semantics(
+      button: true,
+      expanded: open,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(behavior: HitTestBehavior.opaque, onTap: onTap, child: label),
+      ),
     );
   }
 }
@@ -235,7 +327,8 @@ class _ShellRow extends StatelessWidget {
 }
 
 /// A child session's chat in the right panel: Back to the view under it, its title and status, a way to open it as
-/// a full session, then its transcript (read here; approvals and the composer are on its own screen).
+/// a full session, its approval card when it waits on the user, then its transcript (the composer is on its own
+/// screen).
 class ChildChatView extends ConsumerWidget {
   const ChildChatView({super.key, required this.parentId, required this.childId});
 
@@ -254,7 +347,7 @@ class ChildChatView extends ConsumerWidget {
           AdaptiveIconButton(
             key: const ValueKey('console.child.back'),
             icon: EveryIcon.chevronLeft,
-            tooltip: 'Back',
+            tooltip: 'Back to the main chat',
             size: 16,
             onPressed: back,
           ),
@@ -296,12 +389,14 @@ class ChildChatView extends ConsumerWidget {
       children: [
         header,
         Container(height: 1, color: theme.border),
+        SubagentBanner(session: info, onBack: back),
+        // Answered here, on the child's own controller.
         if (state.transcript.pending.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-            child: Text(
-              'It is waiting for your approval: open the full session to answer.',
-              style: theme.type.caption.tint(theme.warning),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: SingleChildScrollView(child: SessionApprovalCard(sessionId: childId)),
             ),
           ),
         Expanded(
