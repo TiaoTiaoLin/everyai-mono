@@ -3,7 +3,7 @@ export const meta = {
   name: 'Ultra',
   description: 'Several independent changes at once. Each item gets its own research note, an implementation in its own worktree, a review through two lenses and a fix round, alongside the other items; then one full test round on the combined work',
   whenToUse: 'The task splits into two or more independent changes that each need research, code and tests',
-  args: '{items: [{id, title, spec}], plan_ref?} or {task, plan_ref?}: one entry per independent change, spec saying what to build and how to tell it works; or the whole task, which a first agent splits into items; plan_ref: a plan in .everyai/plans/ the user picked or approved in this conversation (never one you found on your own)',
+  args: '{items: [{id, title, spec}], plan_ref?} or {task, plan_ref?}: one entry per independent change, spec saying what to build and how to tell it works; or the whole task, which a first agent splits into items; plan_ref: a file name from saved_plans (e.g. 2026-11-05-x.md) the user picked or approved in this conversation (never one you found on your own)',
   phases: [
     { title: 'Split', detail: 'given one task: split it into independent items' },
     { title: 'Research', detail: 'per item, read-only, with a concrete plan' },
@@ -33,11 +33,19 @@ const C = (typeof ctx === 'object' && ctx) || {}
 const REVIEW = C.review || null
 const RUN = (C.runId || 'run').slice(0, 12)
 const NOTES = `.everyai/workflows/runs/${RUN}`
-// Only a plain file in .everyai/plans/: the plan the user picked, never a path into another folder.
-const PLAN_REF = typeof A.plan_ref === 'string' && /^\.everyai\/plans\/[\w.-]+\.md$/.test(A.plan_ref) && !A.plan_ref.includes('..')
-  ? A.plan_ref
-  : ''
-if (A.plan_ref && !PLAN_REF) log(`plan_ref ignored: ${String(A.plan_ref).slice(0, 120)} is not a plan file in .everyai/plans/`)
+// Only a plain file in .everyai/plans/: the plan the user picked, never a path into another folder. Taken as a bare
+// name (what saved_plans lists), .everyai/plans/<name> or an absolute path ending in it; anything else stops the run
+// before it spends, so the lead can correct the call.
+function planRefOf(v) {
+  if (v === undefined || v === null || v === '') return ''
+  const s = typeof v === 'string' ? v.trim() : ''
+  const name = s.includes('/') ? (/(?:^|\/)\.everyai\/plans\/([^/]+)$/.exec(s) || [])[1] : s
+  if (!name || !/^[\w.-]+\.md$/.test(name) || name.includes('..')) {
+    throw new Error(`ultra's plan_ref must be a file name from saved_plans, like 2026-11-05-x.md; got ${String(v).slice(0, 120)}`)
+  }
+  return `.everyai/plans/${name}`
+}
+const PLAN_REF = planRefOf(A.plan_ref)
 // The plan file is git-excluded, so worktrees don't have it: only the agents in the session's folder read it, and
 // research copies what its item needs into the run's note.
 const PLAN_LINE = PLAN_REF ? `\nThe plan the user picked for this work: ${PLAN_REF} (read it first).` : ''
@@ -232,8 +240,8 @@ ${quote(JSON.stringify(actionable, null, 1))}
 For each finding: check it against the code, fix the real ones, and reject the wrong ones with a concrete reason. Add a
 test for every real correctness bug. Run the checks and the touched tests again, and commit.`,
       { label: `refix:${it.id}`, phase: 'Refix', schema: REFIX_SCHEMA, worktree: true })
-      // The implementation's commits merged already; a failed refix only loses its own round.
-      .catch((e) => { log(`${it.id}: refix failed: ${e.message}`); return { failed: e.message, commits: [] } })
+      // The implementation's commits merged already; a failed refix only loses its own round (its row shows why).
+      .catch((e) => ({ failed: e.message, commits: [] }))
   }
   return {
     id: it.id,
@@ -251,11 +259,12 @@ const items = await pipeline(ITEMS, (it) => runItem(it))
 
 phase('Integrate')
 let integrationError = null
-const summary = items.map((r, i) => r || { id: ITEMS[i].id, status: 'failed', commits: [] })
+// null: the item's run threw (its implement agent failed or a cap refused it); its row on the card says why.
+const summary = items.map((r, i) => r || { id: ITEMS[i].id, status: 'failed', error: 'did not finish', commits: [] })
 for (const r of summary) {
   log(r.error
     ? `${r.id}: ${r.error}`
-    : `${r.id}: ${r.status}, ${(r.findings || []).filter((f) => f.severity !== 'nit').length} findings to fix, refix ${r.refix ? 'done' : 'skipped'}`)
+    : `${r.id}: ${r.status}, ${(r.findings || []).filter((f) => f.severity !== 'nit').length} findings to fix, refix ${r.refix ? (r.refix.failed ? 'failed' : 'done') : 'skipped'}`)
 }
 const integration = await agent(`${COMMON}
 INTEGRATE: every item's worktree has merged back into this folder. Run the project's full checks and the whole test

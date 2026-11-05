@@ -353,10 +353,12 @@ final class WorkflowEngine {
     return snapshot;
   }
 
-  void _log(String text) {
-    _logs.add((phase: _phase, text: text));
-    if (_logs.where((l) => l.phase == _phase).length > _logsPerPhase) {
-      _logs.removeAt(_logs.indexWhere((l) => l.phase == _phase));
+  /// [phase]: the heading the line goes under; an agent's notes go under its own phase, not the script's current one.
+  void _log(String text, {String? phase}) {
+    final under = phase ?? _phase;
+    _logs.add((phase: under, text: text));
+    if (_logs.where((l) => l.phase == under).length > _logsPerPhase) {
+      _logs.removeAt(_logs.indexWhere((l) => l.phase == under));
     }
     _emit();
   }
@@ -440,7 +442,7 @@ final class WorkflowEngine {
     // A spawn the journal has was counted when the run began, and goes on past the caps.
     final spawned = journal.spawns.containsKey(call.key);
     if (_capProblem() case final why? when !spawned || _halted != null) {
-      _log('${call.label}: $why');
+      _log('${call.label}: $why', phase: call.phase);
       return bridge.reply(id, error: why);
     }
     if (!spawned) _started++;
@@ -457,7 +459,7 @@ final class WorkflowEngine {
         childId = child.childId;
         await journal.write({'t': 'spawn', 'key': call.key, 'child': childId});
         _view(call.key, (v) => v.copyWith(childId: childId, harness: child.harness, model: child.model));
-        if (child.note case final note?) _log('${call.label}: $note');
+        if (child.note case final note?) _log('${call.label}: $note', phase: call.phase);
       } else {
         _view(call.key, (v) => v.copyWith(childId: childId));
       }
@@ -503,7 +505,7 @@ final class WorkflowEngine {
         if (value is String) {
           value = '$value\n\n$note';
         } else {
-          _log('${call.label}: $note');
+          _log('${call.label}: $note', phase: call.phase);
         }
       }
       if (problem != null) throw Exception(problem);

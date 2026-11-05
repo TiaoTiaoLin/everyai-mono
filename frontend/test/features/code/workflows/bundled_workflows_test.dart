@@ -289,38 +289,78 @@ void main() {
 
     test('a plan_ref reaches only the agents in the session folder; others read only this run\'s notes', () async {
       const plan = '.everyai/plans/2026-11-05-x.md';
-      final agents = _Agents({
-        ...answers(),
-        'split': (_) => {
-          'items': [
-            {'id': 'a', 'title': 'A', 'spec': 'Build A'},
-          ],
-        },
-      });
-      final end = await run('ultra', {'task': 'Build A', 'plan_ref': plan}, agents, ctx: {'runId': 'run-1'});
-      expect(end.status, WorkflowStatus.done);
-      for (final c in agents.calls) {
-        final inFolder = c.label == 'split' || c.label.startsWith('research:');
-        expect(c.prompt.contains(plan), inFolder, reason: c.label);
-        expect(c.prompt, contains('Read no saved plan in .everyai/plans/'), reason: c.label);
-        expect(c.prompt, contains('.everyai/workflows/runs/run-1'), reason: c.label);
-      }
-      expect(agents.byLabel('research:a').prompt, contains('Copy into the note what this item needs from the plan'));
-      for (final bad in ['../x.md', 'notes/x.md', '.everyai/plans/../../x.md']) {
-        final other = _Agents(answers(verdict: 'ship'));
-        final r = await run('ultra', {
-          'items': [
-            {'id': 'a', 'spec': 'Build A'},
-          ],
-          'plan_ref': bad,
-        }, other);
-        expect(r.status, WorkflowStatus.done, reason: bad);
-        for (final c in other.calls) {
-          expect(c.prompt, isNot(contains(bad)), reason: '$bad in ${c.label}');
-          expect(c.prompt, isNot(contains('The plan the user picked')), reason: c.label);
+      // saved_plans lists bare names and savePlan returns absolute paths: each means the same file.
+      for (final given in [plan, '2026-11-05-x.md', '/Users/x/proj/.everyai/plans/2026-11-05-x.md']) {
+        final agents = _Agents({
+          ...answers(),
+          'split': (_) => {
+            'items': [
+              {'id': 'a', 'title': 'A', 'spec': 'Build A'},
+            ],
+          },
+        });
+        final end = await run('ultra', {'task': 'Build A', 'plan_ref': given}, agents, ctx: {'runId': 'run-1'});
+        expect(end.status, WorkflowStatus.done, reason: given);
+        for (final c in agents.calls) {
+          final inFolder = c.label == 'split' || c.label.startsWith('research:');
+          expect(
+            c.prompt.contains('The plan the user picked for this work: $plan '),
+            inFolder,
+            reason: '$given ${c.label}',
+          );
+          expect(c.prompt, contains('Read no saved plan in .everyai/plans/'), reason: c.label);
+          expect(c.prompt, contains('.everyai/workflows/runs/run-1'), reason: c.label);
         }
-        expect(r.logs.map((l) => l.text), contains(startsWith('plan_ref ignored: $bad')), reason: bad);
+        expect(agents.byLabel('research:a').prompt, contains('Copy into the note what this item needs from the plan'));
       }
+    }, skip: skip);
+
+    test(
+      'a plan_ref outside .everyai/plans/ stops the run before any agent, with an error the lead can act on',
+      () async {
+        for (final bad in [
+          '../x.md',
+          'notes/x.md',
+          '.everyai/plans/../../x.md',
+          '/a/.everyai/plans/sub/x.md',
+          'x.txt',
+          7,
+        ]) {
+          final other = _Agents(answers(verdict: 'ship'));
+          final r = await run('ultra', {
+            'items': [
+              {'id': 'a', 'spec': 'Build A'},
+            ],
+            'plan_ref': bad,
+          }, other);
+          expect(r.status, WorkflowStatus.failed, reason: '$bad');
+          expect(r.error, contains('a file name from saved_plans'), reason: '$bad');
+          expect(other.calls, isEmpty, reason: '$bad');
+        }
+      },
+      skip: skip,
+    );
+
+    test('an item whose implementation fails is reported as not finished, and the others go on', () async {
+      final agents = _Agents({'impl:a': (_) => null, ...answers(verdict: 'ship')});
+      final end = await run('ultra', {
+        'items': [
+          {'id': 'a', 'spec': 'Build A'},
+          {'id': 'b', 'spec': 'Build B'},
+        ],
+      }, agents);
+      expect(end.status, WorkflowStatus.done);
+      expect(agents.labels, isNot(contains('review:a:correctness')));
+      expect(agents.labels, contains('review:b:correctness'));
+      expect(
+        [
+          for (final l in end.logs)
+            if (l.phase == 'Integrate') l.text,
+        ],
+        ['a: did not finish', 'b: done, 0 findings to fix, refix skipped'],
+      );
+      // The failed implement agent's row is under Implement on the card.
+      expect(end.agents.firstWhere((v) => v.label == 'impl:a').phase, 'Implement');
     }, skip: skip);
 
     test('a failed split builds the task as one item', () async {

@@ -260,6 +260,17 @@ void main() {
       await run;
     });
 
+    test("a refused agent's line goes under its own phase, not the script's current one", () async {
+      final run = engine(caps: const WorkflowCaps(maxAgents: 1)).run();
+      bridge.note('phase', {'title': 'Research'});
+      await bridge.agent('a');
+      await expectLater(bridge.agent('b', {'phase': 'Review', 'label': 'review:b'}), throwsA(startsWith('cap:')));
+      bridge.finish(null);
+      final end = await run;
+      expect(end.phases, ['Research', 'Review']);
+      expect([for (final l in end.logs) (l.phase, l.text.split(':').first)], [('Review', 'review')]);
+    });
+
     test('at most maxAtOnce agents run at the same time', () async {
       final gates = <String, Completer<void>>{};
       launcher.gate = (call) => (gates[call.prompt] = Completer<void>()).future;
