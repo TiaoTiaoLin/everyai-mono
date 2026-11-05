@@ -148,6 +148,43 @@ final class FilesDelivered extends TranscriptItem {
   ];
 }
 
+enum AlertSeverity { info, warning, critical }
+
+/// A `security_alert` call (the EveryAI harness's client tool, or the host
+/// tool an outside agent calls): what the model reports, read leniently so
+/// a malformed call still shows. Shown as plain text, each field capped.
+final class SecurityAlert extends TranscriptItem {
+  SecurityAlert(this.call) : super(call.id);
+  final ActionCall call;
+
+  static const _cap = 500;
+
+  static String _text(Object? v) {
+    final t = v is String ? v.trim() : '';
+    return t.length <= _cap ? t : '${t.substring(0, _cap)}…';
+  }
+
+  AlertSeverity get severity =>
+      AlertSeverity.values.where((s) => s.name == call.action['severity']).firstOrNull ?? AlertSeverity.warning;
+
+  String get what {
+    final t = _text(call.action['what']);
+    return t.isEmpty ? 'The agent reported a security problem.' : t;
+  }
+
+  String get source => _text(call.action['source']);
+  String get actionTaken => _text(call.action['action_taken']);
+
+  List<String> get exposed => [
+    for (final e
+        in (call.action['exposed'] is List ? call.action['exposed']! as List<Object?> : const <Object?>[]).take(20))
+      if (_text(e) case final t when t.isNotEmpty) t,
+  ];
+
+  /// The model asked for the run to stop until the user replies.
+  bool get stopRun => call.action['stop_run'] == true;
+}
+
 /// A `present_plan` proposal. [verdict] is null while it waits for the user.
 final class PlanProposal extends TranscriptItem {
   PlanProposal(this.call, {this.verdict}) : super(call.id);
@@ -338,6 +375,15 @@ final class Transcript {
   }
 
   bool get running => status == ExecutionStatus.running;
+
+  /// The alert since the user last spoke that asked the run to stop, or null.
+  SecurityAlert? get securityStop {
+    for (final item in items.reversed) {
+      if (item is UserTurn) return null;
+      if (item is SecurityAlert && item.stopRun) return item;
+    }
+    return null;
+  }
 }
 
 /// Folds events into a [Transcript]. Mutable on the inside, immutable
@@ -573,6 +619,10 @@ final class TranscriptBuilder {
     }
     if (card == presentPlanTool) {
       _push(call.id, PlanProposal(call));
+      return;
+    }
+    if (card == securityAlertTool) {
+      _push(call.id, SecurityAlert(call));
       return;
     }
     if (call.toolName == presentFilesTool) {

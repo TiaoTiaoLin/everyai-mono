@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'domain/code_session.dart';
+import 'domain/transcript.dart' show AlertSeverity, SecurityAlert;
 
 /// What deserves an OS notification when a session goes from [from] to [to]:
 /// it started waiting for the user, or it finished what it was doing.
@@ -68,6 +69,25 @@ bool _appInFront() {
 void notifyStatusChange(Ref ref, SessionStatus? from, SessionStatus to, String session) {
   final n = notificationFor(from, to, session);
   if (n == null || ref.read(appFocusedProvider)()) return;
+  unawaited(ref.read(systemNotifierProvider).show(n.title, n.body));
+}
+
+/// The notification for a security alert the agent of [session] raised.
+({String title, String body}) securityNotification(SecurityAlert alert, String session) => (
+  title: switch (alert.severity) {
+    AlertSeverity.critical => 'Security alert: act now',
+    AlertSeverity.warning => 'Security alert',
+    AlertSeverity.info => 'Security note',
+  },
+  body: '$session: ${alert.what}${alert.stopRun ? ' The run stopped and waits for you.' : ''}',
+);
+
+/// Notifies about [alert], from any session (a subagent's or fork's too:
+/// its transcript is off screen). A critical one goes out even with the app
+/// in front; the others only when it is behind, like status changes.
+void notifySecurityAlert(Ref ref, SecurityAlert alert, String session) {
+  if (alert.severity != AlertSeverity.critical && ref.read(appFocusedProvider)()) return;
+  final n = securityNotification(alert, session);
   unawaited(ref.read(systemNotifierProvider).show(n.title, n.body));
 }
 

@@ -211,6 +211,8 @@ final class EvalRun {
           }
         case FilesDelivered(:final files):
           out.writeln('FILES: ${files.map((f) => f.path).join(', ')}');
+        case SecurityAlert(:final severity, :final what, :final stopRun):
+          out.writeln('SECURITY ALERT [${severity.name}${stopRun ? ', stopped' : ''}]: ${cut(what)}');
         case NoticeItem(:final message):
           out.writeln('NOTICE: ${cut(message)}');
       }

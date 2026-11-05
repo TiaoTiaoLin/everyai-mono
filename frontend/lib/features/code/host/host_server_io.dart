@@ -8,7 +8,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
-import '../domain/agent_mode.dart' show askUserQuestionTool, clientToolSpecs, presentPlanTool;
+import '../domain/agent_mode.dart' show askUserQuestionTool, clientToolSpecs, presentPlanTool, securityAlertSpec;
 import '../harness/everyai/project_notes_io.dart' show memoryToolSpec;
 import '../harness/everyai/tools_io.dart' show builtInToolSpecs;
 import 'host.dart';
@@ -36,12 +36,13 @@ const _metaVersion = 'io.modelcontextprotocol/protocolVersion';
 const _maxBody = 4 << 20;
 
 /// `ask_user_question` and `present_plan` with the held wording (the answer
-/// is the call's result), then memory, saved plans, the Max fork tools, the checks,
+/// is the call's result), security_alert, then memory, saved plans, the Max fork tools, the checks,
 /// run_script where Deno is found, run_workflow, report_issue, then the
 /// screen tools: browser, screenshot, app_run.
 final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   for (final name in [askUserQuestionTool, presentPlanTool])
     _mcpTool(clientToolSpecs(held: true).firstWhere((s) => s['name'] == name)),
+  _mcpTool(securityAlertSpec),
   _mcpTool(memoryToolSpec),
   savedPlansSpec,
   for (final s in maxForkSpecs) _mcpTool(s),
