@@ -8,13 +8,15 @@ import 'screen_windows.dart';
 export 'screen_windows.dart';
 
 /// The windows on screen, frontmost first; empty off macOS or on failure.
+/// Windows whose app asked not to be captured (sharing state none, as
+/// KeePassXC sets) are left out.
 Future<List<ScreenWindow>> listWindows() async {
   if (!Platform.isMacOS) return const [];
   const script = r'''
 ObjC.import("CoreGraphics");
 var raw = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID);
 var list = ObjC.deepUnwrap(ObjC.castRefToObject(raw)) || [];
-JSON.stringify(list.filter(w => w.kCGWindowLayer == 0).map(w => ({
+JSON.stringify(list.filter(w => w.kCGWindowLayer == 0 && w.kCGWindowSharingState !== 0).map(w => ({
   id: w.kCGWindowNumber, pid: w.kCGWindowOwnerPID, owner: w.kCGWindowOwnerName || "", title: w.kCGWindowName || "",
   width: Math.round((w.kCGWindowBounds || {}).Width || 0), height: Math.round((w.kCGWindowBounds || {}).Height || 0)
 })))''';

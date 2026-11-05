@@ -950,8 +950,9 @@ pub fn webFetch(app: *App, req: anytype, args: std.json.Value, sink: anytype) ![
     const url = std.mem.trim(u8, openrouter.jsonString(args, "url") orelse "", " \t\r\n");
     const offset: usize = @intCast(@max(0, intArg(args, "offset") orelse 0));
     const limit: usize = @intCast(std.math.clamp(intArg(args, "max_chars") orelse web.default_chars, web.min_chars, web.max_chars));
-    const page = fetcher.get(req.io, req.arena, url, "text/html,text/plain,application/xhtml+xml,*/*;q=0.5") catch |err|
-        return std.fmt.allocPrint(req.arena, "Error: {s}.", .{safe_fetch.describe(err)});
+    var diag: safe_fetch.Diagnostics = .{};
+    const page = fetcher.get(req.io, req.arena, url, "text/html,text/plain,application/xhtml+xml,*/*;q=0.5", &diag) catch |err|
+        return std.fmt.allocPrint(req.arena, "Error: {s}.", .{try safe_fetch.reason(req.arena, err, diag)});
     if (page.status >= 400) return std.fmt.allocPrint(req.arena, "Error: HTTP {d}", .{page.status});
     if (!textual(page.content_type)) return std.fmt.allocPrint(req.arena, "Error: the URL is not a web page ({s}); web_fetch reads text only.", .{page.content_type});
     const text = try readableText(req.arena, page.body, page.body.len);
@@ -964,7 +965,8 @@ pub fn webFetch(app: *App, req: anytype, args: std.json.Value, sink: anytype) ![
     });
     const w = web.window(text, offset, limit);
     const fenced = try safe_fetch.wrapUntrusted(req.arena, page.url, w.text);
-    return std.mem.concat(req.arena, u8, &.{ fenced, "\n", try web.pagingNote(req.arena, n, w) });
+    const note = if (page.notice) |line| try std.mem.concat(req.arena, u8, &.{ line, "\n" }) else "";
+    return std.mem.concat(req.arena, u8, &.{ note, fenced, "\n", try web.pagingNote(req.arena, n, w) });
 }
 
 fn intArg(args: std.json.Value, key: []const u8) ?i64 {

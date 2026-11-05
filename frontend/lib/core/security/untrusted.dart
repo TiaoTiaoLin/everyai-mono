@@ -37,14 +37,33 @@ HiddenKind? _kindOf(int r) {
   return null;
 }
 
+/// Hidden characters that ordinary writing uses: zero-width spaces and
+/// (non-)joiners (emoji sequences, Persian, Indic and Thai text), the word
+/// joiner, the byte-order mark and the direction marks LRM, RLM and ALM next
+/// to right-to-left text. The user's own text keeps them (`keepWriting`);
+/// what goes there are the kinds no ordinary text needs: tag characters, the
+/// extra selectors and the direction overrides and isolates (Trojan Source).
+bool _writing(int r) =>
+    r == 0x200B ||
+    r == 0x200C ||
+    r == 0x200D ||
+    r == 0x2060 ||
+    r == 0xFEFF ||
+    r == 0x200E ||
+    r == 0x200F ||
+    r == 0x061C;
+
+HiddenKind? _hidden(int r, bool keepWriting) => keepWriting && _writing(r) ? null : _kindOf(r);
+
 /// The hidden kinds found in [text], in a fixed order. A leading byte-order
-/// mark doesn't count.
-Set<HiddenKind> hiddenIn(String text) {
+/// mark doesn't count. With [keepWriting], only the kinds ordinary text never
+/// needs (see [_writing]).
+Set<HiddenKind> hiddenIn(String text, {bool keepWriting = false}) {
   final found = <HiddenKind>{};
   var first = true;
   for (final r in text.runes) {
     if (!(first && r == 0xFEFF)) {
-      if (_kindOf(r) case final k?) found.add(k);
+      if (_hidden(r, keepWriting) case final k?) found.add(k);
     }
     first = false;
   }
@@ -56,11 +75,13 @@ Set<HiddenKind> hiddenIn(String text) {
 
 /// [text] without hidden characters (see [HiddenKind]). Zero-width joiners
 /// inside emoji sequences are dropped too: the emoji splits, the meaning stays.
-String stripHidden(String text) {
-  if (hiddenIn(text).isEmpty) return text;
+/// With [keepWriting] (the user's own text), the characters ordinary writing
+/// uses stay (see [_writing]).
+String stripHidden(String text, {bool keepWriting = false}) {
+  if (hiddenIn(text, keepWriting: keepWriting).isEmpty) return text;
   final b = StringBuffer();
   for (final r in text.runes) {
-    if (_kindOf(r) == null) b.writeCharCode(r);
+    if (_hidden(r, keepWriting) == null) b.writeCharCode(r);
   }
   return b.toString();
 }
@@ -70,15 +91,30 @@ String stripHidden(String text) {
 /// the block early. [nonce], when given, is the session's secret: a block quoting a fake one is visibly not ours.
 String untrusted(String text, {required String source, String? nonce}) {
   final hidden = hiddenIn(text);
-  final clean = stripHidden(text)
-      .replaceAll(RegExp('</?untrusted-content', caseSensitive: false), '<_untrusted-content');
+  final clean = stripHidden(text).replaceAll(_tagOpen, '<_untrusted-content');
   final attrs = StringBuffer('source="${_attr(source)}"');
   if (nonce != null && nonce.isNotEmpty) attrs.write(' nonce="${_attr(nonce)}"');
   if (hidden.isNotEmpty) attrs.write(' removed="${hidden.map((k) => k.label).join(', ')}"');
   return '<untrusted-content $attrs>\n$clean\n</untrusted-content>';
 }
 
-String _attr(String s) => s.replaceAll('"', "'").replaceAll(RegExp(r'[\r\n]+'), ' ');
+/// A `<` that opens or closes our tag as a model may read it: any case, `_` for `-`, spaces or a slash before the
+/// name (`</ untrusted-content>`, `</UNTRUSTED_content>`, `< /untrusted-content`).
+final _tagOpen = RegExp(r'<[\s/]*untrusted[-_]content', caseSensitive: false);
+
+/// An attribute value: no quote, line break or angle bracket, so a source (a path, a query, a URL) can't close the
+/// tag or fake a closing one.
+String _attr(String s) =>
+    s.replaceAll('"', "'").replaceAll(RegExp(r'[\r\n]+'), ' ').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+/// [text] without our block's tag lines, for showing a tool result to the person (the transcript): the content's
+/// own look-alikes are defused by [untrusted], so only real tags go.
+String withoutUntrustedTags(String text) {
+  if (!text.contains('untrusted-content')) return text;
+  return text.split('\n').where((l) => !_tagLine.hasMatch(l)).join('\n');
+}
+
+final _tagLine = RegExp(r'^(<untrusted-content( [^\n]*)?>|</untrusted-content>)$');
 
 /// The rule every model gets with untrusted blocks, in our own words. Kept constant (cache-stable).
 const untrustedRule =

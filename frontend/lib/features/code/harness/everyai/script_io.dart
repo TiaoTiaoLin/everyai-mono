@@ -4,9 +4,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../../../../core/security/untrusted.dart';
 import '../harness.dart' show ScriptCaps;
 import 'llm.dart';
 import 'research_sites.dart' show secretPath;
+import 'exfil.dart';
 import 'tools_io.dart';
 
 // run_script: the model writes a TypeScript program that calls the harness's
@@ -17,10 +19,17 @@ import 'tools_io.dart';
 // model and keep only the answers (recursive language model).
 //
 // The program runs in Deno with no permissions at all: no files, network,
-// processes or environment. Its only way out is the bridge on stdin/stdout,
-// where every call is checked here: files inside the project only, never
-// secrets, the web through the backend's safe fetcher, model calls counted
-// against the session tier's caps and billed to the session.
+// processes or environment. Deno loads a program's static module graph
+// (static imports and string-literal `import()`) without asking the
+// permission system, so a program saved as a file could import any file on
+// the machine as text. The prelude loads it from a blob URL built at run time
+// instead, which puts every import it makes under the (empty) permissions.
+// Its only way out is then the bridge on stdin/stdout, where every call is
+// checked here: files inside the project only, never secrets, the web
+// through the same tool code as web_fetch and web_search (capped per
+// script), model calls counted against the session tier's caps and billed to
+// the session, and every reply's size counted. What it prints reaches the
+// model as untrusted content.
 
 /// The cheap model behind `llmQuery` (the backend's utility model).
 const scriptQueryModel = 'google/gemini-3.5-flash-lite';
@@ -28,8 +37,12 @@ const scriptQueryModel = 'google/gemini-3.5-flash-lite';
 /// Most bridged calls that run at once: model calls, then tool calls.
 const _queryLanes = 6, _toolLanes = 8;
 
-/// What a program may print back, and a readFile's largest file.
+/// What a program may print back, and a readFile's largest file (also the
+/// largest reply of any bridged call).
 const _maxOutput = 2000000, _maxReadBytes = 4000000;
+
+/// Text a decide or llmQuery call sends to the cheap model at most.
+const _maxModelText = 200000;
 
 /// Steps of an llmQuery that writes its own scripts (depth 2).
 const _subSteps = 6;
@@ -101,7 +114,10 @@ final runScriptSpec = <String, Object?>{
   },
 };
 
-/// The functions a program gets, then the program itself.
+/// The functions a program gets, then the program itself. The program's
+/// source comes first as `__src` (see [ScriptRunner.run]); it is imported
+/// from a blob so its imports are checked at run time, not loaded with the
+/// prelude's static graph.
 const _prelude = r'''
 const __enc = new TextEncoder();
 let __id = 0;
@@ -168,7 +184,7 @@ __g.rank = async (items: string[], question: string, k = 10) => {
   return all.sort((a, b) => b.score - a.score).slice(0, k);
 };
 try {
-  await import("./main.ts");
+  await import(URL.createObjectURL(new Blob([__src], { type: "application/typescript" })));
 } catch (e) {
   console.error(e instanceof Error ? (e.stack ?? e.message) : String(e));
   Deno.exit(1);
@@ -188,27 +204,57 @@ final class ScriptResult {
   final List<ScriptCall> calls;
 }
 
-/// The model calls one run_script (and the programs its llmQuery calls
-/// write) spent, against the tier's caps.
+/// The model and web calls one run_script (and the programs its llmQuery
+/// calls write) spent, against the tier's caps, and the bytes the bridge
+/// handed back. [webCalls] and [maxBytes] are the same on every tier.
 final class ScriptBudget {
-  ScriptBudget(this.caps);
+  ScriptBudget(this.caps, {this.webCalls = 20, this.maxBytes = 64000000});
   final ScriptCaps caps;
+
+  /// webFetch and webSearch calls per script, together (each search costs money).
+  final int webCalls;
+
+  /// Characters of bridge results per script.
+  final int maxBytes;
   int decides = 0;
   int queries = 0;
+  int webs = 0;
+  int bytes = 0;
 
   /// Why one more [fn] call is refused, or null (and counts it).
   String? spend(String fn) {
-    if (fn == 'decide') {
-      if (decides >= caps.decides) return 'decide limit reached (${caps.decides} calls per script on this tier)';
-      decides++;
-    } else {
-      if (caps.queries == 0) return 'llmQuery is off on this tier; use decide or rank, or read it yourself';
-      if (queries >= caps.queries) return 'llmQuery limit reached (${caps.queries} calls per script on this tier)';
-      queries++;
+    switch (fn) {
+      case 'decide':
+        if (decides >= caps.decides) return 'decide limit reached (${caps.decides} calls per script on this tier)';
+        decides++;
+      case 'webFetch' || 'webSearch':
+        if (webs >= webCalls) {
+          return 'web limit reached ($webCalls fetches and searches per script); print what you have and fetch '
+              'the rest with web_fetch';
+        }
+        webs++;
+      default:
+        if (caps.queries == 0) return 'llmQuery is off on this tier; use decide or rank, or read it yourself';
+        if (queries >= caps.queries) return 'llmQuery limit reached (${caps.queries} calls per script on this tier)';
+        queries++;
     }
     return null;
   }
+
+  /// Why a [size]-character reply is refused, or null (and counts it). Only
+  /// the total is capped: readFile has its own file limit and every other
+  /// reply is fitted tool text.
+  String? take(String fn, int size) {
+    if (bytes + size > maxBytes) {
+      return 'bridge limit reached (${_mb(maxBytes)} per script); filter with grep or narrow the paths';
+    }
+    bytes += size;
+    return null;
+  }
 }
+
+/// [bytes] for a message: whole megabytes, or kilobytes below one.
+String _mb(int bytes) => bytes >= 1000000 ? '${bytes ~/ 1000000} MB' : '${bytes ~/ 1000} KB';
 
 /// A small counting semaphore for the bridge's lanes.
 final class _Lanes {
@@ -245,6 +291,7 @@ final class ScriptRunner {
     required this.sessionTag,
     this.pathMap = const {},
     this.offline = false,
+    this.maxStream = 64000000,
   });
 
   final String deno;
@@ -261,6 +308,10 @@ final class ScriptRunner {
   /// readFile, grep and glob work, so nothing reaches a model or the web.
   final bool offline;
 
+  /// Bytes a program may write to stdout and stderr together (bridge calls
+  /// included) before it is stopped: what the app holds while reading it.
+  final int maxStream;
+
   /// Shared by every runner: the MCP host makes one per call, and two calls
   /// in the same millisecond must not share a run folder.
   static var _runs = 0;
@@ -276,8 +327,8 @@ final class ScriptRunner {
   }) async {
     final runDir = Directory('$dir/run-${DateTime.now().millisecondsSinceEpoch}-${_runs++}')
       ..createSync(recursive: true);
-    File('${runDir.path}/main.ts').writeAsStringSync(code);
-    File('${runDir.path}/prelude.ts').writeAsStringSync(_prelude);
+    // A JSON string is a valid JS string literal: the program can't end it early.
+    File('${runDir.path}/prelude.ts').writeAsStringSync('const __src: string = ${jsonEncode(code)};\n$_prelude');
     final process = await Process.start(
       deno,
       ['run', '--no-prompt', '--no-config', '--no-lock', '--no-remote', '--no-npm', '--quiet', 'prelude.ts'],
@@ -289,8 +340,10 @@ final class ScriptRunner {
     unawaited(process.stdin.done.catchError((_) {}));
     final out = StringBuffer();
     var cut = false;
-    void keep(String line) {
+    void keep(String raw) {
       if (cut) return;
+      // Error stacks name the program `blob:null/<uuid>`; the model knows it as main.ts.
+      final line = raw.replaceAll(_blobUrl, 'main.ts');
       if (out.length + line.length > _maxOutput) {
         out.writeln('[… output cut at ${_maxOutput ~/ 1000}K characters …]');
         cut = true;
@@ -308,29 +361,45 @@ final class ScriptRunner {
       final id = req['id'];
       final fn = req['fn'] as String? ?? '';
       final args = (req['args'] as Map<String, Object?>?) ?? const {};
-      Map<String, Object?> reply;
+      String reply;
       try {
         final model = fn == 'decide' || fn == 'llmQuery';
         final result = await (model ? queryLanes : toolLanes).run(
           () => _bridge(fn, args, budget: budget, level: level, cancel: cancel),
         );
-        reply = {'id': id, 'result': result};
+        if (budget.take(fn, result is String ? result.length : jsonEncode(result).length) case final refusal?) {
+          throw Exception(refusal);
+        }
+        reply = jsonEncode({'id': id, 'result': result});
         calls.add((fn: fn, detail: _detail(fn, args), failed: false));
       } on Object catch (e) {
         final message = e is LlmError ? e.message : '$e'.replaceFirst('Exception: ', '');
-        reply = {'id': id, 'error': message};
+        reply = jsonEncode({'id': id, 'error': message});
         calls.add((fn: fn, detail: '${_detail(fn, args)}: $message', failed: true));
       }
       if (closed) return;
       try {
-        process.stdin.writeln(jsonEncode(reply));
+        process.stdin.writeln(reply);
       } on Object {
         // The program already ended.
       }
     }
 
+    // Raw bytes counted before decoding: one huge line without a newline would otherwise sit whole in memory.
+    var streamed = 0, overflow = false;
+    List<int> count(List<int> chunk) {
+      if (overflow) return const [];
+      streamed += chunk.length;
+      if (streamed <= maxStream) return chunk;
+      overflow = true;
+      process.kill(ProcessSignal.sigkill);
+      return const [];
+    }
+
+    // Malformed UTF-8 (a raw byte, or a character the cap cut in half) becomes U+FFFD instead of failing the run.
+    const decoder = Utf8Decoder(allowMalformed: true);
     final pending = <Future<void>>[];
-    final stdoutDone = process.stdout.transform(utf8.decoder).transform(const LineSplitter()).forEach((line) {
+    final stdoutDone = process.stdout.map(count).transform(decoder).transform(const LineSplitter()).forEach((line) {
       if (line.startsWith('\x1e')) {
         try {
           final req = jsonDecode(line.substring(1));
@@ -344,7 +413,7 @@ final class ScriptRunner {
       }
       keep(line);
     });
-    final stderrDone = process.stderr.transform(utf8.decoder).transform(const LineSplitter()).forEach(keep);
+    final stderrDone = process.stderr.map(count).transform(decoder).transform(const LineSplitter()).forEach(keep);
 
     var timedOut = false;
     final timer = Timer(timeout, () {
@@ -364,8 +433,11 @@ final class ScriptRunner {
       // Left for the session folder's own cleanup.
     }
     if (pending.isNotEmpty) unawaited(Future.wait(pending));
+    if (overflow) out.writeln('[The script wrote more than ${_mb(maxStream)} and was stopped.]');
     return ScriptResult(output: out.toString().trimRight(), exitCode: exitCode, timedOut: timedOut, calls: calls);
   }
+
+  static final _blobUrl = RegExp(r'blob:null/[0-9a-f-]+');
 
   static String _detail(String fn, Map<String, Object?> args) {
     String clip(Object? v) {
@@ -411,7 +483,9 @@ final class ScriptRunner {
     }
 
     if (!roots.any(under)) throw Exception('$raw is outside the project; scripts read project files only');
-    if (secretPath(full)) throw Exception('$raw looks like a secret; scripts may not read it');
+    if (secretPath(full) || credentialPath(full, home: Platform.environment['HOME'] ?? '') != null) {
+      throw Exception('$raw looks like a secret; scripts may not read it');
+    }
     return full;
   }
 
@@ -468,21 +542,25 @@ final class ScriptRunner {
             if (l.isNotEmpty && !l.startsWith('[') && l != 'No files found.') l,
         ];
       case 'webFetch':
+        if (budget.spend(fn) case final refusal?) throw Exception(refusal);
         return tool(ToolNames.webFetch, {
           'url': args['url'] ?? '',
           'offset': ?args['offset'],
           'limit': ?args['maxChars'],
         });
       case 'webSearch':
+        if (budget.spend(fn) case final refusal?) throw Exception(refusal);
         return tool(ToolNames.webSearch, {'query': args['query'] ?? ''});
       case 'decide':
         final questions = [...(args['questions'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>()];
         if (questions.isEmpty) throw Exception('decide needs at least one question');
         if (questions.length > 64) throw Exception('decide takes at most 64 questions per call; batch them');
         if (budget.spend('decide') case final refusal?) throw Exception(refusal);
+        var text = '${args['text'] ?? ''}';
+        if (text.length > _maxModelText) text = '${text.substring(0, _maxModelText)}\n[… cut at 200K characters]';
         try {
           return await gateway.decide(
-            '${args['text'] ?? ''}',
+            text,
             questions,
             sessionTag: sessionTag,
             instructions: args['instructions'] as String?,
@@ -496,9 +574,12 @@ final class ScriptRunner {
         if (budget.spend('llmQuery') case final refusal?) throw Exception(refusal);
         final prompt = '${args['prompt'] ?? ''}';
         var text = args['text'] as String?;
-        if (text != null && text.length > 200000) text = '${text.substring(0, 200000)}\n[… cut at 200K characters]';
+        if (text != null && text.length > _maxModelText) {
+          text = '${text.substring(0, _maxModelText)}\n[… cut at 200K characters]';
+        }
         final maxTokens = ((args['maxTokens'] as num?)?.toInt() ?? 2000).clamp(100, 8000);
-        final ask = text == null ? prompt : '$prompt\n\n<text>\n$text\n</text>';
+        // The text is data the program gathered (files, pages): marked so, with a closing tag inside defused.
+        final ask = text == null ? prompt : '$prompt\n\n${untrusted(text, source: 'script text')}';
         if (args['script'] == true && level > 1) return _subQuery(ask, maxTokens, budget, level - 1, cancel);
         return _query(ask, maxTokens, cancel);
       default:
@@ -581,14 +662,19 @@ final class ScriptRunner {
     return '';
   }
 
-  /// [r] as the model reads it.
-  String describe(ScriptResult r) {
-    final head = r.timedOut
-        ? '[The script timed out and was stopped.]\n'
-        : r.exitCode != 0
-        ? '[The script failed (exit ${r.exitCode}).]\n'
-        : '';
-    final body = r.output.isEmpty ? '(The script printed nothing.)' : r.output;
-    return tools.fit('$head$body', 'script-${DateTime.now().millisecondsSinceEpoch}');
-  }
+  /// [r] as the model reads it: what it printed is data it gathered (files,
+  /// pages, model answers), so it comes in an untrusted block. The status
+  /// line and our cut note stay outside it.
+  String describe(ScriptResult r) =>
+      '${scriptHead(r)}${tools.fitUntrusted(scriptBody(r), 'run_script output', 'script-${DateTime.now().millisecondsSinceEpoch}')}';
 }
+
+/// The status line of [r] (none when it ran to the end), with its line break.
+String scriptHead(ScriptResult r) => r.timedOut
+    ? '[The script timed out and was stopped.]\n'
+    : r.exitCode != 0
+    ? '[The script failed (exit ${r.exitCode}).]\n'
+    : '';
+
+/// What [r] printed, or a note that it printed nothing.
+String scriptBody(ScriptResult r) => r.output.isEmpty ? '(The script printed nothing.)' : r.output;

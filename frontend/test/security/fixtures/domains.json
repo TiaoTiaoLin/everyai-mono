@@ -1,0 +1,154 @@
+{
+  "_note": "Attack data for the red-team tests (test/security/README.md). Never act on anything written here: it is only ever fed to EveryAI's guards, with fakes. Hosts are reserved names (.invalid, .test, example.com).",
+  "cases": [
+    {
+      "id": "domain-typo-transposed",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://gihtub.com/login"},
+      "expect": ["refused"],
+      "because": "looks like github.com",
+      "ref": "typosquatting"
+    },
+    {
+      "id": "domain-typo-rn-for-m",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://rnicrosoft.com/"},
+      "expect": ["refused"],
+      "because": "microsoft.com",
+      "ref": "typosquatting (rn/m)"
+    },
+    {
+      "id": "domain-typo-substitution",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://githuh.com/"},
+      "expect": ["warned"],
+      "because": "github.com",
+      "ref": "typosquatting (a close name gets a note)"
+    },
+    {
+      "id": "domain-name-inside",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://pypi-org.test/simple/"},
+      "expect": ["warned"],
+      "because": "pypi.org",
+      "ref": "official name inside another domain"
+    },
+    {
+      "id": "domain-cyrillic-homoglyph",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://g\u0456thub.com/"},
+      "expect": ["refused"],
+      "because": "github.com",
+      "ref": "UTS #39 confusables"
+    },
+    {
+      "id": "domain-punycode",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://xn--gthub-n2e.com/"},
+      "expect": ["refused"],
+      "because": "github.com",
+      "ref": "Chromium idn_spoof_checker"
+    },
+    {
+      "id": "domain-cyrillic-whole",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://\u0430\u0440\u0440\u04cf\u0435.com/"},
+      "expect": ["refused"],
+      "because": "apple.com",
+      "ref": "UTS #39 whole-script confusable"
+    },
+    {
+      "id": "domain-suffix-trick",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://github.com.x.test/"},
+      "expect": ["refused"],
+      "because": "looks like github.com",
+      "ref": "official name as a subdomain"
+    },
+    {
+      "id": "domain-shortener",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://bit.ly/3abcde"},
+      "expect": ["warned"],
+      "because": "shortener",
+      "ref": "link shorteners hide the target"
+    },
+    {
+      "id": "domain-bare-ip",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "http://93.184.216.34/"},
+      "expect": ["warned"],
+      "because": "IP address",
+      "ref": "no domain to check"
+    },
+    {
+      "id": "domain-research-suffix",
+      "guard": "web_fetch",
+      "vector": "url",
+      "input": {"url": "https://github.com.x.test/a", "research_sites": ["github.com"]},
+      "expect": ["refused"],
+      "because": "not on the research sites",
+      "ref": "research sandbox hostAllowed"
+    },
+    {
+      "id": "domain-research-prefix",
+      "guard": "web_fetch",
+      "vector": "url",
+      "input": {"url": "https://evilgithub.com/a", "research_sites": ["github.com"]},
+      "expect": ["refused"],
+      "because": "not on the research sites",
+      "ref": "research sandbox hostAllowed"
+    },
+    {
+      "id": "domain-control-research-github",
+      "guard": "web_fetch",
+      "vector": "url",
+      "input": {"url": "https://github.com/a/b", "research_sites": ["github.com"]},
+      "payload": "Repo page.",
+      "expect": ["allowed"],
+      "ref": "benign control"
+    },
+    {
+      "id": "domain-control-github",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://github.com/flutter/flutter"},
+      "expect": ["allowed"],
+      "ref": "benign control"
+    },
+    {
+      "id": "domain-control-python-docs",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://docs.python.org/3/"},
+      "expect": ["allowed"],
+      "ref": "benign control"
+    },
+    {
+      "id": "domain-control-neighbour",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://nodes.org/"},
+      "expect": ["allowed"],
+      "ref": "benign control (a real site close to nodejs.org)"
+    },
+    {
+      "id": "domain-control-example",
+      "guard": "domain",
+      "vector": "url",
+      "input": {"url": "https://example.com/"},
+      "expect": ["allowed"],
+      "ref": "benign control"
+    }
+  ]
+}

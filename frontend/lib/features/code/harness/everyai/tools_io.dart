@@ -8,13 +8,18 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
+import '../../../../core/security/untrusted.dart';
+import '../../domain/permissions.dart' show commandPaths;
 import 'apply_patch.dart';
 import 'browser_io.dart';
+import 'exfil.dart';
 import 'llm.dart';
+import 'package_registry_io.dart';
 import 'shell_io.dart';
 import 'screen_tools_io.dart';
 import 'window_capture_io.dart';
 import 'scrub.dart';
+import 'untrusted_tools.dart';
 
 // The tool set and its behaviour follow opencode's (MIT; see
 // THIRD_PARTY_NOTICES.md) and the conventions of other coding harnesses;
@@ -309,7 +314,9 @@ final _specs = [
     'resize {width, height} · close.\n'
     '- Every action reports what the page logged since the last one (console errors, uncaught exceptions, '
     'failed requests); console reads it alone. screenshot returns the picture: look at it before saying a UI works.\n'
-    '- Add screenshot: true to any action to see the page right after it.',
+    '- Add screenshot: true to any action to see the page right after it.\n'
+    '- It never types into password, one-time code or payment fields nor submits their forms, and eval must not '
+    'either: the user does that. Downloads land in .everyai/scratch/downloads.',
     {
       'action': {
         'type': 'string',
@@ -349,7 +356,8 @@ final _specs = [
     ToolNames.screenshot,
     'Take a screenshot of a desktop app\'s window that this session started (a native, Flutter or Electron app you '
     'run here, or one built in this folder) and look at it. Other apps\' windows are the user\'s and are never '
-    'captured. macOS only for now; for web pages use browser instead.',
+    'captured, and password managers and banking or payment pages never are. macOS only for now; for web pages use '
+    'browser instead.',
     {
       'app': {'type': 'string', 'description': 'App or window name to pick, when the session runs several'},
     },
@@ -522,10 +530,18 @@ final class ToolRunner {
     this.pathMap = const {},
     this.researchSites,
     this.browser,
+    this.ownFolders = const [],
     Scrubber? scrubber,
+    this.pushTargets,
+    this.loadLoginEnv = false,
+    this.packages,
   }) : scrubber = scrubber ?? Scrubber.forProject(root, extra: [gateway.apiKey]);
 
   final String root;
+
+  /// Folders outside [root] whose files are the user's own (the session's
+  /// skills, see [skillFolders]): read doesn't mark them as outside text.
+  final List<String> ownFolders;
 
   /// The session's headless browser; null (tests) means none.
   final HeadlessBrowser? browser;
@@ -534,11 +550,115 @@ final class ToolRunner {
   final List<String>? researchSites;
   bool get research => researchSites != null && !bypass;
 
-  /// The session runs in Bypass permissions: no EveryAI refusals (the research sandbox, secrets in URLs or queries).
+  /// The session runs in Bypass permissions: the research sandbox is off. The tools' own guardrails (see [_guard])
+  /// stay on.
   bool bypass = false;
 
-  /// Stops secrets leaving in fetched URLs and search queries.
+  /// Checks the packages a bash command installs (see [PackageGuard]); null (tests) means no check. In every mode,
+  /// Bypass too, like [_guard]. The session owns it, so its lookup cache outlives a model switch.
+  final PackageGuard? packages;
+
+  /// Stops secrets leaving in fetched URLs and search queries, and hides them in tool output (see
+  /// [EveryAiSession]).
   final Scrubber scrubber;
+
+  /// The repository's remotes (names and URLs) when the session started: git push goes to these only. With
+  /// [loadLoginEnv], loaded by [ready] when not given; null skips the check.
+  Set<String>? pushTargets;
+
+  /// Whether [ready] adds the login shell's secrets to [scrubber] and loads [pushTargets]. Off for tests and the
+  /// host's offline script runner, which shouldn't start a login shell.
+  final bool loadLoginEnv;
+
+  Future<void>? _prepared;
+
+  /// Done once before the first call (and awaited by the session before it checks a call): the login shell's
+  /// secrets into [scrubber] (keys exported in `.zshrc` aren't in the app's environment), and the remotes git may
+  /// push to.
+  Future<void> ready() => _prepared ??= loadLoginEnv ? _prepare() : Future.value();
+
+  Future<void> _prepare() async {
+    scrubber.addEnv((await ShellEnv.load()).env);
+    if (pushTargets == null) {
+      final targets = <String>{};
+      try {
+        final r = await Process.run('git', ['remote', '-v'], workingDirectory: root);
+        if (r.exitCode == 0) {
+          for (final line in const LineSplitter().convert(r.stdout as String)) {
+            targets.addAll(line.split(RegExp(r'\s+')).take(2).where((w) => w.isNotEmpty));
+          }
+        }
+      } on Object {
+        // Not a repository, or no git: only a plain `git push` goes.
+      }
+      pushTargets ??= targets;
+    }
+  }
+
+  static String get _home => Platform.environment['HOME'] ?? '';
+
+  /// [path] with symlinks resolved, so a link can't dress a credential store up as a project file.
+  static String _real(String path) {
+    try {
+      if (FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound) {
+        return File(path).resolveSymbolicLinksSync();
+      }
+    } on FileSystemException {
+      // Checked as written.
+    }
+    return path;
+  }
+
+  /// Why [tool] with [args] is refused by the tools' own guardrails, in every mode (Bypass too) and with no
+  /// approval: reading a credential store, a command that prints or ships out secrets, a URL or query carrying one,
+  /// and writing the mark [Scrubber.redact] leaves in place of a secret.
+  String? _guard(String tool, Map<String, Object?> args) {
+    String? why;
+    switch (tool) {
+      case ToolNames.read || ToolNames.grep || ToolNames.glob:
+        final path = resolvePath(root, (args['file_path'] ?? args['path'] ?? '') as String);
+        final h = _home;
+        if (credentialPath(_real(path), home: h) ?? credentialPath(path, home: h) case final what?) {
+          why = 'the path holds $what';
+        } else if (tool == ToolNames.grep) {
+          if (credentialsUnder(_real(path), home: h) case final what?) {
+            why = 'the folder holds $what; search a project folder';
+          }
+        }
+      case ToolNames.bash:
+        final command = args['command'] as String? ?? '';
+        if (command.contains(Scrubber.hiddenMark)) return _hiddenMarkRefusal;
+        why =
+            secretSourceReason(command, home: _home, cwd: shell.cwd) ??
+            exfilReason(command, scrubber: scrubber, pushTargets: pushTargets);
+      case ToolNames.webFetch:
+        final url = (args['url'] as String? ?? '').trim();
+        if (scrubber.leak(url) case final what?) {
+          why = 'the URL contains $what';
+        } else if (exfilHost(Uri.tryParse(url)?.host ?? '') case final site?) {
+          why = '$site is a site that takes uploads';
+        }
+      case ToolNames.webSearch:
+        if (scrubber.leak((args['query'] as String? ?? '').trim()) case final what?) why = 'the query contains $what';
+      case ToolNames.browser:
+        // open's URL, and the free text of eval (page JavaScript, which can send requests) and type.
+        final text = '${args['url'] ?? ''} ${args['script'] ?? ''} ${args['text'] ?? ''}'.trim();
+        if (scrubber.leak(text) case final what?) {
+          why = 'the browser would get $what';
+        } else if (args['action'] != 'open') {
+          if (dropSiteIn(text) case final site?) why = '$site is a site that takes uploads';
+        }
+      case ToolNames.write || ToolNames.edit || ToolNames.applyPatch:
+        final text = '${args['content'] ?? ''}${args['new_string'] ?? ''}${args['patch'] ?? ''}';
+        if (text.contains(Scrubber.hiddenMark)) return _hiddenMarkRefusal;
+    }
+    return why == null ? null : guardRefusal(why);
+  }
+
+  static const _hiddenMarkRefusal =
+      'Error: the text contains ${Scrubber.hiddenMark} …], a value EveryAI hid from you (a secret). Writing it would '
+      "replace the user's real secret. Change the file around that line with edit, or ask the user to change the "
+      'secret.';
 
   /// Where a research job may write: its notes.
   String get researchDir => '$root/.everyai/scratch/research';
@@ -606,11 +726,27 @@ final class ToolRunner {
 
   /// Why a research job may not make this call at all, before it is shown
   /// for approval: such a call is never run, so no one should be asked.
-  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) => _researchRefusal(tool, mapped(raw));
+  /// The same for a call the tools' guardrails refuse.
+  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) {
+    final args = mapped(raw);
+    return _researchRefusal(tool, args) ?? _guard(tool, args);
+  }
+
+  /// The package check's refusal of a bash call, before it is shown for approval (see [PackageGuard]): an install
+  /// that will be refused shouldn't be put to the user first. [_bash] checks again when it runs.
+  Future<String?> packageRefusal(String tool, Map<String, Object?> raw) async {
+    if (tool != ToolNames.bash || packages == null) return null;
+    final command = (raw['command'] as String? ?? '').trim();
+    if (command.isEmpty) return null;
+    return (await packages!.check(command, cwd: shell.cwd, root: root)).refusal;
+  }
 
   Future<ToolOutput> run(String tool, Map<String, Object?> raw, {Future<void>? cancel}) async {
+    await ready();
     final args = mapped(raw);
-    if (_researchRefusal(tool, args) case final refusal?) return ToolOutput(refusal, isError: true);
+    if (_researchRefusal(tool, args) ?? _guard(tool, args) case final refusal?) {
+      return ToolOutput(refusal, isError: true);
+    }
     try {
       return switch (tool) {
         ToolNames.bash => await _bash(args, cancel),
@@ -659,11 +795,19 @@ final class ToolRunner {
       app: app,
     );
     // Another app's window is the user's: never captured here.
-    if (pick case OwnWindow(:final window, :final others)) {
-      return captureFor(window, root: root, vision: vision, others: others);
+    if (pick case OwnWindow(:final window, :final others, :final skipped)) {
+      final shot = await captureFor(window, root: root, vision: vision, others: others);
+      return skipped.isEmpty || shot.isError
+          ? shot
+          : ToolOutput('${shot.text}\n${skippedText(skipped)}', images: shot.images);
     }
+    final skipped = switch (pick) {
+      NoWindow(:final skipped) => '${skippedText(skipped)} ',
+      _ => '',
+    };
     return ToolOutput(
-      'Error: no window of an app this session started${app == null || app.isEmpty ? '' : ' matching "$app"'}. Start '
+      'Error: ${skipped.trimLeft()}no window of an app this session started'
+      '${app == null || app.isEmpty ? '' : ' matching "$app"'}. Start '
       'the app from this session (bash with run_in_background) or open one built in this folder, wait for its '
       'window, then try again. Other apps\' windows are the user\'s and are not captured. For web pages use browser.',
       isError: true,
@@ -677,42 +821,90 @@ final class ToolRunner {
 
   String _fit(String text, String name) {
     if (text.length <= maxToolText) return text;
+    const half = maxToolText ~/ 2;
+    return '${text.substring(0, half)}\n\n${_spill(text, name, maxToolText)}\n\n${text.substring(text.length - half)}';
+  }
+
+  /// Saves [text] under `.everyai/spill/` and returns our note for the cut.
+  String _spill(String text, String name, int kept) {
     final dir = Directory(spillDir)..createSync(recursive: true);
     final file = File('${dir.path}/$name.txt')..writeAsStringSync(text);
-    const half = maxToolText ~/ 2;
-    return '${text.substring(0, half)}\n\n[… ${text.length - maxToolText} characters cut. The full output is in '
-        '${file.path}; read it in parts or grep it. …]\n\n${text.substring(text.length - half)}';
+    return '[… ${text.length - kept} characters cut. The full output is in ${file.path}; read it in parts or grep '
+        'it. …]';
+  }
+
+  /// [text] from [source] in an untrusted block, cut like [_fit] when long: the head and the tail each in their own
+  /// block, so our cut note stays outside them (a page can't fake it). Leaves room for the notes around it, so the
+  /// [_fit] that follows keeps it whole.
+  String fitUntrusted(String text, String source, String name) {
+    const kept = maxToolText - 2000;
+    if (text.length <= kept) return untrusted(text, source: source);
+    const half = kept ~/ 2;
+    return '${untrusted(text.substring(0, half), source: source)}\n\n${_spill(text, name, kept)}\n\n'
+        '${untrusted(text.substring(text.length - half), source: source)}';
   }
 
   Future<ToolOutput> _bash(Map<String, Object?> args, Future<void>? cancel) async {
     final command = (args['command'] as String? ?? '').trim();
     if (command.isEmpty) return const ToolOutput('Error: command is empty.', isError: true);
+    final cwd = shell.cwd;
+    final check = await packages?.check(command, cwd: cwd, root: root);
+    if (check?.refusal case final why?) return ToolOutput(why, isError: true);
     if (args['run_in_background'] == true) {
       final bg = await shell.start(command, description: args['description'] as String? ?? '');
       return ToolOutput(
         'Started in the background as ${bg.id} (pid ${bg.pid}). Use bash_output to read its output, monitor '
-        'to wait for a line or its exit, and kill_shell to stop it.',
+        'to wait for a line or its exit, and kill_shell to stop it.${PackageGuard.block(check?.notes ?? const [])}',
         observation: {'shell_id': bg.id},
       );
     }
     final ms = ((args['timeout'] as num?)?.toInt() ?? 120000).clamp(1000, 600000);
+    final name = 'bash-${DateTime.now().millisecondsSinceEpoch}';
+    final locks = check == null ? null : await packages!.snapshot(cwd, root, check.scan);
     final r = await shell.run(
       command,
       timeout: Duration(milliseconds: ms),
       cancel: cancel,
     );
-    final out = r.output.trimRight();
+    final out = _commandOutput(command, r.output.trimRight(), name, cwd: cwd);
     final note = r.timedOut
         ? '\n[Killed after ${ms ~/ 1000} s. Run long commands in the background with run_in_background.]'
         : r.cancelled
         ? '\n[Stopped by the user.]'
         : '';
     final shown = '${out.isEmpty ? '(no output)' : out}$note${r.exitCode == 0 ? '' : '\n[exit code ${r.exitCode}]'}';
+    final checked = check == null
+        ? ''
+        : PackageGuard.block([...check.notes, ...await packages!.lockNotes(locks!, command)]);
     return ToolOutput(
-      _fit(shown, 'bash-${DateTime.now().millisecondsSinceEpoch}'),
+      '${_fit(shown, name)}$checked',
       isError: r.exitCode != 0,
       observation: {'exit_code': r.exitCode, 'cwd': shell.cwd},
     );
+  }
+
+  /// [output] of [command] (run in [cwd]) as the model gets it: in an
+  /// untrusted block when the command prints text from outside (see
+  /// [untrustedCommand]) or names a file outside the project (`cat
+  /// node_modules/x/README.md`, `head ~/Downloads/page.html`), else without
+  /// hidden characters (named in a note when there were any).
+  String _commandOutput(String command, String output, String name, {String? cwd}) {
+    if (output.isEmpty) return output;
+    final source = untrustedCommand(command) ?? _outsidePathIn(command, cwd ?? shell.cwd);
+    if (source != null) return fitUntrusted(output, source, name);
+    return stripHiddenNoted(output);
+  }
+
+  /// `command output: <path>` for the first path argument of [command] that
+  /// is outside the project (see [outsideProject]), or null. `/dev/…` (null,
+  /// stdin) doesn't count.
+  String? _outsidePathIn(String command, String cwd) {
+    for (final w in commandPaths(command)) {
+      if (w.startsWith('/dev/') || w.contains(r'$')) continue;
+      final path = resolvePath(cwd, w);
+      if (outsideProject(root, path, own: ownFolders)) return 'command output: $path';
+    }
+    return null;
   }
 
   BackgroundShell? _bg(Map<String, Object?> args) => shell.backgroundShell(args['shell_id'] as String? ?? '');
@@ -727,7 +919,8 @@ final class ToolRunner {
       final re = RegExp(f);
       text = text.split('\n').where(re.hasMatch).join('\n');
     }
-    return ToolOutput(_fit('[${b.id}: ${_status(b)}]\n${text.isEmpty ? '(no new output)' : text}', 'bg-${b.id}'));
+    final shown = text.isEmpty ? '(no new output)' : _commandOutput(b.command, text, 'bg-${b.id}');
+    return ToolOutput(_fit('[${b.id}: ${_status(b)}]\n$shown', 'bg-${b.id}'));
   }
 
   Future<ToolOutput> _killShell(Map<String, Object?> args) async {
@@ -770,11 +963,12 @@ final class ToolRunner {
     final fresh = b.output.substring(from.clamp(0, b.output.length));
     b.readTo = b.output.length;
     final why = matched != null
-        ? 'Matched: $matched'
+        ? 'Matched: ${stripHidden(matched!)}'
         : !b.running
         ? '${b.id} exited with code ${b.exitCode}.'
         : 'Still running after ${ms ~/ 1000} s with no match.';
-    return ToolOutput(_fit('$why\n--- output while waiting ---\n${fresh.isEmpty ? '(none)' : fresh}', 'bg-${b.id}'));
+    final shown = fresh.isEmpty ? '(none)' : _commandOutput(b.command, fresh, 'bg-${b.id}');
+    return ToolOutput(_fit('$why\n--- output while waiting ---\n$shown', 'bg-${b.id}'));
   }
 
   ToolOutput _readFile(Map<String, Object?> args) {
@@ -804,22 +998,52 @@ final class ToolRunner {
       );
     }
     if (bytes.take(8000).contains(0)) return ToolOutput('$path is a binary file (${bytes.length} bytes).');
-    final lines = const LineSplitter().convert(utf8.decode(bytes, allowMalformed: true));
+    final text = utf8.decode(bytes, allowMalformed: true);
+    // A secret file in the project (.env.local, a key): its values may not leave later, and are hidden from now on.
+    if (secretPath(path)) scrubber.remember(Scrubber.dotEnvLines(text));
+    final lines = const LineSplitter().convert(text);
     final offset = ((args['offset'] as num?)?.toInt() ?? 1).clamp(1, lines.length + 1);
     final limit = ((args['limit'] as num?)?.toInt() ?? 2000).clamp(1, 2000);
     _read[path] = file.lastModifiedSync();
     if (lines.isEmpty) return ToolOutput('(empty file)', observation: {'path': path});
     final end = (offset - 1 + limit).clamp(0, lines.length);
-    final out = StringBuffer();
+    final outside = outsideProject(root, path, own: ownFolders);
+    final body = StringBuffer();
+    // The user's own file: the hidden characters no ordinary text needs come out of what the model sees (edits still
+    // match, see applyEdit); emoji joiners and direction marks stay, so rewriting a line keeps them.
+    final hidden = <HiddenKind>{};
+    final hiddenLines = <int>[];
     for (var i = offset - 1; i < end; i++) {
-      final l = lines[i];
-      out.writeln('${'${i + 1}'.padLeft(6)}\t${l.length > 2000 ? '${l.substring(0, 2000)}…' : l}');
+      var l = lines[i];
+      if (!outside) {
+        final kinds = hiddenIn(l, keepWriting: true);
+        if (kinds.isNotEmpty) {
+          hidden.addAll(kinds);
+          hiddenLines.add(i + 1);
+          l = stripHidden(l, keepWriting: true);
+        }
+      }
+      body.writeln('${'${i + 1}'.padLeft(6)}\t${l.length > 2000 ? '${l.substring(0, 2000)}…' : l}');
+    }
+    final out = StringBuffer();
+    final name = 'read-${DateTime.now().millisecondsSinceEpoch}';
+    if (outside) {
+      // Not the user's: a dependency, another tool's output, a file elsewhere on the machine.
+      out.writeln(fitUntrusted(body.toString().trimRight(), path, name));
+    } else {
+      if (hiddenLines.isNotEmpty) {
+        final shown = hiddenLines.take(10).join(', ');
+        final more = hiddenLines.length > 10 ? ' and ${hiddenLines.length - 10} more' : '';
+        out.writeln(
+          '[Hidden characters removed (${hiddenLabels({for (final k in HiddenKind.values)
+            if (hidden.contains(k)) k})}) on line${hiddenLines.length == 1 ? '' : 's'} $shown$more. The file still has them: lines you copy unchanged into edit, apply_patch or write keep them, lines '
+          'you change lose them. To remove one without other changes, use sed.]',
+        );
+      }
+      out.write(body);
     }
     if (end < lines.length) out.writeln('\n[${lines.length - end} more lines; read on with offset ${end + 1}.]');
-    return ToolOutput(
-      _fit(out.toString(), 'read-${DateTime.now().millisecondsSinceEpoch}'),
-      observation: {'path': path},
-    );
+    return ToolOutput(_fit(out.toString(), name), observation: {'path': path});
   }
 
   String? _staleRead(String path) {
@@ -843,7 +1067,8 @@ final class ToolRunner {
     }
     // Parts meet on a line break.
     final after = !append || before.isEmpty
-        ? content
+        // Lines copied unchanged from what read showed keep their hidden characters (see keepHidden).
+        ? keepHidden(before.split('\n'), content.split('\n')).join('\n')
         : '$before${before.endsWith('\n') || content.startsWith('\n') ? '' : '\n'}$content';
     file.parent.createSync(recursive: true);
     file.writeAsStringSync(after);
@@ -999,6 +1224,11 @@ final class ToolRunner {
     final pattern = args['pattern'] as String? ?? '';
     final where = resolvePath(root, args['path'] as String? ?? '');
     final mode = args['output_mode'] as String? ?? 'files_with_matches';
+    // Secret files never show up in grep (a `.env` glob included): their lines would reach the model unscrubbed.
+    // A named path is searched whatever the globs say, so a link to a secret is checked where it points too.
+    if (secretPath(where) || secretPath(_real(where))) {
+      return ToolOutput('Error: ${_relative(where)} looks like a secret; grep skips secret files.', isError: true);
+    }
     final env = (await ShellEnv.load()).env;
     final ProcessResult res;
     if (await _hasRg()) {
@@ -1010,6 +1240,7 @@ final class ToolRunner {
           '--max-columns=400',
           if (args['case_insensitive'] == true) '-i',
           if (args['glob'] case final String g when g.isNotEmpty) ...['--glob', g],
+          for (final g in secretGlobs) ...['--glob', '!$g'],
           ...switch (mode) {
             'content' => ['-n', if (args['context'] case final num c) '-C${c.toInt()}'],
             'count' => ['--count'],
@@ -1031,6 +1262,7 @@ final class ToolRunner {
           if (args['glob'] case final String g when g.isNotEmpty) '--include=$g',
           '--exclude-dir=.git',
           '--exclude-dir=node_modules',
+          for (final g in secretGlobs) ...['--exclude=$g', '--exclude-dir=$g'],
           ...switch (mode) {
             'content' => ['-n'],
             'count' => ['-c'],
@@ -1049,8 +1281,25 @@ final class ToolRunner {
     if (out.isEmpty) return const ToolOutput('No matches.');
     final lines = out.split('\n');
     final shown = lines.length > 250 ? [...lines.take(250), '[${lines.length - 250} more not shown]'] : lines;
-    return ToolOutput(_fit(shown.map(_relative).join('\n'), 'grep-${DateTime.now().millisecondsSinceEpoch}'));
+    // Matching lines are file text: hidden characters out, as read does, and lines from files outside the project
+    // (see outsideProject) in an untrusted block. Path lists are left alone; scripts parse them.
+    final text = shown.map(_relative).join('\n');
+    final name = 'grep-${DateTime.now().millisecondsSinceEpoch}';
+    if (mode != 'content') return ToolOutput(_fit(text, name));
+    final outside = [
+      where,
+      for (final l in shown)
+        if (_grepFile.firstMatch(l)?.group(1) case final f?) resolvePath(root, f),
+    ].where((p) => outsideProject(root, p, own: ownFolders)).firstOrNull;
+    return ToolOutput(
+      outside != null
+          ? fitUntrusted(text, 'grep: $outside', name)
+          : _fit(stripHiddenNoted(text, what: 'the matching lines'), name),
+    );
   }
+
+  /// The file of a content-mode match line (`path:12:text`).
+  static final _grepFile = RegExp(r'^([^\n]+?):\d+:');
 
   String _relative(String line) => line.startsWith('$root/') ? line.substring(root.length + 1) : line;
 
@@ -1085,9 +1334,6 @@ final class ToolRunner {
     if (url == null || !(url.isScheme('http') || url.isScheme('https'))) {
       return const ToolOutput('Error: give an http(s) URL.', isError: true);
     }
-    if ((bypass ? null : scrubber.leak(raw)) case final what?) {
-      return ToolOutput('Error: refused: the URL contains $what. Never put secrets in URLs.', isError: true);
-    }
     final sites = researchSites;
     if (sites != null && !hostAllowed(url.host, sites)) {
       return ToolOutput(
@@ -1098,7 +1344,9 @@ final class ToolRunner {
     final offset = (args['offset'] as num?)?.toInt() ?? 0;
     final limit = ((args['limit'] as num?)?.toInt() ?? 20000).clamp(1000, 40000);
     try {
-      // Through the backend's safe fetcher: no local or private addresses, every redirect checked.
+      // Through the backend's safe fetcher: no local or private addresses, no look-alikes of official sites,
+      // every redirect checked. Uri's form: anole's client takes no spaces or non-ASCII in a path or query, and the
+      // judge reads a percent-encoded host as the letters it stands for.
       final page = await gateway.fetchPage(
         url.toString(),
         sessionTag: sessionTag,
@@ -1107,21 +1355,24 @@ final class ToolRunner {
         maxChars: limit,
       );
       final more = page.nextOffset == null ? '' : '\n[More follows; fetch again with offset ${page.nextOffset}.]';
-      return ToolOutput('${page.text}$more');
+      final note = page.notice == null ? '' : '${page.notice}\n';
+      return ToolOutput('$note${untrusted(_unfenced(page.text), source: page.url)}$more');
     } on LlmError catch (e) {
       return ToolOutput('Error: $e ($url)', isError: true);
     }
   }
 
+  /// [text] without the backend's own `<untrusted_tool_result>` fence (the app wraps pages in its own block).
+  static String _unfenced(String text) => _backendFence.firstMatch(text)?.group(1) ?? text;
+
+  static final _backendFence = RegExp(r'^<untrusted_tool_result source="[^"]*">\n([\s\S]*)\n</untrusted_tool_result>$');
+
   Future<ToolOutput> _webSearch(Map<String, Object?> args) async {
     final query = (args['query'] as String? ?? '').trim();
     if (query.isEmpty) return const ToolOutput('Error: query is empty.', isError: true);
-    if ((bypass ? null : scrubber.leak(query)) case final what?) {
-      return ToolOutput('Error: refused: the query contains $what. Never put secrets in searches.', isError: true);
-    }
     final sites = researchSites;
     final (reply, repeated) = await _searchOnce(query);
-    final out = StringBuffer('<search_results query="$query"${repeated ? ' repeated="true"' : ''}>\n');
+    final out = StringBuffer();
     var n = 0;
     final seen = <String>{};
     final annotations = switch (reply['choices']) {
@@ -1148,8 +1399,8 @@ final class ToolRunner {
             : 'No results on the research sites. Try naming GitHub, Hugging Face or Stack Overflow in the query.',
       );
     }
-    out.write('</search_results>');
-    return ToolOutput(out.toString());
+    final results = untrusted(out.toString().trimRight(), source: 'web search: $query');
+    return ToolOutput(repeated ? '(Same results as an earlier search.)\n$results' : results);
   }
 
   /// Runs [query] once per session: a repeat (a parallel researcher asking
@@ -1217,15 +1468,16 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
       'old_string matches $exact places. Add surrounding lines to make it unique, or set replace_all.',
     );
   }
-  // Line-trimmed match: the same lines, whitespace at either end ignored.
+  // Line-trimmed match: the same lines, whitespace at either end and hidden characters (which read leaves out)
+  // ignored.
   final lines = content.split('\n');
-  final want = oldStr.split('\n').map((l) => l.trim()).toList();
+  final want = oldStr.split('\n').map((l) => stripHidden(l).trim()).toList();
   if (want.isNotEmpty && want.last.isEmpty) want.removeLast();
   final hits = <int>[];
   for (var i = 0; i + want.length <= lines.length; i++) {
     var ok = true;
     for (var j = 0; j < want.length; j++) {
-      if (lines[i + j].trim() != want[j]) {
+      if (stripHidden(lines[i + j]).trim() != want[j]) {
         ok = false;
         break;
       }
@@ -1233,6 +1485,12 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
     if (ok) hits.add(i);
   }
   if (hits.isEmpty) {
+    if (_hiddenLineIn(lines, oldStr) case final n?) {
+      return EditResult.failed(
+        'old_string was not found as written: line $n has hidden characters (read leaves them out), so include '
+        'whole lines in old_string.',
+      );
+    }
     return const EditResult.failed(
       'old_string was not found in the file. Read the file again and copy the lines exactly.',
     );
@@ -1242,9 +1500,27 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
   }
   final replacement = newStr.endsWith('\n') ? newStr.substring(0, newStr.length - 1) : newStr;
   for (final i in hits.reversed) {
-    lines.replaceRange(i, i + want.length, replacement.split('\n'));
+    lines.replaceRange(i, i + want.length, keepHidden(lines.sublist(i, i + want.length), replacement.split('\n')));
   }
   return EditResult.ok(lines.join('\n'), hits.length);
+}
+
+/// The line (1-based) with hidden characters where [oldStr] would match
+/// part of the text once they are left out, or null.
+int? _hiddenLineIn(List<String> lines, String oldStr) {
+  final stripped = lines.map(stripHidden).toList();
+  bool hidden(int i) => stripHidden(lines[i], keepWriting: true) != lines[i];
+  final joined = stripped.join('\n');
+  final want = stripHidden(oldStr);
+  final at = joined.indexOf(want);
+  if (at < 0) return null;
+  // Hidden characters are never line breaks, so line numbers are the same in both.
+  final first = '\n'.allMatches(joined.substring(0, at)).length;
+  final last = first + '\n'.allMatches(want).length;
+  for (var i = first; i <= last && i < lines.length; i++) {
+    if (hidden(i)) return i + 1;
+  }
+  return null;
 }
 
 int _count(String s, String sub) {

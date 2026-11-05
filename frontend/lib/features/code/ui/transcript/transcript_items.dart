@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import '../../../../core/security/untrusted.dart' show withoutUntrustedTags;
 import '../../../../core/theme/every_theme.dart';
 
 import 'package:everyai_markdown/everyai_markdown.dart' show languageForPath;
@@ -215,7 +216,7 @@ class _ScriptView extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final obs = step.result?.observation ?? const {};
-    final output = step.result?.text ?? '';
+    final output = withoutUntrustedTags(step.result?.text ?? '');
     final calls = [...(obs['calls'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>()];
     final summary = scriptSummary(obs);
     final base = _mono.copyWith(color: theme.text);
@@ -272,7 +273,7 @@ class _ToolView extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final args = Map.of(step.call.action)..remove('kind');
-    final output = step.result?.text ?? '';
+    final output = withoutUntrustedTags(step.result?.text ?? '');
     return _Disclosure(
       icon: EveryIcon.code,
       title: stepTitle(step.call),
@@ -380,9 +381,10 @@ class _CommandView extends StatelessWidget {
     final theme = EveryTheme.of(context);
     final obs = step.result?.observation ?? const {};
     final exit = obs['exit_code'] as int? ?? (obs['metadata'] as Map<String, Object?>?)?['exit_code'] as int?;
-    final output =
-        step.result?.text ??
-        (step.rejected ? 'Not run: ${denialSummary('${step.result!.observation['reason'] ?? ''}')}' : '');
+    final output = switch (step.result?.text) {
+      final t? => withoutUntrustedTags(t),
+      _ => step.rejected ? 'Not run: ${denialSummary('${step.result!.observation['reason'] ?? ''}')}' : '',
+    };
     final command = step.call.str('command');
     final base = _mono.copyWith(color: theme.text);
     return _Disclosure(
