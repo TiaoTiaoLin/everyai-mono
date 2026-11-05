@@ -243,24 +243,12 @@ String? hostRunRefusal({
   required String command,
   required List<ActionCall> approved,
 }) {
-  final probe = ActionCall(
-    id: 'host-$tool',
-    raw: const {},
-    toolName: 'bash',
-    toolCallId: '',
-    action: {'kind': 'TerminalAction', 'command': command},
-  );
-  final d = policy.decide(probe, mode);
+  final d = _probe(policy, mode, tool, command);
   switch (d.verdict) {
     case Verdict.allow:
       return null;
     case Verdict.deny:
-      return switch (d.source) {
-        DecisionSource.floor => 'Not run: ${d.why}. EveryAI never runs this for an agent.',
-        DecisionSource.rule => 'Not run: the user\'s rule ${d.rule} refuses it.',
-        DecisionSource.plan => 'Not run: Plan mode runs no commands that may change things.',
-        _ => 'Not run: the session\'s permissions refuse it.',
-      };
+      return _denial(d);
     case Verdict.ask:
       final i = approved.indexWhere(
         (c) => hostToolOf(c) == tool && args.entries.every((e) => jsonEncode(c.action[e.key]) == jsonEncode(e.value)),
@@ -273,6 +261,38 @@ String? hostRunRefusal({
           'arguments is in the session. Call $tool through your MCP client so the user can approve it.';
   }
 }
+
+/// Why the session's permissions refuse [command] for host tool [tool]
+/// outright (the safety floor, a deny rule, Plan mode), or null when they
+/// allow it or would ask (the caller's own card is the approval then).
+String? hostRunDenial({
+  required PermissionPolicy policy,
+  required AgentMode mode,
+  required String tool,
+  required String command,
+}) {
+  final d = _probe(policy, mode, tool, command);
+  return d.verdict == Verdict.deny ? _denial(d) : null;
+}
+
+/// [policy]'s decision on [command] as if the agent ran it in a shell.
+Decision _probe(PermissionPolicy policy, AgentMode mode, String tool, String command) => policy.decide(
+  ActionCall(
+    id: 'host-$tool',
+    raw: const {},
+    toolName: 'bash',
+    toolCallId: '',
+    action: {'kind': 'TerminalAction', 'command': command},
+  ),
+  mode,
+);
+
+String _denial(Decision d) => switch (d.source) {
+  DecisionSource.floor => 'Not run: ${d.why}. EveryAI never runs this for an agent.',
+  DecisionSource.rule => 'Not run: the user\'s rule ${d.rule} refuses it.',
+  DecisionSource.plan => 'Not run: Plan mode runs no commands that may change things.',
+  _ => 'Not run: the session\'s permissions refuse it.',
+};
 
 /// A test command and the project folder (relative, '' for the session
 /// folder) it runs in.

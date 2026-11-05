@@ -31,6 +31,7 @@ import 'domain/floor_advice.dart';
 import 'domain/doom_loop.dart';
 import 'domain/git_commands.dart';
 import 'domain/goal.dart';
+import 'domain/local_ports.dart' show detectLocalUrls;
 import 'domain/no_spend.dart';
 import 'domain/review.dart';
 import 'domain/rewind.dart';
@@ -57,7 +58,7 @@ import 'drivers/briefing/skill_export.dart';
 import 'drivers/briefing/skill_render.dart' show defuseInlineCommands;
 import 'drivers/driver.dart';
 import 'drivers/driver_policy.dart';
-import 'drivers/driver_process.dart' show closeAllDriverProcesses;
+import 'drivers/driver_process.dart' show DriverProcess, closeAllDriverProcesses;
 import 'drivers/driver_registry.dart';
 import 'drivers/terminal/terminal_driver.dart';
 import 'harness/everyai/everyai.dart';
@@ -74,6 +75,7 @@ import 'host/host_output.dart';
 import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
 import 'host/host_report.dart';
+import 'host/host_screen.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'limit_providers.dart';
 import 'mcp_providers.dart';
@@ -97,6 +99,7 @@ import 'workflows/workflow_prelude.dart' show workflowCtxKey;
 import 'workflows/workflow_runs.dart';
 
 part 'session_builtins.dart';
+part 'session_screen.dart';
 
 /// Projects under this scheme run on the scripted [FakeHarness].
 const demoScheme = 'demo://';
@@ -177,7 +180,7 @@ final _briefingTextsProvider = Provider<Map<String, String>>((ref) => {});
 /// What the session text tells an outside agent about each host tool it is
 /// offered, in `hostToolSpecs` order.
 List<HostToolInfo> get _hostToolInfos => [
-  for (final t in [..._baseToolInfos, ...checkToolInfos])
+  for (final t in [..._baseToolInfos, ...checkToolInfos, ..._screenToolInfos])
     if (hostToolSpecs.any((s) => s['name'] == t.name)) t,
 ];
 
@@ -212,6 +215,20 @@ const _baseToolInfos = <HostToolInfo>[
     when: 'the user said yes to reporting an EveryAI problem and `gh` is not signed in: it builds the issue link.',
   ),
   ...maxHostToolInfos,
+];
+
+const _screenToolInfos = <HostToolInfo>[
+  (
+    name: browserTool,
+    when: 'you changed a web page: open it (the local URL), click through it and look, in a browser of your own.',
+  ),
+  (name: screenshotTool, when: 'you changed a desktop UI: look at the app\'s window before you say it works.'),
+  (
+    name: appRunTool,
+    when:
+        'you need the app you changed running to look at it: it starts it the way the user confirmed once and '
+        'returns its window ids (or its local URL).',
+  ),
 ];
 
 /// [_hostToolInfos] for a fork: no Max tools, and no plan (its task is a
@@ -1588,7 +1605,7 @@ final codeSessionProvider = NotifierProvider.family<CodeSessionController, CodeS
 );
 
 final class CodeSessionController extends Notifier<CodeSessionState>
-    with _SessionBuiltins
+    with _SessionBuiltins, _SessionScreen
     implements HostTools, HostPrompts, HostForks {
   CodeSessionController(this.sessionId);
   @override
@@ -1628,6 +1645,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// The lead has said which of its own modes it is in since [_watchModes].
   var _modesSeen = false;
+  @override
   var _builder = TranscriptBuilder();
 
   /// What earlier conversations showed (before a compaction): kept on screen
@@ -1784,6 +1802,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         return hostFit(dir, 'host-${DateTime.now().millisecondsSinceEpoch}-$name', await hostCheckTool(call, context));
       case runWorkflowTool:
         return _runWorkflowCall(call.args);
+      case final name when screenHostTools.contains(name):
+        final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        if (info == null) return (text: 'Error: this session is closed.', isError: true);
+        return _screenCall(call, info);
       case reportIssueTool:
         final lead = ref.read(codeSessionsProvider.notifier).byId(sessionId);
         return hostReportIssue(
@@ -1847,6 +1869,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// says the user replied in chat (for a plan, that they want changes), and
   /// the message follows once the agent's turn ends.
   void _releaseHostCards() {
+    _refuseLocalAsks();
     for (final w in [..._hostWaits]) {
       _answerHost(w, w.call.name == presentPlanTool ? '$planRevisionLead see their next message.' : repliedInChat);
     }
@@ -1861,6 +1884,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(_mirror.close());
       _gitTimer?.cancel();
       _disposeBuiltins();
+      unawaited(_closeScreen());
       for (final s in _childSubs.values) {
         s.close();
       }
@@ -2120,6 +2144,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// What decides this session's actions: stored rules (global, project),
   /// then `settings.json` rules, plus approvals remembered for the session.
+  @override
   PermissionPolicy get policy {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     return PermissionPolicy(
@@ -3773,6 +3798,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     for (final w in [..._hostWaits]) {
       _answerHost(w, denialMessage(DenialKind.cancelled), isError: true);
     }
+    await _closeScreen();
     await _stopSubagents();
     final pending = state.transcript.pending;
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
@@ -4665,6 +4691,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends the card's answers: as the held call's result when the server is
   /// holding it, else as a new user message.
   Future<void> answer(QuestionItem item, List<QuestionAnswer> answers) async {
+    if (_localAsks.containsKey(item.call.id)) return _settleLocalAsk(item.call.id, answers);
     if (_hostFor(item.call.id) case final wait?) {
       _answerHost(wait, answersReason(item.questions, answers));
       _builder.settleLocal(item.call.id, answers);

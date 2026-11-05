@@ -29,6 +29,8 @@ import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
+import 'package:every_ai/features/code/host/host_screen.dart';
+import 'package:every_ai/features/code/drivers/driver_process.dart' show DriverProcess;
 import 'package:every_ai/features/code/host/host_script.dart' show hostScriptsAvailable;
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
@@ -74,6 +76,7 @@ void main() {
   final reached = <String>[];
   // A test that wants the real key flow (minting recorded in [reached]) sets this.
   GatewayKeys? keys;
+  late _FakeScreen screen;
 
   ProviderContainer make(Preferences prefs) => ProviderContainer(
     overrides: [
@@ -83,6 +86,7 @@ void main() {
       codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
       driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
       hostServerProvider.overrideWithValue(host),
+      screenAccessProvider.overrideWith((ref) => screen.access),
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       // An outside CLI runs on the user's own account: no EveryAI key is minted for it.
       gatewayKeysProvider.overrideWith((ref) => keys ?? (throw StateError('no gateway key for outside agents'))),
@@ -142,6 +146,7 @@ void main() {
     project = await Directory('${tmp.path}/project').create();
     session = FakeLeadSession();
     host = FakeHost();
+    screen = _FakeScreen();
     drivers = {
       everyaiHarnessName: FakeLeadDriver(everyaiHarnessName, session: session),
       'test': FakeLeadDriver('test', session: session),
@@ -174,7 +179,7 @@ void main() {
     expect(File('$root/session.md').readAsStringSync(), b.sessionSkill);
     expect(b.sessionSkill, contains('# EveryAI session'));
     expect(b.sessionSkill, contains('`ask_user_question`'));
-    for (final tool in ['bug_check', 'check', 'diff_stats', 'goal_check']) {
+    for (final tool in ['bug_check', 'check', 'diff_stats', 'goal_check', 'browser', 'screenshot', 'app_run']) {
       expect(b.sessionSkill, contains('`$tool`'));
     }
     expect(spec.llmApiKey, isEmpty);
@@ -730,6 +735,228 @@ void main() {
     expect(host.revokedSessions, isNot(contains(child.id)));
   });
 
+  group('screen tools', () {
+    const counter = (id: 7, pid: 70, owner: 'counter', title: 'Counter', width: 800, height: 600);
+    const mail = (id: 8, pid: 80, owner: 'Mail', title: 'Inbox', width: 900, height: 700);
+
+    test("a screenshot of the session's own window comes back as a picture, with no card", () async {
+      final info = await start();
+      await open(info.id);
+      screen
+        ..windows = [mail, counter]
+        ..sessionPids = {70};
+      final call = hostCall(info.id, screenshotTool, const {});
+      final r = await call.result;
+      expect(r, (text: 'Captured counter (0 more)', isError: false));
+      expect(screen.captured, [7]);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
+    });
+
+    test("another app's window asks once, naming it; allowed, it is captured again without asking", () async {
+      final info = await start();
+      final c = await open(info.id);
+      screen.windows = [mail];
+      final first = hostCall(info.id, screenshotTool, const {'app': 'mail'});
+      await pumpEventQueue();
+      final card = stateOf(info.id).transcript.openQuestion!;
+      expect(card.questions.single.question, contains('Mail — “Inbox”'));
+      await c.answer(card, const [
+        QuestionAnswer(selected: {0}),
+      ]);
+      expect((await first.result).isError, isFalse);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
+      final again = hostCall(info.id, screenshotTool, const {'window_id': 8});
+      expect((await again.result).isError, isFalse);
+      expect(screen.captured, [8, 8]);
+    });
+
+    test("a refused window isn't captured", () async {
+      final info = await start();
+      final c = await open(info.id);
+      screen.windows = [mail];
+      final call = hostCall(info.id, screenshotTool, const {'app': 'Mail'});
+      await pumpEventQueue();
+      await c.answer(stateOf(info.id).transcript.openQuestion!, const [
+        QuestionAnswer(selected: {1}),
+      ]);
+      expect(await call.result, (text: "Error: the user didn't allow a screenshot of Mail.", isError: true));
+      expect(screen.captured, isEmpty);
+    });
+
+    test('a chat message or Stop refuses the window and closes its card', () async {
+      final info = await start();
+      final c = await open(info.id);
+      screen.windows = [mail];
+      final chat = hostCall(info.id, screenshotTool, const {'app': 'mail'});
+      await pumpEventQueue();
+      await c.send('never mind');
+      expect((await chat.result).isError, isTrue);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
+      final stopped = hostCall(info.id, screenshotTool, const {'app': 'mail'});
+      await pumpEventQueue();
+      expect(stateOf(info.id).transcript.openQuestion, isNotNull);
+      await c.stop();
+      expect((await stopped.result).isError, isTrue);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
+      expect(screen.captured, isEmpty);
+    });
+
+    test('a call that ends withdraws its card', () async {
+      final info = await start();
+      await open(info.id);
+      screen.windows = [mail];
+      final call = hostCall(info.id, screenshotTool, const {'app': 'mail'});
+      await pumpEventQueue();
+      call.end.complete(HostEnd.timedOut);
+      expect((await call.result).isError, isTrue);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
+    });
+
+    test('off macOS a screenshot is not supported yet', () async {
+      final info = await start();
+      await open(info.id);
+      screen.os = 'linux';
+      final r = await hostCall(info.id, screenshotTool, const {}).result;
+      expect(r.text, contains("aren't supported on Linux yet"));
+      expect(r.isError, isTrue);
+    });
+
+    group('app_run', () {
+      String localSettings() => File('${project.path}/.everyai/settings.local.json').readAsStringSync();
+
+      setUp(() {
+        File('${project.path}/pubspec.yaml').writeAsStringSync('name: counter\nflutter:\n');
+      });
+
+      /// Answers the run card with option [pick], or types [other].
+      Future<void> confirm(CodeSessionController c, {int? pick, String other = ''}) async {
+        await pumpEventQueue();
+        final card = stateOf(c.sessionId).transcript.openQuestion!;
+        await c.answer(card, [
+          QuestionAnswer(selected: {?pick}, other: other),
+        ]);
+      }
+
+      test('asks once, saves the command, starts it in the session and returns its windows', () async {
+        final info = await start();
+        final c = await open(info.id);
+        screen.onSpawn = (p) =>
+            screen.windows = [mail, (id: 9, pid: p.pid, owner: 'counter', title: '', width: 800, height: 600)];
+        final first = hostCall(info.id, appRunTool, const {});
+        await pumpEventQueue();
+        final card = stateOf(info.id).transcript.openQuestion!;
+        expect(card.questions.single.options.first.label, 'flutter run -d macos (Recommended)');
+        expect(card.questions.single.options.last.label, "Don't run it");
+        await confirm(c, pick: 0);
+        final r = await first.result;
+        expect(r.isError, isFalse);
+        expect(r.text, contains('- window_id 9: counter (800x600)'));
+        expect(r.text, isNot(contains('window_id 8')));
+        expect(screen.spawned.single, (command: 'flutter run -d macos', cwd: info.workingDir, tag: info.id));
+        expect(jsonDecode(localSettings()), {
+          'run': {'command': 'flutter run -d macos'},
+        });
+        expect(jsonDecode(container.read(preferencesProvider)['code.run_commands']!), {
+          project.path: 'flutter run -d macos',
+        });
+        // Again: the running copy, no card, no second start.
+        final again = await hostCall(info.id, appRunTool, const {}).result;
+        expect(again.text, startsWith('The app is already running'));
+        expect(screen.spawned, hasLength(1));
+        // A restart after it is stopped runs the saved command without asking.
+        final restarted = await hostCall(info.id, appRunTool, const {'restart': true}).result;
+        expect(restarted.text, startsWith('Started `flutter run -d macos`'));
+        expect(screen.spawned, hasLength(2));
+        expect(screen.processes.first.closed, isTrue);
+      });
+
+      test("a command in the settings file the user didn't confirm here asks again", () async {
+        Directory('${project.path}/.everyai').createSync();
+        File('${project.path}/.everyai/settings.local.json').writeAsStringSync('{"run": {"command": "make planted"}}');
+        final info = await start();
+        final c = await open(info.id);
+        final call = hostCall(info.id, appRunTool, const {});
+        await pumpEventQueue();
+        final options = stateOf(info.id).transcript.openQuestion!.questions.single.options;
+        expect(
+          [for (final o in options) o.label],
+          ['make planted', 'flutter run -d macos (Recommended)', "Don't run it"],
+        );
+        await confirm(c, pick: 2);
+        expect(await call.result, (text: 'Error: the user chose not to run the app.', isError: true));
+        expect(screen.spawned, isEmpty);
+      });
+
+      test('a command the floor refuses never runs', () async {
+        final info = await start();
+        final c = await open(info.id);
+        final call = hostCall(info.id, appRunTool, const {'command': 'rm -rf ~'});
+        await pumpEventQueue();
+        final options = stateOf(info.id).transcript.openQuestion!.questions.single.options;
+        expect(options.any((o) => o.label.contains('rm -rf')), isFalse);
+        await confirm(c, other: 'rm -rf ~');
+        final r = await call.result;
+        expect(r.isError, isTrue);
+        expect(r.text, startsWith('Not run:'));
+        expect(screen.spawned, isEmpty);
+      });
+
+      test('Plan mode refuses it', () async {
+        final info = await start(mode: AgentMode.plan);
+        await open(info.id);
+        final r = await hostCall(info.id, appRunTool, const {}).result;
+        expect(r.isError, isTrue);
+        expect(r.text, startsWith('Not run: Plan mode'));
+        expect(stateOf(info.id).transcript.openQuestion, isNull);
+      });
+
+      test('an app that exits returns its code and output; a dev server its URL', () async {
+        final info = await start();
+        final c = await open(info.id);
+        screen.onSpawn = (p) => p
+          ..say('error: no device')
+          ..exit(1);
+        final failed = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        expect(await failed.result, (
+          text: 'Error: `flutter run -d macos` exited with code 1.\nOutput so far:\nerror: no device',
+          isError: true,
+        ));
+        // The next call starts it again (the trusted command, no card).
+        screen.onSpawn = (p) => p
+          ..say('A Dart VM Service on macOS is available at: http://127.0.0.1:50001/abc=/')
+          ..say('  Local:   http://localhost:5173/');
+        final served = await hostCall(info.id, appRunTool, const {}).result;
+        expect(served.text, contains('It serves http://localhost:5173/: open it with browser.'));
+        expect(screen.spawned, hasLength(2));
+      });
+
+      test('Stop and closing the session end the app', () async {
+        final info = await start();
+        final c = await open(info.id);
+        screen.onSpawn = (p) => p.say('  Local:   http://localhost:3000/');
+        final call = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        await call.result;
+        await c.stop();
+        expect(screen.processes.single.closed, isTrue);
+        await hostCall(info.id, appRunTool, const {}).result;
+        expect(screen.processes, hasLength(2));
+        container.dispose();
+        await pumpEventQueue();
+        expect(screen.processes.last.closed, isTrue);
+      });
+
+      test("Windows isn't supported yet", () async {
+        final info = await start();
+        await open(info.id);
+        screen.os = 'windows';
+        final r = await hostCall(info.id, appRunTool, const {}).result;
+        expect((r.isError, r.text), (true, "Error: app_run isn't supported on Windows yet."));
+      });
+    });
+  });
+
   test('an EveryAI session still asks for the gateway key and gets no host token', () async {
     final prefs = container.read(preferencesProvider);
     container.dispose();
@@ -756,4 +983,76 @@ final class _MemoryStore implements SecretStore {
   Future<void> write(String key, String value) async => values[key] = value;
   @override
   Future<void> delete(String key) async => values.remove(key);
+}
+
+/// The screen as the tests set it: windows, the session's processes, what was captured and started.
+final class _FakeScreen {
+  var os = 'macos';
+  var windows = <ScreenWindow>[];
+  var sessionPids = <int>{};
+  final captured = <int>[];
+  final spawned = <({String command, String cwd, String tag})>[];
+  final processes = <_FakeProcess>[];
+  void Function(_FakeProcess p)? onSpawn;
+
+  late final access = ScreenAccess(
+    os: os,
+    listWindows: () async => windows,
+    executableOf: (pid) async => '/Applications/App.app/Contents/MacOS/App',
+    capture: (w, root, others) async {
+      captured.add(w.id);
+      return (
+        text: 'Captured ${w.owner} ($others more)',
+        isError: false,
+        images: const [(mime: 'image/png', data: 'AA==')],
+      );
+    },
+    sessionPids: ({required tag, required workingDir, required ownsDir}) async => sessionPids,
+    processTree: (pid) async => {pid},
+    spawn: ({required command, required cwd, required sessionTag, required logPath}) async {
+      spawned.add((command: command, cwd: cwd, tag: sessionTag));
+      final p = _FakeProcess(1000 + processes.length);
+      processes.add(p);
+      onSpawn?.call(p);
+      return p;
+    },
+    browser: (_) => throw UnimplementedError(),
+    poll: () async {},
+  );
+}
+
+final class _FakeProcess implements DriverProcess {
+  _FakeProcess(this.pid);
+  @override
+  final int pid;
+  final _lines = StreamController<String>.broadcast(sync: true);
+  final _exit = Completer<int>();
+  final _said = <String>[];
+  var closed = false;
+
+  /// A line of output, kept for a listener that comes later.
+  void say(String line) {
+    _said.add(line);
+    _lines.add(line);
+  }
+
+  void exit(int code) => _exit.complete(code);
+
+  @override
+  Stream<String> get lines async* {
+    yield* Stream.fromIterable([..._said]);
+    yield* _lines.stream;
+  }
+
+  @override
+  Future<int> get exitCode => _exit.future;
+  @override
+  String get lastError => '';
+  @override
+  void send(String line) {}
+  @override
+  Future<void> close() async {
+    closed = true;
+    if (!_exit.isCompleted) _exit.complete(-15);
+  }
 }

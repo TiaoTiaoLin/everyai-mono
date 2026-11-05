@@ -53,6 +53,10 @@ final class _FakeTools implements HostTools {
     calls.add(call);
     if (call.name == 'memory') return Future.value((text: 'saved: ${call.args['text']}', isError: false));
     if (call.name == 'fork') return Future.value((text: 'Started fork f1.', isError: false));
+    if (call.name == 'screenshot') {
+      call.images.add((mime: 'image/png', data: 'iVBORw0KGgo='));
+      return Future.value((text: 'Screenshot of Counter: /p/shot.png.', isError: false));
+    }
     final c = held[call.id] = Completer();
     if (_waiting.isNotEmpty) {
       _waiting.removeAt(0).complete(call);
@@ -159,6 +163,9 @@ void main() {
         if (hostScriptsAvailable) 'run_script',
         'run_workflow',
         'report_issue',
+        'browser',
+        'screenshot',
+        'app_run',
       ],
     );
     expect(c.tools.first['description'], contains('come back as the result of this call'));
@@ -167,6 +174,26 @@ void main() {
     expect(out.text, 'saved: - run make');
     expect(out.isError, isFalse);
     expect(tools.calls.single.sessionId, 's1');
+  });
+
+  test('a result with pictures sends them after its text; a text-only one is unchanged', () async {
+    final shot = resultOf(await post(rpc('tools/call', {'name': 'screenshot', 'arguments': <String, Object?>{}})));
+    expect(shot['content'], [
+      {'type': 'text', 'text': 'Screenshot of Counter: /p/shot.png.'},
+      {'type': 'image', 'data': 'iVBORw0KGgo=', 'mimeType': 'image/png'},
+    ]);
+    expect(shot['isError'], isFalse);
+    final memory = resultOf(
+      await post(
+        rpc('tools/call', {
+          'name': 'memory',
+          'arguments': {'text': 'x'},
+        }),
+      ),
+    );
+    expect(memory['content'], [
+      {'type': 'text', 'text': 'saved: x'},
+    ]);
   });
 
   test('a fork call reaches the session and returns at once, with no held timer', () async {
@@ -260,10 +287,11 @@ void main() {
       expect(errorCode(r), -32602);
     });
 
-    test('run_workflow is listed last but report_issue, and its call goes to the session', () async {
+    test('run_workflow is listed before report_issue and the screen tools, and its call goes to the session', () async {
       final list = resultOf(await post(rpc('tools/list'), token: p.token))['tools'] as List;
-      expect((list.last as Map)['name'], 'report_issue');
-      final run = list[list.length - 2] as Map;
+      final names = [for (final t in list) (t as Map)['name']];
+      expect(names.sublist(names.length - 5), ['run_workflow', 'report_issue', 'browser', 'screenshot', 'app_run']);
+      final run = list[list.length - 5] as Map;
       expect(run['name'], 'run_workflow');
       expect(run['annotations'], containsPair('readOnlyHint', false));
       expect((run['inputSchema'] as Map)['required'], ['id']);
