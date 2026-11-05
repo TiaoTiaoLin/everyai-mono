@@ -147,7 +147,8 @@ void main() {
     expect(hiddenRemovedNote('clean'), isNull);
   });
 
-  test('stripping splits emoji joined with zero-width joiners (accepted)', () {
-    expect(stripHidden('👩\u200D💻'), '👩💻');
+  test('a joiner between emoji is ordinary text; one inside an ASCII word is stripped', () {
+    expect(stripHidden('👩\u200D💻'), '👩\u200D💻');
+    expect(stripHidden('ig\u200Dnore'), 'ignore');
   });
 }
