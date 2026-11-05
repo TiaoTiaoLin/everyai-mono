@@ -3,11 +3,44 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import 'git_guard.dart';
 import 'git_models.dart';
 import 'git_service.dart' show GitError;
 
+/// Subcommands that run no repository program (with [guardFlags] on), so they skip the config read.
+const _plain = {
+  'rev-parse', 'config', 'symbolic-ref', 'check-ref-format', 'show-ref', 'for-each-ref', 'update-ref', //
+  'rev-list', 'branch', 'remote', 'log', 'read-tree', 'write-tree', 'check-ignore', 'merge-file',
+};
+
+/// The full argument list for an EveryAI git call in [dir]: [guardFlags], the overrides for programs the
+/// repository's own config names ([repoGuard]), then [args], diffs with [diffFlags]. Throws [GitError] when the
+/// repository can't be guarded.
+Future<List<String>> guardedArgs(String dir, List<String> args) async {
+  final fixed = guardFlags(Platform.isWindows ? 'NUL' : '/dev/null');
+  final cmd = args.isEmpty ? '' : args.first;
+  final call = [
+    if (cmd == 'diff' || cmd == 'show') ...[cmd, ...diffFlags, ...args.skip(1)] else ...args,
+  ];
+  if (_plain.contains(cmd)) return ['-C', dir, ...fixed, ...call];
+  final res = await Process.run('git', ['-C', dir, ...fixed, 'config', '--list', '--show-scope', '-z']);
+  if (res.exitCode != 0) {
+    final err = '${res.stderr}'.trim();
+    // --show-scope came in git 2.26; without it the repository's config can't be told from the user's.
+    if (err.contains('show-scope')) throw const GitError('EveryAI needs git 2.26 or later: update git and try again.');
+    throw GitError('git config: $err');
+  }
+  final guard = repoGuard(parseConfigList('${res.stdout}'));
+  if (guard.refusal case final why?) throw GitError(why);
+  return ['-C', dir, ...fixed, ...guard.args, ...call];
+}
+
+/// Runs git in [dir] the way EveryAI's own calls do: nothing the repository defines runs (see `git_guard.dart`).
+Future<ProcessResult> runGit(String dir, List<String> args, {Map<String, String>? env}) async =>
+    Process.run('git', await guardedArgs(dir, args), environment: env);
+
 Future<ProcessResult> _git(String dir, List<String> args, {Map<String, String>? env, bool check = true}) async {
-  final res = await Process.run('git', ['-C', dir, ...args], environment: env);
+  final res = await runGit(dir, args, env: env);
   if (check && res.exitCode != 0) {
     final err = '${res.stderr}'.trim();
     throw GitError('git ${args.first}: ${err.isEmpty ? '${res.stdout}'.trim() : err}');
@@ -89,9 +122,11 @@ Future<SessionWorktree> createWorktree({
 }
 
 /// Points the worktree at EveryAI's hooks: commit-msg strips AI-credit
-/// lines; every hook then runs the repository's own one.
+/// lines; every hook then runs the repository's own one. They are for the
+/// agent's own git commands: EveryAI's calls run no hooks (`git_guard.dart`).
 Future<void> _installHooks(SessionWorktree w, String hooksDir) async {
-  final configured = await _git(w.repoRoot, ['config', '--get', 'core.hooksPath'], check: false);
+  // Without guardFlags, whose hooksPath would come back (`git config` runs nothing).
+  final configured = await Process.run('git', ['-C', w.repoRoot, 'config', '--get', 'core.hooksPath']);
   final common = await _out(w.repoRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
   final custom = '${configured.stdout}'.trim();
   // A relative hooksPath (husky) is relative to the checkout the hook runs in.
@@ -240,7 +275,7 @@ Future<bool> ghReady(String dir) async {
 Future<Set<String>> ignoredAmong(String dir, List<String> paths) async {
   if (paths.isEmpty) return const {};
   try {
-    final p = await Process.start('git', ['-C', dir, 'check-ignore', '--stdin', '-z']);
+    final p = await Process.start('git', await guardedArgs(dir, ['check-ignore', '--stdin', '-z']));
     p.stdin.write('${paths.join('\x00')}\x00');
     await p.stdin.close();
     final (out, _, code) = await (p.stdout.transform(utf8.decoder).join(), p.stderr.drain<void>(), p.exitCode).wait;
@@ -256,7 +291,7 @@ Future<Set<String>> ignoredAmong(String dir, List<String> paths) async {
 }
 
 Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) async {
-  final p = await Process.start('git', ['-C', w.path, 'apply', '-R', '--whitespace=nowarn', '-']);
+  final p = await Process.start('git', await guardedArgs(w.path, ['apply', '-R', '--whitespace=nowarn', '-']));
   p.stdin.write(file.patchFor(hunk));
   await p.stdin.close();
   final err = await p.stderr.transform(utf8.decoder).join();
@@ -277,11 +312,12 @@ Future<bool> _hasStaged(SessionWorktree w) async =>
 Future<bool> commitAll(SessionWorktree w, String message, {List<String>? paths}) async {
   await _stage(w, paths);
   if (!await _hasStaged(w)) return false;
+  // EveryAI's own commits skip the hooks, the session's commit-msg one too: its job is done here.
   await _git(w.path, [
     'commit',
     '-q',
     '-m',
-    message,
+    stripBranding(message),
     if (paths != null) ...['--', ...paths],
   ]);
   return true;
@@ -308,7 +344,7 @@ Future<String?> commitOnNewBranch(SessionWorktree w, String branch, String messa
       'commit',
       '-q',
       '-m',
-      message,
+      stripBranding(message),
       if (paths != null) ...['--', ...paths],
     ]);
   } on Object {
@@ -377,11 +413,32 @@ Future<String> squashMerge(SessionWorktree w, String message) async {
   await _git(w.repoRoot, ['merge', '--squash', '-q', w.branch]);
   final staged = await _git(w.repoRoot, ['diff', '--cached', '--quiet'], check: false);
   if (staged.exitCode == 0) throw const GitError('There is nothing to merge: the session made no changes.');
-  await _git(w.repoRoot, ['commit', '-q', '-m', message]);
+  await _git(w.repoRoot, ['commit', '-q', '-m', stripBranding(message)]);
   return _out(w.repoRoot, ['rev-parse', 'HEAD']);
 }
 
-Future<void> push(SessionWorktree w) => _git(w.path, ['push', '-q', '-u', 'origin', w.branch]);
+/// Pushes the session branch. Not to a folder on this computer: git runs that repository's own hooks (and a
+/// `receivepack` the repository sets) here, with none of EveryAI's flags.
+Future<void> push(SessionWorktree w) async {
+  final res = await _git(w.path, [
+    '-c',
+    'protocol.file.allow=never',
+    'push',
+    '-q',
+    '-u',
+    'origin',
+    w.branch,
+  ], check: false);
+  if (res.exitCode == 0) return;
+  final err = '${res.stderr}'.trim();
+  if (err.contains("transport 'file' not allowed")) {
+    throw const GitError(
+      'EveryAI doesn\'t push to a folder on this computer, since the repository there can run its own hooks. '
+      'Push from a terminal instead.',
+    );
+  }
+  throw GitError('git push: $err');
+}
 
 Future<String> createPr(SessionWorktree w, {required String title, required String body}) async {
   final ProcessResult res;
@@ -455,7 +512,7 @@ Future<ForkCopy?> forkCopy(String dir, {required String worktreesDir, required S
 }
 
 Future<List<int>?> _blob(String root, String rev, String path) async {
-  final res = await Process.run('git', ['-C', root, 'show', '$rev:$path'], stdoutEncoding: null);
+  final res = await Process.run('git', await guardedArgs(root, ['show', '$rev:$path']), stdoutEncoding: null);
   return res.exitCode == 0 ? res.stdout as List<int> : null;
 }
 
@@ -513,6 +570,7 @@ Future<ForkMerge> mergeFork(ForkCopy copy, {required String slug, bool merge = t
           final b = File('${tmp.path}/base')..writeAsBytesSync(base ?? const []);
           final t = File('${tmp.path}/theirs')..writeAsBytesSync(theirs);
           final res = await Process.run('git', [
+            ...guardFlags(Platform.isWindows ? 'NUL' : '/dev/null'),
             'merge-file',
             '-p',
             '-L',
