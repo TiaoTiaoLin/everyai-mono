@@ -6,7 +6,8 @@
 /// Two failures are refused: a name the registry doesn't have (models make names up, and attackers register the
 /// names they make up: "slopsquatting"), and a new or little-used look-alike of a popular package (a typosquat).
 /// New or little-used packages, installs from git or a URL and install scripts only get a note. A name already in
-/// the project's manifest or lockfile is never refused: that is how the user lets one through.
+/// the project's lockfile is never refused. A name only in a manifest still is: the model can write manifests
+/// itself, so a manifest entry proves nothing.
 ///
 /// The typo checks follow the ideas of PyPI Warehouse's `typosnyper.py` and TypoGard (Taylor et al., "Defending
 /// Against Package Typosquatting", NSS 2020): one edit away, the same name without delimiters, the same words in
@@ -36,13 +37,17 @@ enum Ecosystem {
 
 /// A package a command installs, by its registry name (version, extras and alias removed; PEP 503 for PyPI).
 final class PackageRef {
-  const PackageRef(this.ecosystem, this.name, {this.known = false, this.privateIndex = false});
+  const PackageRef(this.ecosystem, this.name, {this.known = false, this.privateIndex = false, this.source});
 
   final Ecosystem ecosystem;
   final String name;
 
-  /// Already in the project's manifest or lockfile: never refused.
+  /// Already in the project's lockfile: never refused.
   final bool known;
+
+  /// The file the name was read from (`package.json` for a bare `npm install`, a `pip -r` file), or null when the
+  /// command names it.
+  final String? source;
 
   /// The install may use a private index (a flag, an environment variable or a config file says so), so a name
   /// missing from the public registry isn't proof of a made-up name.
@@ -73,7 +78,8 @@ final class InstallScan {
   /// The folders the installs run in (after the command's own `cd`s).
   final List<String> dirs;
 
-  /// Whether any part of the command runs a package manager, install or not (so a lockfile may change).
+  /// Whether any part of the command runs a package manager command that may change a lockfile (install, add,
+  /// update, remove, sync, …).
   final bool runsManager;
 }
 
@@ -117,6 +123,7 @@ PackageVerdict verdictOf(PackageRef p, PackageInfo? info, {required DateTime now
   if (p.known) return PackageVerdict.pass;
   if (info == null) return PackageVerdict.unknown;
   final typo = typoTargetOf(p);
+  final from = p.source == null ? '' : ' (listed in ${p.source})';
   if (!info.exists) {
     if (p.privateIndex) {
       return PackageVerdict(
@@ -127,7 +134,7 @@ PackageVerdict verdictOf(PackageRef p, PackageInfo? info, {required DateTime now
     final hint = typo != null
         ? 'Did you mean `$typo`?'
         : 'It may be a made-up name: check the real name (${_lookupHint(p)}) or ask the user.';
-    return PackageVerdict(VerdictKind.refuse, "`${p.name}` doesn't exist on ${p.ecosystem.label}. $hint");
+    return PackageVerdict(VerdictKind.refuse, "`${p.name}`$from doesn't exist on ${p.ecosystem.label}. $hint");
   }
   final age = info.created == null ? null : now.difference(info.created!);
   final isNew = age != null && age < newPackageAge;
@@ -139,7 +146,7 @@ PackageVerdict verdictOf(PackageRef p, PackageInfo? info, {required DateTime now
   if (typo != null && (isNew || low)) {
     return PackageVerdict(
       VerdictKind.refuse,
-      '`${p.name}` looks like a typo of the popular `$typo`, and is ${isNew ? 'new' : 'little used'} ($why). '
+      '`${p.name}`$from looks like a typo of the popular `$typo`, and is ${isNew ? 'new' : 'little used'} ($why). '
       'Install `$typo`, or ask the user whether they meant this exact package.',
     );
   }
@@ -247,24 +254,18 @@ String pep503(String name) => name.toLowerCase().replaceAll(RegExp(r'[-_.]+'), '
 // Parsing
 
 /// The installs in [command], run from [cwd] in a project at [root]. [readFile] reads a file's text (null when it
-/// doesn't exist); it serves `pip -r` files, `package.json` for a bare `npm install`, the manifests and lockfiles
-/// that make a name [PackageRef.known], and `.npmrc` and other index settings. [env] is the shell's environment.
+/// doesn't exist); it serves `pip -r` files, `package.json` for a bare `npm install`, the lockfiles that make a name
+/// [PackageRef.known], and `.npmrc` and other index settings. [listDir] lists a folder's entries by name (npm
+/// workspaces, `node_modules/.bin`). [env] is the shell's environment.
 InstallScan installsIn(
   String command, {
   String cwd = '',
   String? root,
   Map<String, String> env = const {},
   String? Function(String path)? readFile,
+  List<String> Function(String dir)? listDir,
 }) {
-  final scan = _Scan(cwd, root ?? cwd, env, readFile ?? (_) => null);
-  final segments = shellSegments(command);
-  if (segments == null) {
-    // `$(…)`, a subshell or a heredoc: no word list, but a lockfile change still isn't surprising.
-    return InstallScan(runsManager: RegExp('\\b(${_managers.join('|')})\\b').hasMatch(command));
-  }
-  for (final words in segments) {
-    scan.segment(words);
-  }
+  final scan = _Scan(cwd, root ?? cwd, env, readFile ?? (_) => null, listDir ?? (_) => const [])..text(command);
   return InstallScan(
     packages: scan.refs.toList(),
     notes: scan.notes.toList(),
@@ -273,10 +274,64 @@ InstallScan installsIn(
   );
 }
 
+/// Stands for a word whose value only the shell knows (`$VAR`, `$(…)`): never a package name or a folder.
+const _unknownWord = '\u0000';
+
+/// The words of each simple command in [command] when [shellSegments] can't parse it (`$(…)`, a subshell, a
+/// redirect to a file, backgrounding, backticks): split at every operator and bracket, redirections and their
+/// targets dropped, quote marks removed. Coarser than a shell, but an install hidden in one of these shapes is still
+/// seen.
+List<List<String>> _coarseSegments(String command) {
+  final text = _heredocsDropped(command)
+      .replaceAll(RegExp(r'\d*>&[\d-]+'), ' ') // 2>&1
+      .replaceAll('&>', '>')
+      .replaceAllMapped(RegExp('>>?|<'), (m) => ' ${m[0]} ');
+  final out = <List<String>>[];
+  for (final part in text.split(RegExp(r'&&|\|\||[;&|()`\n]'))) {
+    final words = <String>[];
+    final raw = part.trim().split(RegExp(r'\s+'));
+    for (var i = 0; i < raw.length; i++) {
+      final w = raw[i].replaceAll(RegExp('["\']'), '');
+      if (w.isEmpty) continue;
+      if (w == '>' || w == '>>' || w == '<') {
+        i++;
+      } else {
+        words.add(w.contains(r'$') ? _unknownWord : w);
+      }
+    }
+    if (words.isNotEmpty) out.add(words);
+  }
+  return out;
+}
+
+/// [command] without its heredoc bodies (text for a file, not commands), except a body fed to a shell
+/// (`bash <<EOF`), which runs.
+String _heredocsDropped(String command) {
+  final m = RegExp(r'''<<-?\s*['"]?([A-Za-z_]\w*)['"]?''').firstMatch(command);
+  if (m == null) return command;
+  final lineStart = command.lastIndexOf('\n', m.start) + 1;
+  final toShell = RegExp(r'\b(bash|sh|zsh|dash)(\s+-\w+)*\s*$').hasMatch(command.substring(lineStart, m.start));
+  final lineEnd = command.indexOf('\n', m.end);
+  if (lineEnd < 0) return command.substring(0, m.start) + command.substring(m.end);
+  final body = command.substring(lineEnd + 1);
+  final close = RegExp('^\\s*${m[1]}\\s*\$', multiLine: true).firstMatch(body);
+  final rest = close == null ? '' : body.substring(close.end);
+  return '${command.substring(0, m.start)}${command.substring(m.end, lineEnd)}\n'
+      '${toShell ? body.substring(0, close?.start ?? body.length) : ''}\n${_heredocsDropped(rest)}';
+}
+
 const _managers = [
   'npm', 'pnpm', 'yarn', 'bun', 'npx', 'bunx', 'pip', 'pip3', 'uv', 'uvx', 'pipx', 'poetry', 'pipenv', 'cargo', //
   'gem', 'bundle', 'dart', 'flutter', 'go', 'brew', 'corepack',
 ];
+
+/// Package manager subcommands that may change a lockfile.
+const _lockSubs = {
+  'install', 'i', 'in', 'isntall', 'add', 'a', 'ci', 'update', 'up', 'upgrade', 'remove', 'rm', 'uninstall', 'un', //
+  'get', 'sync', 'lock', 'dedupe', 'tidy', 'prune',
+};
+
+const _shells = {'bash', 'sh', 'zsh', 'dash'};
 
 final _assignment = RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=');
 final _python = RegExp(r'^python[\d.]*$');
@@ -284,20 +339,27 @@ final _pipName = RegExp(r'^pip[\d.]*$');
 final _remote = RegExp(r'^(git\+|git:|github:|gitlab:|bitbucket:|gist:|https?:|ssh:|hg\+|svn\+|bzr\+)');
 
 final class _Scan {
-  _Scan(this.cwd, this.root, Map<String, String> env, this.read) : env = {...env};
+  _Scan(this.cwd, this.root, Map<String, String> env, this.read, this.list) : env = {...env};
 
   String cwd;
   final String root;
   final Map<String, String> env;
   final String? Function(String path) read;
+  final List<String> Function(String dir) list;
 
   final refs = <PackageRef>{};
   final notes = <String>{};
   final dirs = <String>{};
   var runsManager = false;
   final _texts = <String, String?>{};
+  final _lists = <String, List<String>>{};
+
+  /// The words came from [_coarseSegments]: a quoted argument may be split into several.
+  var _coarse = false;
+  var _depth = 0;
 
   String? _text(String path) => _texts.putIfAbsent(path, () => read(path));
+  List<String> _list(String dir) => _lists.putIfAbsent(dir, () => list(dir));
 
   String get _home => env['HOME'] ?? '';
 
@@ -314,6 +376,18 @@ final class _Scan {
       }
     }
     return '/${out.join('/')}';
+  }
+
+  /// Scans the command line [command] (also the string of a `bash -c`).
+  void text(String command) {
+    if (_depth > 3) return;
+    final parsed = shellSegments(command);
+    final saved = _coarse;
+    _coarse = parsed == null;
+    for (final words in parsed ?? _coarseSegments(command)) {
+      segment(words);
+    }
+    _coarse = saved;
   }
 
   void segment(List<String> words) {
@@ -334,7 +408,7 @@ final class _Scan {
         break;
       }
     }
-    if (w.isEmpty) return;
+    if (w.isEmpty || w.first.contains(_unknownWord)) return;
     final saved = {...env};
     env.addAll(local);
     try {
@@ -350,17 +424,33 @@ final class _Scan {
     if (prog == 'cd') {
       if (a.isEmpty) {
         cwd = _home;
-      } else if (a.first != '-') {
+      } else if (a.first != '-' && !a.first.contains(_unknownWord)) {
         cwd = _resolve(a.first);
       }
       return;
     }
-    if (_managers.contains(prog) || _pipName.hasMatch(prog)) runsManager = true;
-    String? at(int i) => i < a.length ? a[i] : null;
-    if (_python.hasMatch(prog) && at(0) == '-m' && (at(1) == 'pip' || at(1) == 'pip3')) {
-      runsManager = true;
-      return _pip(a.sublist(2));
+    if (_shells.contains(prog)) {
+      // `bash -c "npm i x"`, `sh -lc '…'`: the string is a command line of its own (its `cd`s stay inside it).
+      final c = a.indexWhere((w) => RegExp(r'^-[a-z]*c[a-z]*$').hasMatch(w));
+      if (c < 0 || c + 1 >= a.length) return;
+      final saved = cwd;
+      _depth++;
+      if (_coarse) {
+        segment(a.sublist(c + 1));
+      } else {
+        text(a[c + 1]);
+      }
+      _depth--;
+      cwd = saved;
+      return;
     }
+    String? at(int i) => i < a.length ? a[i] : null;
+    final pythonPip = _python.hasMatch(prog) && at(0) == '-m' && (at(1) == 'pip' || at(1) == 'pip3');
+    if (pythonPip || _managers.contains(prog) || _pipName.hasMatch(prog)) {
+      final subs = a.where((w) => !w.startsWith('-')).take(3);
+      if (subs.any(_lockSubs.contains) || (subs.isEmpty && (prog == 'yarn' || prog == 'bundle'))) runsManager = true;
+    }
+    if (pythonPip) return _pip(a.sublist(2));
     switch (prog) {
       case _ when _pipName.hasMatch(prog):
         _pip(a);
@@ -380,11 +470,11 @@ final class _Scan {
       case 'poetry' when at(0) == 'add':
         _pyAdd(a.sublist(1));
       case 'npx' || 'bunx':
-        _runner(Ecosystem.npm, a);
+        _runner(Ecosystem.npm, a, localBins: true);
       case 'npm' || 'pnpm' || 'yarn' || 'bun':
         _js(prog, a);
-      case 'cargo' when at(0) == 'add' || at(0) == 'install':
-        _cargo(a.sublist(1));
+      case 'cargo':
+        _cargo(a);
       case 'gem' when at(0) == 'install':
         _gem(a.sublist(1));
       case 'dart' || 'flutter' when at(0) == 'pub' && at(1) == 'add':
@@ -399,7 +489,37 @@ final class _Scan {
     }
   }
 
+  /// Where the subcommand starts in [args]: after the manager's own flags ([values] take the next word, given to
+  /// [onValue]), as in `pnpm --filter web add x` or `pip -q install x`.
+  int _subcommandAt(List<String> args, Set<String> values, [void Function(String flag, String value)? onValue]) {
+    var i = 0;
+    while (i < args.length && args[i].startsWith('-') && args[i].length > 1 && args[i] != '--') {
+      final eq = args[i].indexOf('=');
+      if (eq > 0) {
+        onValue?.call(args[i].substring(0, eq), args[i].substring(eq + 1));
+      } else if (values.contains(args[i]) && i + 1 < args.length) {
+        i++;
+        onValue?.call(args[i - 1], args[i]);
+      }
+      i++;
+    }
+    return i;
+  }
+
+  /// Runs [f] with [cwd] set to [dir] (a `--prefix`/`-C`/`--cwd` flag) when there is one.
+  void _inDir(String? dir, void Function() f) {
+    if (dir == null || dir.contains(_unknownWord)) return f();
+    final saved = cwd;
+    cwd = _resolve(dir);
+    try {
+      f();
+    } finally {
+      cwd = saved;
+    }
+  }
+
   /// The arguments of [args] that aren't flags; [values] are the flags that take the next word, given to [onValue].
+  /// A number is never a name (it is the value of a flag we don't know, as in `--fetch-timeout 60000`).
   List<String> _positional(
     List<String> args,
     Set<String> values, {
@@ -417,9 +537,10 @@ final class _Scan {
         if (eq > 0) {
           onValue?.call(a.substring(0, eq), a.substring(eq + 1));
         } else if (values.contains(a) && i + 1 < args.length) {
-          onValue?.call(a, args[++i]);
+          i++;
+          onValue?.call(args[i - 1], args[i]);
         }
-      } else {
+      } else if (!RegExp(r'^\d+$').hasMatch(a)) {
         out.add(a);
         if (limit != null && out.length >= limit) break;
       }
@@ -442,7 +563,11 @@ final class _Scan {
     '--implementation', '--abi', '--only-binary', '--no-binary', '--upgrade-strategy', '--src', '--cache-dir',
     '--trusted-host', '--index', '--default-index', '--progress-bar', '--report', '--log', '-p', '--group',
     '--optional', '--extra', '--package', '--project', '--directory', '-G', '-E', '--extras', '--source', '--with',
-    '--from', '--spec', '--pip-args', '--suffix',
+    '--from', '--spec', '--pip-args', '--suffix', '--timeout', '--default-timeout', '--retries', '--proxy', '--cert',
+    '--client-cert', '--exists-action', '--log-file', '--config-settings', '-C', '--global-option', '--prerelease',
+    '--resolution', '--index-strategy', '--python-platform', '--bounds', '--keyring-provider', '--upgrade-package',
+    '-P', '--reinstall-package', '--refresh-package', '--link-mode', '--branch', '--tag', '--rev', '--marker', '-m',
+    '--script', '--exclude-newer', '--color', '--config-file',
   };
 
   static const _pyIndexFlags = {
@@ -466,15 +591,30 @@ final class _Scan {
       final py = _text('$d/pyproject.toml') ?? '';
       if (py.contains('tool.uv.index') || py.contains('tool.poetry.source')) return true;
     }
-    for (final f in const ['.config/pip/pip.conf', '.pip/pip.conf', 'Library/Application Support/pip/pip.conf']) {
-      if (_home.isNotEmpty && (_text('$_home/$f')?.contains('index-url') ?? false)) return true;
+    final xdg = env['XDG_CONFIG_HOME'] ?? '$_home/.config';
+    for (final f in [
+      ?env['PIP_CONFIG_FILE'],
+      ?env['UV_CONFIG_FILE'],
+      if (_home.isNotEmpty) ...[
+        '$xdg/pip/pip.conf',
+        '$_home/.pip/pip.conf',
+        '$_home/Library/Application Support/pip/pip.conf',
+        '$xdg/uv/uv.toml',
+      ],
+      '/etc/pip.conf',
+      '/etc/xdg/pip/pip.conf',
+      '/Library/Application Support/pip/pip.conf',
+      '/etc/uv/uv.toml',
+    ]) {
+      if (_text(f)?.contains('index') ?? false) return true;
     }
     return false;
   }
 
-  void _pip(List<String> a) {
-    if (a.isEmpty || a.first != 'install') return;
+  void _pip(List<String> all) {
     _pyPrivate = false;
+    final a = all.sublist(_subcommandAt(all, _pipValues, _pyIndex));
+    if (a.isEmpty || a.first != 'install') return;
     final files = <String>[];
     final names = _positional(
       a.sublist(1),
@@ -504,6 +644,7 @@ final class _Scan {
     final text = _text(path);
     if (text == null) return;
     final dir = path.substring(0, path.lastIndexOf('/'));
+    final file = path.substring(dir.length + 1);
     var count = 0;
     for (var line in const LineSplitter().convert(text)) {
       final hash = line.indexOf(' #');
@@ -519,11 +660,11 @@ final class _Scan {
         continue;
       }
       if (++count > 30) break;
-      _addPy(line, fromFile: true);
+      _addPy(line, source: file);
     }
   }
 
-  void _addPy(String spec, {bool fromFile = false}) {
+  void _addPy(String spec, {String? source}) {
     if (_remote.hasMatch(spec) || spec.contains('://') || RegExp(r'\s@\s|^[\w.-]+\s*@').hasMatch(spec)) {
       if (!spec.startsWith('.') && !spec.startsWith('/')) _remoteNote(spec);
       return;
@@ -537,24 +678,25 @@ final class _Scan {
     final name = spec.split(RegExp(r'[\[<>=!~;\s(]')).first.trim();
     if (!RegExp(r'^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$').hasMatch(name)) return;
     final n = pep503(name);
-    _add(
-      PackageRef(
-        Ecosystem.pypi,
-        n,
-        known: _known(Ecosystem.pypi, n, lockOnly: fromFile),
-        privateIndex: _pyPrivateNow,
-      ),
-    );
+    _add(PackageRef(Ecosystem.pypi, n, known: _known(Ecosystem.pypi, n), privateIndex: _pyPrivateNow, source: source));
   }
 
   // JavaScript --------------------------------------------------------------------------------------------------
 
+  /// Flags of npm, pnpm, yarn and bun that take the next word.
   static const _jsValues = {
-    '--registry', '--prefix', '--cache', '-w', '--workspace', '--tag', '--filter', '-F', '--cwd', '-C', '--dir', //
-    '--omit', '--include', '--install-strategy', '--userconfig', '--loglevel',
+    '--registry', '--prefix', '--cache', '--workspace', '--tag', '--filter', '-F', '--cwd', '-C', '--dir', //
+    '--omit', '--include', '--install-strategy', '--userconfig', '--loglevel', '--log-level', '--before',
+    '--save-prefix', '--network-timeout', '--fetch-timeout', '--fetch-retries', '--network-concurrency', '--mutex',
+    '--modules-folder', '--cache-folder', '--global-folder', '--reporter', '--config', '--otp',
   };
 
-  static const _runnerValues = {..._jsValues, '-p', '--package', '--call', '-c'};
+  /// npm's `-w` names a workspace; pnpm's `-w` is the workspace root and takes nothing.
+  static const _npmValues = {..._jsValues, '-w'};
+
+  static const _runnerValues = {..._npmValues, '-p', '--package', '--call', '-c'};
+
+  static const _dirFlags = {'--prefix', '-C', '--dir', '--cwd'};
 
   bool _jsFlagPrivate = false;
 
@@ -579,54 +721,103 @@ final class _Scan {
     return false;
   }
 
-  void _js(String prog, List<String> a) {
-    if (a.isEmpty) return;
+  void _js(String prog, List<String> all) {
+    final values = prog == 'npm' ? _npmValues : _jsValues;
+    String? dir;
+    void flag(String f, String v) {
+      _jsValue(f, v);
+      if (_dirFlags.contains(f)) dir = v;
+    }
+
+    _jsFlagPrivate = false;
+    final a = all.sublist(_subcommandAt(all, values, flag));
+    if (a.isEmpty) {
+      // A bare `yarn` installs.
+      if (prog == 'yarn') _inDir(dir, _bareJs);
+      return;
+    }
     var sub = a.first;
     var rest = a.sublist(1);
     if (sub == 'dlx' && (prog == 'pnpm' || prog == 'yarn')) return _runner(Ecosystem.npm, rest);
-    if (sub == 'global' && prog == 'yarn' && rest.isNotEmpty) {
+    if (prog == 'yarn' && (sub == 'global' || sub == 'workspace') && rest.isNotEmpty) {
+      // `yarn global add x`, `yarn workspace web add x`.
+      if (sub == 'workspace') rest = rest.sublist(1);
+      if (rest.isEmpty) return;
       sub = rest.first;
       rest = rest.sublist(1);
     }
     if (!const {'install', 'i', 'in', 'add', 'a', 'isntall'}.contains(sub)) return;
-    _jsFlagPrivate = false;
-    final names = _positional(rest, _jsValues, onValue: _jsValue);
-    if (names.isEmpty) {
-      if (sub != 'add') _bareJs();
-      return;
-    }
-    for (final n in names) {
-      _addNpm(n);
-    }
+    final names = _positional(rest, values, onValue: flag);
+    _inDir(dir, () {
+      if (names.isEmpty) {
+        if (sub != 'add') _bareJs();
+        return;
+      }
+      for (final n in names) {
+        _addNpm(n);
+      }
+    });
   }
 
   static const _jsLocks = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock'];
 
-  /// A bare `npm install`: the dependencies in package.json the lockfile doesn't have yet (the ones just added).
+  /// A bare `npm install`: the dependencies in package.json the lockfile doesn't have yet (the ones just added),
+  /// except the project's own workspace packages, which aren't on the registry.
   void _bareJs() {
-    final text = _text('$cwd/package.json');
-    if (text == null) return;
-    Map<String, Object?> json;
-    try {
-      json = (jsonDecode(text) as Map).cast<String, Object?>();
-    } on Object {
-      return;
-    }
+    final json = _packageJson(cwd);
+    if (json == null) return;
+    final own = _workspaceNames(json);
     final lock = [for (final f in _jsLocks) ?_text('$cwd/$f')].join('\n');
     var count = 0;
     for (final field in const ['dependencies', 'devDependencies', 'optionalDependencies']) {
       if (json[field] case final Map<Object?, Object?> deps) {
         for (final MapEntry(:key, :value) in deps.entries) {
-          if (key is! String || value is! String) continue;
+          if (key is! String || value is! String || own.contains(key)) continue;
           if (lock.isNotEmpty && _mentions(lock, key, Ecosystem.npm)) continue;
           if (++count > 30) return;
-          _addNpm(value.startsWith('npm:') ? value.substring(4) : '$key@$value', fromFile: true);
+          _addNpm(value.startsWith('npm:') ? value.substring(4) : '$key@$value', source: 'package.json');
         }
       }
     }
   }
 
-  void _addNpm(String spec, {bool fromFile = false}) {
+  Map<String, Object?>? _packageJson(String dir) {
+    final text = _text('$dir/package.json');
+    if (text == null) return null;
+    try {
+      return (jsonDecode(text) as Map).cast<String, Object?>();
+    } on Object {
+      return null;
+    }
+  }
+
+  /// The names of the packages [json]'s `workspaces` point at (`packages/*` and plain folders).
+  Set<String> _workspaceNames(Map<String, Object?> json) {
+    final globs = switch (json['workspaces']) {
+      final List<Object?> l => l,
+      {'packages': final List<Object?> l} => l,
+      _ => const <Object?>[],
+    };
+    final names = <String>{};
+    for (final g in globs.whereType<String>()) {
+      if (g.startsWith('!')) continue;
+      final List<String> folders;
+      if (!g.contains('*')) {
+        folders = [_resolve(g)];
+      } else if (RegExp(r'^[^*]+/\*\*?$').hasMatch(g)) {
+        final base = _resolve(g.substring(0, g.indexOf('/*')));
+        folders = [for (final e in _list(base)) '$base/$e'];
+      } else {
+        continue;
+      }
+      for (final f in folders.take(300)) {
+        if (_packageJson(f)?['name'] case final String name) names.add(name);
+      }
+    }
+    return names;
+  }
+
+  void _addNpm(String spec, {String? source}) {
     final alias = spec.indexOf('@npm:');
     if (alias > 0) spec = spec.substring(alias + 5);
     if (_remote.hasMatch(spec) || (spec.contains('/') && !spec.startsWith('@') && !spec.startsWith('.'))) {
@@ -650,15 +841,17 @@ final class _Scan {
       PackageRef(
         Ecosystem.npm,
         name,
-        known: _known(Ecosystem.npm, name, lockOnly: fromFile),
+        known: _known(Ecosystem.npm, name),
         privateIndex: _npmPrivate(name),
+        source: source,
       ),
     );
   }
 
   /// `npx pkg args…`, `uvx pkg`, `pipx run pkg`: the first word is the package (or `-p`/`--from`/`--spec`
-  /// name it, and then the first word is the command); the rest are its arguments.
-  void _runner(Ecosystem e, List<String> a) {
+  /// name it, and then the first word is the command); the rest are its arguments. With [localBins] (`npx`, `bunx`),
+  /// a command the project installed (`node_modules/.bin`) runs without a download, so it isn't checked.
+  void _runner(Ecosystem e, List<String> a, {bool localBins = false}) {
     final named = <String>[];
     _jsFlagPrivate = false;
     _pyPrivate = false;
@@ -672,13 +865,19 @@ final class _Scan {
       },
     );
     for (final n in [...named, if (named.isEmpty) ...words]) {
+      if (localBins && named.isEmpty && {cwd, root}.any((d) => _list('$d/node_modules/.bin').contains(n))) continue;
       e == Ecosystem.npm ? _addNpm(n) : _addPy(n);
     }
   }
 
   // Rust, Ruby, Dart, Go ------------------------------------------------------------------------------------------
 
-  void _cargo(List<String> a) {
+  void _cargo(List<String> all) {
+    // `cargo +nightly -q install x`: the toolchain and cargo's own flags come first.
+    var a = all.isNotEmpty && all.first.startsWith('+') ? all.sublist(1) : all;
+    a = a.sublist(_subcommandAt(a, const {'-Z', '--config', '--color', '-C'}));
+    if (a.isEmpty || (a.first != 'add' && a.first != 'install')) return;
+    a = a.sublist(1);
     var private = false;
     var notRegistry = false;
     final names = _positional(
@@ -766,7 +965,8 @@ final class _Scan {
   }
 
   void _go(List<String> a) {
-    final private = const ['GOPRIVATE', 'GONOPROXY', 'GOPROXY'].any((k) => env[k]?.isNotEmpty ?? false);
+    final private =
+        const ['GOPRIVATE', 'GONOPROXY', 'GOPROXY'].any((k) => env[k]?.isNotEmpty ?? false) || _goEnvPrivate;
     for (final spec in _positional(a, const {'-modfile', '-C', '-o', '-tags'})) {
       final name = spec.split('@').first;
       if (name.startsWith('.') || name.startsWith('/') || !name.split('/').first.contains('.')) continue;
@@ -775,16 +975,20 @@ final class _Scan {
     }
   }
 
-  // Manifests -----------------------------------------------------------------------------------------------------
+  /// `go env -w GOPRIVATE=…` writes go's own env file, not the environment.
+  bool get _goEnvPrivate {
+    final file =
+        env['GOENV'] ??
+        (_home.isEmpty
+            ? null
+            : _text('$_home/Library/Application Support/go/env') != null
+            ? '$_home/Library/Application Support/go/env'
+            : '${env['XDG_CONFIG_HOME'] ?? '$_home/.config'}/go/env');
+    final text = file == null ? null : _text(file);
+    return text != null && RegExp(r'^(GOPRIVATE|GONOPROXY|GOPROXY)=\S', multiLine: true).hasMatch(text);
+  }
 
-  static const _manifests = {
-    Ecosystem.npm: ['package.json'],
-    Ecosystem.pypi: ['requirements.txt', 'requirements-dev.txt', 'pyproject.toml', 'Pipfile', 'setup.py', 'setup.cfg'],
-    Ecosystem.crates: ['Cargo.toml'],
-    Ecosystem.gems: ['Gemfile'],
-    Ecosystem.pub: ['pubspec.yaml'],
-    Ecosystem.go: ['go.mod'],
-  };
+  // Lockfiles -----------------------------------------------------------------------------------------------------
 
   static const _locks = {
     Ecosystem.npm: _jsLocks,
@@ -795,12 +999,11 @@ final class _Scan {
     Ecosystem.go: ['go.sum'],
   };
 
-  /// Whether [name] is in a lockfile (or, unless [lockOnly], a manifest) in the folder or the project root. Names
-  /// read from a file the command installs from count by the lockfile only: the file itself may be where a made-up
-  /// name was just written.
-  bool _known(Ecosystem e, String name, {bool lockOnly = false}) {
+  /// Whether [name] is in a lockfile in the folder or the project root: installed before, so resolved by the package
+  /// manager. Manifests don't count: the model can write a made-up name into one as easily as it can type it.
+  bool _known(Ecosystem e, String name) {
     for (final d in {cwd, root}) {
-      for (final f in [...?_locks[e], if (!lockOnly) ...?_manifests[e]]) {
+      for (final f in _locks[e] ?? const <String>[]) {
         final text = _text('$d/$f');
         if (text != null && _mentions(text, name, e)) return true;
       }

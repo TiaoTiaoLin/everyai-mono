@@ -5,8 +5,18 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   /// What [command] installs, as `ecosystem:name` keys.
-  List<String> keys(String command, {Map<String, String> files = const {}, Map<String, String> env = const {}}) =>
-      installsIn(command, cwd: '/p', env: env, readFile: (path) => files[path]).packages.map((p) => p.key).toList();
+  List<String> keys(
+    String command, {
+    Map<String, String> files = const {},
+    Map<String, String> env = const {},
+    Map<String, List<String>> dirs = const {},
+  }) => installsIn(
+    command,
+    cwd: '/p',
+    env: env,
+    readFile: (path) => files[path],
+    listDir: (d) => dirs[d] ?? const [],
+  ).packages.map((p) => p.key).toList();
 
   group('installsIn', () {
     test('JavaScript managers, scoped, versioned and aliased names', () {
@@ -60,8 +70,12 @@ void main() {
       for (final c in ['npm test', 'npm view lodash', 'pip list', 'pip show requests', 'cargo build', 'ls -la']) {
         expect(keys(c), isEmpty, reason: c);
       }
-      expect(installsIn('npm test').runsManager, isTrue);
+      expect(installsIn('npm test').runsManager, isFalse);
+      expect(installsIn('cargo build && go test ./...').runsManager, isFalse);
       expect(installsIn('make setup').runsManager, isFalse);
+      for (final c in ['npm ci', 'yarn', 'pnpm -r update', 'bundle', 'go mod tidy', 'uv sync', 'flutter pub get']) {
+        expect(installsIn(c).runsManager, isTrue, reason: c);
+      }
     });
 
     test('specs that are not registry names', () {
@@ -111,14 +125,93 @@ void main() {
       expect(keys('npm ci', files: files), isEmpty);
     });
 
-    test('names in the manifest or lockfile are known, file-read names by the lockfile only', () {
-      final files = {'/p/package.json': '{"dependencies": {"lodahs": "1"}}', '/p/requirements.txt': 'Flask_Login\n'};
-      final named = installsIn('npm i lodahs', cwd: '/p', readFile: (p) => files[p]).packages.single;
-      expect(named.known, isTrue);
-      final py = installsIn('pip install flask-login', cwd: '/p', readFile: (p) => files[p]).packages.single;
-      expect(py.known, isTrue);
-      final fromFile = installsIn('pip install -r requirements.txt', cwd: '/p', readFile: (p) => files[p]);
-      expect(fromFile.packages.single.known, isFalse);
+    test('only lockfiles make a name known: the model can write a manifest itself', () {
+      final files = {
+        '/p/package.json': '{"dependencies": {"lodahs": "1"}}',
+        '/p/requirements.txt': 'Flask_Login\n',
+        '/p/yarn.lock': 'left-pad@^1:\n  version "1.3.0"\n',
+        '/p/poetry.lock': '[[package]]\nname = "flask_login"\n',
+      };
+      PackageRef one(String c) => installsIn(c, cwd: '/p', readFile: (p) => files[p]).packages.single;
+      expect(one('npm i lodahs').known, isFalse);
+      expect(one('npm i left-pad').known, isTrue);
+      expect(one('pip install flask-login').known, isTrue);
+      expect(one('pip install -r requirements.txt').known, isTrue);
+      final fromFile = one('npm install');
+      expect((fromFile.known, fromFile.source), (false, 'package.json'));
+    });
+
+    test('shapes the shell parser gives up on are still scanned', () {
+      for (final c in [
+        'npm install reactt > install.log 2>&1',
+        '(cd web && npm install reactt)',
+        r'cd $(git rev-parse --show-toplevel) && npm install reactt',
+        'bash -c "npm install reactt"',
+        "sh -lc 'cd web && npm i reactt'",
+        'npm install reactt && echo ok &',
+        'echo `date` && npm i reactt',
+        'bash <<EOF\nnpm i reactt\nEOF',
+      ]) {
+        expect(keys(c), ['npm:reactt'], reason: c);
+      }
+      expect(keys(r'npm i $PKG > log'), isEmpty);
+      expect(keys("cat > notes.md <<'EOF'\nRun pip install reqests\nEOF\nls > out"), isEmpty);
+      expect(installsIn('(cd web && npm install reactt) > log', cwd: '/p').dirs, ['/p/web']);
+      expect(installsIn(r'cd $(pwd)/x && npm i reactt > log', cwd: '/p').dirs, ['/p']);
+      expect(installsIn('bash -c "cd web && npm i a" && npm i b', cwd: '/p').dirs, ['/p/web', '/p']);
+    });
+
+    test('flags before the subcommand, workspaces and toolchains', () {
+      expect(keys('pnpm --filter web add reactt'), ['npm:reactt']);
+      expect(keys('pnpm add -D -w reactt'), ['npm:reactt']);
+      expect(keys('yarn workspace web add reactt'), ['npm:reactt']);
+      expect(keys('npm -w web install reactt'), ['npm:reactt']);
+      expect(keys('pip -q install requestss'), ['pypi:requestss']);
+      expect(keys('pip --timeout 5 install six'), ['pypi:six']);
+      expect(keys('cargo +nightly install ripgrp'), ['crates:ripgrp']);
+      expect(keys('cargo -Z unstable-options add serde'), ['crates:serde']);
+      expect(keys('go get -modfile alt.mod corp.dev/x'), ['go:corp.dev/x']);
+      final prefixed = installsIn('npm --prefix web install reactt', cwd: '/p');
+      expect(prefixed.packages.single.name, 'reactt');
+      expect(prefixed.dirs, ['/p/web']);
+      expect(keys('yarn', files: {'/p/package.json': '{"dependencies": {"reactt": "^1"}}'}), ['npm:reactt']);
+    });
+
+    test('a bare install skips the project\'s own workspace packages', () {
+      final files = {
+        '/p/package.json': '{"workspaces": ["packages/*", "tools"], "dependencies": {"@acme/ui": "*", "my-tool": "^1", "reactt": "1"}}',
+        '/p/packages/ui/package.json': '{"name": "@acme/ui"}',
+        '/p/tools/package.json': '{"name": "my-tool"}',
+      };
+      expect(
+        keys(
+          'npm install',
+          files: files,
+          dirs: {
+            '/p/packages': ['ui'],
+          },
+        ),
+        ['npm:reactt'],
+      );
+    });
+
+    test('npx runs a command the project installed without a lookup', () {
+      final bins = {
+        '/p/node_modules/.bin': ['corp-gen'],
+      };
+      expect(keys('npx corp-gen --check', dirs: bins), isEmpty);
+      expect(keys('npx create-thing', dirs: bins), ['npm:create-thing']);
+      expect(keys('pnpm dlx corp-gen', dirs: bins), ['npm:corp-gen']);
+    });
+
+    test('values of flags we know and numbers are not taken for names', () {
+      expect(keys('pip install --default-timeout 100 numpy'), ['pypi:numpy']);
+      expect(keys('pip install --timeout 60 --retries 5 requests'), ['pypi:requests']);
+      expect(keys('uv add --prerelease allow httpx'), ['pypi:httpx']);
+      expect(keys('uv pip install --python-platform linux foo'), ['pypi:foo']);
+      expect(keys('npm install --before 2024-01-01 x'), ['npm:x']);
+      expect(keys('yarn add --network-timeout 100000 lodash'), ['npm:lodash']);
+      expect(keys('npm install --some-new-flag 60000 left-pad'), ['npm:left-pad']);
     });
 
     test('private indexes: flags, environment and .npmrc', () {
@@ -131,6 +224,11 @@ void main() {
       expect(private('PIP_INDEX_URL=https://x pip install foo'), isTrue);
       expect(private('npm i @acme/ui', files: {'/p/.npmrc': '@acme:registry=https://npm.acme.dev\n'}), isTrue);
       expect(private('npm i lodash', files: {'/p/.npmrc': '@acme:registry=https://npm.acme.dev\n'}), isFalse);
+      const home = {'HOME': '/h'};
+      expect(private('go get corp.dev/lib', env: home), isFalse);
+      expect(private('go get corp.dev/lib', env: home, files: {'/h/.config/go/env': 'GOPRIVATE=corp.dev/*\n'}), isTrue);
+      expect(private('pip install foo', env: home, files: {'/h/.config/uv/uv.toml': '[[index]]\nurl = "x"\n'}), isTrue);
+      expect(private('pip install foo', files: {'/etc/pip.conf': '[global]\nindex-url = https://x\n'}), isTrue);
     });
   });
 
@@ -203,6 +301,11 @@ void main() {
       expect(script.text, contains('install script'));
       final old = v(const PackageRef(npm, 'my-own-thing'), PackageInfo(created: DateTime.utc(2020), downloads: 5000));
       expect(old.kind, VerdictKind.pass);
+    });
+
+    test('a name read from a file says which file', () {
+      final a = v(const PackageRef(npm, 'fastjsonfix-utils', source: 'package.json'), PackageInfo.missing);
+      expect(a.text, startsWith("`fastjsonfix-utils` (listed in package.json) doesn't exist on npm."));
     });
 
     test('a failed lookup is unknown, a known name always passes', () {

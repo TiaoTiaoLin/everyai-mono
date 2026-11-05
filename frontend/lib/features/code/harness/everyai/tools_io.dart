@@ -732,6 +732,15 @@ final class ToolRunner {
     return _researchRefusal(tool, args) ?? _guard(tool, args);
   }
 
+  /// The package check's refusal of a bash call, before it is shown for approval (see [PackageGuard]): an install
+  /// that will be refused shouldn't be put to the user first. [_bash] checks again when it runs.
+  Future<String?> packageRefusal(String tool, Map<String, Object?> raw) async {
+    if (tool != ToolNames.bash || packages == null) return null;
+    final command = (raw['command'] as String? ?? '').trim();
+    if (command.isEmpty) return null;
+    return (await packages!.check(command, cwd: shell.cwd, root: root)).refusal;
+  }
+
   Future<ToolOutput> run(String tool, Map<String, Object?> raw, {Future<void>? cancel}) async {
     await ready();
     final args = mapped(raw);
@@ -851,7 +860,7 @@ final class ToolRunner {
     }
     final ms = ((args['timeout'] as num?)?.toInt() ?? 120000).clamp(1000, 600000);
     final name = 'bash-${DateTime.now().millisecondsSinceEpoch}';
-    final locks = check == null ? null : packages!.snapshot(cwd, root, check.scan);
+    final locks = check == null ? null : await packages!.snapshot(cwd, root, check.scan);
     final r = await shell.run(
       command,
       timeout: Duration(milliseconds: ms),
@@ -866,7 +875,7 @@ final class ToolRunner {
     final shown = '${out.isEmpty ? '(no output)' : out}$note${r.exitCode == 0 ? '' : '\n[exit code ${r.exitCode}]'}';
     final checked = check == null
         ? ''
-        : PackageGuard.block([...check.notes, ...packages!.lockNotes(locks!, check.scan, command)]);
+        : PackageGuard.block([...check.notes, ...await packages!.lockNotes(locks!, command)]);
     return ToolOutput(
       '${_fit(shown, name)}$checked',
       isError: r.exitCode != 0,

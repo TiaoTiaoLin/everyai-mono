@@ -52,11 +52,14 @@ void main() {
     late List<Uri> asked;
     late Object? Function(http.Request) override;
     late RegistryLookup lookup;
+    late DateTime now;
 
     setUp(() {
       asked = [];
       override = (_) => null;
+      now = DateTime.utc(2026, 11, 5);
       lookup = RegistryLookup(
+        clock: () => now,
         MockClient((req) async {
           asked.add(req.url);
           if (override(req) case final Object o) {
@@ -104,17 +107,28 @@ void main() {
     });
 
     test('failures are unknown and not cached; answers are cached', () async {
-      override = (_) => http.ClientException('offline');
-      expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNull);
-      override = (_) => TimeoutException('slow');
-      expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNull);
-      override = (_) => http.Response('busy', 503);
-      expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNull);
+      for (final failure in [http.ClientException('offline'), TimeoutException('slow'), http.Response('busy', 503)]) {
+        override = (_) => failure;
+        expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNull);
+        now = now.add(lookup.downFor);
+      }
       override = (_) => null;
       expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNotNull);
       final before = asked.length;
       expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNotNull);
       expect(asked.length, before);
+    });
+
+    test('a registry that failed is skipped for a while, the others are not', () async {
+      override = (_) => http.ClientException('dropped');
+      expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')), isNull);
+      override = (_) => null;
+      final before = asked.length;
+      expect(await lookup.info(const PackageRef(Ecosystem.pypi, 'other')), isNull);
+      expect(asked.length, before);
+      expect(await lookup.info(const PackageRef(Ecosystem.npm, 'left-pad')), isNotNull);
+      now = now.add(lookup.downFor);
+      expect((await lookup.info(const PackageRef(Ecosystem.pypi, 'reqests')))!.exists, isTrue);
     });
   });
 
@@ -126,6 +140,25 @@ void main() {
       expect(fake.asked, ['npm:tiny-x']);
       expect(check.refusal, isNull);
       expect(check.notes.single, contains("Couldn't check `tiny-x`"));
+    });
+
+    test('index settings come from the environment it is given (the login shell\'s)', () async {
+      final fake = _FakeLookup({'pypi:corp-utils': PackageInfo.missing});
+      final public = await PackageGuard(fake, env: const {}).check('pip install corp-utils', cwd: '/x', root: '/x');
+      expect(public.refusal, contains("doesn't exist on PyPI"));
+      final guard = PackageGuard(fake, loadEnv: () async => {'PIP_INDEX_URL': 'https://pypi.corp/simple'});
+      final private = await guard.check('pip install corp-utils', cwd: '/x', root: '/x');
+      expect(private.refusal, isNull);
+      expect(private.notes.single, contains('private index'));
+    });
+
+    test('the refusal does not point at a way around the check', () async {
+      final check = await PackageGuard(
+        _FakeLookup({'npm:react-form-hooks-utils': PackageInfo.missing}),
+        env: const {},
+      ).check('npm i react-form-hooks-utils', cwd: '/x', root: '/x');
+      expect(check.refusal, contains('Terminal pane'));
+      expect(check.refusal, isNot(contains('manifest')));
     });
   });
 
@@ -197,12 +230,19 @@ void main() {
       expect(out.text, isNot(contains('runs no package manager')));
     });
 
-    test('a lockfile changed by a command that runs no package manager is noted', () async {
-      File('${tmp.path}/lock.next').writeAsStringSync('{"packages": {}}\n');
+    test('commands that run no install leave the lockfiles alone (git checkout may change them)', () async {
+      File('${tmp.path}/lock.next')
+          .writeAsStringSync('{"packages": {"node_modules/x": {"resolved": "http://evil.example/x.tgz"}}}\n');
       final out = await runner.run('bash', {'command': 'cp lock.next package-lock.json'});
-      expect(out.text, contains('package-lock.json changed, though this command runs no package manager'));
-      final quiet = await runner.run('bash', {'command': 'echo hi'});
-      expect(quiet.text, isNot(contains('package check')));
+      expect(out.text, isNot(contains('package check')));
+      expect(await runner.packages!.snapshot(tmp.path, tmp.path, installsIn('npm test')), isEmpty);
+    });
+
+    test('an install the check refuses is refused before it is shown for approval', () async {
+      expect(await runner.packageRefusal('bash', {'command': npm('i lodahs')}), contains("`lodahs` doesn't exist"));
+      expect(await runner.packageRefusal('bash', {'command': npm('i old-thing')}), isNull);
+      expect(await runner.packageRefusal('read', {'path': 'x'}), isNull);
+      expect(File('${tmp.path}/ran').existsSync(), isFalse);
     });
   });
 }

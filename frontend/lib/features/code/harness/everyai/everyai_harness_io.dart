@@ -140,7 +140,10 @@ final class EveryAISession
   EveryAISession._(this.id, this._spec, this._dir, http.Client? client)
     : _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey, client: client),
       _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell'),
-      _packages = PackageGuard(RegistryLookup(client ?? http.Client())) {
+      _packages = PackageGuard(
+        RegistryLookup(client ?? http.Client()),
+        loadEnv: () async => (await ShellEnv.load()).env,
+      ) {
     _tools = ToolRunner(
       root: _spec.workingDir,
       shell: _shell,
@@ -1312,9 +1315,11 @@ final class EveryAISession
         );
         continue;
       }
-      // A research job's shell or out-of-bounds write is refused here, not
-      // after it waited for an approval no one may be watching for.
-      final early = args == null ? null : _tools.refusalBeforeApproval(call.name, args);
+      // A research job's shell or out-of-bounds write, and an install the
+      // package check refuses, are refused here, not after an approval.
+      final early = args == null
+          ? null
+          : _tools.refusalBeforeApproval(call.name, args) ?? await _tools.packageRefusal(call.name, args);
       if (early != null) {
         _result(call, actionId, ToolOutput(early, isError: true));
         continue;

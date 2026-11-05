@@ -12,6 +12,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:http/http.dart' as http;
 
@@ -24,16 +25,28 @@ abstract interface class PackageLookup {
 }
 
 /// [PackageLookup] on the public registries, with a cache for the session: answers (found or missing) are kept,
-/// failures aren't, so the next command tries again.
+/// failures aren't. After a failure the registry isn't asked again for [downFor] (a network that drops the traffic
+/// would make every install wait out the timeout again).
 final class RegistryLookup implements PackageLookup {
-  RegistryLookup(this.client, {this.timeout = const Duration(seconds: 3)});
+  RegistryLookup(
+    this.client, {
+    this.timeout = const Duration(seconds: 3),
+    this.downFor = const Duration(minutes: 3),
+    DateTime Function()? clock,
+  }) : _clock = clock ?? DateTime.now;
 
   final http.Client client;
 
   /// Per request.
   final Duration timeout;
 
+  /// How long a registry that failed is skipped.
+  final Duration downFor;
+
+  final DateTime Function() _clock;
+
   final _cache = <String, Future<PackageInfo?>>{};
+  final _down = <Ecosystem, DateTime>{};
 
   static final _headers = {'User-Agent': 'EveryAI/$appVersion (package check)', 'Accept': 'application/json'};
 
@@ -41,11 +54,14 @@ final class RegistryLookup implements PackageLookup {
   Future<PackageInfo?> info(PackageRef p) {
     final key = p.key;
     if (_cache[key] case final hit?) return hit;
+    if (_down[p.ecosystem] case final since? when _clock().difference(since) < downFor) return Future.value();
     final f = _fetch(p).then<PackageInfo?>((v) => v, onError: (Object _) => null);
     _cache[key] = f;
     unawaited(
       f.then((v) {
-        if (v == null) _cache.remove(key);
+        if (v != null) return;
+        _cache.remove(key);
+        _down[p.ecosystem] = _clock();
       }),
     );
     return f;
@@ -138,23 +154,27 @@ final class PackageCheck {
   final InstallScan scan;
 }
 
-/// The lockfiles before a command ran: path → text (a size and date for a big file), null when absent.
+/// The lockfiles before a command ran: path → text (a size and date for a big file), null when absent. Empty when
+/// the command runs no package manager command that changes them.
 typedef LockSnapshot = Map<String, String?>;
 
 /// The package check of one session (one per session, so its lookups are cached across model switches).
 final class PackageGuard {
+  /// [env] is the environment the commands run in; without it, [loadEnv] loads it (the session gives the login
+  /// shell's, where `.zshrc` exports index settings the app's own environment lacks), else the app's own is used.
   PackageGuard(
     this.lookup, {
     Map<String, String>? env,
+    Future<Map<String, String>> Function()? loadEnv,
     DateTime Function()? clock,
     this.wait = const Duration(seconds: 5),
-  }) : env = env ?? Platform.environment,
+  }) : _env = env == null ? (loadEnv ?? () async => Platform.environment) : (() async => env),
        _clock = clock ?? DateTime.now;
 
   final PackageLookup lookup;
 
   /// The shell's environment (index settings, HOME for `~/.npmrc`).
-  final Map<String, String> env;
+  final Future<Map<String, String>> Function() _env;
 
   /// The longest a command waits for its lookups, in all.
   final Duration wait;
@@ -173,9 +193,17 @@ final class PackageGuard {
     }
   }
 
+  static List<String> _list(String dir) {
+    try {
+      return [for (final e in Directory(dir).listSync()) e.path.substring(e.path.lastIndexOf('/') + 1)];
+    } on Object {
+      return const [];
+    }
+  }
+
   /// Checks what [command] (run in [cwd], in the project at [root]) installs.
   Future<PackageCheck> check(String command, {required String cwd, required String root}) async {
-    final scan = installsIn(command, cwd: cwd, root: root, env: env, readFile: _read);
+    final scan = installsIn(command, cwd: cwd, root: root, env: await _env(), readFile: _read, listDir: _list);
     final notes = [...scan.notes];
     final todo = [
       for (final p in scan.packages)
@@ -211,8 +239,8 @@ final class PackageGuard {
     return PackageCheck(
       refusal:
           "Error: refused by EveryAI's package check, nothing was installed. ${refused.join(' ')} This check is on "
-          'in every mode. If the user wants this exact package, they can add it to the project themselves (a name '
-          'in the manifest or lockfile installs) or run the install in the Terminal pane.',
+          'in every mode. If the user wants this exact package, they can run the install themselves in the Terminal '
+          'pane.',
       notes: notes,
       scan: scan,
     );
@@ -223,19 +251,25 @@ final class PackageGuard {
     'poetry.lock', 'Pipfile.lock', 'Cargo.lock', 'Gemfile.lock', 'pubspec.lock',
   ];
 
-  /// The lockfiles in [cwd], [root] and the folders [scan] installs in, before the command runs. Their text is only
-  /// read when the command runs a package manager; otherwise a size and date tell whether one changed.
-  LockSnapshot snapshot(String cwd, String root, InstallScan scan) => {
-    for (final d in {cwd, root, ...scan.dirs})
-      for (final f in lockfiles) '$d/$f': _lockState('$d/$f', text: scan.runsManager),
-  };
+  /// The lockfiles in [cwd], [root] and the folders [scan] installs in, before the command runs; none when it runs
+  /// no package manager command that changes them.
+  Future<LockSnapshot> snapshot(String cwd, String root, InstallScan scan) async {
+    if (!scan.runsManager) return const {};
+    final paths = [
+      for (final d in {cwd, root, ...scan.dirs})
+        for (final f in lockfiles) '$d/$f',
+    ];
+    final states = await Future.wait(paths.map(_lockState));
+    return {for (var i = 0; i < paths.length; i++) paths[i]: states[i]};
+  }
 
-  static String? _lockState(String path, {required bool text}) {
+  /// A lockfile's text, a size and date for a big one, null when absent.
+  static Future<String?> _lockState(String path) async {
     try {
       final f = File(path);
-      if (!f.existsSync()) return null;
-      final s = f.statSync();
-      return text && s.size < 5 << 20 ? f.readAsStringSync() : '\u0000${s.size}:${s.modified.millisecondsSinceEpoch}';
+      if (!await f.exists()) return null;
+      final s = await f.stat();
+      return s.size < 5 << 20 ? await f.readAsString() : '\u0000${s.size}:${s.modified.millisecondsSinceEpoch}';
     } on Object {
       return null;
     }
@@ -252,20 +286,27 @@ final class PackageGuard {
   static final _url = RegExp(r'''(?:registry\+|sparse\+|git\+)?[a-z][a-z0-9+.-]*://[^\s"'<>,)}\]]+''');
   static final _sourceLine = RegExp(r'\b(resolved|tarball|url|registry|source|remote|git)\b', caseSensitive: false);
 
-  /// Notes on what [command] changed in the lockfiles of [before]: addresses off the registry or over plain http,
-  /// new npm packages that run install scripts, and a lockfile changed by a command that runs no package manager.
-  List<String> lockNotes(LockSnapshot before, InstallScan scan, String command) {
-    final notes = <String>[];
+  /// Notes on what [command] changed in the lockfiles of [before] (see [snapshot]): addresses off the registry or
+  /// over plain http, and new npm packages that run install scripts. The comparing runs off the UI isolate (a
+  /// package-lock.json can be megabytes).
+  Future<List<String>> lockNotes(LockSnapshot before, String command) async {
+    if (before.isEmpty) return const [];
+    final changed = <(String, String?, String)>[];
+    for (final MapEntry(key: path, value: old) in before.entries) {
+      final now = await _lockState(path);
+      if (now != null && now != old) changed.add((path, old, now));
+    }
+    if (changed.isEmpty) return const [];
+    return Isolate.run(() => _changeNotes(changed, command));
+  }
+
+  static List<String> _changeNotes(List<(String, String?, String)> changed, String command) {
     final offRegistry = <String>{};
     final plain = <String>{};
     final scripts = <String>{};
-    final changed = <String>[];
-    for (final MapEntry(key: path, value: old) in before.entries) {
-      final now = _lockState(path, text: old == null ? scan.runsManager : !old.startsWith('\u0000'));
-      if (now == old || now == null) continue;
-      final name = path.substring(path.lastIndexOf('/') + 1);
-      changed.add(name);
+    for (final (path, old, now) in changed) {
       if (now.startsWith('\u0000')) continue;
+      final name = path.substring(path.lastIndexOf('/') + 1);
       final had = (old == null || old.startsWith('\u0000')) ? const <String>{} : old.split('\n').toSet();
       for (final line in now.split('\n')) {
         if (had.contains(line)) continue;
@@ -287,25 +328,14 @@ final class PackageGuard {
       }
       if (name == 'package-lock.json') scripts.addAll(_newInstallScripts(old, now));
     }
-    if (plain.isNotEmpty) notes.add('The lockfile now downloads over plain http from ${plain.join(', ')}.');
-    if (offRegistry.isNotEmpty) {
-      notes.add(
+    return [
+      if (plain.isNotEmpty) 'The lockfile now downloads over plain http from ${plain.join(', ')}.',
+      if (offRegistry.isNotEmpty)
         'The lockfile now downloads from ${offRegistry.join(', ')}, not the registry; make sure that is meant.',
-      );
-    }
-    if (scripts.isNotEmpty) {
-      final list = scripts.take(10).join(', ');
-      notes.add(
-        'New packages that run install scripts: $list${scripts.length > 10 ? ' and ${scripts.length - 10} more' : ''}.',
-      );
-    }
-    if (changed.isNotEmpty && !scan.runsManager) {
-      notes.add(
-        '${changed.toSet().join(', ')} changed, though this command runs no package manager; check what it added '
-        '(git diff).',
-      );
-    }
-    return notes;
+      if (scripts.isNotEmpty)
+        'New packages that run install scripts: ${scripts.take(10).join(', ')}'
+            '${scripts.length > 10 ? ' and ${scripts.length - 10} more' : ''}.',
+    ];
   }
 
   /// npm packages with `hasInstallScript` in [now]'s `packages` that weren't there (with it) in [old].
