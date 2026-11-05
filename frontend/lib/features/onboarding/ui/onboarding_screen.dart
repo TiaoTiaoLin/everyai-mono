@@ -72,7 +72,8 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           children: [
             _ProgressBar(value: (_index + 1) / _steps.length),
             Padding(
-              padding: const EdgeInsets.fromLTRB(28, 18, 28, 0),
+              // On macOS the traffic lights sit in this row: start after them, as the sidebar does.
+              padding: EdgeInsets.fromLTRB(Host.hasTrafficLights ? 92 : 28, 18, 28, 0),
               child: Row(
                 children: [
                   const BrandMark(size: 22),
