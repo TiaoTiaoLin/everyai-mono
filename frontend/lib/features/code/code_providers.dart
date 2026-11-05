@@ -206,7 +206,12 @@ const _baseToolInfos = <HostToolInfo>[
         'you learned something a later session would otherwise rediscover: how to build and test, conventions the '
         'user stated, pitfalls and their fixes.',
   ),
-  (name: savedPlansTool, when: 'the task continues earlier work: list and read the plans the user approved before.'),
+  (
+    name: savedPlansTool,
+    when:
+        'the user names an earlier plan or asks to continue that work: list the plans the user approved before and '
+        'read that one (a fork or workflow agent reads only the plan its task names).',
+  ),
   (
     name: runWorkflowTool,
     when:

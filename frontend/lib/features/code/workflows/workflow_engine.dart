@@ -425,6 +425,8 @@ final class WorkflowEngine {
 
   Future<void> _agent(Object? id, Map<String, Object?> args) async {
     final call = _callOf(args);
+    // A phase named only in an agent's options (Ultra's Review and Refix) still gets its place on the card.
+    if (call.phase.isNotEmpty && !_phases.contains(call.phase)) _phases.add(call.phase);
     final base = WorkflowAgentView(key: call.key, label: call.label, phase: call.phase);
     if (journal.agents[call.key] case final j?) {
       _agents[call.key] = base.copyWith(

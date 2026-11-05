@@ -108,7 +108,8 @@ const savedPlansSpec = <String, Object?>{
   'description':
       'The plans the user approved in earlier sessions of this project (kept in .everyai/plans/). Without a name, '
       'lists them newest first with their titles; with a name from that list, returns that plan in full. Read one '
-      'when the task continues earlier work.',
+      'only when the user names it or asks to continue that work; a fork or workflow agent reads only the plan its '
+      'task names.',
   'inputSchema': {
     'type': 'object',
     'properties': {

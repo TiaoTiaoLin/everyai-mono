@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -15,8 +16,14 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// Agents that answer with [answers] by label prefix, as a fenced json block.
 final class _Agents implements AgentLauncher {
-  _Agents(this.answers, {this.bugChecks = const {}});
+  _Agents(this.answers, {this.bugChecks = const {}, this.holds = const {}, this.onStart});
   final Map<String, Object? Function(WorkflowAgentCall call)> answers;
+
+  /// Answers held back until the future completes, by exact label.
+  final Map<String, Future<void>> holds;
+
+  /// Told of every agent as it starts.
+  final void Function(WorkflowAgentCall call)? onStart;
 
   /// The app's bug_check record by label prefix; verified when none matches.
   final Map<String, Map<String, Object?>> bugChecks;
@@ -29,6 +36,7 @@ final class _Agents implements AgentLauncher {
   @override
   Future<WorkflowChild> start(WorkflowAgentCall call) async {
     calls.add(call);
+    onStart?.call(call);
     final id = 'c${calls.length}';
     _byChild[id] = call;
     return (childId: id, harness: call.harness ?? 'lead', model: call.model ?? 'lead-model', note: null);
@@ -37,6 +45,7 @@ final class _Agents implements AgentLauncher {
   @override
   Future<WorkflowAgentResult> watch(String childId, {bool reattached = false}) async {
     final call = _byChild[childId]!;
+    await holds[call.label];
     final answer = answers.entries.where((e) => call.label.startsWith(e.key)).firstOrNull?.value;
     if (answer == null) return (text: '', error: 'no answer for ${call.label}', spentMicros: null);
     final v = answer(call);
@@ -158,7 +167,8 @@ void main() {
       );
       expect(end.error, isNull);
       expect(end.status, WorkflowStatus.done);
-      expect(end.phases, ['Research', 'Implement', 'Integrate']);
+      // Review and Refix come from the agents' own phases.
+      expect(end.phases, ['Research', 'Implement', 'Review', 'Refix', 'Integrate']);
       expect(agents.labels.where((l) => l.startsWith('research:')), ['research:a', 'research:b']);
       expect(agents.labels.last, 'integrate');
       expect(agents.labels, containsAll(['review:a:correctness', 'review:a:cost-simplicity', 'refix:a']));
@@ -239,12 +249,78 @@ void main() {
       });
       final end = await run('ultra', {'task': 'Add dark mode and CSV export'}, agents);
       expect(end.error, isNull);
-      expect(end.phases.first, 'Split');
+      expect(end.phases, ['Split', 'Research', 'Implement', 'Review', 'Integrate']);
       final split = agents.byLabel('split');
       expect(split.readOnly, isTrue);
       expect(split.prompt, contains('Add dark mode and CSV export'));
       // Ids become unique slugs; an item without a spec is dropped.
       expect(agents.labels.where((l) => l.startsWith('impl:')), ['impl:dark-mode', 'impl:item-2']);
+    }, skip: skip);
+
+    test("items don't wait for each other's research", () async {
+      // b's research answers only once a's implementation has started: a barrier after research would hang here.
+      final aBuilding = Completer<void>();
+      final agents = _Agents(
+        answers(verdict: 'ship'),
+        holds: {'research:b': aBuilding.future},
+        onStart: (c) {
+          if (c.label == 'impl:a' && !aBuilding.isCompleted) aBuilding.complete();
+        },
+      );
+      final end = await run('ultra', {
+        'items': [
+          {'id': 'a', 'spec': 'Build A'},
+          {'id': 'b', 'spec': 'Build B'},
+        ],
+      }, agents);
+      expect(end.error, isNull);
+      expect(end.status, WorkflowStatus.done);
+      expect(agents.labels.indexOf('impl:a'), lessThan(agents.labels.indexOf('impl:b')));
+      expect(agents.labels.last, 'integrate');
+      // Each item's one-line result is logged under Integrate.
+      expect(
+        [
+          for (final l in end.logs)
+            if (l.phase == 'Integrate') l.text,
+        ],
+        ['a: done, 0 findings to fix, refix skipped', 'b: done, 0 findings to fix, refix skipped'],
+      );
+    }, skip: skip);
+
+    test('a plan_ref reaches only the agents in the session folder; others read only this run\'s notes', () async {
+      const plan = '.everyai/plans/2026-11-05-x.md';
+      final agents = _Agents({
+        ...answers(),
+        'split': (_) => {
+          'items': [
+            {'id': 'a', 'title': 'A', 'spec': 'Build A'},
+          ],
+        },
+      });
+      final end = await run('ultra', {'task': 'Build A', 'plan_ref': plan}, agents, ctx: {'runId': 'run-1'});
+      expect(end.status, WorkflowStatus.done);
+      for (final c in agents.calls) {
+        final inFolder = c.label == 'split' || c.label.startsWith('research:');
+        expect(c.prompt.contains(plan), inFolder, reason: c.label);
+        expect(c.prompt, contains('Read no saved plan in .everyai/plans/'), reason: c.label);
+        expect(c.prompt, contains('.everyai/workflows/runs/run-1'), reason: c.label);
+      }
+      expect(agents.byLabel('research:a').prompt, contains('Copy into the note what this item needs from the plan'));
+      for (final bad in ['../x.md', 'notes/x.md', '.everyai/plans/../../x.md']) {
+        final other = _Agents(answers(verdict: 'ship'));
+        final r = await run('ultra', {
+          'items': [
+            {'id': 'a', 'spec': 'Build A'},
+          ],
+          'plan_ref': bad,
+        }, other);
+        expect(r.status, WorkflowStatus.done, reason: bad);
+        for (final c in other.calls) {
+          expect(c.prompt, isNot(contains(bad)), reason: '$bad in ${c.label}');
+          expect(c.prompt, isNot(contains('The plan the user picked')), reason: c.label);
+        }
+        expect(r.logs.map((l) => l.text), contains(startsWith('plan_ref ignored: $bad')), reason: bad);
+      }
     }, skip: skip);
 
     test('a failed split builds the task as one item', () async {

@@ -167,6 +167,21 @@ void main() {
     await run;
   });
 
+  test("an agent's own phase joins the run's phases in order; an empty one adds nothing", () async {
+    final run = engine().run();
+    // Before any phase note: the agent has no phase, and none is added.
+    await bridge.agent('no phase', {'phase': ''});
+    bridge.note('phase', {'title': 'Implement'});
+    await bridge.agent('build it');
+    await bridge.agent('look at it', {'phase': 'Review'});
+    await bridge.agent('look again', {'phase': 'Review', 'label': 'second'});
+    bridge.finish(null);
+    final end = await run;
+    expect(end.phases, ['Implement', 'Review']);
+    expect(end.agents.firstWhere((a) => a.label == 'no phase').phase, '');
+    expect(end.agents.firstWhere((a) => a.label == 'second').phase, 'Review');
+  });
+
   group('bugCheck', () {
     const fixed = '```json\n{"status":"done","bug_check":{"state":"verified"}}\n```';
     const open = {
