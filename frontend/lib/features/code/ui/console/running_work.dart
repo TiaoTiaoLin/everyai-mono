@@ -9,6 +9,7 @@ import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../code_providers.dart';
+import '../subagent_banner.dart';
 import '../../domain/code_session.dart';
 import '../../harness/harness.dart' show BackgroundTask;
 import '../../workflows/workflow_engine.dart' show WorkflowAgentStatus, WorkflowStatus;
@@ -346,7 +347,7 @@ class ChildChatView extends ConsumerWidget {
           AdaptiveIconButton(
             key: const ValueKey('console.child.back'),
             icon: EveryIcon.chevronLeft,
-            tooltip: 'Back',
+            tooltip: 'Back to the main chat',
             size: 16,
             onPressed: back,
           ),
@@ -388,6 +389,7 @@ class ChildChatView extends ConsumerWidget {
       children: [
         header,
         Container(height: 1, color: theme.border),
+        SubagentBanner(session: info, onBack: back),
         // Answered here, on the child's own controller.
         if (state.transcript.pending.isNotEmpty)
           Padding(

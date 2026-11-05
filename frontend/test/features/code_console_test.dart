@@ -419,6 +419,13 @@ void main() {
       expect(container.read(consolePanelProvider('p')).child, 'c');
       expect(find.byKey(const ValueKey('console.child.back')), findsOneWidget);
       expect(find.text('Research the tests'), findsOneWidget);
+      // It says plainly this isn't the main chat; the banner goes back too.
+      expect(find.textContaining('A subagent of'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('subagent.banner')));
+      await tester.pump();
+      expect(find.text('Running work'), findsOneWidget);
+      container.read(consolePanelProvider('p').notifier).openChild('c');
+      await tester.pump();
 
       await tester.tap(find.byKey(const ValueKey('console.child.back')));
       await tester.pump();

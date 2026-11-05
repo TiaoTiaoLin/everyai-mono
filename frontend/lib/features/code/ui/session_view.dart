@@ -17,6 +17,7 @@ import '../../models/models_providers.dart';
 import '../../questions/ui/question_card.dart';
 import '../../usage/usage_totals.dart';
 import '../code_providers.dart';
+import 'subagent_banner.dart';
 import '../limit_providers.dart' show codePlanLimitsProvider;
 import '../morning_providers.dart';
 import '../domain/agent_mode.dart';
@@ -164,19 +165,29 @@ class CodeSessionScreen extends ConsumerWidget {
             title: info.title,
             titleWidget: ConsoleTitle(info: info),
             onBack: info.parentId == null ? null : () => context.go(Routes.codeSession(info.parentId!)),
-            backTooltip: 'Back to the parent session',
-            header: fidelity == null
+            backTooltip: 'Back to the main chat',
+            header: fidelity == null && info.parentId == null
                 ? null
-                : Padding(
-                    key: const ValueKey('session.fidelity'),
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
-                    child: Text(
-                      fidelity,
-                      textAlign: TextAlign.center,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.type.caption.tint(theme.textMuted),
-                    ),
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // A fork's or workflow agent's own chat says so, and goes back to the main chat.
+                      if (info.parentId case final parent?)
+                        SubagentBanner(session: info, onBack: () => context.go(Routes.codeSession(parent))),
+                      if (fidelity != null)
+                        Padding(
+                          key: const ValueKey('session.fidelity'),
+                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 2),
+                          child: Text(
+                            fidelity,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.type.caption.tint(theme.textMuted),
+                          ),
+                        ),
+                    ],
                   ),
             actions: [
               ConsoleActions(info: info, tier: tier),
@@ -355,6 +366,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                     onUnqueue: controller.unqueue,
                                     placeholder: t.openQuestion != null
                                         ? 'Answer the questions above, or reply in your own words'
+                                        : info.parentId != null
+                                        ? 'Message this subagent (not the main chat)'
                                         : 'Ask for a change, or reply to the agent',
                                     agent: agentMenu(),
                                     // The lead-offer card says it louder once the limit has hit.
