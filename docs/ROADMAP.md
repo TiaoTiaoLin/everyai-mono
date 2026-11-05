@@ -1,6 +1,6 @@
 # EveryAI roadmap
 
-Status as of 2026-11-04: pre-alpha dev build `0.1.0-dev-nonsigned`. macOS is the daily driver; Windows and Linux
+Status as of 2026-11-05: pre-alpha dev build `0.1.0-dev-nonsigned`. macOS is the daily driver; Windows and Linux
 build in CI but haven't been tested on real machines. The Code workspace's internals are in
 [CODE_ROADMAP.md](CODE_ROADMAP.md).
 
@@ -36,6 +36,9 @@ and adds what they don't have:
   review) as `workflow.js` run in Deno and served as MCP prompts; Max as an approach skill with fork tools.
 - **Continuity:** handoff on a usage limit (native import into the next agent's session format, or facts plus the
   transcript file), a default handoff target, and resuming any agent's earlier session from New session.
+- **The console layout:** one right panel (session info with context, usage and running work; diff; files with
+  light editing), a git button that follows the repo, a bottom drawer for the terminal, and a composer strip for the
+  agent, workflows, skills and MCP.
 - **The EveryAI harness:** any model on the user's key, per-family tools, approvals, compaction, forks in worktrees,
   a browser and screenshots for checking its own work.
 - **Chat:** modes (Chat, Search, Research, Learn, Summarise), artifacts with versions and downloads, slides, charts,
@@ -48,21 +51,19 @@ and adds what they don't have:
 
 In order:
 
-1. **Console layout:** the session screen reworked around a right panel (session info with context, usage and
-   running work; diff; files) and a composer strip for the agent, workflows, skills and MCP.
-2. **Easy setup and migration:** desktop apps detected (Claude, Cursor, Antigravity, Codex), the agent's official
+1. **Easy setup and migration:** desktop apps detected (Claude, Cursor, Antigravity, Codex), the agent's official
    installer and its own sign-in run in EveryAI's terminal, and the user's MCP servers, rules and sessions brought over
    with a yes.
-3. **Local models:** Ollama, LM Studio and llama.cpp called from the app, a lighter harness profile for small models,
+2. **Local models:** Ollama, LM Studio and llama.cpp called from the app, a lighter harness profile for small models,
    and an offline mode.
-4. **Windows parity:** a Windows shell for the EveryAI harness, WSL as a per-project environment, process cleanup, and
+3. **Windows parity:** a Windows shell for the EveryAI harness, WSL as a per-project environment, process cleanup, and
    a test pass on real machines.
-5. **The standalone package:** the same MCP server, skills and workflows as a plugin for Claude Code, Codex and
+4. **The standalone package:** the same MCP server, skills and workflows as a plugin for Claude Code, Codex and
    OpenCode in the user's own terminal.
-6. **Lead Mode:** the EveryAI harness leads and delegates batches of work to other agents, each in its own worktree,
+5. **Lead Mode:** the EveryAI harness leads and delegates batches of work to other agents, each in its own worktree,
    with a check gating every merge.
-7. **Live terminal views:** each agent's real terminal UI beside the transcript where it can attach.
-8. **Releases:** the Microsoft Store (signed by the Store; winget installs from it), Flathub, and a notarized macOS
+6. **Live terminal views:** each agent's real terminal UI beside the transcript where it can attach.
+7. **Releases:** the Microsoft Store (signed by the Store; winget installs from it), Flathub, and a notarized macOS
    DMG with a Homebrew tap, from the first alpha on.
 
 Also planned: an OS sandbox for shell commands (Seatbelt, bubblewrap), headless mode and user hooks, LSP diagnostics,

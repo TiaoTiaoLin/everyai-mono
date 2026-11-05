@@ -3,6 +3,20 @@
 EveryAI is a pre-alpha dev build. Versions start at `0.1.0-dev-nonsigned`; until signed releases begin, changes are
 listed by date and pull request.
 
+## 2026-11-05: the console layout (PR #8)
+
+- **Session screen:** a title menu, icons for Session info, Diff and Files that switch one resizable right panel, and
+  a git button that follows the repo (Commit → Create PR → View PR → Merge locally). Session info shows the
+  environment, context (outside agents: what they report, the rest "not itemised"), usage and limits, running work
+  (click a row to open that chat in the panel) and changes. Files has light editing (saved after a checkpoint, so
+  rewind still works). Terminal, Processes and Preview move to a bottom drawer (⌃`).
+- **Composer:** a strip with the agent (switch or hand off), Workflows, Skills and MCP; model · effort · workflow ·
+  mode as quiet text under the box; a limit banner with the numbers an agent reports.
+- **Sidebar:** Pinned and Recents with status icons.
+- **Briefing:** every agent is told to prefer EveryAI's tools where they fit. An agent that hits a problem with one
+  of them may draft a GitHub issue, but posts only after the user says yes (`gh issue` commands always ask); a
+  `report_issue` tool builds a prefilled link with paths stripped.
+
 ## 2026-11-04: every coding agent, one workspace (PRs #1–#7)
 
 The Code workspace now runs outside coding agents as well as the EveryAI harness.

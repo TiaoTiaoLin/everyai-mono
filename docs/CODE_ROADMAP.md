@@ -1,6 +1,6 @@
 # Code workspace roadmap
 
-Status as of 2026-11-04. Code is the coding half of EveryAI: one workspace for every coding agent. It runs on desktop;
+Status as of 2026-11-05. Code is the coding half of EveryAI: one workspace for every coding agent. It runs on desktop;
 phones, tablets and browsers drive a paired desktop through the remote relay. For the product as a whole, see
 [ROADMAP.md](ROADMAP.md); for a picture of the pieces, [ARCHITECTURE.md](ARCHITECTURE.md). All paths below are under
 `frontend/lib/features/code/`.
@@ -38,12 +38,14 @@ phones, tablets and browsers drive a paired desktop through the remote relay. Fo
   is revoked).
 - Tools: `ask_user_question`, `present_plan`, `memory`, `saved_plans`, `check` (targeted tests, detected per
   ecosystem, never a free command), `bug_check`, `diff_stats`, `goal_check`, `run_script` (without model calls when
-  EveryAI isn't the lead), Max's `fork` / `check_forks` / `answer_fork` / `stop_fork`, and `run_workflow`.
+  EveryAI isn't the lead), Max's `fork` / `check_forks` / `answer_fork` / `stop_fork`, `run_workflow`, and `report_issue` (a prefilled
+  GitHub issue link for problems with EveryAI's tools, paths stripped; no network).
 - `check` and `bug_check` run commands, so they go through the session's approvals; the rest are trusted.
 
 ### The briefing
 - `drivers/briefing/`: every outside session gets a short system note listing what EveryAI provides (tools, skills,
-  workflows), plus the session's skills exported in the agent's own format. It shows as one collapsed row in the
+  workflows) and asks it to prefer them where they fit, plus the session's skills exported in the agent's own
+  format. An agent may draft a GitHub issue about a problem with our tools, but posts only after the user's yes. It shows as one collapsed row in the
   transcript, with the exact text sent.
 
 ### Workflows
@@ -63,6 +65,13 @@ phones, tablets and browsers drive a paired desktop through the remote relay. Fo
   as `<cut-turn>` and is finished, not redone. EveryAI makes no model call for any of this.
 - `resume/`: New session lists a folder's earlier sessions from Claude Code, Codex, OpenCode and Gemini CLI (read-only
   from their own files), and resumes the chosen one on its own agent with its full history.
+
+### The session screen
+- `ui/`: a header with the title menu, the git button (Commit → Create PR → View PR → Merge locally) and icons that
+  switch one right panel: Session info (environment, context, usage and limits, running work, changes), Diff and
+  Files (tree plus light editing, saved after a checkpoint). Terminal, Processes and Preview live in a bottom drawer.
+- The composer has a strip for the agent, Workflows, Skills and MCP, and model · effort · workflow · mode as quiet
+  text under the box.
 
 ### Transcript, approvals and modes
 - `domain/transcript.dart` folds every driver's events into one transcript, keeping each agent's own tool names,
@@ -84,7 +93,7 @@ phones, tablets and browsers drive a paired desktop through the remote relay. Fo
 
 ## 2. Status
 
-Built and unit-tested: everything above (`flutter test`: about 1,500 tests).
+Built and unit-tested: everything above (`flutter test`: about 1,600 tests).
 
 Not yet run end to end:
 - a real turn through every outside driver (Codex wasn't installed on the build machine; fixtures were recorded or
@@ -93,14 +102,14 @@ Not yet run end to end:
 - a real "Add agent" registry install
 - workflows on outside agents
 - Windows and Linux on real machines
+- the console layout, clicked through on a real desktop
 
 ## 3. Next steps
 
 In order (details in [ROADMAP.md](ROADMAP.md)):
 1. A live pass over section 2.
-2. Console layout: the right panel (session info, diff, files), the composer strip, the git button.
-3. Easy setup and migration: desktop apps detected, one-step install and sign-in in our terminal, imports.
-4. Local models and a light harness profile for small models.
-5. Windows parity (shell, WSL, process cleanup).
-6. The standalone package, then Lead Mode, then live terminal views.
-7. The cheaper execution loop (runtime profiles, post-edit hooks, plan batches) and the OS sandbox.
+2. Easy setup and migration: desktop apps detected, one-step install and sign-in in our terminal, imports.
+3. Local models and a light harness profile for small models.
+4. Windows parity (shell, WSL, process cleanup).
+5. The standalone package, then Lead Mode, then live terminal views.
+6. The cheaper execution loop (runtime profiles, post-edit hooks, plan batches) and the OS sandbox.
