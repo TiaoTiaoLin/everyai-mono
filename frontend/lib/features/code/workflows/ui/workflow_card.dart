@@ -8,6 +8,7 @@ import '../../../../app/router.dart';
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/brand.dart';
+import '../../../../core/ui/every_icons.dart';
 import '../../code_providers.dart';
 import '../../domain/code_session.dart' show SessionStatus;
 import '../workflow_engine.dart';
@@ -20,7 +21,12 @@ class WorkflowRunsView extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final runs = ref.watch(workflowRunsProvider(sessionId));
+    final all = ref.watch(workflowRunsProvider(sessionId));
+    final store = ref.read(workflowRunsProvider(sessionId).notifier);
+    final runs = [
+      for (final r in all)
+        if (!store.dismissed.contains(r.runId)) r,
+    ];
     if (runs.isEmpty) return const SizedBox.shrink();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -31,6 +37,7 @@ class WorkflowRunsView extends ConsumerWidget {
             child: WorkflowCard(
               run: run,
               onStop: () => ref.read(codeSessionProvider(sessionId).notifier).stopWorkflow(run.runId),
+              onDismiss: () => store.dismiss(run.runId),
             ),
           ),
       ],
@@ -41,9 +48,12 @@ class WorkflowRunsView extends ConsumerWidget {
 /// One run: its phases, each with its agents (tap one to open its session)
 /// and log lines, then what it used of its caps.
 class WorkflowCard extends StatelessWidget {
-  const WorkflowCard({super.key, required this.run, this.onStop});
+  const WorkflowCard({super.key, required this.run, this.onStop, this.onDismiss});
   final WorkflowRun run;
   final VoidCallback? onStop;
+
+  /// Closes a finished run's card (done, failed, capped or stopped); a running one has Stop instead.
+  final VoidCallback? onDismiss;
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +89,16 @@ class WorkflowCard extends StatelessWidget {
               if (running && onStop != null) ...[
                 const SizedBox(width: 8),
                 AdaptiveButton(label: 'Stop', emphasis: ButtonEmphasis.plain, onPressed: onStop),
+              ],
+              if (!running && onDismiss != null) ...[
+                const SizedBox(width: 4),
+                AdaptiveIconButton(
+                  key: ValueKey('workflow.dismiss.${run.runId}'),
+                  icon: EveryIcon.close,
+                  tooltip: 'Dismiss',
+                  size: 14,
+                  onPressed: onDismiss,
+                ),
               ],
             ],
           ),
