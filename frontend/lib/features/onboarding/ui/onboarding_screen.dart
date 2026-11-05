@@ -526,7 +526,7 @@ class _KeysState extends ConsumerState<_Keys> {
           runSpacing: 8,
           children: [
             AdaptiveButton(
-              label: 'Get a ${_provider.name} key',
+              label: 'Get ${'AEIOU'.contains(_provider.name[0]) ? 'an' : 'a'} ${_provider.name} key',
               emphasis: ButtonEmphasis.secondary,
               icon: const AdaptiveIcon(EveryIcon.external, size: 14),
               onPressed: () => launchUrl(Uri.parse(_provider.keysUrl), mode: LaunchMode.externalApplication),
