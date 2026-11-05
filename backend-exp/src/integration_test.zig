@@ -1717,6 +1717,14 @@ test "gateway fetch: local and metadata addresses are refused, and the allowlist
     defer off.deinit();
     try off.expectStatus(.unprocessable_entity);
     try std.testing.expect(std.mem.indexOf(u8, off.body, "research allowlist") != null);
+
+    // A look-alike of an official site (a Cyrillic і), raw or punycode: refused before any lookup, naming the real one.
+    for ([_][]const u8{ "https://g\u{456}thub.com/", "https://xn--gthub-n2e.com/x", "https://gihtub.com/" }) |url| {
+        var res = try env.t.post("/v1/fetch", .{ .headers = &.{.{ "Authorization", try bearer(a, key) }}, .json = .{ .url = url } });
+        defer res.deinit();
+        try res.expectStatus(.unprocessable_entity);
+        try std.testing.expect(std.mem.indexOf(u8, res.body, "looks like github.com") != null);
+    }
 }
 
 /// Stripe's signature header for `body` at `ts`: `t=<ts>,v1=<hex HMAC-SHA256 of "ts.body">`.

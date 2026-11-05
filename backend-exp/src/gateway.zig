@@ -602,11 +602,13 @@ pub fn routes(app: *anole.Server(App), state: *App) void {
 /// local or private addresses, every redirect hop checked again, the body
 /// capped), optionally only from the hosts in `allow` (research jobs), as
 /// one window of readable text fenced as untrusted.
-/// Body: `{"url", "allow"?: [host], "offset"?, "max_chars"?}`.
-/// POST /v1/fetch: one page for the Code agent's web tool.
+/// Body: `{"url", "allow"?: [host], "offset"?, "max_chars"?}`. A look-alike
+/// of an official site is a 422 naming the real one; a host with a reason for
+/// doubt fills `notice`, one line for the caller to show outside the fence.
 const FetchBody = struct {
     url: []const u8,
-    /// Hosts the agent may reach even when private (a local dev server).
+    /// When given, the only hosts the fetch may reach, every redirect included
+    /// (a research job's sites; see `safe_fetch.hostAllowed`).
     allow: ?[]const []const u8 = null,
     offset: i64 = 0,
     max_chars: ?i64 = null,
@@ -629,9 +631,10 @@ fn fetch(app: *App, req: *anole.Request, res: *anole.Response) !void {
     const allow = body.allow;
     const offset: usize = @intCast(body.offset);
     const limit: usize = @intCast(std.math.clamp(body.max_chars orelse web.default_chars, web.min_chars, web.max_chars));
-    const page = fetcher.getAllowed(req.io, req.arena, url, "text/html,text/plain,application/xhtml+xml,application/json,*/*;q=0.5", allow) catch |err| {
+    var diag: safe_fetch.Diagnostics = .{};
+    const page = fetcher.getAllowed(req.io, req.arena, url, "text/html,text/plain,application/xhtml+xml,application/json,*/*;q=0.5", allow, &diag) catch |err| {
         res.status = .unprocessable_entity;
-        return res.json(.{ .@"error" = safe_fetch.describe(err) });
+        return res.json(.{ .@"error" = try safe_fetch.reason(req.arena, err, diag) });
     };
     if (page.status >= 400) {
         res.status = .unprocessable_entity;
@@ -649,6 +652,7 @@ fn fetch(app: *App, req: *anole.Request, res: *anole.Response) !void {
         .url = page.url,
         .status = page.status,
         .text = try safe_fetch.wrapUntrusted(req.arena, page.url, w.text),
+        .notice = page.notice,
         .total_chars = w.total,
         .next_offset = if (w.end < w.total) @as(?usize, w.end) else null,
     });
