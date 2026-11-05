@@ -223,7 +223,7 @@ class _CodeHomeState extends ConsumerState<CodeHome> {
                     placeholder: 'Describe a change, a bug to fix, or a feature to build',
                     onModeChanged: (m) => _pickMode(m, project.id),
                     onSend: (text, files) => _start(project, text, files),
-                    trailing: AgentMenu(
+                    agent: AgentMenu(
                       harness: lead,
                       onHarness: isDemoPath(project.path) ? null : ref.read(codeLeadProvider.notifier).chooseHarness,
                       model: lead == everyaiHarnessName

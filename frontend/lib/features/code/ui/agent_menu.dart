@@ -117,9 +117,8 @@ class AgentMenu extends ConsumerWidget {
   /// A pill outline, for the page header.
   final bool bordered;
 
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = EveryTheme.of(context);
+  /// What the menu shows, worked out once for the trigger and its panel.
+  _Resolved _resolve(WidgetRef ref) {
     final catalog = ref.watch(agentCatalogProvider);
     final specs = ref.watch(modelCatalogProvider);
     final library = ref.watch(libraryProvider).value ?? const <ModelSpec>[];
@@ -142,57 +141,107 @@ class AgentMenu extends ConsumerWidget {
     final workflows = onWorkflow == null || demo || projectDir.isEmpty
         ? null
         : ref.watch(workflowChoicesProvider(projectDir)).value;
-    final label = [
-      if (outside) ...[
-        lead.label,
-        agentMenuLabel(
-          driverModels?.where((m) => m.id == model).firstOrNull?.label ?? (model.isEmpty ? 'Default model' : model),
-          effort,
-        ),
+    final driverModel = driverModels?.where((m) => m.id == model).firstOrNull;
+    return (
+      groups: groups,
+      current: current,
+      lead: lead,
+      outside: outside,
+      leads: leads,
+      driverModels: driverModels,
+      workflows: workflows,
+      modelName: outside
+          ? driverModel?.label ?? (model.isEmpty ? 'Default model' : model)
+          : current?.name ?? model.split('/').last,
+      reasons: outside ? driverModel?.efforts.isNotEmpty ?? false : specs[ModelId(model)]?.reasoning ?? true,
+    );
+  }
+
+  /// The parts of the composer's settings line, in order: model, effort
+  /// (when the model or the EveryAI level takes one), the workflow while
+  /// one is picked, and the spending cap on the New session page.
+  List<AgentMenuPage> lineParts(WidgetRef ref) {
+    final r = _resolve(ref);
+    return [
+      AgentMenuPage.model,
+      if (!demo && (r.reasons || (!r.outside && onLevel != null))) AgentMenuPage.effort,
+      if (workflow != null && onWorkflow != null) AgentMenuPage.workflow,
+      if (onBudget != null) AgentMenuPage.budget,
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => AgentMenuPart(menu: this, page: AgentMenuPage.root);
+}
+
+typedef _Resolved = ({
+  List<(ModelProvider, List<AgentMenuModel>)> groups,
+  AgentMenuModel? current,
+  DriverInfo lead,
+  bool outside,
+  List<LeadOption> leads,
+  List<DriverModel>? driverModels,
+  WorkflowLibrary? workflows,
+  String modelName,
+  bool reasons,
+});
+
+/// One part of an [AgentMenu] as its own trigger: it opens the menu at
+/// [page] (no way back to the others; a pick closes it). The composer's
+/// strip has the harness and workflow parts, its settings line the rest.
+/// [AgentMenuPage.root] is the whole menu behind one joined label.
+/// [trigger] draws the label (null: the menu's own look); [enabled] is false
+/// when the part can't be changed here (a subagent's harness).
+class AgentMenuPart extends ConsumerWidget {
+  const AgentMenuPart({super.key, required this.menu, required this.page, this.trigger});
+
+  final AgentMenu menu;
+  final AgentMenuPage page;
+  final Widget Function(BuildContext context, String label, bool enabled)? trigger;
+
+  /// What the part says, as its label reads.
+  static String _labelOf(AgentMenu m, AgentMenuPage page, _Resolved r) => switch (page) {
+    AgentMenuPage.harness => r.lead.label,
+    AgentMenuPage.workflow => m.workflow?.title ?? 'Workflows',
+    AgentMenuPage.model => r.modelName,
+    AgentMenuPage.effort => [
+      if (r.reasons) m.effort.isEmpty ? 'Default effort' : effortLabel(m.effort),
+      if (!r.outside && m.onLevel != null) m.level.label,
+    ].join(' · '),
+    AgentMenuPage.budget => m.budget == null ? 'No cap' : '${formatMicros((m.budget! * 1e6).round())} cap',
+    AgentMenuPage.root => [
+      if (r.outside) ...[
+        r.lead.label,
+        agentMenuLabel(r.modelName, m.effort),
       ] else ...[
-        agentMenuLabel(current?.name ?? model.split('/').last, effort),
-        if (onLevel != null) level.label,
+        agentMenuLabel(r.modelName, m.effort),
+        if (m.onLevel != null) m.level.label,
       ],
-      ?workflow?.title,
-    ].join(' · ');
-    return AnchoredPopover(
-      width: 320,
-      builder: (context, close) => AgentMenuPanel(
-        groups: groups,
-        model: model,
-        effort: effort,
-        demo: demo,
-        reasons: specs[ModelId(model)]?.reasoning ?? true,
-        onChanged: onChanged,
-        close: close,
-        level: level,
-        onLevel: outside ? null : onLevel,
-        workflow: workflow,
-        onWorkflow: onWorkflow,
-        workflowBusy: workflowBusy,
-        workflows: workflows,
-        onTrust: (w) => ref.read(workflowTrustProvider.notifier).set(w, true),
-        budget: budget,
-        onBudget: onBudget,
-        leads: leads,
-        harness: harness,
-        onHarness: onHarness == null || !switchesLive
-            ? onHarness
-            : (h) {
-                close();
-                onHarness!(h);
-              },
-        onCheckAgain: onHarness == null
-            ? null
-            : () => unawaited(ref.read(driverStatusesProvider.notifier).refresh(reloadShell: true)),
-        driverModels: driverModels,
-      ),
-      child: Semantics(
-        button: true,
-        label: 'Agent model: $label',
-        child: Container(
+      ?m.workflow?.title,
+    ].join(' · '),
+  };
+
+  static const _names = {
+    AgentMenuPage.root: 'Agent model',
+    AgentMenuPage.harness: 'Harness',
+    AgentMenuPage.workflow: 'Workflow',
+    AgentMenuPage.model: 'Model',
+    AgentMenuPage.effort: 'Effort',
+    AgentMenuPage.budget: 'Spending cap',
+  };
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = EveryTheme.of(context);
+    final m = menu;
+    final r = m._resolve(ref);
+    final label = _labelOf(m, page, r);
+    final enabled = page != AgentMenuPage.harness || m.onHarness != null;
+    final look =
+        trigger?.call(context, label, enabled) ??
+        Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: bordered
+          decoration: m.bordered
               ? BoxDecoration(
                   border: Border.all(color: theme.border),
                   borderRadius: BorderRadius.circular(8),
@@ -213,19 +262,64 @@ class AgentMenu extends ConsumerWidget {
               AdaptiveIcon(EveryIcon.chevronDown, size: 11, color: theme.textMuted),
             ],
           ),
-        ),
+        );
+    final semantic = Semantics(
+      button: enabled,
+      label: '${_names[page]}: $label',
+      tooltip: enabled ? null : 'Switching comes later',
+      child: look,
+    );
+    if (!enabled) return semantic;
+    final direct = page != AgentMenuPage.root;
+    return AnchoredPopover(
+      width: 320,
+      builder: (context, close) => AgentMenuPanel(
+        initialPage: page,
+        groups: r.groups,
+        model: m.model,
+        effort: m.effort,
+        demo: m.demo,
+        reasons: r.outside ? true : r.reasons,
+        onChanged: m.onChanged,
+        close: close,
+        level: m.level,
+        onLevel: r.outside ? null : m.onLevel,
+        workflow: m.workflow,
+        onWorkflow: m.onWorkflow,
+        workflowBusy: m.workflowBusy,
+        workflows: r.workflows,
+        onTrust: (w) => ref.read(workflowTrustProvider.notifier).set(w, true),
+        budget: m.budget,
+        onBudget: m.onBudget,
+        leads: r.leads,
+        harness: m.harness,
+        // Opened at a page, a pick closes the panel anyway.
+        onHarness: m.onHarness == null || !m.switchesLive || direct
+            ? m.onHarness
+            : (h) {
+                close();
+                m.onHarness!(h);
+              },
+        onCheckAgain: m.onHarness == null
+            ? null
+            : () => unawaited(ref.read(driverStatusesProvider.notifier).refresh(reloadShell: true)),
+        driverModels: r.driverModels,
       ),
+      child: semantic,
     );
   }
 }
 
-enum _Page { root, harness, workflow, model, effort, budget }
+/// The agent menu's pages: [root] lists the others.
+enum AgentMenuPage { root, harness, workflow, model, effort, budget }
 
 /// The popover's content: a root list whose rows open their submenu in place,
-/// with a back row to return.
+/// with a back row to return. Opened at another [initialPage] (one part of
+/// the menu, from the composer), it has no back row and a pick closes it.
 class AgentMenuPanel extends StatefulWidget {
   const AgentMenuPanel({
     super.key,
+    this.initialPage = AgentMenuPage.root,
     required this.groups,
     required this.model,
     required this.effort,
@@ -248,6 +342,8 @@ class AgentMenuPanel extends StatefulWidget {
     this.onCheckAgain,
     this.driverModels,
   });
+
+  final AgentMenuPage initialPage;
 
   /// The harnesses the Harness row lists: no row when there are none, or
   /// only one to pick from.
@@ -295,7 +391,7 @@ class AgentMenuPanel extends StatefulWidget {
 }
 
 class _AgentMenuPanelState extends State<AgentMenuPanel> {
-  var _page = _Page.root;
+  late var _page = widget.initialPage;
 
   // Reflects a pick at once, before the parent rebuilds with it.
   late String _model = widget.model;
@@ -316,16 +412,28 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
     if (old.harness != widget.harness) _harness = widget.harness;
   }
 
+  /// Opened at one page: no back row, and a pick closes the panel.
+  bool get _direct => widget.initialPage != AgentMenuPage.root;
+
+  /// After a pick (or a tap on the current row): back to the root, or closed.
+  void _home() {
+    if (_direct) {
+      widget.close();
+    } else {
+      setState(() => _page = AgentMenuPage.root);
+    }
+  }
+
+  Widget _top(String title) => _direct ? PopoverHeader(title) : _Back(title, onTap: _home);
+
   /// The lead is an outside agent: its own models, and no effort level.
   bool get _outside => widget.driverModels != null;
 
   DriverModel? get _driverModel => widget.driverModels?.where((m) => m.id == _model).firstOrNull;
 
   void _pickWorkflow(WorkflowPick? w) {
-    setState(() {
-      _workflow = w;
-      _page = _Page.root;
-    });
+    setState(() => _workflow = w);
+    _home();
     widget.onWorkflow!(w);
   }
 
@@ -353,8 +461,8 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
     setState(() {
       _model = model;
       _effort = effort;
-      _page = _Page.root;
     });
+    _home();
     widget.onChanged(model, effort);
   }
 
@@ -369,7 +477,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
     final efforts = _outside ? ['', ...?_driverModel?.efforts] : agentMenuEfforts;
     final reasons = _outside ? efforts.length > 1 : widget.reasons;
     final rows = switch (_page) {
-      _Page.root => [
+      AgentMenuPage.root => [
         const PopoverHeader('Agent'),
         if (widget.leads.length > 1 || (widget.leads.isNotEmpty && widget.onHarness == null))
           PopoverRow(
@@ -380,7 +488,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
               if (widget.onHarness == null) 'Switching comes later' else ?lead?.blocked,
             ].join(' · '),
             trailing: widget.onHarness == null ? null : more,
-            onTap: widget.onHarness == null ? null : () => setState(() => _page = _Page.harness),
+            onTap: widget.onHarness == null ? null : () => setState(() => _page = AgentMenuPage.harness),
           )
         // Only EveryAI is found: no Harness page to open, but the user may
         // be about to install one, so the check stays in reach.
@@ -397,31 +505,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             title: 'Workflow',
             subtitle: _workflow?.title ?? (widget.demo ? 'Not in the demo' : 'None'),
             trailing: more,
-            onTap: () => setState(() => _page = _Page.workflow),
-          ),
-        if (widget.onLevel != null && !_outside)
-          Padding(
-            key: const ValueKey('agent-menu.level'),
-            padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text('Effort level', style: theme.type.callout),
-                const SizedBox(height: 6),
-                AdaptiveSegmented<HarnessTier>(
-                  values: HarnessTier.offered,
-                  selected: HarnessTier.offered.contains(_level) ? _level : HarnessTier.efficient,
-                  label: (t) => t.label,
-                  onSelected: (t) {
-                    if (t == _level) return;
-                    setState(() => _level = t);
-                    widget.onLevel!(t);
-                  },
-                ),
-                const SizedBox(height: 6),
-                Text(_level.description, style: theme.type.caption.tint(theme.textMuted)),
-              ],
-            ),
+            onTap: () => setState(() => _page = AgentMenuPage.workflow),
           ),
         PopoverRow(
           key: const ValueKey('agent-menu.model'),
@@ -433,14 +517,17 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
                   if (current?.tierHint case final h? when h.isNotEmpty) h,
                 ].join(' · '),
           trailing: more,
-          onTap: () => setState(() => _page = _Page.model),
+          onTap: () => setState(() => _page = AgentMenuPage.model),
         ),
         PopoverRow(
           key: const ValueKey('agent-menu.effort'),
           title: 'Effort',
-          subtitle: reasons ? effortLabel(_effort) : 'Not used by this model',
+          subtitle: [
+            reasons ? effortLabel(_effort) : 'Not used by this model',
+            if (widget.onLevel != null && !_outside) _level.label,
+          ].join(' · '),
           trailing: more,
-          onTap: widget.demo ? null : () => setState(() => _page = _Page.effort),
+          onTap: widget.demo ? null : () => setState(() => _page = AgentMenuPage.effort),
         ),
         if (widget.onBudget != null)
           PopoverRow(
@@ -448,11 +535,11 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             title: 'Spending cap',
             subtitle: _budget != null ? formatMicros((_budget! * 1e6).round()) : 'No cap',
             trailing: more,
-            onTap: () => setState(() => _page = _Page.budget),
+            onTap: () => setState(() => _page = AgentMenuPage.budget),
           ),
       ],
-      _Page.budget => [
-        _Back('Spending cap', onTap: () => setState(() => _page = _Page.root)),
+      AgentMenuPage.budget => [
+        _top('Spending cap'),
         for (final usd in [null, ...budgetPresets])
           PopoverRow(
             key: ValueKey('agent-menu.budget.${usd ?? 'none'}'),
@@ -460,16 +547,14 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             selected: usd == _budget,
             trailing: check(usd == _budget),
             onTap: () {
-              setState(() {
-                _budget = usd;
-                _page = _Page.root;
-              });
+              setState(() => _budget = usd);
+              _home();
               widget.onBudget!(usd);
             },
           ),
       ],
-      _Page.workflow => [
-        _Back('Workflow', onTap: () => setState(() => _page = _Page.root)),
+      AgentMenuPage.workflow => [
+        _top('Workflow'),
         PopoverRow(
           key: const ValueKey('agent-menu.workflow.none'),
           title: 'None',
@@ -503,8 +588,8 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
           ],
         ],
       ],
-      _Page.harness => [
-        _Back('Harness', onTap: () => setState(() => _page = _Page.root)),
+      AgentMenuPage.harness => [
+        _top('Harness'),
         for (final l in widget.leads)
           PopoverRow(
             key: ValueKey('agent-menu.harness.${l.info.id}'),
@@ -515,12 +600,10 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             onTap: l.blocked != null
                 ? null
                 : l.info.id == _harness
-                ? () => setState(() => _page = _Page.root)
+                ? _home
                 : () {
-                    setState(() {
-                      _harness = l.info.id;
-                      _page = _Page.root;
-                    });
+                    setState(() => _harness = l.info.id);
+                    _home();
                     widget.onHarness!(l.info.id);
                   },
           ),
@@ -530,20 +613,20 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             title: 'Check again',
             subtitle: 'Looks for harnesses you installed',
             onTap: () {
-              setState(() => _page = _Page.root);
+              _home();
               again();
             },
           ),
       ],
-      _Page.model when _outside => [
-        _Back('Model', onTap: () => setState(() => _page = _Page.root)),
+      AgentMenuPage.model when _outside => [
+        _top('Model'),
         if (widget.driverModels!.isEmpty)
           PopoverRow(
             key: const ValueKey('agent-menu.model.default'),
             title: 'Its default model',
             selected: true,
             trailing: check(true),
-            onTap: () => setState(() => _page = _Page.root),
+            onTap: _home,
           ),
         for (final m in widget.driverModels!)
           PopoverRow(
@@ -552,13 +635,11 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             subtitle: m.isDefault ? 'default' : null,
             selected: m.id == _model,
             trailing: check(m.id == _model),
-            onTap: m.id == _model
-                ? () => setState(() => _page = _Page.root)
-                : () => _pick(m.id, m.efforts.contains(_effort) ? _effort : ''),
+            onTap: m.id == _model ? _home : () => _pick(m.id, m.efforts.contains(_effort) ? _effort : ''),
           ),
       ],
-      _Page.model => [
-        _Back('Model', onTap: () => setState(() => _page = _Page.root)),
+      AgentMenuPage.model => [
+        _top('Model'),
         for (final (vendor, models) in widget.groups) ...[
           PopoverHeader(vendor.company),
           for (final m in models)
@@ -568,14 +649,36 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
               subtitle: m.tierHint.isEmpty ? null : m.tierHint,
               selected: m.model == _model,
               trailing: check(m.model == _model),
-              onTap: m.model == _model
-                  ? () => setState(() => _page = _Page.root)
-                  : () => _pick(m.model, effortForModel(m, _effort)),
+              onTap: m.model == _model ? _home : () => _pick(m.model, effortForModel(m, _effort)),
             ),
         ],
       ],
-      _Page.effort => [
-        _Back('Effort', onTap: () => setState(() => _page = _Page.root)),
+      AgentMenuPage.effort => [
+        _top('Effort'),
+        if (widget.onLevel != null && !_outside)
+          Padding(
+            key: const ValueKey('agent-menu.level'),
+            padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('Effort level', style: theme.type.callout),
+                const SizedBox(height: 6),
+                AdaptiveSegmented<HarnessTier>(
+                  values: HarnessTier.offered,
+                  selected: HarnessTier.offered.contains(_level) ? _level : HarnessTier.efficient,
+                  label: (t) => t.label,
+                  onSelected: (t) {
+                    if (t == _level) return;
+                    setState(() => _level = t);
+                    widget.onLevel!(t);
+                  },
+                ),
+                const SizedBox(height: 6),
+                Text(_level.description, style: theme.type.caption.tint(theme.textMuted)),
+              ],
+            ),
+          ),
         for (final e in efforts)
           PopoverRow(
             key: ValueKey('agent-menu.effort.${e.isEmpty ? 'default' : e}'),
@@ -590,7 +693,7 @@ class _AgentMenuPanelState extends State<AgentMenuPanel> {
             onTap: !reasons
                 ? null
                 : e == _effort
-                ? () => setState(() => _page = _Page.root)
+                ? _home
                 : () => _pick(_model, e),
           ),
       ],

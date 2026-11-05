@@ -12,17 +12,26 @@ import '../../attachments/attachment.dart';
 import '../../attachments/attachment_input.dart';
 import '../../attachments/ui/attachment_tray.dart';
 import '../../models/domain/model_catalog.dart';
+import '../../settings/settings_registry.dart' show SettingsSection;
+import '../../settings/ui/settings_modal.dart' show showSettings;
+import '../../skills/domain/skill_catalog.dart' show sessionSkills;
+import '../../skills/skills_providers.dart' show installedSkillsProvider, skillSettingsProvider;
 import '../../slash/native_commands.dart';
 import '../../slash/slash_command.dart';
 import '../../slash/slash_registry.dart';
 import '../../slash/ui/slash_menu.dart';
+import '../code_providers.dart' show codeProjectsProvider;
 import '../domain/agent_mode.dart';
 import '../harness/harness.dart' show NativeCommand, NativeMode, nativeModeOf;
+import '../mcp_providers.dart';
 import '../uploads/uploads.dart';
+import 'agent_menu.dart';
 
 /// The Code composer. Enter sends (or queues while the agent works),
 /// Option-Enter interrupts and sends now, Esc stops. `/` at the start opens the
-/// command menu.
+/// command menu. With an [agent], a strip on the box's top edge holds the
+/// harness, Workflows, Skills and MCP, and the settings sit as quiet text
+/// under the box (model · effort · workflow · mode), each part its own menu.
 class CodeComposer extends ConsumerStatefulWidget {
   const CodeComposer({
     super.key,
@@ -37,6 +46,8 @@ class CodeComposer extends ConsumerStatefulWidget {
     this.placeholder = 'Ask for a change, or reply to the agent',
     this.leading,
     this.trailing,
+    this.agent,
+    this.banner,
     this.meter,
     this.minLines = 1,
     this.autofocus = true,
@@ -62,9 +73,18 @@ class CodeComposer extends ConsumerStatefulWidget {
   final ValueChanged<int>? onUnqueue;
   final String placeholder;
 
-  /// Extra controls in the bottom row (project and model pickers).
+  /// Extra controls in the bottom row (the project picker; a remote
+  /// session's model name).
   final Widget? leading;
   final Widget? trailing;
+
+  /// The harness, workflow, model and effort the session runs with: the
+  /// strip and the settings line take their parts from it. Null: no strip,
+  /// only the mode under the box (remote control).
+  final AgentMenu? agent;
+
+  /// Above everything (the session's [LimitBanner]).
+  final Widget? banner;
 
   /// Tokens, cost and context ring, before send.
   final Widget? meter;
@@ -264,6 +284,8 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
               ],
             ),
           ),
+        ?widget.banner,
+        if (widget.agent case final agent?) _Strip(agent: agent, project: widget.project),
         AttachmentDropZone(
           onFiles: _add,
           child: GlassSurface(
@@ -303,21 +325,10 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
                       color: theme.textMuted,
                       onPressed: () async => _add(await pickAttachmentFiles(allowed: widget.attachKinds)),
                     ),
-                    if (widget.nativeModes case final modes?
-                        when modes.isNotEmpty && widget.onNativeModeChanged != null)
-                      NativeModeMenu(
-                        harness: widget.harnessLabel,
-                        modes: modes,
-                        current: widget.nativeMode,
-                        policy: widget.mode,
-                        onChanged: widget.onNativeModeChanged!,
-                      )
-                    else
-                      ModeMenu(mode: widget.mode, onChanged: widget.onModeChanged),
                     if (widget.slashHost case final host? when widget.commands != null)
                       SessionActionsButton(host: host),
                     // Both sides shrink on narrow composers (project first, it is
-                    // capped); the model sits at the right, next to send.
+                    // capped); a remote session's model sits at the right, next to send.
                     if (widget.leading != null) ...[
                       const SizedBox(width: 4),
                       Flexible(
@@ -346,7 +357,189 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
             ),
           ),
         ),
+        _settingsLine(),
       ],
+    );
+  }
+
+  /// model · effort · workflow · mode under the box, each its own menu.
+  Widget _settingsLine() {
+    final theme = EveryTheme.of(context);
+    final agent = widget.agent;
+    final modes = widget.nativeModes;
+    final mode = modes != null && modes.isNotEmpty && widget.onNativeModeChanged != null
+        ? NativeModeMenu(
+            harness: widget.harnessLabel,
+            modes: modes,
+            current: widget.nativeMode,
+            policy: widget.mode,
+            onChanged: widget.onNativeModeChanged!,
+          )
+        : ModeMenu(mode: widget.mode, onChanged: widget.onModeChanged);
+    final parts = [
+      if (agent != null)
+        for (final page in agent.lineParts(ref))
+          AgentMenuPart(
+            key: ValueKey('composer.line.${page.name}'),
+            menu: agent,
+            page: page,
+            trigger: (context, label, enabled) => _QuietPart(label: label, enabled: enabled),
+          ),
+      mode,
+    ];
+    final dot = Text(' · ', style: theme.type.caption.tint(theme.textMuted));
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 4, 10, 0),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          for (final (i, part) in parts.indexed) ...[if (i > 0) dot, part],
+        ],
+      ),
+    );
+  }
+}
+
+/// The tabs on the composer's top-left edge: the harness (a click hands
+/// the session to another), Workflows, and how many skills and MCP servers
+/// the session gets (each opens its Settings page).
+class _Strip extends ConsumerWidget {
+  const _Strip({required this.agent, required this.project});
+
+  final AgentMenu agent;
+
+  /// The project folder, or null on a page without one.
+  final String? project;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final projectId = project == null
+        ? null
+        : ref.watch(codeProjectsProvider).where((p) => p.path == project).firstOrNull?.id;
+    // What a session here gets: active, trusted, this project's own or the user's.
+    final skills = sessionSkills(
+      ref.watch(installedSkillsProvider).value ?? const [],
+      ref.watch(skillSettingsProvider),
+      projectId,
+    ).length;
+    final mcp = ref.watch(codeMcpServersProvider).serversFor(projectId).where((s) => s.active).length;
+    void open(SettingsSection section) => showSettings(context, section: section, args: {'project': ?projectId});
+    _QuietPart tab(String label, bool enabled) => _QuietPart(label: label, enabled: enabled, tab: true);
+    return Padding(
+      padding: const EdgeInsets.only(left: 14),
+      child: Wrap(
+        spacing: 2,
+        children: [
+          AgentMenuPart(
+            key: const ValueKey('composer.strip.harness'),
+            menu: agent,
+            page: AgentMenuPage.harness,
+            trigger: (context, label, enabled) => tab(label, enabled),
+          ),
+          if (agent.onWorkflow != null && !agent.demo)
+            AgentMenuPart(
+              key: const ValueKey('composer.strip.workflow'),
+              menu: agent,
+              page: AgentMenuPage.workflow,
+              trigger: (context, label, enabled) => tab(label, enabled),
+            ),
+          _StripButton(
+            key: const ValueKey('composer.strip.skills'),
+            label: 'Skills $skills',
+            onTap: () => open(SettingsSection.skills),
+          ),
+          _StripButton(
+            key: const ValueKey('composer.strip.mcp'),
+            label: 'MCP $mcp',
+            onTap: () => open(SettingsSection.mcp),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StripButton extends StatelessWidget {
+  const _StripButton({super.key, required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: label,
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: _QuietPart(label: label, tab: true, chevron: false),
+      ),
+    ),
+  );
+}
+
+/// A part of the composer's settings line (or, as a [tab], of its strip):
+/// quiet text that lights up under the pointer to show it opens a menu.
+class _QuietPart extends StatefulWidget {
+  const _QuietPart({required this.label, this.color, this.enabled = true, this.tab = false, this.chevron = true});
+
+  final String label;
+
+  /// The text's colour at rest (the mode's policy); muted by default.
+  final Color? color;
+  final bool enabled;
+
+  /// A tab on the box's top edge: a filled top, square bottom corners.
+  final bool tab;
+  final bool chevron;
+
+  @override
+  State<_QuietPart> createState() => _QuietPartState();
+}
+
+class _QuietPartState extends State<_QuietPart> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    final lit = _hover && widget.enabled;
+    final rest = widget.color ?? theme.textMuted;
+    final color = lit ? (widget.color ?? theme.text) : rest;
+    final fill = widget.tab
+        ? theme.surfaceRaised.withValues(alpha: lit ? 1 : 0.7)
+        : lit
+        ? theme.text.withValues(alpha: 0.07)
+        : null;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: widget.tab ? 9 : 4, vertical: widget.tab ? 3 : 2),
+        decoration: BoxDecoration(
+          color: fill,
+          borderRadius: widget.tab ? const BorderRadius.vertical(top: Radius.circular(8)) : BorderRadius.circular(6),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                widget.label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.type.caption.tint(color),
+              ),
+            ),
+            if (widget.chevron && widget.enabled) ...[
+              const SizedBox(width: 3),
+              AdaptiveIcon(EveryIcon.chevronDown, size: 9, color: color),
+            ],
+          ],
+        ),
+      ),
     );
   }
 }
@@ -486,26 +679,12 @@ class _ModeChip extends StatelessWidget {
     final color = switch (policy) {
       AgentMode.fullAuto => theme.danger,
       AgentMode.plan => theme.accent,
-      _ => theme.textMuted,
+      _ => null,
     };
     return Semantics(
       button: true,
       label: 'Mode: $label',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        decoration: BoxDecoration(
-          border: Border.all(color: color.withValues(alpha: 0.4)),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(label, style: theme.type.callout.medium.tint(color)),
-            const SizedBox(width: 4),
-            AdaptiveIcon(EveryIcon.chevronDown, size: 11, color: color),
-          ],
-        ),
-      ),
+      child: _QuietPart(label: label, color: color),
     );
   }
 }

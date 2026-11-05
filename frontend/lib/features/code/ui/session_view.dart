@@ -31,6 +31,7 @@ import '../drivers/driver_registry.dart';
 import '../harness/events.dart' show ExecutionStatus;
 import 'agent_menu.dart';
 import 'code_composer.dart';
+import 'limit_banner.dart';
 import 'code_slash_host.dart';
 import 'transcript/files_card.dart';
 import 'code_top_bar.dart';
@@ -84,7 +85,7 @@ class CodeSessionScreen extends ConsumerWidget {
         t.items.whereType<UserTurn>().isNotEmpty;
 
     // The live harness → mode → tier → Model → Effort menu, in the composer.
-    Widget agentMenu() => AgentMenu(
+    AgentMenu agentMenu() => AgentMenu(
       harness: info.harness,
       model: info.model,
       effort: info.effort,
@@ -322,7 +323,9 @@ class CodeSessionScreen extends ConsumerWidget {
                               placeholder: t.openQuestion != null
                                   ? 'Answer the questions above, or reply in your own words'
                                   : 'Ask for a change, or reply to the agent',
-                              trailing: agentMenu(),
+                              agent: agentMenu(),
+                              // The lead-offer card says it louder once the limit has hit.
+                              banner: pick == null ? LimitBanner(sessionId: sessionId) : null,
                               model: ref.watch(modelCatalogProvider)[ModelId(info.model)],
                               meter: SessionMeter(sessionId: sessionId, model: info.model),
                               // An outside lead's own commands (empty until listed, never ours); null: EveryAI's.
