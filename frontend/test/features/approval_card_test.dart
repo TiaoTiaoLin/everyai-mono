@@ -62,7 +62,8 @@ void main() {
     );
     expect(find.text('Allow 2 actions?'), findsOneWidget);
     expect(find.text('Allow'), findsNWidgets(2));
-    expect(find.text('Always'), findsOneWidget, reason: 'only the call with a rule offers it');
+    // Both are commands, so both offer "all commands for this session" under More.
+    expect(find.text('More'), findsNWidgets(2));
 
     await tester.tap(find.text('Deny').last);
     await tester.tap(find.text('Allow').first);
@@ -107,7 +108,7 @@ void main() {
       ),
     );
     expect(find.text('Allow for session'), findsNothing);
-    await tester.tap(find.text('Allow for all forks of this session'));
+    await tester.tap(find.text('Allow similar for all forks of this session'));
     expect(scope, ApprovalScope.session);
   });
 }

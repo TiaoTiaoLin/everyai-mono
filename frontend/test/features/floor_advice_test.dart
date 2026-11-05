@@ -40,7 +40,7 @@ void main() {
       'tool_name': 'mcp__everyai__bug_check',
       'action': {'kind': 'MCPToolAction', 'command': 'rm -rf ~'},
     }) as ActionCall;
-    for (final m in AgentMode.values) {
+    for (final m in AgentMode.values.where((m) => m != AgentMode.bypass)) {
       for (final advised in [
         <String>{},
         {floorReason('rm -rf ~')!},
@@ -53,7 +53,7 @@ void main() {
   });
 
   test('a floor hit is never approved on its own', () {
-    for (final m in AgentMode.values) {
+    for (final m in AgentMode.values.where((m) => m != AgentMode.bypass)) {
       for (final c in ['rm -rf ~', 'sudo rm -rf /usr', 'mkfs.ext4 /dev/sdb1', ':(){ :|:& };:']) {
         for (final advised in [
           <String>{},
@@ -82,7 +82,7 @@ void main() {
   });
 
   test('anything else is decided as before', () {
-    for (final m in AgentMode.values) {
+    for (final m in AgentMode.values.where((m) => m != AgentMode.bypass)) {
       for (final c in ['ls', 'npm install', 'git reset --hard']) {
         expect(outsideVerdict(policy, _sh(c), m), policy.decideAll([_sh(c)], m), reason: '$m $c');
       }

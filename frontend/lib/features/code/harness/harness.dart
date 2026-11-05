@@ -476,6 +476,7 @@ NativeMode? nativeModeFor(List<NativeMode> modes, AgentMode mode) {
     AgentMode.ask => 1,
     AgentMode.autoEdit => 2,
     AgentMode.fullAuto => 3,
+    AgentMode.bypass => 4,
   };
   NativeMode? best;
   for (final m in modes) {

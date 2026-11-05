@@ -263,6 +263,7 @@ class _CodeSettingsSectionState extends ConsumerState<CodeSettingsSection> {
     }
     try {
       await files.writeLayer(path, edit);
+      ref.read(settingsFilesRevisionProvider.notifier).bump();
       if (_local && l.scope == SettingsScope.project) {
         final project = ref.read(codeProjectsProvider).where((p) => p.id == l.projectId).firstOrNull;
         if (project != null) await files.excludeFromGit(project.path, const ['/${files.localSettingsPath}']);
@@ -1177,6 +1178,7 @@ class PermissionsSection extends ConsumerWidget {
                   if (path == null) return;
                   try {
                     await files.writeLayer(path, edit);
+                    ref.read(settingsFilesRevisionProvider.notifier).bump();
                   } on Object catch (e) {
                     if (context.mounted) showAdaptiveToast(context, "Couldn't save: $e");
                   }

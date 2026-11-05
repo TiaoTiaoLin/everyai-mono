@@ -240,6 +240,7 @@ AgentMode stricterMode(AgentMode a, AgentMode b) {
     AgentMode.ask => 1,
     AgentMode.autoEdit => 2,
     AgentMode.fullAuto => 3,
+    AgentMode.bypass => 4,
   };
   return rank(a) <= rank(b) ? a : b;
 }

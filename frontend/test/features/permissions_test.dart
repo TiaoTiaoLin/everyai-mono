@@ -187,7 +187,7 @@ void main() {
     const policy = PermissionPolicy(workingDir: _dir);
 
     test('the floor holds in every mode, Full auto included', () {
-      for (final m in AgentMode.values) {
+      for (final m in AgentMode.values.where((m) => m != AgentMode.bypass)) {
         final d = policy.decide(_sh('rm -rf ~'), m);
         expect(d.verdict, Verdict.deny);
         expect(d.source, DecisionSource.floor);
@@ -195,7 +195,7 @@ void main() {
     });
 
     test('floor: false skips only the floor', () {
-      for (final m in AgentMode.values) {
+      for (final m in AgentMode.values.where((m) => m != AgentMode.bypass)) {
         expect(policy.decide(_sh('rm -rf ~'), m, floor: false).source, isNot(DecisionSource.floor));
       }
       expect(policy.decide(_sh('rm -rf ~'), AgentMode.fullAuto, floor: false).verdict, Verdict.allow);
@@ -252,7 +252,7 @@ void main() {
         'cat<.env',
         'ls && cat .env | base64',
       ]) {
-        for (final m in AgentMode.values) {
+        for (final m in AgentMode.values.where((m) => m != AgentMode.bypass)) {
           final d = p.decide(_sh(c), m);
           expect(d.verdict, Verdict.deny, reason: '$c in $m');
           expect(d.rule, 'Read(.env*)', reason: c);
@@ -546,6 +546,47 @@ void main() {
       expect(ours.decide(host(askUserQuestionTool), AgentMode.ask).verdict, Verdict.ask);
       const denying = PermissionPolicy(rules: PermissionRules(deny: ['Mcp(mcp__everyai__memory)']), hostTools: true);
       expect(denying.decide(host('memory'), AgentMode.ask).verdict, Verdict.deny);
+    });
+  });
+
+  group('long runs: chains, similar and all-similar approvals, bypass', () {
+    const policy = PermissionPolicy(workingDir: '/p');
+
+    test('a chain is allowed when every part matches an allow rule', () {
+      final rules = const PermissionPolicy(workingDir: '/p', session: {'cd *', 'npm test *'});
+      expect(rules.decide(_sh('cd app && npm test -- --watch=false'), AgentMode.ask).verdict, Verdict.allow);
+      // One part not covered: still asks.
+      expect(rules.decide(_sh('cd app && npm publish'), AgentMode.ask).verdict, Verdict.ask);
+      // Nothing the parser can't vouch for.
+      expect(rules.decide(_sh(r'cd app && npm test $(cat x)'), AgentMode.ask).verdict, Verdict.ask);
+    });
+
+    test('allow similar remembers each part of a chain', () {
+      expect(rememberPatterns(_sh('cd app && npm run build | tail -5')), ['cd *', 'npm run build *', 'tail *']);
+      expect(rememberPattern(_sh('cd app && npm test')), isNull, reason: 'one rule only for a simple command');
+      expect(rememberPatterns(_sh('rm -rf / && ls')), isNull, reason: 'dangerous: approved once only');
+    });
+
+    test('allow all similar covers the kind, and the floor and risky actions still ask', () {
+      expect(broadPattern(_sh('npm test')), '*');
+      expect(broadPattern(_edit('/p/lib/a.dart')), 'Edit(**)');
+      final all = const PermissionPolicy(workingDir: '/p', session: {'*', 'Edit(**)'});
+      expect(all.decide(_sh('cd app && make && ./run.sh --x'), AgentMode.ask).verdict, Verdict.allow);
+      expect(all.decide(_edit('/p/lib/deep/b.dart'), AgentMode.ask).verdict, Verdict.allow);
+      expect(all.decide(_sh('git push --force origin main'), AgentMode.ask).verdict, isNot(Verdict.allow));
+      expect(all.decide(_edit('/etc/hosts'), AgentMode.ask).verdict, Verdict.ask, reason: 'outside the project');
+    });
+
+    test('bypass runs everything, floor and deny rules included', () {
+      final denying = PermissionPolicy(
+        workingDir: '/p',
+        rules: const PermissionRules(deny: ['npm publish *']),
+      );
+      expect(denying.decide(_sh('npm publish'), AgentMode.bypass).verdict, Verdict.allow);
+      expect(policy.decide(_sh('rm -rf ~'), AgentMode.bypass).verdict, Verdict.allow);
+      expect(policy.decide(_edit('/etc/hosts'), AgentMode.bypass).verdict, Verdict.allow);
+      expect(policy.decideAll([_sh('rm -rf ~'), _edit('/p/.env')], AgentMode.bypass, askMcp: true)?.accept, isTrue);
+      expect(AgentMode.bypass.autoApproves(_sh('rm -rf ~')), isTrue);
     });
   });
 }

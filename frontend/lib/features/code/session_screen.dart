@@ -179,6 +179,9 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
     switch (pick) {
       case OwnWindow(:final window, :final others):
         return _withImages(call, await a.capture(window, root, others));
+      // Bypass permissions: no question, the window is captured like the session's own.
+      case ForeignWindow(:final window) when state.mode == AgentMode.bypass:
+        return _withImages(call, await a.capture(window, root, 0));
       case ForeignWindow(:final window):
         final title = window.title.isEmpty ? '' : ' — “${window.title}”';
         final answers = await _askLocally(call, 'screen-${call.id}', [

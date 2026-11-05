@@ -615,7 +615,9 @@ class ModeMenu extends StatelessWidget {
     final theme = EveryTheme.of(context);
     return AnchoredPopover(
       width: 280,
-      builder: (context, close) => Padding(
+      // The popover closes before the Bypass confirmation, so that asks from this widget's context.
+      // Scrolls when the window is too short for every mode.
+      builder: (_, close) => SingleChildScrollView(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -628,8 +630,9 @@ class ModeMenu extends StatelessWidget {
                 subtitle: m.description,
                 selected: m == mode,
                 trailing: m == mode ? AdaptiveIcon(EveryIcon.check, size: 14, color: theme.accent) : null,
-                onTap: () {
+                onTap: () async {
                   close();
+                  if (m == AgentMode.bypass && mode != AgentMode.bypass && !await confirmBypass(context)) return;
                   onChanged(m);
                 },
               ),
@@ -705,7 +708,7 @@ class _ModeChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final color = switch (policy) {
-      AgentMode.fullAuto => theme.danger,
+      AgentMode.fullAuto || AgentMode.bypass => theme.danger,
       AgentMode.plan => theme.accent,
       _ => null,
     };
@@ -747,3 +750,15 @@ class _QueuedChip extends StatelessWidget {
     );
   }
 }
+
+/// Asks before Bypass permissions turns every EveryAI check off.
+Future<bool> confirmBypass(BuildContext context) => showAdaptiveConfirm(
+  context,
+  title: 'Bypass permissions?',
+  message:
+      'Every command and edit runs without asking, and EveryAI\'s checks are off too: the safety floor (rm -rf, '
+      'force pushes, secrets), your deny rules and the warnings for risky commands or files outside the project. '
+      'Forks, subagents and workflow agents of this session run the same way. Use it on a project you can restore.',
+  confirmLabel: 'Bypass permissions',
+  destructive: true,
+);

@@ -83,7 +83,7 @@ final class ClaudeDriver
   @override
   /// [permissionModeFor]: Full auto starts in `default`, which asks.
   @override
-  bool startsNatively(AgentMode mode) => mode != AgentMode.fullAuto;
+  bool startsNatively(AgentMode mode) => mode != AgentMode.fullAuto && mode != AgentMode.bypass;
 
   @override
   Set<DriverCap> get caps => const {

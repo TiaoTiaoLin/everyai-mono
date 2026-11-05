@@ -2059,6 +2059,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     // A switch in Settings → Skills reaches the lead's next process.
     ref.listen(leadSkillsProvider, (_, _) => _applySkillsOff());
+    // Rules changed in Settings apply mid-session: a card already waiting is decided again under them.
+    ref.listen(codePermissionsProvider, (_, _) => _autoRespond(state.transcript));
+    if (info != null) ref.listen(settingsFilesRevisionProvider, (_, _) => unawaited(_loadSettingsRules(info)));
     // The budget holds whether or not the session is on screen: every new
     // reading (and a lowered budget) is checked here.
     if (info != null) {
@@ -5157,16 +5160,31 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final pending = calls ?? state.transcript.pending;
     if (pending.isEmpty) return null;
     final dir = policy.workingDir;
-    final patterns = [for (final c in pending) rememberPattern(c, workingDir: dir)];
+    final patterns = [for (final c in pending) rememberPatterns(c, workingDir: dir)];
     if (patterns.any((p) => p == null)) return null;
-    return {for (final p in patterns) p!}.toList();
+    return {for (final p in patterns) ...p!}.toList();
+  }
+
+  /// "Allow all similar for this session" for [calls] (default: the pending ones): the whole kind of each (every
+  /// command, every edit in the project, every MCP tool), or empty when one has no such kind.
+  List<String> broadPatterns([List<ActionCall>? calls]) {
+    final out = <String>[];
+    for (final c in calls ?? state.transcript.pending) {
+      final p = broadPattern(c);
+      if (p == null) return const [];
+      if (!out.contains(p)) out.add(p);
+    }
+    return out;
   }
 
   /// What "for this session" / "always" would store for each pending call
   /// that can be remembered (call id → rule), for the card's per-call menus.
   Map<String, String> rememberBy() {
     final dir = policy.workingDir;
-    return {for (final c in state.transcript.pending) c.id: ?rememberPattern(c, workingDir: dir)};
+    return {
+      for (final c in state.transcript.pending)
+        if (rememberPatterns(c, workingDir: dir) case final p?) c.id: p.join(', '),
+    };
   }
 
   /// Approves the pending actions ([callIds], or every one not answered
@@ -5179,8 +5197,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         if (callIds == null ? !_decided.containsKey(c.id) : callIds.contains(c.id)) c,
     ];
     if (scope != ApprovalScope.once) {
-      final patterns = rememberable(targets) ?? const <String>[];
-      if (scope == ApprovalScope.session) {
+      final patterns = scope == ApprovalScope.sessionAll
+          ? broadPatterns(targets)
+          : rememberable(targets) ?? const <String>[];
+      if (scope == ApprovalScope.session || scope == ApprovalScope.sessionAll) {
         _allowForSession(patterns);
       } else {
         final projectId = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.projectId;

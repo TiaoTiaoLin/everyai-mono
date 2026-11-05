@@ -15,7 +15,11 @@ enum AgentMode {
 
   /// Nothing waits (the worktree keeps the main checkout safe), but the
   /// safety floor and deny rules still hold.
-  fullAuto('Full auto', 'Runs commands and edits without asking');
+  fullAuto('Full auto', 'Runs commands and edits without asking'),
+
+  /// Every EveryAI check off: no safety floor, no deny rules, no risk prompts. The harness runs as if EveryAI weren't
+  /// there (an outside lead gets its own skip-permissions mode). The user confirms before switching to it.
+  bypass('Bypass permissions', 'No EveryAI checks: everything runs, nothing asks');
 
   const AgentMode(this.label, this.description);
   final String label;
@@ -32,7 +36,7 @@ enum AgentMode {
   bool autoApproves(ActionCall call) {
     final readOnly = isReadOnly(call);
     return switch (this) {
-      fullAuto => true,
+      fullAuto || bypass => true,
       autoEdit => readOnly || isFileEdit(call) || _isClientTool(call),
       plan => readOnly || _isClientTool(call),
       ask => readOnly || _isClientTool(call),
@@ -90,6 +94,8 @@ enum AgentMode {
     autoEdit => 'Mode: Auto-edit. Edits apply at once; other commands wait for approval. Use your tools.',
     plan => 'Mode: Plan. Read-only: do not edit files or change anything. Explore, then call present_plan and stop.',
     fullAuto => 'Mode: Full auto. Everything runs without approval. Use your tools and finish the task.',
+    bypass =>
+      'Mode: Bypass permissions. Everything runs without approval or checks. Use your tools and finish the task.',
   };
 
   /// What the agent is told when a message is sent in this mode (see
@@ -112,6 +118,11 @@ enum AgentMode {
       'Mode: Full auto. Every command and edit runs without approval. Do the task end to end: read the code, '
           'make the change, run the tests or build, and fix what fails. Restrictions from earlier mode notes no '
           'longer apply.',
+    bypass =>
+      'Mode: Bypass permissions. The user turned off every approval and safety check for this session: every '
+          'command and edit runs at once, so be careful with anything destructive or outside the project. Do the task '
+          'end to end: read the code, make the change, run the tests or build, and fix what fails. Restrictions from '
+          'earlier mode notes no longer apply.',
   };
 
   /// The mode note for a subagent's conversation: the same limits, without
@@ -128,6 +139,9 @@ enum AgentMode {
           'status/log/diff/show); do not edit files or run anything that changes the workspace. Put what you find '
           'in your final report.',
     fullAuto => 'Mode: Full auto. Commands and edits run without approval. Use your tools and finish the task.',
+    bypass =>
+      'Mode: Bypass permissions. Every command and edit runs without approval or checks; be careful with anything '
+          'destructive. Use your tools and finish the task.',
   };
 }
 

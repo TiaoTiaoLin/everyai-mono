@@ -122,7 +122,7 @@ final class FakeSession implements HarnessSession {
       await Future<void>.delayed(_h.step);
       if (raw['kind'] == 'ActionEvent') {
         final call = _emit(raw) as ActionCall;
-        if (_mode != AgentMode.fullAuto) {
+        if (_mode != AgentMode.fullAuto && _mode != AgentMode.bypass) {
           _status(ExecutionStatus.waitingForConfirmation);
           final ok = await (_approval = Completer<bool>()).future;
           _approval = null;

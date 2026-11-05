@@ -106,7 +106,7 @@ const codexModes = [
 
 /// The preset a session in [mode] shows when none was picked by name.
 String codexModeFor(AgentMode mode) =>
-    mode == AgentMode.autoEdit || mode == AgentMode.fullAuto ? 'default' : codexReadOnly;
+    mode == AgentMode.autoEdit || mode == AgentMode.fullAuto || mode == AgentMode.bypass ? 'default' : codexReadOnly;
 
 /// Whether usage under an `account/updated` `authMode` is on a plan rather
 /// than billed per token: the modes Codex serves from its own backend

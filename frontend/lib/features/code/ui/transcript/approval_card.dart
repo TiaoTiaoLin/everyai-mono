@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../core/platform/platform_kind.dart';
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
+import '../../../../core/ui/layout.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../../../core/ui/syntax_spans.dart';
 import '../../approval_risk.dart';
@@ -181,11 +182,19 @@ class _ApprovalCardState extends State<ApprovalCard> {
                       onPressed: () => widget.onAllow(ApprovalScope.always),
                     ),
                     AdaptiveButton(
-                      label: widget.forks ? 'Allow for all forks of this session' : 'Allow for session',
+                      label: widget.forks
+                          ? 'Allow similar for all forks of this session'
+                          : 'Allow similar for this session',
                       emphasis: ButtonEmphasis.secondary,
                       onPressed: () => widget.onAllow(ApprovalScope.session),
                     ),
                   ],
+                  if (_broadLabel() case final all?)
+                    AdaptiveButton(
+                      label: 'Allow $all for this session',
+                      emphasis: ButtonEmphasis.secondary,
+                      onPressed: () => widget.onAllow(ApprovalScope.sessionAll),
+                    ),
                   AdaptiveButton(
                     label: 'Allow once  ${Host.enterKeys(command: true)}',
                     onPressed: () => widget.onAllow(ApprovalScope.once),
@@ -196,7 +205,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: Text(
-                    'Session and always cover: ${remember.join(', ')}',
+                    'Similar and always cover: ${remember.join(', ')}',
                     textAlign: TextAlign.end,
                     style: theme.type.caption.tint(theme.textMuted),
                   ),
@@ -206,6 +215,19 @@ class _ApprovalCardState extends State<ApprovalCard> {
         ),
       ),
     );
+  }
+
+  /// "all commands", "all commands and all edits in the project"… when every pending call has a kind that
+  /// "Allow all similar for this session" covers; null otherwise.
+  String? _broadLabel() {
+    final kinds = <String>[];
+    for (final c in widget.pending) {
+      if (widget.decided.containsKey(c.id)) continue;
+      final b = broadPattern(c);
+      if (b == null) return null;
+      if (!kinds.contains(b)) kinds.add(b);
+    }
+    return kinds.isEmpty ? null : kinds.map(broadLabel).join(' and ');
   }
 
   /// Several calls, one answer each: a row per call (Allow / Deny / Always ⌄)
@@ -250,7 +272,9 @@ class _ApprovalCardState extends State<ApprovalCard> {
                           call: c,
                           flag: widget.flags[c.id],
                           reason: widget.reasons[c.id],
-                          sessionLabel: widget.forks ? 'Allow for all forks of this session' : 'Allow for this session',
+                          sessionLabel: widget.forks
+                              ? 'Allow similar for all forks of this session'
+                              : 'Allow similar for this session',
                           decided: widget.decided[c.id],
                           rule: widget.rememberBy[c.id],
                           workingDir: widget.workingDir,
@@ -295,6 +319,12 @@ class _ApprovalCardState extends State<ApprovalCard> {
                       label: 'Allow all edits',
                       emphasis: ButtonEmphasis.secondary,
                       onPressed: () => widget.onMode(AgentMode.autoEdit),
+                    ),
+                  if (_broadLabel() case final all?)
+                    AdaptiveButton(
+                      label: 'Allow $all for this session',
+                      emphasis: ButtonEmphasis.secondary,
+                      onPressed: () => widget.onAllow(ApprovalScope.sessionAll),
                     ),
                   AdaptiveButton(
                     label: 'Allow all  ${Host.enterKeys(command: true)}',
@@ -352,16 +382,16 @@ class _CallRow extends StatelessWidget {
           _Preview(call: call, flag: flag, reason: reason, workingDir: workingDir, session: session),
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    approvalTitle(call),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.type.caption.tint(theme.textMuted),
-                  ),
-                ),
+            // The buttons go under the title when the row is narrow.
+            child: WrapRow(
+              gap: 6,
+              lead: Text(
+                approvalTitle(call),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.type.caption.tint(theme.textMuted),
+              ),
+              actions: [
                 if (done != null)
                   Text(
                     done ? 'Allowed' : 'Denied',
@@ -369,18 +399,22 @@ class _CallRow extends StatelessWidget {
                   )
                 else ...[
                   AdaptiveButton(label: 'Deny', emphasis: ButtonEmphasis.secondary, onPressed: onDeny),
-                  if (rule case final r?) ...[
-                    const SizedBox(width: 6),
+                  if (rule != null || broadPattern(call) != null)
                     AdaptiveMenuButton(
-                      tooltip: 'Remember: $r',
+                      tooltip: rule == null ? 'Allow more' : 'Remember: $rule',
                       actions: [
-                        MenuAction(label: sessionLabel, onSelected: () => onAllow(ApprovalScope.session)),
-                        MenuAction(label: 'Always allow', onSelected: () => onAllow(ApprovalScope.always)),
+                        if (rule != null) ...[
+                          MenuAction(label: sessionLabel, onSelected: () => onAllow(ApprovalScope.session)),
+                          MenuAction(label: 'Always allow', onSelected: () => onAllow(ApprovalScope.always)),
+                        ],
+                        if (broadPattern(call) case final b?)
+                          MenuAction(
+                            label: 'Allow ${broadLabel(b)} for this session',
+                            onSelected: () => onAllow(ApprovalScope.sessionAll),
+                          ),
                       ],
-                      child: const MenuTrigger('Always'),
+                      child: const MenuTrigger('More'),
                     ),
-                  ],
-                  const SizedBox(width: 6),
                   AdaptiveButton(label: 'Allow', onPressed: () => onAllow(ApprovalScope.once)),
                 ],
               ],

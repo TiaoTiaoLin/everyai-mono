@@ -222,6 +222,7 @@ void main() {
           AgentMode.autoEdit: 'acceptEdits',
           AgentMode.plan: 'plan',
           AgentMode.fullAuto: 'default',
+          AgentMode.bypass: 'default',
         },
       );
     });
