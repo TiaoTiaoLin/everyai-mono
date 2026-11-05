@@ -28,6 +28,7 @@ typedef InstructionFinding = ({String file, int line, InstructionFlag flag, Stri
 const maxFindingsPerFile = 20;
 
 final _comment = RegExp(r'<!--([\s\S]*?)(?:-->|$)');
+// Every gap is bounded, so no rule backtracks across a long line (minified files, padding).
 final _phrases = <InstructionFlag, List<RegExp>>{
   InstructionFlag.ignoresUser: [
     _rule(
@@ -43,47 +44,75 @@ final _phrases = <InstructionFlag, List<RegExp>>{
     _rule(r'\b(?:hide|conceal|keep)\b.{0,40}?\bfrom (?:the )?user\b'),
     _rule(r'\b(?:secretly|covertly)\b'),
   ],
-  InstructionFlag.sendsData: [
-    _rule(r'\b(?:curl|wget|nc|ncat)\b.*(?:\$\{?\w*(?:key|token|secret|pass)|@\S*(?:\.ssh|\.env|\.aws))'),
-    _rule(r'!\[[^\]]*\]\(\s*\w+://[^)\s]*[$\{<]'),
-  ],
+  InstructionFlag.sendsData: [_rule(r'!\[[^\]]{0,200}\]\(\s*\w{1,20}://[^)\s]{0,500}?[$\{<]')],
 };
 
 RegExp _rule(String pattern) => RegExp(pattern, caseSensitive: false);
 
-// sendsData also fires on a sending verb and a private-data noun in one sentence (two plain scans, no backtracking).
+// sendsData also fires on two plain scans in one sentence (no backtracking): a sending verb and a private-data noun,
+// or a network tool and a secret variable or private path.
 final _sendVerb = _rule(r'\b(?:send|upload|forward|exfiltrate|leak|transmit)\w*\b');
 final _privateData = _rule(
   r'\.env\b|\bapi[ _-]?keys?\b|\btokens?\b|\bsecrets?\b|\bcredentials?\b|\bpasswords?\b|\bssh keys?\b|'
   r'~/\.ssh|~/\.aws|\bcookies\b|\b(?:chat|conversation) history\b',
 );
+final _netTool = _rule(r'\b(?:curl|wget|nc|ncat)\b');
+final _secretRef = _rule(r'\$\{?\w{0,40}?(?:key|token|secret|pass)|@\S{0,80}?(?:\.ssh|\.env|\.aws)');
 
-/// What in [text] (the contents of [file]) may be trying to steer the agent; at most [maxFindingsPerFile].
+/// The phrase rules see at most this much of a sentence at a time.
+const _chunk = 4096;
+
+/// Files every rule reads: prose (Markdown, plain text, or no extension). Scripts and data get only the
+/// hidden-character check and the network-tool rule (`curl … $TOKEN`), since `send(token)` is ordinary code.
+final _proseName = RegExp(r'(?:^|/)[^/.]+$|\.(?:md|markdown|mdx|txt|rst|adoc)$', caseSensitive: false);
+
+/// What in [text] (the contents of [file]) may be trying to steer the agent; at most [maxFindingsPerFile], the first
+/// by line. Linear in the size of [text].
 List<InstructionFinding> scanInstructions(String text, {required String file}) {
   final out = <InstructionFinding>[];
-  final lines = text.replaceAll('\r\n', '\n').split('\n');
+  final seen = <(int, InstructionFlag)>{};
+  final counts = <InstructionFlag, int>{};
+  // Each flag is found in line order, so its first [maxFindingsPerFile] are all the final cut can keep.
+  bool full(InstructionFlag flag) => (counts[flag] ?? 0) >= maxFindingsPerFile;
   void add(int line, InstructionFlag flag, String excerpt) {
-    if (out.any((f) => f.line == line && f.flag == flag)) return;
+    if (full(flag) || !seen.add((line, flag))) return;
+    counts[flag] = (counts[flag] ?? 0) + 1;
     out.add((file: file, line: line, flag: flag, excerpt: _short(excerpt)));
   }
 
-  for (var i = 0; i < lines.length; i++) {
+  final prose = _proseName.hasMatch(file);
+  final lines = text.replaceAll('\r\n', '\n').split('\n');
+  for (var i = 0; i < lines.length && !full(InstructionFlag.hiddenText); i++) {
     final l = i == 0 ? lines[i].replaceFirst('\uFEFF', '') : lines[i];
     if (hiddenIn(l).isNotEmpty) add(i + 1, InstructionFlag.hiddenText, revealHidden(l));
   }
   final clean = stripHidden(lines.join('\n'));
-  for (final m in _comment.allMatches(clean)) {
-    final words = RegExp(r'\S+').allMatches(m.group(1)!).length;
-    if (words >= 4) add('\n'.allMatches(clean.substring(0, m.start)).length + 1, InstructionFlag.htmlComment, m[0]!);
+  if (prose) {
+    var line = 1;
+    var at = 0;
+    for (final m in _comment.allMatches(clean)) {
+      if (full(InstructionFlag.htmlComment)) break;
+      for (; at < m.start; at++) {
+        if (clean.codeUnitAt(at) == 0x0A) line++;
+      }
+      if (RegExp(r'\S+').allMatches(m.group(1)!).take(4).length >= 4) add(line, InstructionFlag.htmlComment, m[0]!);
+    }
   }
+  final flags = prose ? _phrases.keys.toList() : const [InstructionFlag.sendsData];
   final cleanLines = clean.split('\n');
-  for (var i = 0; i < cleanLines.length; i++) {
+  for (var i = 0; i < cleanLines.length && !flags.every(full); i++) {
     for (final sentence in cleanLines[i].split(RegExp(r'(?<=[.!?])\s+'))) {
-      final s = sentence.replaceAll(RegExp(r'\s+'), ' ');
-      for (final MapEntry(key: flag, value: rules) in _phrases.entries) {
-        if (rules.any((r) => r.hasMatch(s)) ||
-            flag == InstructionFlag.sendsData && _sendVerb.hasMatch(s) && _privateData.hasMatch(s)) {
-          add(i + 1, flag, cleanLines[i]);
+      final folded = sentence.replaceAll(RegExp(r'\s+'), ' ');
+      for (var o = 0; o < folded.length; o += _chunk) {
+        final s = folded.substring(o, o + _chunk < folded.length ? o + _chunk : folded.length);
+        for (final flag in flags) {
+          if (full(flag)) continue;
+          final hit =
+              prose && _phrases[flag]!.any((r) => r.hasMatch(s)) ||
+              flag == InstructionFlag.sendsData &&
+                  (prose && _sendVerb.hasMatch(s) && _privateData.hasMatch(s) ||
+                      _netTool.hasMatch(s) && _secretRef.hasMatch(s));
+          if (hit) add(i + 1, flag, cleanLines[i]);
         }
       }
     }
@@ -121,7 +150,7 @@ String revealHidden(String text) {
 }
 
 String _short(String s) {
-  final t = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final t = (s.length > 1000 ? s.substring(0, 1000) : s).replaceAll(RegExp(r'\s+'), ' ').trim();
   return t.length <= 120 ? t : '${t.substring(0, 117)}...';
 }
 

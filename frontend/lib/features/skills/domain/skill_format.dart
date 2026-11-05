@@ -334,11 +334,13 @@ SkillManifest? _manifest(
     }
     if (name != dirName) lenient('The folder is called "$dirName" but the skill is "$name"; they must match.');
   }
-  // What the agent gets: hidden characters removed (the digest stays over the raw file).
-  final description = switch (str('description')) {
-    final d? => stripHidden(d),
+  // What the agent gets: hidden characters removed from every field but the name, which refuses them (the digest
+  // stays over the raw file).
+  String? clean(String key) => switch (str(key)) {
+    final v? => stripHidden(v),
     null => null,
   };
+  final description = clean('description');
   if (description == null || description.isEmpty) {
     errors.add('The front matter needs a description.');
   } else {
@@ -349,15 +351,15 @@ SkillManifest? _manifest(
       errors.add('The description may not contain XML or HTML tags.');
     }
   }
-  final compatibility = str('compatibility');
+  final compatibility = clean('compatibility');
   if (compatibility != null && compatibility.length > SkillRules.maxCompatibility) {
     errors.add('"compatibility" is longer than ${SkillRules.maxCompatibility} characters.');
   }
-  final license = str('license');
-  final allowedTools = str('allowed-tools');
+  final license = clean('license');
+  final allowedTools = clean('allowed-tools');
   final metadata = switch (f['metadata']) {
     null => const <String, String>{},
-    final Map<String, String> m => m,
+    final Map<String, String> m => {for (final e in m.entries) stripHidden(e.key): stripHidden(e.value)},
     '' => const <String, String>{},
     _ => () {
       errors.add('"metadata" must be a mapping of keys to text.');

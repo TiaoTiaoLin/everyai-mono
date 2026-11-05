@@ -1,10 +1,10 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
 import '../domain/hidden_instructions.dart';
 
 import '../domain/builtin_skills.dart';
 import '../domain/skill_catalog.dart';
+import '../domain/skill_format.dart' show SkillRules;
 import 'skill_import.dart';
 import 'skill_store_stub.dart' if (dart.library.io) 'skill_store_io.dart' as impl;
 
@@ -50,9 +50,11 @@ Future<void> seedBuiltinSkills(String libraryDir, List<BuiltinSkill> skills) => 
 Future<List<InstructionFinding>> scanSkillFolder(InstalledSkill skill) async {
   final out = [...skill.report.findings];
   for (final rel in skill.files) {
-    if (!scansSkillFile(rel, 0)) continue;
-    final bytes = await readSkillFileBytes(skill.dir, rel, maxBytes: scannedFileBytes);
-    if (bytes != null) out.addAll(scanInstructions(utf8.decode(bytes, allowMalformed: true), file: rel));
+    if (rel == 'SKILL.md') continue;
+    final bytes = await readSkillFileBytes(skill.dir, rel, maxBytes: SkillRules.maxFileBytes);
+    if (bytes != null) {
+      if (scannedText(bytes) case final t?) out.addAll(scanInstructions(t, file: rel));
+    }
   }
   return out;
 }

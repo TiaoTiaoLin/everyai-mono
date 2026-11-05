@@ -49,17 +49,16 @@ final class ImportCandidate {
   bool get ok => check.report.ok;
 }
 
-/// Bundled files read for [scanInstructions]: text-like and at most this large.
+/// How much of each bundled file [scanInstructions] reads.
 const scannedFileBytes = 256 * 1024;
 
-final _scannedName = RegExp(
-  r'\.(md|markdown|txt|py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|ps1|json|ya?ml|html?|xml|toml)$',
-  caseSensitive: false,
-);
-
-/// Whether a bundled file at [path] of [size] bytes is scanned for hidden instructions (`SKILL.md` is scanned apart).
-bool scansSkillFile(String path, int size) =>
-    path != 'SKILL.md' && size <= scannedFileBytes && _scannedName.hasMatch(path);
+/// The part of a bundled file [scanInstructions] reads: its first [scannedFileBytes] as text, or null for a binary
+/// file (a NUL byte there). Every other file is read, whatever its name or size, so no file is skipped quietly.
+String? scannedText(List<int> bytes) {
+  final head = bytes.length > scannedFileBytes ? bytes.sublist(0, scannedFileBytes) : bytes;
+  if (head.contains(0)) return null;
+  return utf8.decode(head, allowMalformed: true);
+}
 
 /// The skills in [files]: every folder holding a `SKILL.md` (nested skills
 /// belong to the outer one). A `SKILL.md` at the top takes its folder name
@@ -131,8 +130,12 @@ Future<List<ImportCandidate>> findImportCandidates(List<SkillFile> files, {requi
         head = await f.head();
       }
       entries.add(SkillEntry(f.path, size: f.size, kind: f.kind, head: head));
-      if (withinLimits && f.kind == SkillEntryKind.file && f.read != null && scansSkillFile(f.path, f.size)) {
-        findings.addAll(scanInstructions(utf8.decode(await f.read!(), allowMalformed: true), file: f.path));
+      if (withinLimits &&
+          f.kind == SkillEntryKind.file &&
+          f.read != null &&
+          f.path != 'SKILL.md' &&
+          f.size <= SkillRules.maxFileBytes) {
+        if (scannedText(await f.read!()) case final t?) findings.addAll(scanInstructions(t, file: f.path));
       }
     }
     final check = checkSkill(dirName: dirName, skillMd: text, entries: entries);

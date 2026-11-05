@@ -297,7 +297,8 @@ class _SkillTile extends ConsumerWidget {
           'This skill came with the project, in ${skill.dir}. The agent will follow its instructions'
           '${skill.report.hasScripts ? ' and may run its scripts (each command still asks in Ask mode)' : ''}.\n\n'
           '${m.description}${findings.isEmpty ? '' : '\n\n${findingsMessage(findings)}'}',
-      // The whole body as the agent gets it (hidden characters removed): trust covers all of it.
+      // The whole body with hidden characters removed, as Chat and the outside CLIs' copy get it. A Code agent reads
+      // the SKILL.md itself; its read tool strips them there (security/tools). Trust covers all of it.
       detail: m.body,
       confirmLabel: findings.isEmpty ? 'Trust and turn on' : 'Trust anyway',
     );
