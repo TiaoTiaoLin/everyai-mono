@@ -81,6 +81,7 @@ const _knownKinds = {
 const hostToolNames = {
   askUserQuestionTool,
   presentPlanTool,
+  securityAlertTool,
   'memory',
   savedPlansTool,
   bugCheckTool,
@@ -95,7 +96,8 @@ const hostToolNames = {
 };
 
 /// The host tools the policy lets run without asking: they only show the
-/// user a card, read and write the project's notes, or read the session
+/// user a card (a question, a plan, a security alert), read and write the
+/// project's notes, or read the session
 /// (diff_stats, goal_check, run_script's sandboxed reads). bug_check and
 /// check run a command, so they go through the mode like any other. The
 /// screen tools gate themselves: another app's window asks, and app_run's
@@ -103,6 +105,7 @@ const hostToolNames = {
 const trustedHostTools = {
   askUserQuestionTool,
   presentPlanTool,
+  securityAlertTool,
   'memory',
   savedPlansTool,
   reportIssueTool,

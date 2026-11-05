@@ -2,7 +2,7 @@
 
 import 'dart:async';
 
-import '../domain/agent_mode.dart' show askUserQuestionTool, presentPlanTool;
+import '../domain/agent_mode.dart' show askUserQuestionTool, presentPlanTool, securityAlertTool;
 import '../domain/phases.dart' show bugCheckTool;
 import 'host_checks.dart' show checkTool, diffStatsTool;
 import 'host_report.dart' show reportIssueTool;
@@ -99,9 +99,10 @@ HostServer createHostServer({
 List<Map<String, Object?>> get hostToolSpecs => impl.hostToolSpecs;
 
 /// What a workflow agent's token sees: the proof tools and nothing that
-/// forks, starts a workflow or asks the user (the lead does that). No memory:
+/// forks, starts a workflow or asks the user (the lead does that), and the
+/// security alert, which every agent has. No memory:
 /// they read it in their instructions, and the lead decides what is kept.
-const workflowHostTools = {bugCheckTool, checkTool, diffStatsTool, reportIssueTool};
+const workflowHostTools = {bugCheckTool, checkTool, diffStatsTool, reportIssueTool, securityAlertTool};
 
 /// The calls that wait for the user, so they get [createHostServer]'s
 /// `heldLimit` (a screenshot of another app's window asks first).

@@ -11,6 +11,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../domain/agent_mode.dart';
 import '../../domain/compaction.dart';
+import '../../domain/mcp_tool_check.dart' show McpToolsReport;
 import '../../domain/bug_check.dart';
 import '../../domain/permissions.dart' show cancelledLead;
 import '../../domain/shell_readonly.dart';
@@ -21,8 +22,10 @@ import '../events.dart';
 import '../harness.dart';
 import '../../drivers/briefing/briefing_types.dart' show everyaiServerName;
 import '../../drivers/usage_limit.dart';
+import '../../git/git_service_io.dart' show runGit;
 import 'browser_io.dart';
 import 'llm.dart';
+import 'package_registry_io.dart';
 import 'mcp_io.dart';
 import 'model_family.dart';
 import 'prompt_io.dart';
@@ -32,13 +35,14 @@ import 'project_notes_io.dart';
 import 'script_io.dart';
 import 'shell_io.dart';
 import 'tools_io.dart';
+import 'untrusted_tools.dart' show skillFolders;
 
 /// The EveryAI harness: the agent loop runs here, in the app, against the
 /// gateway. It speaks the same events as the agent-server (the transcript,
 /// permissions and approvals are shared), but the loop, the tools and the
 /// history are ours: questions block inside the call, tool results can be cut
 /// to size, and a session can be forked from another's history.
-final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed {
+final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed, AttachesWithMcp {
   EveryAIHarness({required this.dataDir, required this.gatewayKey, this.client});
 
   /// App Support; sessions are kept under `everyai-sessions/<id>/`.
@@ -89,9 +93,25 @@ final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed {
     return session;
   }
 
+  /// [attach] with the user's MCP servers as they are now: one still open
+  /// keeps the servers it connected to; a reopened one connects to
+  /// [mcpConfig] (with its current pins) instead of the servers in its
+  /// saved spec, which the user may have turned off or reviewed since.
+  @override
+  Future<HarnessSession> attachWithMcp(String conversationId, Map<String, Object?> mcpConfig) async {
+    final open = _sessions[conversationId];
+    final session = (await attach(conversationId)) as EveryAISession;
+    if (open == null) {
+      session._spec = session._withSpec(mcpConfig: mcpConfig);
+      session._writeSpec();
+    }
+    return session;
+  }
+
   /// [attach] for a workflow agent reopened with a fresh host ([briefing]):
-  /// the old token died with the app. One still open keeps the host it has;
-  /// the user's MCP servers come from its saved spec, not [mcpConfig].
+  /// the old token died with the app. One still open keeps the host and the
+  /// servers it has; a reopened one connects to [mcpConfig] (the user's
+  /// servers and pins as they are now), as with [attachWithMcp].
   @override
   Future<HarnessSession> attachBriefed(
     String conversationId,
@@ -102,8 +122,10 @@ final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed {
     final session = (await attach(conversationId)) as EveryAISession;
     if (open == null) {
       session
-        .._spec = session._withSpec(briefing: briefing)
-        .._hosted = true;
+        .._spec = session._withSpec(briefing: briefing, mcpConfig: mcpConfig)
+        .._hosted = true
+        // The briefing (a live token) isn't saved; the servers are.
+        .._writeSpec();
     }
     return session;
   }
@@ -134,10 +156,15 @@ final class EveryAISession
         CompactsInPlace,
         RetriesModelCalls,
         PerCallApprovals,
-        HasContextParts {
+        HasContextParts,
+        ReportsMcpTools {
   EveryAISession._(this.id, this._spec, this._dir, http.Client? client)
     : _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey, client: client),
-      _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell') {
+      _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell'),
+      _packages = PackageGuard(
+        RegistryLookup(client ?? http.Client()),
+        loadEnv: () async => (await ShellEnv.load()).env,
+      ) {
     _tools = ToolRunner(
       root: _spec.workingDir,
       shell: _shell,
@@ -147,11 +174,17 @@ final class EveryAISession
       pathMap: _spec.pathMap,
       researchSites: _spec.researchSites,
       browser: _browser,
+      ownFolders: skillFolders(_spec.skills),
+      loadLoginEnv: true,
+      packages: _packages,
     )..bypass = _spec.mode == AgentMode.bypass;
   }
 
   @override
   final String id;
+
+  /// The bash tool's package check, kept across model switches (its registry lookups are cached).
+  final PackageGuard _packages;
   SessionSpec _spec;
   final Directory _dir;
   GatewayClient _gateway;
@@ -164,6 +197,12 @@ final class EveryAISession
   /// The session's MCP servers (connected once, at start or first run).
   McpTools _mcp = McpTools.empty;
   Future<void>? _mcpReady;
+  final _mcpReported = Completer<Map<String, McpToolsReport>>();
+
+  /// Completes once the session connected to its MCP servers (at its first
+  /// run): what vetting found, for the app to store.
+  @override
+  Future<Map<String, McpToolsReport>> get mcpReport => _mcpReported.future;
 
   /// A briefed session (a workflow agent) also reaches the app's host as the
   /// `everyai` server, its tools named `everyai__<tool>` like an outside
@@ -178,12 +217,18 @@ final class EveryAISession
           'headers': {'Authorization': 'Bearer ${host.mcpToken}'},
         },
     };
-    if (config.isEmpty) return;
-    _mcp = await McpTools.start(
-      config,
-      reserved: {...actionKinds.keys, ...clientTools},
-      prefixed: {if (host != null) everyaiServerName},
-    );
+    try {
+      if (config.isEmpty) return;
+      _mcp = await McpTools.start(
+        config,
+        reserved: {...actionKinds.keys, ...clientTools},
+        prefixed: {if (host != null) everyaiServerName},
+        // Ours: a user's server can't take the name (the host entry replaces it).
+        trusted: {if (host != null) everyaiServerName},
+      );
+    } finally {
+      if (!_mcpReported.isCompleted) _mcpReported.complete(_mcp.report);
+    }
   }();
   late ToolRunner _tools;
 
@@ -270,13 +315,21 @@ final class EveryAISession
       _loadedSkills
         ..clear()
         ..addAll((j['skills'] as List<Object?>? ?? const []).whereType<String>());
+      if (j['push_targets'] case final List<Object?> targets) _tools.pushTargets = {...targets.whereType<String>()};
     } on Object {
       // A broken file only loses what compaction would re-inject.
     }
   }
 
   void _saveState() => _stateFile.writeAsStringSync(
-    jsonEncode({'approved_plan': _approvedPlan, 'todos': _todos, 'touched': _touched, 'skills': _loadedSkills}),
+    jsonEncode({
+      'approved_plan': _approvedPlan,
+      'todos': _todos,
+      'touched': _touched,
+      'skills': _loadedSkills,
+      // The remotes when the session started, so a reopened session doesn't take ones the agent added.
+      if (_tools.pushTargets case final t?) 'push_targets': [...t],
+    }),
   );
 
   /// Notes what a finished call means for compaction: the todo list, the
@@ -550,18 +603,36 @@ final class EveryAISession
       if (spec.subagent) const ContextPart(prompt, subagentRules),
       if (spec.rolePrompt case final role?) ContextPart(prompt, role),
       if (spec.skills.isNotEmpty) ContextPart(ContextKind.skills, _skillsBlock(spec.skills)),
-      if (_mcp.failures.isNotEmpty)
-        ContextPart(
-          ContextKind.mcpInstructions,
-          '<MCP>\nThese MCP servers could not start, so their tools are missing: '
-          '${_mcp.failures.entries.map((e) => '${e.key} (${e.value})').join('; ')}. Tell the user if the task needs them.\n</MCP>',
-        ),
+      if (_mcp.failures.isNotEmpty || _mcp.leftOut.isNotEmpty) ContextPart(ContextKind.mcpInstructions, _mcpBlock()),
       if (await projectNotesBlock(spec.workingDir) case final notes when notes.isNotEmpty)
         ContextPart(ContextKind.memoryFiles, notes),
       ContextPart(prompt, await environmentBlock(spec.workingDir)),
     ];
     _promptParts = parts;
     return parts.map((p) => p.text).join('\n\n');
+  }
+
+  /// MCP servers that couldn't start, and tools left out until the user reviews them.
+  String _mcpBlock() {
+    final b = StringBuffer('<MCP>');
+    if (_mcp.failures.isNotEmpty) {
+      b.write(
+        '\nThese MCP servers could not start, so their tools are missing: '
+        '${_mcp.failures.entries.map((e) => '${e.key} (${e.value})').join('; ')}. Tell the user if the task needs them.',
+      );
+    }
+    if (_mcp.leftOut.isNotEmpty) {
+      final tools = [
+        for (final e in _mcp.leftOut.entries)
+          for (final t in e.value) '${e.key}/${t.replaceAll(RegExp('[^A-Za-z0-9_-]'), '_')}',
+      ];
+      b.write(
+        '\nThese MCP tools were left out because they changed or look unsafe, until the user reviews them in '
+        'Settings → MCP servers: ${tools.join(', ')}. Tell the user if the task needs them.',
+      );
+    }
+    b.write('\n</MCP>');
+    return b.toString();
   }
 
   /// The system message's parts as [_systemPrompt] last built them (empty for a reopened session).
@@ -816,6 +887,9 @@ final class EveryAISession
       vision: spec.vision,
     );
     _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey);
+    // The new runner keeps what the old one learnt: values hidden from secret files the agent read, and the remotes
+    // the session started with (not ones the agent added since).
+    final old = _tools;
     _tools = ToolRunner(
       root: _spec.workingDir,
       shell: _shell,
@@ -825,6 +899,11 @@ final class EveryAISession
       pathMap: _spec.pathMap,
       researchSites: _spec.researchSites,
       browser: _browser,
+      ownFolders: skillFolders(_spec.skills),
+      scrubber: old.scrubber..remember([_gateway.apiKey]),
+      pushTargets: old.pushTargets,
+      loadLoginEnv: true,
+      packages: _packages,
     )..bypass = _spec.mode == AgentMode.bypass;
     _writeSpec();
   }
@@ -839,6 +918,7 @@ final class EveryAISession
     bool? vision,
     ScriptCaps? script,
     DriverBriefing? briefing,
+    Map<String, Object?>? mcpConfig,
   }) {
     final s = _spec;
     return SessionSpec(
@@ -857,7 +937,7 @@ final class EveryAISession
       tools: s.tools,
       clientTools: s.clientTools,
       autoCompactAt: s.autoCompactAt,
-      mcpConfig: s.mcpConfig,
+      mcpConfig: mcpConfig ?? s.mcpConfig,
       pathMap: s.pathMap,
       researchSites: s.researchSites,
       bugCheck: s.bugCheck,
@@ -954,6 +1034,11 @@ final class EveryAISession
     _pauseRequested = false;
     // A reopened session reconnects its servers before the first call.
     await _ensureMcp();
+    // The tools' guardrails need the login shell's secrets and the start-of-session remotes before any call is
+    // checked (refusalBeforeApproval is synchronous); the first time, the remotes are saved with the state.
+    final fresh = _tools.pushTargets == null;
+    await _tools.ready();
+    if (fresh && _tools.pushTargets != null) _saveState();
     var steps = 0;
     try {
       while (true) {
@@ -1150,6 +1235,10 @@ final class EveryAISession
       todos: kept.todos,
       files: kept.files,
       skills: kept.skills,
+      repoCheck: repoCheckIn([
+        for (final e in _history)
+          if (e is ChatMessage && e.fromUser) e.text,
+      ]),
     );
     final eid = _newId();
     _emit({
@@ -1268,8 +1357,12 @@ final class EveryAISession
         'security_risk': 'UNKNOWN',
       });
       // A fork's questions go to the agent that started it (the app routes
-      // them); the other client tools are the orchestrator's.
-      if (isFork && clientTools.contains(call.name) && call.name != askUserQuestionTool) {
+      // them); a security alert is the fork's own; the other client tools
+      // are the orchestrator's.
+      if (isFork &&
+          clientTools.contains(call.name) &&
+          call.name != askUserQuestionTool &&
+          call.name != securityAlertTool) {
         // A fork keeps the parent's tools (for the cache) but can't use these.
         _result(
           call,
@@ -1282,9 +1375,11 @@ final class EveryAISession
         );
         continue;
       }
-      // A research job's shell or out-of-bounds write is refused here, not
-      // after it waited for an approval no one may be watching for.
-      final early = args == null ? null : _tools.refusalBeforeApproval(call.name, args);
+      // A research job's shell or out-of-bounds write, and an install the
+      // package check refuses, are refused here, not after an approval.
+      final early = args == null
+          ? null
+          : _tools.refusalBeforeApproval(call.name, args) ?? await _tools.packageRefusal(call.name, args);
       if (early != null) {
         _result(call, actionId, ToolOutput(early, isError: true));
         continue;
@@ -1514,7 +1609,7 @@ final class EveryAISession
         final r = await run(command);
         final shown = expect.isNotEmpty ? r.out.contains(expect) : r.exit != 0;
         // Any failure counts without `expect`: the decider checks it is this bug, not another one.
-        final match = shown && expect.isEmpty ? await _reproMatch(command, r.out) : 'bug';
+        final match = shown && expect.isEmpty ? await _reproMatch(command, _tools.scrubber.redact(r.out)) : 'bug';
         if (match == 'other') {
           return ToolOutput(
             'Not reproduced: the command fails, but its output reads as a different failure than the bug described '
@@ -1602,7 +1697,10 @@ final class EveryAISession
         // as another failure; the agent is told what still fails.
         final marked = f.reproExpect.isNotEmpty;
         final clean = marked ? !r.out.contains(f.reproExpect) : r.exit == 0;
-        final other = !clean && !marked && await _reproMatch(f.reproCommand, r.out, afterFix: true) == 'other';
+        final other =
+            !clean &&
+            !marked &&
+            await _reproMatch(f.reproCommand, _tools.scrubber.redact(r.out), afterFix: true) == 'other';
         final gone = clean || other;
         if (gone) {
           f.reviews = 0;
@@ -1751,18 +1849,9 @@ final class EveryAISession
   /// review.
   Future<String> _workingDiff() async {
     try {
-      final d = await Process.run('git', [
-        'diff',
-        'HEAD',
-        '--no-color',
-        '--stat',
-        '-p',
-      ], workingDirectory: _spec.workingDir);
-      final n = await Process.run('git', [
-        'ls-files',
-        '--others',
-        '--exclude-standard',
-      ], workingDirectory: _spec.workingDir);
+      // EveryAI's own git: nothing the repository defines runs (git_guard.dart).
+      final d = await runGit(_spec.workingDir, ['diff', 'HEAD', '--no-color', '--stat', '-p']);
+      final n = await runGit(_spec.workingDir, ['ls-files', '--others', '--exclude-standard']);
       final text = '${d.stdout}${'${n.stdout}'.trim().isEmpty ? '' : '\nNew files:\n${n.stdout}'}';
       return text.length > 16000 ? '${text.substring(0, 16000)}\n[…cut]' : text;
     } on Object {
@@ -1839,7 +1928,16 @@ final class EveryAISession
         p: sha256.convert(f.readAsBytesSync()).toString().substring(0, 24),
   };
 
-  void _result(LlmToolCall call, String actionId, ToolOutput out) {
+  /// [out] as the call's result, to the model and the event stream alike. Secrets in its text are hidden here (see
+  /// [Scrubber.redact]): this is where every tool's output passes. Only the text: the observation (a write's old and
+  /// new contents, for the diff the user sees) goes to the journal and paired devices as it is.
+  void _result(LlmToolCall call, String actionId, ToolOutput rawOut) {
+    final out = ToolOutput(
+      _tools.scrubber.redact(rawOut.text),
+      isError: rawOut.isError,
+      observation: rawOut.observation,
+      images: rawOut.images,
+    );
     _emit({
       'kind': 'ObservationEvent',
       'id': _newId(),

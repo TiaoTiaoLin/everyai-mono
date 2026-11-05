@@ -19,6 +19,9 @@
 // whitespace, then ignoring indentation, so a patch written from a slightly
 // stale memory of the file still lands where it was meant to.
 
+import '../../../../core/security/untrusted.dart';
+import 'untrusted_tools.dart' show keepHidden;
+
 /// One file change in a patch.
 sealed class PatchOp {
   const PatchOp(this.path);
@@ -203,22 +206,25 @@ String applyHunks(String text, List<PatchHunk> hunks, {String path = ''}) {
       }
       at = found;
     }
-    lines.replaceRange(at, at + h.before.length, h.after);
+    lines.replaceRange(at, at + h.before.length, keepHidden(lines.sublist(at, at + h.before.length), h.after));
     cursor = at + h.after.length;
   }
   if (lines.isEmpty) return '';
   return '${lines.join('\n')}${trailingNewline || text.isEmpty ? '\n' : ''}';
 }
 
-bool _sameLine(String a, String b) => a == b || a.trimRight() == b.trimRight() || a.trim() == b.trim();
+bool _sameLine(String a, String b) =>
+    a == b || a.trimRight() == b.trimRight() || a.trim() == b.trim() || stripHidden(a).trim() == stripHidden(b).trim();
 
 /// Where [want] starts in [lines] at or after [from]: exact, then ignoring
-/// trailing whitespace, then ignoring all surrounding whitespace.
+/// trailing whitespace, then ignoring all surrounding whitespace, then also
+/// hidden characters (read leaves them out of what the model saw).
 int? _find(List<String> lines, List<String> want, int from) {
   for (final same in <bool Function(String, String)>[
     (a, b) => a == b,
     (a, b) => a.trimRight() == b.trimRight(),
     (a, b) => a.trim() == b.trim(),
+    (a, b) => stripHidden(a).trim() == stripHidden(b).trim(),
   ]) {
     for (var i = from; i + want.length <= lines.length; i++) {
       var ok = true;
@@ -243,9 +249,9 @@ int? _uniqueFrom(List<String> lines, List<String> want) {
 }
 
 int? _findContaining(List<String> lines, String anchor, int from) {
-  final a = anchor.trim();
+  final a = stripHidden(anchor).trim();
   for (var i = from; i < lines.length; i++) {
-    if (lines[i].contains(a)) return i;
+    if (stripHidden(lines[i]).contains(a)) return i;
   }
   return null;
 }

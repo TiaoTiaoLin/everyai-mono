@@ -4,6 +4,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../../core/security/untrusted.dart';
+import '../git/repo_check.dart' show repoCheckLine, splitRepoCheck;
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
@@ -121,9 +123,24 @@ String _between(String text, String open, String close) {
   return text.substring(start + open.length, end < 0 ? text.length : end).trim();
 }
 
-/// The user's text of a message: session block, mode, context, workflow and rewind notes split off.
-String userTextOf(String raw) =>
-    splitRewindNote(splitWorkflowNotes(splitContextNotes(splitModeNote(splitSessionBlock(raw).$2).$2).$2).$2);
+/// The repo-check list a session started with (see `repo_check.dart`), from the first of [userTexts] that has
+/// one, or ''. A continuation carries it, since the first message that had it is gone after compaction.
+String repoCheckIn(Iterable<String> userTexts) {
+  for (final raw in userTexts) {
+    final text = splitModeNote(splitSessionBlock(raw).$2).$2;
+    if (splitRepoCheck(text).$1 case final list?) return list;
+    if (splitCompacted(text) != null) {
+      final kept = _between(text, '<repo-check>', '</repo-check>');
+      if (kept.isNotEmpty) return _between(kept, '>', '</untrusted-content>').trim();
+    }
+  }
+  return '';
+}
+
+/// The user's text of a message: session block, mode, repo-check, context, workflow and rewind notes split off.
+String userTextOf(String raw) => splitRewindNote(
+  splitWorkflowNotes(splitContextNotes(splitRepoCheck(splitModeNote(splitSessionBlock(raw).$2).$2).$2).$2).$2,
+);
 
 String _userText(String raw) => userTextOf(raw);
 
@@ -211,13 +228,27 @@ String renderTail(CompactionPlan plan, {CompactionBudget budget = const Compacti
         .join('\n\n');
 
 /// The conversation so far as text for a side call (`/btw`): tool output cut
-/// short, and only the newest [maxChars] characters when it runs long.
-String renderSessionRecord(List<HarnessEvent> events, {int maxChars = 60000}) {
-  final text = [
+/// short, and only the newest [maxChars] characters when it runs long (whole
+/// steps go first, so a [wrapResult] block is never cut in two).
+/// [wrapResult], when given, frames each tool result's text (a handoff marks
+/// results as untrusted data; the user's and agent's messages stay plain).
+String renderSessionRecord(
+  List<HarnessEvent> events, {
+  int maxChars = 60000,
+  String Function(String toolName, String text)? wrapResult,
+}) {
+  final parts = [
     for (final e in events)
-      if (countsForModel(e)) _render(e, outputCap: 800, argsCap: 600),
-  ].where((p) => p.isNotEmpty).join('\n\n');
+      if (countsForModel(e)) _render(e, outputCap: 800, argsCap: 600, wrapResult: wrapResult),
+  ].where((p) => p.isNotEmpty).toList();
+  final text = parts.join('\n\n');
   if (text.length <= maxChars) return text;
+  var size = 0, from = parts.length;
+  while (from > 0 && size + parts[from - 1].length + 2 <= maxChars) {
+    size += parts[from - 1].length + 2;
+    from--;
+  }
+  if (from < parts.length) return '[earlier steps omitted]\n\n${parts.sublist(from).join('\n\n')}';
   final cut = text.indexOf('\n\n', text.length - maxChars);
   return '[earlier steps omitted]\n\n${text.substring(cut < 0 ? text.length - maxChars : cut + 2)}';
 }
@@ -230,7 +261,12 @@ String renderSessionRecord(List<HarnessEvent> events, {int maxChars = 60000}) {
 String renderStep(HarnessEvent e, {int outputCap = 800, int argsCap = 600}) =>
     _render(e, outputCap: outputCap, argsCap: argsCap);
 
-String _render(HarnessEvent e, {required int outputCap, required int argsCap}) => switch (e) {
+String _render(
+  HarnessEvent e, {
+  required int outputCap,
+  required int argsCap,
+  String Function(String toolName, String text)? wrapResult,
+}) => switch (e) {
   ChatMessage(fromUser: true, :final text) => '[user]\n${_userText(text).trim()}',
   ChatMessage(:final text, :final reasoning) =>
     text.trim().isEmpty
@@ -239,10 +275,13 @@ String _render(HarnessEvent e, {required int outputCap, required int argsCap}) =
   ActionCall() => _renderCall(e, argsCap),
   ToolResult(:final toolName, :final outcome) =>
     '[result of $toolName${outcome == ToolOutcome.ok ? '' : ' (${outcome.name})'}]\n'
-        '${outputCap == 0 ? clearedOutput : _cap(_resultText(e), outputCap)}',
+        '${outputCap == 0 ? clearedOutput : _wrapped(toolName, _cap(_resultText(e), outputCap), wrapResult)}',
   ConversationFailure(:final message) => '[error]\n$message',
   _ => '',
 };
+
+String _wrapped(String tool, String text, String Function(String, String)? wrap) =>
+    wrap == null ? text : wrap(tool, text);
 
 /// Fields OpenHands adds to typed actions that say nothing new about the step
 /// (client tools such as `present_plan` keep their own `summary`).
@@ -501,8 +540,8 @@ String checklist(Iterable<({String title, String status})> items) => [
 
 /// The first message of the continuation conversation: [summary], then what
 /// the agent was working from ([plan] the user approved, its [todos], the
-/// current text of the [files] it touched last, the [skills] it loaded),
-/// then the kept turns. With [resume] the agent is told to carry on;
+/// current text of the [files] it touched last, the [skills] it loaded, the
+/// [repoCheck] list it started with), then the kept turns. With [resume] the agent is told to carry on;
 /// otherwise the conversation starts without running and the user's next
 /// message follows.
 String continuationMessage({
@@ -513,6 +552,7 @@ String continuationMessage({
   String todos = '',
   String files = '',
   String skills = '',
+  String repoCheck = '',
 }) {
   final b = StringBuffer()
     ..writeln(compactedOpen)
@@ -534,6 +574,8 @@ String continuationMessage({
     files,
   );
   section('skills', 'Skills you loaded earlier in the session; follow them as before:', skills);
+  final checked = untrusted(repoCheck.replaceAll('</repo-check', '<_repo-check'), source: 'repository files');
+  if (repoCheck.trim().isNotEmpty) section('repo-check', repoCheckLine, checked);
   if (recent.trim().isNotEmpty) {
     b
       ..writeln()

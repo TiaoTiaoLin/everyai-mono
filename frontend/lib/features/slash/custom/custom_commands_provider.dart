@@ -7,6 +7,7 @@ import '../../../core/preferences.dart';
 import '../../../core/ui/adaptive.dart';
 
 import '../../code/code_providers.dart';
+import '../../skills/domain/hidden_instructions.dart';
 import 'command_store.dart';
 import 'command_trust.dart';
 import 'custom_command.dart';
@@ -69,14 +70,17 @@ final class CommandTrustNotifier extends Notifier<CommandTrust> {
   /// Shows the command and trusts it on a yes. Returns whether it is trusted now.
   Future<bool> review(BuildContext context, CustomCommand c) async {
     // The whole body, scrollable: trust is bound to the digest of all of it.
+    // The detail is the body as the agent gets it, hidden characters removed; the findings show what was there.
+    final flagged = c.findings.isNotEmpty;
     final ok = await showAdaptiveConfirm(
       context,
       title: 'Trust /${c.name}?',
       message:
           'This command came with the project, in ${c.path ?? c.projectDir}. Running it sends this text to the '
-          'agent as your message${c.mode != null ? ' and switches to ${c.mode} mode' : ''}.',
+          'agent as your message${c.mode != null ? ' and switches to ${c.mode} mode' : ''}.'
+          '${flagged ? '\n\n${findingsMessage(c.findings)}' : ''}',
       detail: c.body,
-      confirmLabel: 'Trust and turn on',
+      confirmLabel: flagged ? 'Trust anyway' : 'Trust and turn on',
     );
     if (ok) set(c, true);
     return ok;

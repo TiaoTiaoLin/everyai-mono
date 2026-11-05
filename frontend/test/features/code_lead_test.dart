@@ -594,7 +594,10 @@ void main() {
     await Directory('${project.path}/.everyai/plans').create(recursive: true);
     File('${project.path}/.everyai/plans/2026-11-04-dark.md').writeAsStringSync('# Dark\n\nSteps');
     expect((await hostCall(info.id, savedPlansTool, const {}).result).text, '- 2026-11-04-dark.md: Dark');
-    expect((await hostCall(info.id, savedPlansTool, {'name': '2026-11-04-dark.md'}).result).text, '# Dark\n\nSteps');
+    expect(
+      (await hostCall(info.id, savedPlansTool, {'name': '2026-11-04-dark.md'}).result).text,
+      '<untrusted-content source=".everyai/plans/2026-11-04-dark.md">\n# Dark\n\nSteps\n</untrusted-content>',
+    );
     expect((await hostCall(info.id, savedPlansTool, {'name': '../memory.md'}).result).isError, isTrue);
     final bug = await hostCall(info.id, 'bug_check', const {}).result;
     expect(bug.isError, isTrue);
@@ -720,6 +723,46 @@ void main() {
     expect(drivers['test']!.reopenedMcp.single.keys, ['charts']);
   });
 
+  test("a session's MCP report reaches Settings: pins and the tools to review", () async {
+    final mcp = container.read(codeMcpServersProvider.notifier);
+    mcp.put(const McpServer(name: 'dict', transport: McpTransport.http, url: 'https://dict.example/mcp'));
+    final info = await start();
+    await open(info.id);
+    session.mcpReported.complete({
+      'dict': const McpToolsReport(
+        pin: {'lookup': 'd1'},
+        pending: [
+          McpToolReview(name: 'define', digest: 'e1', isNew: true, reasons: ['x']),
+        ],
+      ),
+    });
+    await pumpEventQueue();
+    final dict = container.read(codeMcpServersProvider).global.single;
+    expect(dict.pinned, {'lookup': 'd1'});
+    expect([for (final p in dict.pending) p.name], ['define']);
+  });
+
+  test('a reopened EveryAI session gets the MCP servers and pins as they are now', () async {
+    final info = await start();
+    final mcp = container.read(codeMcpServersProvider.notifier);
+    mcp.put(
+      const McpServer(
+        name: 'dict',
+        transport: McpTransport.http,
+        url: 'https://dict.example/mcp',
+        pinned: {'lookup': 'd1'},
+        pending: [McpToolReview(name: 'define', digest: 'e1')],
+      ),
+    );
+    await container
+        .read(codeSessionsProvider.notifier)
+        .attachSession(CodeSessionInfo.fromJson({...info.toJson(), 'harness': everyaiHarnessName}));
+    final reopened = drivers[everyaiHarnessName]!.reopenedWithMcp.single;
+    // Its own harness vets per tool, so a server with tools to review still comes, with its pins.
+    expect(reopened.keys, ['dict']);
+    expect((reopened['dict']! as Map)['pinned'], {'lookup': 'd1'});
+  });
+
   test('a reopened child of an outside session gets no briefing, as it started', () async {
     final parent = await start();
     final child = await container
@@ -770,6 +813,25 @@ void main() {
       final again = hostCall(info.id, screenshotTool, const {'window_id': 8});
       expect((await again.result).isError, isFalse);
       expect(screen.captured, [8, 8]);
+    });
+
+    test('a password manager or a banking page is never captured, not even in Bypass', () async {
+      final info = await start(mode: AgentMode.bypass);
+      await open(info.id);
+      screen.windows = [
+        mail,
+        (id: 9, pid: 90, owner: 'Bitwarden', title: 'My vault', width: 900, height: 700),
+        (id: 10, pid: 91, owner: 'Safari', title: 'Online Banking', width: 900, height: 700),
+      ];
+      final vault = await hostCall(info.id, screenshotTool, const {'app': 'Bitwarden'}).result;
+      expect(vault.isError, isTrue);
+      expect(vault.text, startsWith('Error: Skipped Bitwarden (a password manager): EveryAI never captures'));
+      final bank = await hostCall(info.id, screenshotTool, const {'window_id': 10}).result;
+      expect(bank.text, contains('Safari (looks like a banking or payment page)'));
+      // Bypass still captures an ordinary window of another app without asking.
+      expect((await hostCall(info.id, screenshotTool, const {'app': 'mail'}).result).isError, isFalse);
+      expect(screen.captured, [8]);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
     });
 
     test("a refused window isn't captured", () async {

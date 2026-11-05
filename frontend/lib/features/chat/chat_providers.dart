@@ -8,6 +8,7 @@ import '../../core/preferences.dart';
 import '../../core/providers.dart';
 import '../artifacts/checks/tool_checks.dart';
 import '../attachments/attachment.dart';
+import '../code/session_notifications.dart' show appFocusedProvider, systemNotifierProvider;
 import '../memory/memory_providers.dart';
 import '../models/domain/model_catalog.dart';
 import '../models/models_providers.dart';
@@ -21,6 +22,7 @@ import 'domain/ask_user.dart';
 import 'domain/chat_session.dart';
 import 'domain/message.dart';
 import 'domain/reasoning_effort.dart';
+import 'domain/security_alert.dart';
 import '../settings/byok_keys.dart' show modelBillingProvider;
 import '../settings/reply_language.dart';
 
@@ -285,6 +287,16 @@ final class ChatController extends Notifier<ChatSessionState> {
     return resolveTool(callId, outcome.resultFor(questions));
   }
 
+  /// A live security alert also goes out as an OS notification when the app
+  /// is behind other windows; a critical one always does. Reopened chats
+  /// don't notify again (only the stream calls this). The helper lives with
+  /// Code's notifications: macOS and Linux only for now.
+  void _notifySecurity(String argumentsJson) {
+    final alert = SecurityAlert.fromJson(argumentsJson);
+    if (alert.severity != SecuritySeverity.critical && ref.read(appFocusedProvider)()) return;
+    unawaited(ref.read(systemNotifierProvider).show(alert.severity.label, alert.what));
+  }
+
   /// Answers a call the app checks itself (a diagram, an artifact's math)
   /// with what the check found.
   Future<void> _answerCheck(ToolWait wait) async {
@@ -486,6 +498,7 @@ final class ChatController extends Notifier<ChatSessionState> {
               liveParts: List.unmodifiable(parts),
               streamingText: '',
             );
+            if (name == securityAlertTool) _notifySecurity(argumentsJson);
           case final ToolWait wait:
             flushText();
             parts.add(ToolCallPart(toolName: wait.name, argumentsJson: wait.argumentsJson, callId: wait.id));

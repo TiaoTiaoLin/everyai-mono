@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../../core/security/untrusted.dart';
 import '../../code/domain/agent_mode.dart';
+import '../../skills/domain/hidden_instructions.dart';
 import '../../skills/domain/skill_format.dart' show parseFrontMatter;
 
 /// Where an agent file was found.
@@ -71,6 +73,7 @@ final class AgentDefinition {
     this.text = '',
     this.errors = const [],
     this.warnings = const [],
+    this.findings = const [],
   });
 
   final String name;
@@ -102,6 +105,9 @@ final class AgentDefinition {
   final String digest;
   final List<String> errors;
   final List<String> warnings;
+
+  /// Hidden or suspicious text in the file (advice for the trust review; summed up in [warnings]).
+  final List<InstructionFinding> findings;
 
   bool get usable => errors.isEmpty;
 
@@ -153,7 +159,8 @@ final class AgentDefinition {
         errors.add('Use lowercase letters, digits, - and _ for the name (up to 48 characters).');
       }
     }
-    final description = str('description') ?? '';
+    // What the agent gets: hidden characters removed (the digest stays over the raw file).
+    final description = stripHidden(str('description') ?? '');
     if (description.isEmpty) errors.add('Add a description: it is how the agent is picked for a task.');
 
     var model = str('model');
@@ -184,11 +191,13 @@ final class AgentDefinition {
       if (mode == null) errors.add('The permissions "$raw" is not one of ask, auto-edit, plan, full-auto.');
     }
     if (body.isEmpty) warnings.add('The body is empty, so the agent has no instructions of its own.');
+    final findings = scanInstructions(text, file: fileName);
+    if (findingsWarning(findings) case final w?) warnings.add(w);
 
     return AgentDefinition(
       name: name,
       description: description,
-      prompt: body,
+      prompt: stripHidden(body),
       model: model,
       effort: effort,
       tools: tools,
@@ -200,6 +209,7 @@ final class AgentDefinition {
       digest: digest,
       errors: errors,
       warnings: warnings,
+      findings: findings,
     );
   }
 

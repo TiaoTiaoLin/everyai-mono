@@ -58,6 +58,17 @@ void main() {
     expect(md, contains('present_plan'));
   });
 
+  test('bundled text files lose their hidden characters; binary files are copied as they are', () async {
+    final s = writeSkill(
+      src,
+      'alpha',
+      files: {'references/a.md': 'Read me.\u{E0041}\u202E', 'bin/x': 'a\u0000\u200Bb'},
+    );
+    await exportSkills(session, [s], sessionText: sessionMd);
+    expect(read('skills/alpha/references/a.md'), 'Read me.');
+    expect(read('skills/alpha/bin/x'), 'a\u0000\u200Bb');
+  });
+
   test('SKILL.md round-trips, drops allowed-tools, escapes commands', () async {
     final s = writeSkill(
       src,

@@ -8,7 +8,7 @@ import 'driver.dart';
 
 /// The EveryAI harness as a driver: the agent loop in the app. It forwards
 /// to [inner] (`everyaiHarnessProvider`'s harness).
-final class EveryAIDriver implements HarnessDriver, ForksSessions, AttachesBriefed {
+final class EveryAIDriver implements HarnessDriver, ForksSessions, AttachesBriefed, AttachesWithMcp {
   EveryAIDriver(this.inner);
 
   final Harness inner;
@@ -53,6 +53,12 @@ final class EveryAIDriver implements HarnessDriver, ForksSessions, AttachesBrief
 
   @override
   Future<HarnessSession> attach(String conversationId) => inner.attach(conversationId);
+
+  @override
+  Future<HarnessSession> attachWithMcp(String conversationId, Map<String, Object?> mcpConfig) =>
+      inner is AttachesWithMcp
+      ? (inner as AttachesWithMcp).attachWithMcp(conversationId, mcpConfig)
+      : inner.attach(conversationId);
 
   /// A workflow agent reopened with a fresh host. Without the harness's own
   /// support (the web) it can't reach the host, so it isn't given one.

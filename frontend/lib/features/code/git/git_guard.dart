@@ -1,0 +1,218 @@
+/// Keeps EveryAI's own git calls from running code the repository defines.
+///
+/// A repository's `.git/config` and hooks can name programs git runs on the
+/// commonest calls (`add`, `diff`, `worktree add`, `commit`, `push`): hooks
+/// (in the hooks folder or as `hook.<name>.command` config), `core.fsmonitor`,
+/// filters, merge drivers, `core.sshCommand`, gpg and credential helpers,
+/// git-lfs transfer agents. Anything that can write a file in the repo (the
+/// agent in Full auto, an outside lead, an install script like husky's
+/// `prepare`) can set them, and EveryAI's next checkpoint would run them
+/// outside every approval. So every call EveryAI makes gets [guardFlags], and
+/// the calls that can reach a program also get [repoGuard]'s overrides for
+/// what the repo's own config (scope local or worktree; included files take
+/// their includer's scope) sets. The user's global and system config are
+/// theirs and stay, their own hooks folder (`core.hooksPath`) included.
+///
+/// The config is read just before each call, so a program key added between
+/// the read and the call isn't overridden. Only something already running
+/// code here can win that race, so it gains nothing it didn't have.
+///
+/// Diffs also need `--no-ext-diff --no-textconv` (a blank `diff.external` or
+/// textconv is an error, so the flags are the only way); see [diffFlags].
+library;
+
+/// One `git config --list --show-scope` entry.
+typedef GitConfigEntry = ({String scope, String key, String value});
+
+/// Parses `git config --list --show-scope -z` output (`scope\0key\nvalue\0` per entry).
+List<GitConfigEntry> parseConfigList(String z) {
+  final parts = z.split('\x00');
+  return [
+    for (var i = 0; i + 1 < parts.length; i += 2)
+      if (parts[i + 1].indexOf('\n') case final nl)
+        (
+          scope: parts[i],
+          key: nl < 0 ? parts[i + 1] : parts[i + 1].substring(0, nl),
+          value: nl < 0 ? '' : parts[i + 1].substring(nl + 1),
+        ),
+  ];
+}
+
+/// Flags on every EveryAI git call. [nullPath] is a hooks folder that can't
+/// exist (`/dev/null`, `NUL` on Windows). `-c` beats repository and worktree
+/// config and reaches child gits (receive-pack on a local push) through the
+/// environment.
+List<String> guardFlags(String nullPath) => [
+  '-c', 'core.hooksPath=$nullPath', //
+  '-c', 'core.fsmonitor=false',
+  '-c', 'submodule.recurse=false',
+  '-c', 'protocol.ext.allow=never',
+  '-c', 'safe.bareRepository=explicit',
+  '-c', 'log.showSignature=false',
+];
+
+/// What `git diff` (and `show`) also gets: no external diff tool, no textconv.
+const diffFlags = ['--no-ext-diff', '--no-textconv'];
+
+/// The hooks git knows; a file with another name in a hooks folder never runs.
+const gitHookNames = [
+  'applypatch-msg', 'pre-applypatch', 'post-applypatch', 'pre-commit', 'pre-merge-commit', 'prepare-commit-msg', //
+  'commit-msg', 'post-commit', 'pre-rebase', 'post-checkout', 'post-merge', 'pre-push', 'post-rewrite',
+  'reference-transaction', 'pre-auto-gc', 'push-to-checkout', 'fsmonitor-watchman', 'p4-changelist',
+  'p4-prepare-changelist', 'p4-post-changelist', 'p4-pre-submit', 'post-index-change', 'sendemail-validate',
+];
+
+/// Whether [e] comes from the repository (its `.git/config`, a worktree's
+/// config, or a file either includes) rather than the user.
+bool isRepoScope(GitConfigEntry e) => e.scope == 'local' || e.scope == 'worktree';
+
+/// Single-value program keys the repository may not set, with git's own
+/// default. The user's global value wins over the default.
+const _programDefaults = {
+  'core.sshcommand': 'ssh',
+  'core.askpass': '',
+  'core.alternaterefscommand': '',
+  'gpg.program': 'gpg',
+  'gpg.openpgp.program': 'gpg',
+  'gpg.x509.program': 'gpgsm',
+  'gpg.ssh.program': 'ssh-keygen',
+  'gpg.ssh.defaultkeycommand': '',
+};
+
+final _filterKey = RegExp(r'^filter\.(.+)\.(clean|smudge|process)$');
+final _mergeDriver = RegExp(r'^merge\.(.+)\.driver$');
+final _remotePack = RegExp(r'^remote\.(.+)\.(receivepack|uploadpack)$');
+final _credentialHelper = RegExp(r'^credential\.(.+\.)?helper$');
+final _diffProgram = RegExp(r'^diff\.(.+)\.(textconv|command)$');
+final _configHook = RegExp(r'^hook\.(.+)\.(command|event)$');
+// git-lfs reads these from the repository's config too and runs them on a
+// checkout or a commit (a transfer agent, a file extension).
+final _lfsProgram = RegExp(r'^lfs\.(customtransfer\..+\.path|standalonetransferagent|extension\..+\.(clean|smudge))$');
+
+// git-lfs's and git-crypt's own values (`git lfs install --local` and
+// `git-crypt unlock` write them into the repository's config). git-crypt
+// writes the absolute path it ran from, so only system install folders count.
+final _knownFilter = RegExp(
+  r'^(git-lfs (clean|smudge) -- %f|git-lfs filter-process'
+  r'|"?((/usr|/usr/local|/opt/homebrew|/opt/local)/bin/|/nix/store/[^/" ]+/bin/)?git-crypt"? (clean|smudge|diff))$',
+);
+
+/// Whether the repository's [e] names a program git may run: hooks-folder
+/// files aside, the keys [repoGuard] overrides plus the ones [guardFlags] and
+/// [diffFlags] turn off. git-lfs and git-crypt filters don't count.
+bool isRepoProgram(GitConfigEntry e) {
+  if (!isRepoScope(e)) return false;
+  final k = e.key;
+  if (k == 'core.hookspath') return false; // the repo check lists the folder and its hooks itself
+  if (k == 'core.fsmonitor') return !const {'', 'false', 'true', 'no', 'yes', 'off', 'on', '0', '1'}.contains(e.value);
+  if (_filterKey.hasMatch(k) || _diffProgram.hasMatch(k)) return !_knownFilter.hasMatch(e.value.trim());
+  return _programDefaults.containsKey(k) ||
+      k == 'core.gitproxy' ||
+      k == 'diff.external' ||
+      _configHook.hasMatch(k) ||
+      _lfsProgram.hasMatch(k) ||
+      _mergeDriver.hasMatch(k) ||
+      _remotePack.hasMatch(k) ||
+      _credentialHelper.hasMatch(k);
+}
+
+/// Whether the repository's [e] is one [repoGuard] refuses to store files with: a filter that cleans files, or a
+/// program for git-lfs.
+bool blocksStoring(GitConfigEntry e) =>
+    isRepoProgram(e) && (_lfsProgram.hasMatch(e.key) || (_filterKey.firstMatch(e.key)?[2] ?? 'smudge') != 'smudge');
+
+/// Whether a call to git [command] stores files from the working tree, so a
+/// blanked clean filter would store them raw (for an encryption filter, in
+/// plaintext). These are refused when [repoGuard] has a refusal.
+bool storesFiles(String command) =>
+    const {'add', 'commit', 'stash', 'update-index', 'hash-object', 'apply', 'merge', 'am'}.contains(command);
+
+/// The `-c` overrides that keep the repository's own program keys from
+/// running, and a [refusal] in plain words for the calls that [storesFiles]
+/// when that can't be done safely: a filter that cleans files is blanked like
+/// the rest, but storing files without it would store them raw. Checkouts,
+/// diffs and status still work with it blanked.
+({List<String> args, String? refusal}) repoGuard(List<GitConfigEntry> entries) {
+  final args = <String>[];
+  final user = [
+    for (final e in entries)
+      if (!isRepoScope(e)) e,
+  ];
+  String? userValue(String key) => user.where((e) => e.key == key).lastOrNull?.value;
+  // The user's own hooks folder comes back (secret scanners, say). A relative one would be the checkout's.
+  final hooks = user.where((e) => e.key == 'core.hookspath' && (e.scope == 'global' || e.scope == 'system'));
+  if (hooks.lastOrNull?.value case final h? when h.startsWith('/') || h.startsWith('~/')) {
+    args.addAll(['-c', 'core.hooksPath=$h']);
+  }
+  final seen = <String>{};
+  String? refusal;
+  var credentials = false;
+  void blankFilter(String name) {
+    if (!seen.add('filter.$name')) return;
+    for (final part in const ['clean', 'smudge', 'process']) {
+      args.addAll(['-c', 'filter.$name.$part=']);
+    }
+    args.addAll(['-c', 'filter.$name.required=false']);
+  }
+
+  for (final e in entries.where(isRepoProgram)) {
+    final k = e.key;
+    if (_filterKey.firstMatch(k) case final m?) {
+      if (m[2] != 'smudge') {
+        refusal ??=
+            'This repository\'s git config runs a program on files (filter "${m[1]}"), so EveryAI\'s checkpoints, '
+            'diffs and commits are off here. Remove it from .git/config to turn them back on.';
+        blankFilter(m[1]!);
+      } else if (seen.add(k)) {
+        // A smudge-only filter: checkouts write the stored file as it is.
+        args.addAll(['-c', '$k=', '-c', 'filter.${m[1]}.required=false']);
+      }
+    } else if (_lfsProgram.hasMatch(k)) {
+      // git-lfs would run it: no lfs filter at all, so checkouts keep the pointer files and nothing is stored raw.
+      refusal ??=
+          'This repository\'s git config gives git-lfs a program to run ($k), so EveryAI\'s checkpoints, diffs and '
+          'commits are off here. Remove it from .git/config to turn them back on.';
+      blankFilter('lfs');
+    } else if (_configHook.firstMatch(k) case final m?) {
+      // A hook set in config: off by name. An event the repository adds to a command of the user's own runs theirs.
+      final own = m[2] == 'event' && userValue('hook.${m[1]}.command') != null;
+      if (!own && seen.add('hook.${m[1]}')) args.addAll(['-c', 'hook.${m[1]}.enabled=false']);
+    } else if (_mergeDriver.firstMatch(k) case final m?) {
+      if (seen.add(k)) args.addAll(['-c', 'merge.${m[1]}.driver=git merge-file %A %O %B']);
+    } else if (_credentialHelper.hasMatch(k)) {
+      credentials = true;
+    } else if (k == 'core.gitproxy') {
+      // gitProxy's first match wins and the command line comes last, so it can't be overridden: git:// is off instead.
+      if (seen.add(k)) args.addAll(['-c', 'protocol.git.allow=never']);
+    } else if (_programDefaults[k] case final fallback?) {
+      if (seen.add(k)) args.addAll(['-c', '$k=${userValue(k) ?? fallback}']);
+    }
+    // fsmonitor, diff.external and diff.<x>.textconv|command: guardFlags and diffFlags. remote.<r>.receivepack and
+    // uploadpack: the first value wins, so `-c` can't change them; they run here only for a remote that is a folder
+    // on this computer, which push refuses.
+  }
+  if (credentials) {
+    // An empty helper clears the list; the user's own come back in order.
+    args.addAll(['-c', 'credential.helper=']);
+    for (final e in user) {
+      if (_credentialHelper.hasMatch(e.key) && e.value.isNotEmpty) args.addAll(['-c', '${e.key}=${e.value}']);
+    }
+  }
+  return (args: args, refusal: refusal);
+}
+
+/// [args] (pairs of `-c`, `key=value`) as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` variables
+/// after the [count] ones already in the environment, for git started by another program (a shell, gh).
+Map<String, String> configEnv(List<String> args, {int count = 0}) {
+  final out = <String, String>{};
+  var n = count;
+  for (var i = 0; i + 1 < args.length; i += 2) {
+    if (args[i] != '-c') continue;
+    final eq = args[i + 1].indexOf('=');
+    out['GIT_CONFIG_KEY_$n'] = eq < 0 ? args[i + 1] : args[i + 1].substring(0, eq);
+    out['GIT_CONFIG_VALUE_$n'] = eq < 0 ? 'true' : args[i + 1].substring(eq + 1);
+    n++;
+  }
+  out['GIT_CONFIG_COUNT'] = '$n';
+  return out;
+}

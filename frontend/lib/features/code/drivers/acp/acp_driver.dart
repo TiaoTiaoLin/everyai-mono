@@ -26,7 +26,8 @@ export 'acp_session.dart' show AcpConnect;
 /// agent's session id, the folder, the session tag; nothing secret), the
 /// event journal and the agent's stderr. Models come from the last session
 /// the agent started (no session is started just to ask).
-final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeMode, AdoptsNativeSession {
+final class AcpDriver
+    implements HarnessDriver, AttachesBriefed, AttachesWithMcp, StartsInNativeMode, AdoptsNativeSession {
   AcpDriver({
     required this.id,
     required this.label,
@@ -350,6 +351,7 @@ final class AcpDriver implements HarnessDriver, AttachesBriefed, StartsInNativeM
 
   /// [attach] for a session without a briefing (a child session), still with the user's
   /// approved MCP servers ([mcpConfig]).
+  @override
   Future<HarnessSession> attachWithMcp(String conversationId, Map<String, Object?> mcpConfig) =>
       _attach(conversationId, null, mcpConfig);
 

@@ -102,6 +102,16 @@ addEventListener("load",h);
 if(window.ResizeObserver)new ResizeObserver(h).observe(document.documentElement);else setInterval(h,500);
 })();''';
 
+/// CSP doesn't cover WebRTC or DNS prefetching, and both reach the network
+/// (a STUN server name or a prefetched host can carry data). Pages that run
+/// script lose both. This is partial: a script can still take a fresh
+/// `RTCPeerConnection` from a nested blank frame. Accepted until webviews
+/// offer a WebRTC switch.
+const _noDnsPrefetch = '<meta http-equiv="x-dns-prefetch-control" content="off">';
+const _noWebRtc =
+    '["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel"]'
+    '.forEach(function(n){try{delete window[n];window[n]=undefined;}catch(e){}});';
+
 /// The document that runs inside the sandbox: [html] with the CSP, the theme
 /// variables and, for widgets, the base styles and the bridge.
 ///
@@ -112,8 +122,10 @@ if(window.ResizeObserver)new ResizeObserver(h).observe(document.documentElement)
 /// The model's own doctype, `<html>` and `<head>` tags later on are harmless.
 String sandboxedDocument(String html, {required WebSurface surface, required bool interactive, String theme = ''}) {
   final csp = const HtmlEscape(HtmlEscapeMode.attribute).convert(contentSecurityPolicy(interactive: interactive));
-  final prelude = StringBuffer('<!doctype html><meta http-equiv="Content-Security-Policy" content="$csp">')
-    ..write('<style>$theme${surface == WebSurface.widget ? _widgetCss : ''}</style>');
+  final prelude = StringBuffer('<!doctype html><meta http-equiv="Content-Security-Policy" content="$csp">');
+  if (interactive) prelude.write(_noDnsPrefetch);
+  prelude.write('<style>$theme${surface == WebSurface.widget ? _widgetCss : ''}</style>');
+  if (interactive) prelude.write('<script>$_noWebRtc</script>');
   if (surface == WebSurface.widget && interactive) prelude.write('<script>$_widgetBridge</script>');
   return '$prelude$html';
 }

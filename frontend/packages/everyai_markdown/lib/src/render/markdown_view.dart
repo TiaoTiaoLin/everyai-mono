@@ -5,6 +5,7 @@ import '../parser/document.dart';
 import '../style.dart';
 import 'block_builder.dart';
 import 'chips.dart';
+import 'image.dart';
 import 'math.dart';
 
 /// Renders GitHub-flavored Markdown (plus math) with plain [Text.rich]
@@ -25,6 +26,7 @@ class MarkdownView extends StatefulWidget {
     this.mathBuilder,
     this.codeBlockBuilder,
     this.onTapLink,
+    this.confirmRemoteImage,
     this.citationBuilder,
     this.onTapCitation,
     this.selectable = true,
@@ -52,6 +54,10 @@ class MarkdownView extends StatefulWidget {
 
   /// Called with the raw `href` when a link is tapped.
   final void Function(String href)? onTapLink;
+
+  /// Asked with the image URL when the user taps a remote image to load it;
+  /// false keeps it unloaded. Null loads on the tap.
+  final Future<bool> Function(String src)? confirmRemoteImage;
 
   /// Renders citation markers (`[1]`, `[2][3]`) as emitted by search-backed
   /// models. Defaults to [defaultCitationBuilder], a small accent chip.
@@ -98,6 +104,8 @@ class _MarkdownViewState extends State<MarkdownView> {
   void _handleTapLink(String href) => widget.onTapLink?.call(href);
 
   void _handleTapCitation(int index) => widget.onTapCitation?.call(index);
+
+  Future<bool> _confirmImage(String src) => widget.confirmRemoteImage?.call(src) ?? Future.value(true);
 
   @override
   Widget build(BuildContext context) {
@@ -156,7 +164,10 @@ class _MarkdownViewState extends State<MarkdownView> {
     if (!widget.selectable) {
       result = SelectionContainer.disabled(child: result);
     }
-    return MarkdownStyleScope(style: style, child: result);
+    return MarkdownStyleScope(
+      style: style,
+      child: RemoteImageGate(confirm: _confirmImage, child: result),
+    );
   }
 }
 

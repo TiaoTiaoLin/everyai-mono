@@ -114,6 +114,7 @@ Future<InstalledSkill> _load(String dir, String dirName, SkillSource source, Str
           errors: [...check.report.errors, 'More than ${SkillRules.maxFiles * 2} files and folders.'],
           warnings: check.report.warnings,
           hasScripts: check.report.hasScripts,
+          findings: check.report.findings,
         )
       : check.report;
   return InstalledSkill(

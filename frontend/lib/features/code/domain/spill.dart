@@ -36,20 +36,23 @@ Spill? spillText(String text) {
 }
 
 /// The first and last lines of [spill], with a line saying where the rest is.
-String spillPreview(Spill spill, String path) {
+/// [wrap] (an untrusted block, say) goes around the head and the tail each,
+/// so our note stays outside it.
+String spillPreview(Spill spill, String path, {String Function(String part)? wrap}) {
   final all = spill.text.split('\n');
   final head = all.take(_headLines).toList();
   final tail = all.length > _headLines + _tailLines ? all.sublist(all.length - _tailLines) : const <String>[];
   var h = head.join('\n');
   if (h.length > _previewBytes) h = h.substring(0, _previewBytes);
-  final t = tail.join('\n');
+  var t = tail.join('\n');
+  if (t.length > _previewBytes) t = t.substring(t.length - _previewBytes);
   final omitted = spill.lines - head.length - tail.length;
   final kb = (spill.bytes / 1024).round();
   return [
-    h,
+    wrap == null ? h : wrap(h),
     '… ${omitted > 0 ? '$omitted lines' : 'the rest'} omitted. Full output ($kb KB, ${spill.lines} lines) saved to '
         '$path; read it in parts with sed -n, head, tail or grep …',
-    if (t.isNotEmpty) t,
+    if (t.isNotEmpty) wrap == null ? t : wrap(t),
   ].join('\n');
 }
 

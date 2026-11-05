@@ -6,6 +6,8 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import '../../../../core/security/untrusted.dart';
+import '../../domain/mcp_tool_check.dart';
 import 'shell_io.dart';
 import 'tools_io.dart';
 
@@ -63,12 +65,15 @@ abstract class McpConnection {
   }
 
   /// Calls [tool]; text parts become the result, image parts pictures.
-  Future<ToolOutput> call(String tool, Map<String, Object?> args, {Future<void>? cancel}) async {
+  /// With [wrap] the server's text (an error's too) is marked as untrusted
+  /// data from `mcp:<server>/<tool>`.
+  Future<ToolOutput> call(String tool, Map<String, Object?> args, {Future<void>? cancel, bool wrap = false}) async {
+    String data(String text) => wrap ? untrusted(text, source: 'mcp:$name/$tool') : text;
     final Map<String, Object?> result;
     try {
       result = await _request('tools/call', {'name': tool, 'arguments': args}, timeout: const Duration(minutes: 5));
     } on McpError catch (e) {
-      return ToolOutput('Error from $name: ${e.message}', isError: true);
+      return ToolOutput('Error from $name: ${data(e.message)}', isError: true);
     }
     final text = StringBuffer();
     final images = <ToolImage>[];
@@ -91,7 +96,9 @@ abstract class McpConnection {
       text.write(jsonEncode(structured));
     }
     return ToolOutput(
-      text.isEmpty ? (images.isEmpty ? '(no output)' : '${images.length} image(s) attached below.') : text.toString(),
+      text.isEmpty
+          ? (images.isEmpty ? '(no output)' : '${images.length} image(s) attached below.')
+          : data(text.toString()),
       isError: result['isError'] == true,
       images: images,
     );
@@ -309,11 +316,26 @@ final class _HttpMcp extends McpConnection {
 
 /// A session's MCP servers: their tools by name, and the servers that
 /// couldn't start (with why), for the system prompt.
+///
+/// A server's tools reach the model only once vetted ([vetMcpTools]): those
+/// pinned in its config entry (`pinned`, from Settings), or the clean ones at
+/// its first session. The rest are left out ([leftOut]) and reported
+/// ([report]) for the user to review in Settings, never asked about mid-run.
+/// What an untrusted server returns is wrapped as untrusted data.
 final class McpTools {
-  McpTools._(this.connections, this.failures);
+  McpTools._(this.connections, this.failures, [this._trusted = const {}]);
 
   final List<McpConnection> connections;
   final Map<String, String> failures;
+
+  /// Servers that are the app's own (the `everyai` host): neither vetted nor wrapped.
+  final Set<String> _trusted;
+
+  /// Each vetted server's tools left out of this session, by the server's own names.
+  final leftOut = <String, List<String>>{};
+
+  /// What vetting found per server, for the app to store.
+  final report = <String, McpToolsReport>{};
 
   /// The tool name the model sees, to the server and the server's own name.
   final _byName = <String, (McpConnection, String)>{};
@@ -323,11 +345,17 @@ final class McpTools {
     Map<String, Object?> config, {
     Set<String> reserved = const {},
     Set<String> prefixed = const {},
+    Set<String> trusted = const {},
+    http.Client? client,
   }) async {
     final failures = <String, String>{};
     final opened = await Future.wait([
       for (final e in config.entries)
-        McpConnection.open(e.key, (e.value as Map?)?.cast<String, Object?>() ?? const {}).then<McpConnection?>(
+        McpConnection.open(
+          e.key,
+          (e.value as Map?)?.cast<String, Object?>() ?? const {},
+          client: client,
+        ).then<McpConnection?>(
           (c) => c,
           onError: (Object err) {
             failures[e.key] = '$err';
@@ -335,21 +363,57 @@ final class McpTools {
           },
         ),
     ]);
-    final tools = McpTools._([...opened.nonNulls], failures);
+    final tools = McpTools._([...opened.nonNulls], failures, trusted);
+    final namesOf = {
+      for (final c in tools.connections)
+        c: {
+          for (final t in c.tools)
+            if (t['name'] case final String n) n,
+        },
+    };
+    for (final c in tools.connections) {
+      if (trusted.contains(c.name)) continue;
+      final pinned = ((config[c.name] as Map?)?['pinned'] as Map?)?.map((k, v) => MapEntry('$k', '$v'));
+      final vetted = vetMcpTools(
+        c.tools,
+        pinned: pinned,
+        otherTools: {
+          for (final MapEntry(key: o, value: names) in namesOf.entries)
+            if (o != c) ...names,
+        },
+        builtIns: reserved,
+      );
+      c.tools = vetted.kept;
+      tools.report[c.name] = vetted.report;
+      if (vetted.report.pending.isNotEmpty) tools.leftOut[c.name] = [for (final p in vetted.report.pending) p.name];
+    }
+    // A name two servers offer (left out or not) is prefixed for both: neither takes the plain name, which
+    // Mcp(…) rules and the model may already mean for the other one.
+    final offered = <String, int>{};
+    for (final MapEntry(key: c, value: names) in namesOf.entries) {
+      if (prefixed.contains(c.name)) continue;
+      for (final n in names) {
+        offered[n] = (offered[n] ?? 0) + 1;
+      }
+    }
     final taken = {...reserved};
     for (final c in tools.connections) {
       for (final t in c.tools) {
         final own = t['name'] as String? ?? '';
         if (own.isEmpty) continue;
-        // Keeps the server's names (permission rules match them) unless two clash.
-        var name = taken.contains(own) || prefixed.contains(c.name) ? '${c.name}__$own' : own;
-        name = name.replaceAll(RegExp('[^A-Za-z0-9_-]'), '_');
-        if (name.length > 64) name = name.substring(0, 64);
+        // Keeps the server's names (permission rules match them) unless they clash.
+        final clash = taken.contains(own) || (offered[own] ?? 0) > 1 || prefixed.contains(c.name);
+        final name = _modelName(clash ? '${c.name}__$own' : own);
         taken.add(name);
         tools._byName[name] = (c, own);
       }
     }
     return tools;
+  }
+
+  static String _modelName(String name) {
+    final n = name.replaceAll(RegExp('[^A-Za-z0-9_-]'), '_');
+    return n.length > 64 ? n.substring(0, 64) : n;
   }
 
   static final empty = McpTools._(const [], const {});
@@ -384,8 +448,20 @@ final class McpTools {
 
   Future<ToolOutput> call(String name, Map<String, Object?> args) async {
     final target = _byName[name];
-    if (target == null) return ToolOutput('Error: no MCP tool named $name.', isError: true);
-    return target.$1.call(target.$2, args);
+    if (target == null) {
+      // A reopened session's history may call a tool that is left out now; its prompt can't say so (it is reused).
+      for (final MapEntry(key: server, value: own) in leftOut.entries) {
+        if (own.any((o) => _modelName(o) == name || _modelName('${server}__$o') == name)) {
+          return ToolOutput(
+            'Error: $name (MCP server $server) is left out of this session because it changed or looks unsafe, '
+            'until the user reviews it in Settings → MCP servers. Tell the user if the task needs it.',
+            isError: true,
+          );
+        }
+      }
+      return ToolOutput('Error: no MCP tool named $name.', isError: true);
+    }
+    return target.$1.call(target.$2, args, wrap: !_trusted.contains(target.$1.name));
   }
 
   Future<void> close() async {

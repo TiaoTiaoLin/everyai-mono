@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../../domain/bug_check.dart' show BugCheckState;
+import '../../git/git_service_io.dart' show runGit;
 import 'tools_io.dart' show resolvePath;
 
 /// The tests and repro scripts a bug was reproduced with by [command]
@@ -17,8 +18,8 @@ Future<Set<String>> reproPaths(String root, String command, {String output = ''}
   // (written to reproduce it) and ones its output names. A test elsewhere
   // in the repository isn't part of the repro, so editing it is fine.
   try {
-    final r = await Process.run('git', ['ls-files', '-co', '--exclude-standard'], workingDirectory: root);
-    final st = await Process.run('git', ['status', '--porcelain', '--untracked-files=all'], workingDirectory: root);
+    final r = await runGit(root, ['ls-files', '-co', '--exclude-standard']);
+    final st = await runGit(root, ['status', '--porcelain', '--untracked-files=all']);
     final dirty = {
       if (st.exitCode == 0)
         for (final line in const LineSplitter().convert('${st.stdout}'))

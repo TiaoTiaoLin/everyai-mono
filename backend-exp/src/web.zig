@@ -377,7 +377,7 @@ test "formatResults numbers entries and fences them" {
     const text = try formatResults(a, "zig", &.{ .{ .n = 3, .source = .{ .url = "https://z.dev", .title = "Z", .snippet = "snip" } }, .{ .n = 4, .source = .{ .url = "https://y.dev", .title = "Y" } } }, false);
     try std.testing.expect(std.mem.indexOf(u8, text, "[3] Z\nhttps://z.dev\nsnip") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "[4] Y") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "<untrusted_tool_result source=\"web_search\">") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "<untrusted-content source=\"web_search\">") != null);
     try std.testing.expect(std.mem.startsWith(u8, try formatResults(a, "zig", &.{}, false), "No results"));
 }
 

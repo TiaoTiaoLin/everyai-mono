@@ -241,11 +241,11 @@ pub fn body(arena: std.mem.Allocator, model: []const u8, questions: []const Ques
     // Room for each answer, and a long choice string, without a runaway reply.
     const max_tokens: i64 = @intCast(@min(4000, 64 + 40 * questions.len));
     return std.mem.concat(arena, u8, &.{
-        "{\"model\":",                                                                   try std.json.Stringify.valueAlloc(arena, model, .{}),
-        ",\"usage\":{\"include\":true},\"temperature\":0,\"max_tokens\":",               try std.fmt.allocPrint(arena, "{d}", .{max_tokens}),
+        "{\"model\":",                                                                                                      try std.json.Stringify.valueAlloc(arena, model, .{}),
+        ",\"usage\":{\"include\":true},\"temperature\":0,\"max_tokens\":",                                                  try std.fmt.allocPrint(arena, "{d}", .{max_tokens}),
         ",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answers\",\"strict\":true,\"schema\":", schema_json,
-        "}},\"messages\":[{\"role\":\"system\",\"content\":",                            try std.json.Stringify.valueAlloc(arena, instructions, .{}),
-        "},{\"role\":\"user\",\"content\":",                                             try std.json.Stringify.valueAlloc(arena, user, .{}),
+        "}},\"messages\":[{\"role\":\"system\",\"content\":",                                                               try std.json.Stringify.valueAlloc(arena, instructions, .{}),
+        "},{\"role\":\"user\",\"content\":",                                                                                try std.json.Stringify.valueAlloc(arena, user, .{}),
         "}]}",
     });
 }

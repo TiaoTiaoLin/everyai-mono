@@ -1,0 +1,85 @@
+# Official sites: the domains a look-alike address most often imitates (package
+# registries, git hosts, toolchains, vendor docs and downloads). An entry covers
+# itself and every subdomain (pkg.go.dev is under go.dev). Keep entries to the
+# registrable name (one label before the top-level domain): the look-alike check
+# compares that label. Read by official_sites.zig (backend fetches) and copied
+# into frontend/lib/core/security/official_sites.dart (the browser tool); a test
+# fails when the two differ. `neighbours` are real sites that read as a typo of
+# an official one; they are fine.
+# official
+npmjs.com
+npmjs.org
+yarnpkg.com
+unpkg.com
+jsdelivr.net
+pypi.org
+pythonhosted.org
+python.org
+readthedocs.io
+readthedocs.org
+crates.io
+docs.rs
+rust-lang.org
+rubygems.org
+ruby-lang.org
+go.dev
+golang.org
+pub.dev
+dart.dev
+flutter.dev
+maven.org
+apache.org
+nuget.org
+packagist.org
+cocoapods.org
+github.com
+github.io
+githubusercontent.com
+gitlab.com
+gitlab.io
+bitbucket.org
+nodejs.org
+deno.land
+deno.com
+mozilla.org
+microsoft.com
+apple.com
+google.com
+googleapis.com
+anthropic.com
+openai.com
+docker.com
+docker.io
+kubernetes.io
+cloudflare.com
+amazon.com
+amazonaws.com
+brew.sh
+ubuntu.com
+debian.org
+archlinux.org
+fedoraproject.org
+kernel.org
+gnu.org
+nvidia.com
+jetbrains.com
+huggingface.co
+stackoverflow.com
+wikipedia.org
+wikimedia.org
+# shorteners
+bit.ly
+t.co
+tinyurl.com
+goo.gl
+ow.ly
+is.gd
+buff.ly
+rebrand.ly
+cutt.ly
+shorturl.at
+tiny.cc
+rb.gy
+lnkd.in
+# neighbours
+nodes.org

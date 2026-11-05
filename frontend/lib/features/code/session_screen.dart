@@ -183,8 +183,14 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
       windowId: (call.args['window_id'] as num?)?.toInt(),
     );
     switch (pick) {
-      case OwnWindow(:final window, :final others):
-        return _withImages(call, await a.capture(window, root, others));
+      case OwnWindow(:final window, :final others, :final skipped):
+        final shot = await a.capture(window, root, others);
+        return _withImages(
+          call,
+          skipped.isEmpty || shot.isError
+              ? shot
+              : (text: '${shot.text}\n${skippedText(skipped)}', isError: false, images: shot.images),
+        );
       // Bypass permissions: no question, the window is captured like the session's own.
       case ForeignWindow(:final window) when checksBypassed:
         return _withImages(call, await a.capture(window, root, 0));
@@ -208,14 +214,14 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
         }
         _screenGrants.add((id: window.id, pid: window.pid));
         return _withImages(call, await a.capture(window, root, 0));
-      case NoWindow():
+      case NoWindow(:final skipped):
         final named = [
           if (app != null && app.isNotEmpty) ' matching "$app"',
           if (call.args['window_id'] case final num id) ' with id ${id.toInt()}',
         ].join();
         return (
           text:
-              'Error: no window$named of an app this session started. Start the app with app_run (or from your '
+              'Error: ${skipped.isEmpty ? '' : '${skippedText(skipped)} '}no window$named of an app this session started. Start the app with app_run (or from your '
               'shell, in the background), wait for its window, then try again. For web pages use browser.',
           isError: true,
         );

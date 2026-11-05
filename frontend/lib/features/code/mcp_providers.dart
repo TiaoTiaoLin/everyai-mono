@@ -54,4 +54,17 @@ final class CodeMcpServers extends Notifier<StoredMcpServers> {
   /// Records the user's approval of [name] as it stands now.
   void approve(String name, {String? projectId}) =>
       _set(state.withList(projectId, [for (final s in state.listFor(projectId)) s.name == name ? s.approve() : s]));
+
+  /// What a session in [projectId] found about its servers' tools (see
+  /// [StoredMcpServers.withReports]).
+  void recordTools(Map<String, McpToolsReport> reports, {String? projectId}) {
+    if (reports.isEmpty) return;
+    _set(state.withReports(projectId, reports));
+  }
+
+  /// Allows [name]'s tools that wait for review, as they were seen: the next
+  /// session (or a reopened one) gets them.
+  void allowTools(String name, {String? projectId}) => _set(
+    state.withList(projectId, [for (final s in state.listFor(projectId)) s.name == name ? s.allowPending() : s]),
+  );
 }

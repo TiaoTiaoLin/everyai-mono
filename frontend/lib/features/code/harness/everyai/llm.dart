@@ -565,8 +565,10 @@ final class GatewayClient {
 
   /// A page through the gateway's safe fetcher (`POST {base}/fetch`): no local
   /// or private addresses, redirects checked, and only [allow]'s hosts when
-  /// given. Returns the page's text, fenced as untrusted, or throws.
-  Future<({String url, String text, int? nextOffset})> fetchPage(
+  /// given. Returns the page's text, fenced as untrusted, with the backend's
+  /// one-line [notice] about a doubtful host (a bare IP, a shortener), or
+  /// throws (a look-alike of an official site is refused, naming the real one).
+  Future<({String url, String text, int? nextOffset, String? notice})> fetchPage(
     String url, {
     required String sessionTag,
     List<String>? allow,
@@ -589,7 +591,8 @@ final class GatewayClient {
     if (v case {'error': final String e}) throw LlmError(e, status: res.statusCode);
     if (v case {'error': {'message': final String e}}) throw LlmError(e, status: res.statusCode);
     if (v case {'url': final String u, 'text': final String t}) {
-      return (url: u, text: t, nextOffset: ((v as Map)['next_offset'] as num?)?.toInt());
+      final m = v as Map;
+      return (url: u, text: t, nextOffset: (m['next_offset'] as num?)?.toInt(), notice: m['notice'] as String?);
     }
     throw LlmError('The fetch failed (${res.statusCode}).', status: res.statusCode);
   }

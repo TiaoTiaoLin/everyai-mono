@@ -55,6 +55,87 @@ void main() {
     });
   });
 
+  group('sensitive windows', () {
+    final windows = [
+      _w(1, 10, '1Password', title: 'Vault'),
+      _w(2, 20, 'Safari', title: 'Chase Online Banking'),
+      _w(3, 30, 'counter', title: 'Checkout'),
+      _w(4, 40, 'Schlüsselbundverwaltung', title: 'Login'),
+      _w(5, 50, 'System Settings', title: 'Passwords'),
+      _w(6, 60, 'Notes', title: 'Banking ideas'),
+    ];
+
+    test('a password manager is skipped even when granted or picked by id', () {
+      final byName = pickWindow(windows, own: (_) => true, app: '1password') as NoWindow;
+      expect(byName.skipped, ['1Password (a password manager)']);
+      final byId = pickWindow(windows, own: (_) => true, windowId: 1) as NoWindow;
+      expect(byId.skipped, ['1Password (a password manager)']);
+      expect((pickWindow(windows, own: (w) => w.pid == 50, windowId: 5) as NoWindow).skipped, hasLength(1));
+    });
+
+    test("a foreign browser's banking page is skipped; the session's own checkout and a note are not", () {
+      expect((pickWindow(windows, own: (_) => false, app: 'banking') as ForeignWindow).window.id, 6);
+      expect((pickWindow(windows, own: (_) => false, windowId: 2) as NoWindow).skipped, [
+        'Safari (looks like a banking or payment page)',
+      ]);
+      expect((pickWindow(windows, own: (w) => w.pid == 30, app: 'checkout') as OwnWindow).window.id, 3);
+    });
+
+    test('a keychain app is known by its bundle when its name is localized', () async {
+      Future<WindowPick> pick(int id) => pickSessionWindow(
+        windows,
+        pids: const {},
+        root: '/p',
+        executableOf: (pid) async => pid == 40
+            ? '/System/Applications/Utilities/Keychain Access.app/Contents/MacOS/Keychain Access'
+            : '/Applications/x.app/Contents/MacOS/x',
+        granted: (_) => true,
+        windowId: id,
+      );
+      expect(((await pick(4)) as NoWindow).skipped, ['Schlüsselbundverwaltung (a password manager)']);
+      expect(await pick(6), isA<OwnWindow>());
+    });
+
+    test('a granted browser window turned to a bank is skipped', () async {
+      Future<WindowPick> pick({bool Function(ScreenWindow)? granted}) => pickSessionWindow(
+        windows,
+        pids: const {},
+        root: '/p',
+        executableOf: (pid) async => '/Applications/Safari.app/Contents/MacOS/Safari',
+        granted: granted,
+        windowId: 2,
+      );
+      expect(((await pick(granted: (w) => w.id == 2)) as NoWindow).skipped, [
+        'Safari (looks like a banking or payment page)',
+      ]);
+      expect(((await pick()) as NoWindow).skipped, hasLength(1));
+    });
+
+    test('a password manager the session started is known by its bundle, whatever its name', () async {
+      final pick = await pickSessionWindow(
+        windows,
+        pids: const {40},
+        root: '/p',
+        executableOf: (pid) async => pid == 40
+            ? '/System/Applications/Passwords.app/Contents/MacOS/Passwords'
+            : '/Applications/x.app/Contents/MacOS/x',
+        windowId: 4,
+      );
+      expect((pick as NoWindow).skipped, ['Schlüsselbundverwaltung (a password manager)']);
+    });
+
+    test('an own window still says which named windows were skipped', () {
+      final pick = pickWindow(windows, own: (w) => w.pid == 30, app: 'o') as OwnWindow;
+      expect(pick.window.id, 3);
+      expect(pick.skipped, [
+        '1Password (a password manager)',
+        'Safari (looks like a banking or payment page)',
+        'System Settings (a password manager)',
+      ]);
+      expect(skippedText(const []), '');
+    });
+  });
+
   group('detectRunCommands', () {
     List<String> detect(Map<String, String> files, {List<String> dirs = const ['']}) =>
         detectRunCommands(exists: files.containsKey, read: (p) => files[p], os: 'macos', dirs: dirs);
