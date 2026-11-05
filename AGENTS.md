@@ -679,6 +679,9 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
   signs). `.github/workflows/release.yml` on `v*`: DMG + Store MSIX as a draft Partner Center submission + draft GitHub
   Release; secrets are set on the repo. Credentials and IDs: `TODO-deployment.md` → Credentials (local copies in
   `~/.applesigning/`). Verified: notarization accepted, stapled, the app from the DMG launches.
+  Linux: `packaging/linux/package.sh` → AppImage + .deb (Deno next to the binary), SHA256SUMS, GPG `.asc` signatures
+  (key `packaging/linux/everyai-release-key.asc`); release job on Ubuntu 22.04. Checked in an Ubuntu 22.04 container:
+  the .deb installs, desktop file valid, signatures verify. Flathub is off the table (no AI-written manifests/PRs).
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
