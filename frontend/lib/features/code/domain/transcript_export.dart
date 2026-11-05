@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../../usage/usage_totals.dart';
+import '../git/repo_check.dart' show splitRepoCheck;
 import '../harness/events.dart';
 import 'agent_mode.dart' show splitModeNote;
 import 'code_session.dart';
@@ -64,7 +65,7 @@ String transcriptSteps(List<HarnessEvent> events, {int resultCap = 4000}) {
       case ChatMessage(fromUser: true, :final text):
         out
           ..writeln('## User$stamp\n')
-          ..writeln(splitModeNote(text).$2.trim())
+          ..writeln(splitRepoCheck(splitModeNote(text).$2).$2.trim())
           ..writeln();
       case ChatMessage(:final text, :final reasoning):
         if (text.trim().isEmpty && reasoning.trim().isEmpty) continue;

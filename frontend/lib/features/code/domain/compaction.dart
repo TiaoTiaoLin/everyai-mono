@@ -4,6 +4,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../git/repo_check.dart' show splitRepoCheck;
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
@@ -121,9 +122,10 @@ String _between(String text, String open, String close) {
   return text.substring(start + open.length, end < 0 ? text.length : end).trim();
 }
 
-/// The user's text of a message: session block, mode, context, workflow and rewind notes split off.
-String userTextOf(String raw) =>
-    splitRewindNote(splitWorkflowNotes(splitContextNotes(splitModeNote(splitSessionBlock(raw).$2).$2).$2).$2);
+/// The user's text of a message: session block, mode, repo-check, context, workflow and rewind notes split off.
+String userTextOf(String raw) => splitRewindNote(
+  splitWorkflowNotes(splitContextNotes(splitRepoCheck(splitModeNote(splitSessionBlock(raw).$2).$2).$2).$2).$2,
+);
 
 String _userText(String raw) => userTextOf(raw);
 

@@ -571,6 +571,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     try {
       final first = await prepareMessage(ref, text: prompt, workingDir: workingDir, model: model, files: files);
       task = first.text;
+      // What the repository can run by itself, for the lead as data (the workflow's task stays clean).
+      final repo = local ? repoCheckNote(await GitService.checkRepo(project.path)) : '';
       final briefing = driver == null
           ? null
           : await _brief(
@@ -592,8 +594,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
             effort: effort,
             holdClientTools: hold,
             initialMessage: startsNatively(driver, mode)
-                ? _startText(first.text, workflow)
-                : modeNote(mode, _startText(first.text, workflow)),
+                ? '$repo${_startText(first.text, workflow)}'
+                : modeNote(mode, '$repo${_startText(first.text, workflow)}'),
             initialImages: first.images,
             isolated: worktree != null,
             tier: tier,

@@ -1,7 +1,9 @@
 import 'git_models.dart';
+import 'repo_check.dart';
 import 'git_service_stub.dart' if (dart.library.io) 'git_service_io.dart' as impl;
 
 export 'git_models.dart';
+export 'repo_check.dart' show RepoFinding, repoCheckNote, splitRepoCheck;
 
 /// A git or gh command failed; [message] is meant for the user.
 final class GitError implements Exception {
@@ -23,6 +25,10 @@ abstract final class GitService {
   /// Whether the repository at [repoRoot] has a commit to branch from (a
   /// fresh `git init` has none).
   static Future<bool> hasCommits(String repoRoot) => impl.hasCommits(repoRoot);
+
+  /// What in the project at [dir] can run code by itself (git hooks and config programs, editor tasks, install
+  /// scripts, agent CLI plugins), found without running any of it; empty when nothing is.
+  static Future<List<RepoFinding>> checkRepo(String dir) => impl.checkRepo(dir);
 
   /// Every worktree of the repository [dir] is in, the main one included (`git worktree list`); empty outside one.
   static Future<List<String>> worktrees(String dir) => impl.worktrees(dir);

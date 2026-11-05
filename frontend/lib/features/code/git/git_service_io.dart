@@ -7,6 +7,8 @@ import 'git_guard.dart';
 import 'git_models.dart';
 import 'git_service.dart' show GitError;
 
+export 'repo_check_io.dart' show checkRepo;
+
 /// Subcommands that run no repository program (with [guardFlags] on), so they skip the config read.
 const _plain = {
   'rev-parse', 'config', 'symbolic-ref', 'check-ref-format', 'show-ref', 'for-each-ref', 'update-ref', //
