@@ -73,6 +73,7 @@ import 'host/host_notes.dart';
 import 'host/host_output.dart';
 import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
+import 'host/host_report.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
 import 'permissions_providers.dart';
@@ -203,6 +204,10 @@ const _baseToolInfos = <HostToolInfo>[
     when:
         'the task fits one of the workflows listed under "Workflows": it starts them in the app and returns at once; '
         'the result comes later as a message.',
+  ),
+  (
+    name: reportIssueTool,
+    when: 'the user said yes to reporting an EveryAI problem and `gh` is not signed in: it builds the issue link.',
   ),
   ...maxHostToolInfos,
 ];
@@ -1745,6 +1750,13 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         return hostFit(dir, 'host-${DateTime.now().millisecondsSinceEpoch}-$name', await hostCheckTool(call, context));
       case runWorkflowTool:
         return _runWorkflowCall(call.args);
+      case reportIssueTool:
+        final lead = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        return hostReportIssue(
+          call.args,
+          harness: _leadLabel(lead?.harness ?? everyaiHarnessName),
+          model: lead?.model ?? '',
+        );
       default:
         return (text: 'Error: there is no EveryAI tool called ${call.name}.', isError: true);
     }

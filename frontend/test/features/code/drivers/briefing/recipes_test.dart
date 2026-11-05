@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:every_ai/features/code/drivers/briefing/briefing_types.dart';
 import 'package:every_ai/features/code/drivers/briefing/recipes.dart';
+import 'package:every_ai/features/code/drivers/briefing/session_skill.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '_fixtures.dart';
@@ -87,6 +88,28 @@ void main() {
     });
     expect(acp(i, skills: skills).firstPrompt, gemini(i, skills: skills).firstPrompt);
     expect(acp(i).args, isEmpty);
+  });
+
+  test('every delivery carries the prefer-our-tools and reporting notes', () {
+    final full = (
+      mcpUrl: i.mcpUrl,
+      mcpToken: i.mcpToken,
+      skillDir: i.skillDir,
+      sessionText: sessionBriefing(
+        const SessionSkillInput(worktree: '/wt', projectRoot: '/p', lead: (name: 'X', model: 'm'), hostTools: []),
+      ),
+    );
+    final claudeArgs = claudeCode(full).args;
+    final delivered = {
+      'claude': claudeArgs[claudeArgs.indexOf('--append-system-prompt') + 1],
+      'codex': codex(full).instructions,
+      'gemini': gemini(full).firstPrompt,
+      'acp': acp(full).firstPrompt,
+    };
+    for (final MapEntry(:key, :value) in delivered.entries) {
+      expect(value, contains("## Prefer EveryAI's tools"), reason: key);
+      expect(value, contains('## Reporting EveryAI problems'), reason: key);
+    }
   });
 
   test('the token is never an argument, and no path points into a CLI home', () {

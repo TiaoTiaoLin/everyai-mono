@@ -404,12 +404,12 @@ void main() {
     const policy = PermissionPolicy(hostTools: true);
 
     test('the new tools are ours; the read-only ones run, the ones that run commands ask', () {
-      for (final t in ['check', 'diff_stats', 'goal_check', 'run_script', 'bug_check']) {
+      for (final t in ['check', 'diff_stats', 'goal_check', 'run_script', 'bug_check', 'report_issue']) {
         expect(hostToolOf(mcp(t)), t);
         // OpenCode's naming.
         expect(hostToolOf(actionEvent(id: 'o', toolName: 'everyai_$t', kind: 'MCPToolAction', args: const {})), t);
       }
-      for (final t in ['diff_stats', 'goal_check', 'run_script']) {
+      for (final t in ['diff_stats', 'goal_check', 'run_script', 'report_issue']) {
         expect(policy.decide(mcp(t), AgentMode.ask).verdict, Verdict.allow, reason: t);
       }
       expect(policy.decide(mcp('check'), AgentMode.ask).verdict, Verdict.ask);
