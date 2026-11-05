@@ -63,7 +63,6 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
     the rail is 92px on macOS so the traffic lights fit inside it.
   - Tests: `flutter test` (app) and `packages/*` tests. Screenshots go through
     the seeded demo DB under the macOS container.
-- `backend/`: the legacy FastAPI app (uv). **Frozen**; being replaced by backend-exp.
 - `backend-exp/`: the new backend in **Zig 0.17.0 on Anole** (the `xuckless/anole`
   tag pinned in `build.zig.zon`). See `backend-exp/README.md`.
   - `zig build run` serves `:8080` with docs at `/docs`.
@@ -709,4 +708,4 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
 - OpenRouter: with native web search, citations are nondeterministic; `exa`
   always cites (~$0.007/search). The usage chunk comes last, before
   `[DONE]`; `: OPENROUTER PROCESSING` comments occur.
-- The old FastAPI backend on :8000 is no longer needed; backend-exp runs on :8080.
+- The old FastAPI backend (`backend/`) was removed on 2026-11-05; backend-exp is the only server.

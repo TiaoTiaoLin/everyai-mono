@@ -83,7 +83,6 @@ app. The full `/v1` contract is in [`AGENTS.md`](../AGENTS.md#v1-contract-backen
 | [`frontend/`](../frontend) | The app: Code workspace, drivers, MCP host, workflows, Chat, artifacts, remote control |
 | [`frontend/packages/everyai_markdown`](../frontend/packages/everyai_markdown) | Streaming Markdown renderer: math, highlighting, citations |
 | [`backend-exp/`](../backend-exp) | The optional `/v1` server (Zig on Anole) and its [deployment](../backend-exp/deploy/README.md) |
-| [`backend/`](../backend) | Legacy FastAPI service, frozen |
 | [`docs/`](.) | Roadmaps, this file, [benchmarks](BENCHMARKS.md), research notes |
 | [`scripts/`](../scripts) | `launch.sh` (app against the dev server) and `dev.sh` (local backend + app) |
 

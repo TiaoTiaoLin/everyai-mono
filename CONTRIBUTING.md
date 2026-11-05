@@ -9,7 +9,7 @@ larger change, and if you use a coding agent, point it there.
 - `main` only takes pull requests, and every PR needs the owner's review.
 - Collaborators branch off `main` (`feat/…`, `fix/…`, `docs/…`) and open a PR. Everyone else forks the repo and opens
   a PR from the fork.
-- Keep a PR to one change, and keep files outside it untouched (editor whitespace included). `backend/` is frozen.
+- Keep a PR to one change, and keep files outside it untouched (editor whitespace included).
 - Describe what changed and how you checked it, including what you didn't test.
 
 ## Commits

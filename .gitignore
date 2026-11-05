@@ -1,4 +1,4 @@
-# Single ignore file for the whole monorepo (frontend/ Flutter, backend/ Python).
+# Single ignore file for the whole monorepo (frontend/ Flutter, backend-exp/ Zig).
 # Don't add nested .gitignore files; scope rules here with a path prefix instead.
 
 # ---- Agent / local notes (kept out of git on purpose) ----
@@ -147,7 +147,7 @@ target/
 # ---- Web / Node tooling ----
 node_modules/
 
-# ---- Python (backend/) ----
+# ---- Python (helper scripts) ----
 __pycache__/
 *.py[cod]
 *$py.class
