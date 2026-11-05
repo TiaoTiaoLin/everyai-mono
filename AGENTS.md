@@ -711,6 +711,27 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
   off per project (`--settings skillOverrides`); approvals say why, scratch/temp writes free, sibling forks, mode
   inheritance. The bundled workflow tests need Deno (`frontend/.deno`); worktrees without it skip them (a parse error
   in security_review.js slipped through that way). Release: tag `v0.1.0-alpha.2` on main after the merge.
+- **Security lives in the tools (2026-11-05; batch `batch/security-tools`, notes `docs/research/batches/security/`).**
+  Owner: guardrails sit inside each tool (refuse, sanitise or warn in the result), never as approval cards, on in every
+  mode incl. Bypass, for every lead. Base `core/security/untrusted.dart` (`untrusted()` wrapper, hidden-Unicode kinds;
+  `keepWriting` keeps the joiners and direction marks real text needs; `untrustedRule`).
+  - Harness tools: outside text wrapped (web_fetch/search, browser, network/repo commands, reads outside the project);
+    the user's own files only stripped, and edits keep their hidden characters. `exfil.dart` refuses credential-store
+    reads, uploads, gists, pushes to remotes not configured at start, drop sites and DNS exfil; the Scrubber hides
+    secrets in output. URL/query leak checks are back on under Bypass (`bypass` only drops the research sandbox).
+    Look-alike/punycode/typo domains (`official_sites`, also backend `net/official_sites.zig`); the browser never types
+    into password/payment fields; screenshots skip password managers; package installs checked for typosquats and
+    non-existent names (fail open offline); run_script bridge capped and guarded; red-team fixtures in `test/security/`.
+  - `security_alert` tool and the owner's four checks in every lead's prompt or briefing (host MCP tool for outside
+    leads): red transcript card, OS notification, `stop_run` decided by the model. Memory, plans, handoffs and fork
+    reports are wrapped, and checked for smuggling on write.
+  - Repos: EveryAI's git calls never run hooks, filters or fsmonitor; clone/open scan notes; MCP tool lists pinned by
+    digest (changed tools left out until re-consent in Settings), shadowing flagged, results wrapped; skills, agents
+    and commands scanned.
+  - Chat: backend web tools wrapped and domain/leak-checked, the chat prompt has the checks, `security_alert` card;
+    Markdown links carrying data show the host and warn; HTML/SVG sandbox verified.
+  - Full flutter test (2308) and zig tests pass. Nothing live-tested. Open: whether Bypass keeps the session budget
+    stop; the host browser's eval/type are unguarded for outside leads.
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
