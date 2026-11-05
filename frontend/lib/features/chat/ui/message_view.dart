@@ -3,7 +3,6 @@ import '../../../core/ui/brand.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/platform/platform_kind.dart';
 import '../../../core/theme/every_theme.dart';
@@ -27,6 +26,7 @@ import '../domain/security_alert.dart';
 import '../domain/suggest_mode.dart';
 import 'ask_user_card.dart';
 import 'chat_markdown.dart';
+import 'link_gate.dart';
 import 'security_alert_card.dart';
 import 'tool_steps.dart';
 
@@ -492,7 +492,7 @@ class _SourceCardState extends State<_SourceCard> {
         onEnter: (_) => setState(() => _hover = true),
         onExit: (_) => setState(() => _hover = false),
         child: GestureDetector(
-          onTap: () => launchUrl(s.url, mode: LaunchMode.externalApplication),
+          onTap: () => openOutside(context, s.url),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 120),
             width: 184,

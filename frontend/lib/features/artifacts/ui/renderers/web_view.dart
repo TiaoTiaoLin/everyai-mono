@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../core/theme/every_theme.dart';
 import '../../../chat/ui/chat_markdown.dart';
+import '../../../chat/ui/link_gate.dart';
 import '../../checks/web_scripts.dart';
 import 'drawing_page.dart';
 import 'sandbox.dart';
@@ -177,7 +178,7 @@ class _WebContentViewState extends State<WebContentView> {
             shouldOverrideUrlLoading: (controller, action) async => navigationPolicy(
               action.request.url,
               userClicked: action.hasGesture == true || action.navigationType == NavigationType.LINK_ACTIVATED,
-              open: (url) => launchUrl(url, mode: LaunchMode.externalApplication),
+              open: (url) => openOutside(context, url),
             ),
           );
         },

