@@ -14,6 +14,8 @@ import 'host.dart';
 import 'host_checks_stub.dart' if (dart.library.io) 'host_checks_io.dart' as impl;
 import 'host_script.dart';
 
+export 'host_checks_stub.dart' if (dart.library.io) 'host_checks_io.dart' show readBugCheckState, writeBugCheckState;
+
 // Checks for an outside agent that cost EveryAI nothing: no model call, only
 // what the app can run or read itself. bug_check and check run a command in
 // the app (outside the agent's sandbox), so each run passes [hostRunRefusal]
@@ -22,6 +24,26 @@ import 'host_script.dart';
 const checkTool = 'check';
 const diffStatsTool = 'diff_stats';
 const goalCheckTool = 'goal_check';
+
+/// What a workflow script reads of an agent's bug_check: `{available:
+/// true, state, command, expect, files}` from its [saved] state (null:
+/// nothing reproduced), state one of verified, reproduced, not_reproduced;
+/// or `{available: false, why}` when the agent had no host ([hostless]).
+Map<String, Object?> bugCheckRecord(Map<String, Object?>? saved, {String? hostless}) {
+  if (hostless != null) return {'available': false, 'why': hostless};
+  final command = saved?['command'] as String? ?? '';
+  return {
+    'available': true,
+    'state': command.isEmpty
+        ? 'not_reproduced'
+        : saved?['verified'] == true
+        ? 'verified'
+        : 'reproduced',
+    'command': command,
+    'expect': saved?['expect'] as String? ?? '',
+    'files': saved?['files'] is Map ? saved!['files'] : const <String, Object?>{},
+  };
+}
 
 /// The host's own bug_check: the deterministic steps of Bug fix mode's
 /// (no triage, no review by another model), which a workflow sequences.

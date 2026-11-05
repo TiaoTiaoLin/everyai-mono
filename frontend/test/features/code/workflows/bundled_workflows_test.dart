@@ -15,8 +15,11 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// Agents that answer with [answers] by label prefix, as a fenced json block.
 final class _Agents implements AgentLauncher {
-  _Agents(this.answers);
+  _Agents(this.answers, {this.bugChecks = const {}});
   final Map<String, Object? Function(WorkflowAgentCall call)> answers;
+
+  /// The app's bug_check record by label prefix; verified when none matches.
+  final Map<String, Map<String, Object?>> bugChecks;
   final calls = <WorkflowAgentCall>[];
   final _byChild = <String, WorkflowAgentCall>{};
 
@@ -47,6 +50,13 @@ final class _Agents implements AgentLauncher {
 
   @override
   Future<String?> finish(String childId, {required bool ok}) async => null;
+
+  @override
+  Future<Map<String, Object?>> bugCheckOf(String childId) async {
+    final label = _byChild[childId]!.label;
+    return bugChecks.entries.where((e) => label.startsWith(e.key)).firstOrNull?.value ??
+        {'available': true, 'state': 'verified', 'command': 'dart test test/repro_test.dart'};
+  }
 
   @override
   void stop(String childId) {}
@@ -263,12 +273,22 @@ void main() {
       'commits': ['f00 $label'],
     };
 
-    test('one fixer proves its steps with commands, the review model reviews, a refix follows a finding', () async {
-      final agents = _Agents({
-        'fix': (c) => fix(c.label),
-        'review': (_) => _review('fix-then-ship', const [_finding]),
-        'refix': (c) => fix(c.label),
-      });
+    test('the fixer proves with bug_check, the review reruns its repro, a refix starts from its record', () async {
+      const record = {
+        'available': true,
+        'state': 'verified',
+        'command': 'dart test test/repro_test.dart',
+        'expect': '',
+        'files': {'test/repro_test.dart': 'abc'},
+      };
+      final agents = _Agents(
+        {
+          'fix': (c) => fix(c.label),
+          'review': (_) => _review('fix-then-ship', const [_finding]),
+          'refix': (c) => fix(c.label),
+        },
+        bugChecks: {'fix': record},
+      );
       final end = await run(
         'bugfix',
         {'bug': 'The last item is missing'},
@@ -282,23 +302,59 @@ void main() {
       expect(end.phases, ['Fix', 'Review', 'Refix']);
       final fixer = agents.byLabel('fix');
       expect(fixer.worktree, isTrue);
-      // Workflow agents have no EveryAI host, so the proof is the commands' quoted output, and says so.
-      expect(fixer.prompt, isNot(contains('bug_check')));
+      expect(fixer.bugCheck, isEmpty);
       expect(fixer.prompt, contains('The last item is missing'));
-      for (final step in ['Reproduce', 'Verify', 'quote their output']) {
+      for (final step in ['bug_check', '"reproduced"', '"verify"', 'grep', 'glob', 'Never guess a path', 'check']) {
         expect(fixer.prompt, contains(step));
       }
       final review = agents.byLabel('review');
       expect(review.worktree, isFalse);
+      expect(review.bugCheck, isNull);
       expect(review.prompt, contains('read-only'));
       expect(review.model, 'google/gemini-3.5-pro');
-      expect(review.prompt, contains('dart test test/a_test.dart'));
-      expect(agents.byLabel('refix').worktree, isTrue);
+      // The app's record of the repro, not the agent's own repro_command.
+      expect(review.prompt, contains('dart test test/repro_test.dart'));
+      final refix = agents.byLabel('refix');
+      expect(refix.worktree, isTrue);
+      expect(refix.bugCheck, record);
+      expect(refix.prompt, contains('bug_check'));
       final result = end.result! as Map;
       expect(result['verified'], isTrue);
       expect(result['commits'], ['f00 fix', 'f00 refix']);
       expect((result['review'] as Map)['verdict'], 'fix-then-ship');
+      expect(result['proof'], 'bug_check');
+      expect(result['bug_check'], {'state': 'verified', 'command': 'dart test test/repro_test.dart'});
+      expect(result['repro_command'], 'dart test test/repro_test.dart');
+    }, skip: skip);
+
+    test("bug_check's record wins over the agent's own verified", () async {
+      final agents = _Agents(
+        {'fix': (c) => fix(c.label), 'review': (_) => _review('ship')},
+        bugChecks: {
+          'fix': {'available': true, 'state': 'reproduced', 'command': 'dart test test/a_test.dart'},
+        },
+      );
+      final end = await run('bugfix', {'bug': 'Crash on save'}, agents);
+      final result = end.result! as Map;
+      expect(result['verified'], isFalse);
+      expect(result['proof'], 'bug_check');
+      expect((result['bug_check'] as Map)['state'], 'reproduced');
+    }, skip: skip);
+
+    test('without bug_check the proof is self-reported and says why', () async {
+      final agents = _Agents(
+        {'fix': (c) => fix(c.label), 'review': (_) => _review('ship')},
+        bugChecks: {
+          'fix': {'available': false, 'why': "this harness can't reach EveryAI's tools"},
+        },
+      );
+      final end = await run('bugfix', {'bug': 'Crash on save'}, agents);
+      final result = end.result! as Map;
+      expect(result['verified'], isTrue);
       expect(result['proof'], 'self-reported');
+      expect(result['proof_note'], contains("this harness can't reach EveryAI's tools"));
+      expect(result.containsKey('bug_check'), isFalse);
+      expect(agents.byLabel('review').prompt, contains('dart test test/a_test.dart'));
     }, skip: skip);
 
     test('a ship verdict skips the refix', () async {

@@ -66,6 +66,7 @@ final class FakeBridge implements WorkflowBridge {
 /// Children that reply with [reply] (turn 1 is the brief, 2 a repair).
 final class FakeLauncher implements AgentLauncher {
   final started = <({String prompt, String key, String brief, String childId})>[];
+  final calls = <WorkflowAgentCall>[];
   final watched = <String>[];
   final followUps = <(String, String)>[];
   final stopped = <String>[];
@@ -87,10 +88,15 @@ final class FakeLauncher implements AgentLauncher {
   /// Calls the journal knew before this launcher existed, by child id.
   final known = <String, WorkflowAgentCall>{};
 
+  /// The app's bug_check record for a child (see [AgentLauncher.bugCheckOf]).
+  Map<String, Object?> Function(String childId) bugCheck = (id) => {'available': true, 'state': 'verified'};
+  final bugChecked = <String>[];
+
   @override
   Future<WorkflowChild> start(WorkflowAgentCall call) async {
     final id = 'child-${++_n}-${call.prompt}';
     _calls[id] = call;
+    calls.add(call);
     started.add((prompt: call.prompt, key: call.key, brief: call.brief, childId: id));
     return (childId: id, harness: call.harness ?? 'lead', model: call.model ?? 'm', note: null);
   }
@@ -130,6 +136,12 @@ final class FakeLauncher implements AgentLauncher {
   Future<String?> finish(String childId, {required bool ok}) async {
     finished.add((childId, ok));
     return null;
+  }
+
+  @override
+  Future<Map<String, Object?>> bugCheckOf(String childId) async {
+    bugChecked.add(childId);
+    return bugCheck(childId);
   }
 
   @override

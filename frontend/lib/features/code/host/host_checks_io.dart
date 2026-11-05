@@ -98,6 +98,30 @@ Map<String, String> _digests(String dir, Iterable<String> paths) => {
     if (File('$dir/$p').existsSync()) p: '${sha256.convert(File('$dir/$p').readAsBytesSync())}',
 };
 
+/// The bug_check state in [stateDir], or null when there is none (nothing reproduced yet).
+Future<Map<String, Object?>?> readBugCheckState(String stateDir) async {
+  try {
+    return jsonDecode(await File('$stateDir/bug_check.json').readAsString()) as Map<String, Object?>;
+  } on Object {
+    return null;
+  }
+}
+
+/// Starts [stateDir]'s bug_check from an earlier agent's [record] (see [bugCheckRecord]): the same repro, not
+/// verified yet.
+Future<void> writeBugCheckState(String stateDir, Map<String, Object?> record) async {
+  final file = File('$stateDir/bug_check.json');
+  await file.parent.create(recursive: true);
+  await file.writeAsString(
+    jsonEncode({
+      'command': record['command'] ?? '',
+      'expect': record['expect'] ?? '',
+      'files': record['files'] is Map ? record['files'] : const <String, Object?>{},
+      'verified': false,
+    }),
+  );
+}
+
 Future<HostResult> hostBugCheck(HostCheckContext c, Map<String, Object?> args, Future<void> cancel) async {
   final file = File('${c.stateDir}/bug_check.json');
   Map<String, Object?> state;

@@ -19,6 +19,7 @@ import '../../domain/subagents.dart' show forkingTaskSpec, subagentRules, taskTo
 import '../../settings/agent_prompt.dart' show forHeldClientTools;
 import '../events.dart';
 import '../harness.dart';
+import '../../drivers/briefing/briefing_types.dart' show everyaiServerName;
 import '../../drivers/usage_limit.dart';
 import 'browser_io.dart';
 import 'llm.dart';
@@ -145,10 +146,25 @@ final class EveryAISession
   McpTools _mcp = McpTools.empty;
   Future<void>? _mcpReady;
 
+  /// A briefed session (a workflow agent) also reaches the app's host as the
+  /// `everyai` server, its tools named `everyai__<tool>` like an outside
+  /// agent's (the token stays in memory: [_specToJson] leaves it out).
   Future<void> _ensureMcp() => _mcpReady ??= () async {
-    final config = _spec.mcpConfig;
-    if (config.isEmpty || !(_spec.tools?.contains('mcp') ?? true)) return;
-    _mcp = await McpTools.start(config, reserved: {...actionKinds.keys, ...clientTools});
+    final host = _spec.briefing;
+    final config = {
+      if (_spec.tools?.contains('mcp') ?? true) ..._spec.mcpConfig,
+      if (host != null)
+        everyaiServerName: {
+          'url': host.mcpUrl,
+          'headers': {'Authorization': 'Bearer ${host.mcpToken}'},
+        },
+    };
+    if (config.isEmpty) return;
+    _mcp = await McpTools.start(
+      config,
+      reserved: {...actionKinds.keys, ...clientTools},
+      prefixed: {if (host != null) everyaiServerName},
+    );
   }();
   late ToolRunner _tools;
 
@@ -560,7 +576,8 @@ final class EveryAISession
       [
         ...builtInToolSpecs(only: _spec.tools, applyPatch: family == ModelFamily.gpt),
         if (_scripting) runScriptSpec,
-        memoryToolSpec,
+        // A briefed session uses the host's memory, which decides what it may do.
+        if (_spec.briefing == null) memoryToolSpec,
         ..._mcp.specs,
         if (_spec.bugCheck)
           {
@@ -1368,6 +1385,13 @@ final class EveryAISession
     if (call.name == bugCheckTool) return _bugCheck(call.args!, cancel);
     if (call.name == ToolNames.runScript) return _runScript(call.args!, cancel);
     if (call.name == ToolNames.memory) {
+      // A briefed session's memory is the host's (everyai__memory), which decides what it may do.
+      if (_spec.briefing != null) {
+        return const ToolOutput(
+          'Error: this session has no memory tool of its own; the project memory is already in your instructions.',
+          isError: true,
+        );
+      }
       if (_spec.researchSites != null) {
         return const ToolOutput(
           'Error: research jobs keep notes under their scratch folder, not in the project memory.',

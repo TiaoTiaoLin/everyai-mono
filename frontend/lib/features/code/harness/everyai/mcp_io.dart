@@ -318,7 +318,12 @@ final class McpTools {
   /// The tool name the model sees, to the server and the server's own name.
   final _byName = <String, (McpConnection, String)>{};
 
-  static Future<McpTools> start(Map<String, Object?> config, {Set<String> reserved = const {}}) async {
+  /// Tools of a server in [prefixed] are always named `<server>__<tool>`.
+  static Future<McpTools> start(
+    Map<String, Object?> config, {
+    Set<String> reserved = const {},
+    Set<String> prefixed = const {},
+  }) async {
     final failures = <String, String>{};
     final opened = await Future.wait([
       for (final e in config.entries)
@@ -337,7 +342,7 @@ final class McpTools {
         final own = t['name'] as String? ?? '';
         if (own.isEmpty) continue;
         // Keeps the server's names (permission rules match them) unless two clash.
-        var name = taken.contains(own) ? '${c.name}__$own' : own;
+        var name = taken.contains(own) || prefixed.contains(c.name) ? '${c.name}__$own' : own;
         name = name.replaceAll(RegExp('[^A-Za-z0-9_-]'), '_');
         if (name.length > 64) name = name.substring(0, 64);
         taken.add(name);

@@ -28,6 +28,7 @@ final class WorkflowAgentCall {
     this.worktree = false,
     this.readOnly = false,
     this.schema,
+    this.bugCheck,
   });
 
   final String key;
@@ -50,6 +51,11 @@ final class WorkflowAgentCall {
   /// attacker may have written.
   final bool readOnly;
   final Map<String, Object?>? schema;
+
+  /// It proves with bug_check, and its answer gets the app's record of that
+  /// as `bug_check` (see [AgentLauncher.bugCheckOf]). Empty starts afresh; an
+  /// earlier agent's record starts it from that repro. Null: no record.
+  final Map<String, Object?>? bugCheck;
 
   /// What the child is sent: the prompt, and with a schema how to answer.
   String get brief => schema == null ? prompt : '$prompt\n\n${schemaInstruction(schema!)}';
@@ -76,6 +82,11 @@ abstract interface class AgentLauncher {
   /// The child's work is final: its worktree is merged back when [ok].
   /// Returns a note for the script (what merged, conflicts), or null.
   Future<String?> finish(String childId, {required bool ok});
+
+  /// What the app recorded of the child's bug_check (the script trusts this,
+  /// not the agent's word): `{available: true, state, command, …}`, or
+  /// `{available: false, why}`.
+  Future<Map<String, Object?>> bugCheckOf(String childId);
 
   void stop(String childId);
 }
@@ -356,6 +367,11 @@ final class WorkflowEngine {
     final schema = (a['schema'] as Map?)?.cast<String, Object?>();
     final worktree = a['worktree'] == true;
     final readOnly = a['readOnly'] == true;
+    final bugCheck = switch (a['bugCheck']) {
+      true => const <String, Object?>{},
+      final Map<Object?, Object?> m => m.cast<String, Object?>(),
+      _ => null,
+    };
     final base = sha256
         .convert(
           utf8.encode(
@@ -370,6 +386,7 @@ final class WorkflowEngine {
               worktree,
               // Left out when off, so calls journalled before it existed keep their keys.
               if (readOnly) 'readOnly',
+              if (bugCheck != null) {'bugCheck': bugCheck},
             ]),
           ),
         )
@@ -388,6 +405,7 @@ final class WorkflowEngine {
       worktree: worktree,
       readOnly: readOnly,
       schema: schema,
+      bugCheck: bugCheck,
     );
   }
 
@@ -474,6 +492,10 @@ final class WorkflowEngine {
         r = await launcher.followUp(childId, schemaRepair(problems));
       }
       _live.remove(childId);
+      // The app's record, over anything the agent wrote there itself.
+      if (call.bugCheck != null && value is Map && problem == null) {
+        value = {...value.cast<String, Object?>(), 'bug_check': await launcher.bugCheckOf(childId)};
+      }
       final note = await launcher.finish(childId, ok: problem == null);
       if (note != null) {
         if (value is String) {

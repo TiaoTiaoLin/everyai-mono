@@ -16,6 +16,7 @@ import 'package:every_ai/features/code/domain/transcript.dart' show isOutOfCredi
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/harness/everyai/scrub.dart';
 import 'package:every_ai/features/code/harness/everyai/tools_io.dart';
+import 'package:every_ai/features/code/host/host.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -144,6 +145,17 @@ final class FakeGateway {
   }
 
   Future<void> close() => _server.close(force: true);
+}
+
+/// The app's side of the host: answers every call, keeping their names.
+final class _HostCalls implements HostTools {
+  final names = <String>[];
+
+  @override
+  Future<HostResult> call(HostCall call) async {
+    names.add(call.name);
+    return (text: '2 files changed', isError: false);
+  }
 }
 
 void main() {
@@ -738,6 +750,58 @@ for line in sys.stdin:
     final second = gateway.requests[1]['messages']! as List<Object?>;
     final last = second.last! as Map;
     expect(jsonEncode(last['content']), contains('data:image/png;base64,'));
+    await session.close();
+  });
+
+  test("a briefed session reaches the app's host as everyai__ tools, in place of its own memory", () async {
+    final host = createHostServer();
+    addTearDown(host.stop);
+    final tools = _HostCalls();
+    final token = await host.mint('child', tools, only: workflowHostTools);
+    gateway
+      ..reply(calls: [('everyai__diff_stats', <String, Object?>{})])
+      ..reply(text: 'Done.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-1',
+        initialMessage: 'fix the bug',
+        // A workflow agent: a child, so no client tools of its own.
+        subagent: true,
+        briefing: DriverBriefing(mcpUrl: '${token.url}', mcpToken: token.token),
+      ),
+    );
+    final events = await drive(session);
+    final names = [
+      for (final t in gateway.requests.first['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+    expect(names, containsAll(['everyai__bug_check', 'everyai__check', 'everyai__diff_stats', 'everyai__memory']));
+    expect(names, isNot(contains('memory')));
+    expect(names.where((n) => '$n'.contains('fork') || '$n'.contains('run_workflow')), isEmpty);
+    final call = events.whereType<ActionCall>().single;
+    expect(call.actionKind, 'MCPToolAction');
+    expect(call.toolName, 'everyai__diff_stats');
+    expect(tools.names, ['diff_stats']);
+    expect(events.whereType<ToolResult>().single.text, contains('2 files changed'));
+    // The token lives in memory only.
+    final spec = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
+    expect(spec, isNot(contains(token.token)));
+    await session.close();
+  });
+
+  test('without a briefing a session keeps its own memory and has no everyai tools', () async {
+    gateway.reply(text: 'Done.');
+    final session = await harness.start(spec('hello'));
+    await drive(session);
+    final names = [
+      for (final t in gateway.requests.first['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+    expect(names, contains('memory'));
+    expect(names.where((n) => '$n'.startsWith('everyai__')), isEmpty);
     await session.close();
   });
 

@@ -11,14 +11,21 @@ import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
-import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent;
+import 'package:every_ai/features/code/domain/permissions.dart' show Verdict;
+import 'package:every_ai/features/code/domain/questions.dart';
+import 'package:every_ai/features/code/domain/transcript.dart' show NoticeItem, QuestionItem;
+import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent, userMessageEvent;
 import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
+import 'package:every_ai/features/code/gateway_key.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_prompts.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
+import 'package:every_ai/features/code/workflows/bug_report.dart';
 import 'package:every_ai/features/code/workflows/workflow_engine.dart';
+import 'package:every_ai/features/code/workflows/workflow_library.dart' show loadBundledWorkflows;
+import 'package:every_ai/features/code/workflows/workflow_picker.dart' show WorkflowPick, workflowStartNote;
 import 'package:every_ai/features/code/workflows/workflow_runs.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
@@ -32,6 +39,16 @@ import 'workflow_fakes.dart';
 
 // A workflow run from a session's controller: its agents are child
 // sessions on whichever harness each call names.
+
+/// A keychain that keeps nothing.
+final class _NoStore implements SecretStore {
+  @override
+  Future<String?> read(String key) async => null;
+  @override
+  Future<void> write(String key, String value) async {}
+  @override
+  Future<void> delete(String key) async {}
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -47,6 +64,11 @@ void main() {
   late Preferences prefs;
   Map<String, Object?>? startedArgs;
   String? startedSource;
+  late FakeHost host;
+
+  /// The backend: every request's path, and what it answers (no network by default).
+  late List<String> api;
+  late Future<http.Response> Function(http.Request req) backend;
 
   Future<void> git(List<String> args) async {
     final r = await Process.run('git', args, workingDirectory: project.path);
@@ -61,15 +83,19 @@ void main() {
       modelCatalogProvider.overrideWith(FixedCatalog.new),
       codeUsageProvider.overrideWithBuild((ref, n) async => usage[n.sessionId] ?? UsageTotals.zero),
       driverRegistryProvider.overrideWithValue(DriverRegistry({...drivers})),
-      hostServerProvider.overrideWithValue(FakeHost()),
+      hostServerProvider.overrideWithValue(host),
       driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
       apiClientProvider.overrideWithValue(
         ApiClient(
           baseUrl: Uri.parse('http://backend/'),
-          client: MockClient((req) async => http.Response('no network in this test', 599)),
+          client: MockClient((req) async {
+            api.add(req.url.path);
+            return backend(req);
+          }),
         ),
       ),
       codeSideModelProvider.overrideWithValue((messages) async => ''),
+      gatewayKeysProvider.overrideWith((ref) => GatewayKeys(store: _NoStore(), mint: () async => 'sk-eai-test')),
       workflowBridgeProvider.overrideWithValue(({required dir, required source, required args}) async {
         startedArgs = args;
         startedSource = source;
@@ -91,6 +117,10 @@ void main() {
       'cli': FakeLeadDriver('cli', needsConsent: true, label: 'Gated CLI'),
     };
     prefs = await Preferences.load(db);
+    host = FakeHost();
+    startedArgs = null;
+    api = [];
+    backend = (req) async => http.Response('no network in this test', 599);
     prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: project.path).toJson()]);
     container = makeContainer();
   });
@@ -101,7 +131,7 @@ void main() {
     await tmp.delete(recursive: true);
   });
 
-  Future<CodeSessionController> open() async {
+  Future<CodeSessionController> open({String harness = 'test'}) async {
     final info = await container
         .read(codeSessionsProvider.notifier)
         .start(
@@ -109,7 +139,7 @@ void main() {
           prompt: 'Lead the work',
           model: '',
           mode: AgentMode.autoEdit,
-          harness: 'test',
+          harness: harness,
         );
     container.listen(codeSessionProvider(info.id), (_, _) {});
     await whenValue(container, codeSessionProvider(info.id).select((s) => s.connected), (bool c) => c);
@@ -452,5 +482,302 @@ void main() {
     await container.read(codeUsageProvider(c.sessionId).future);
     answer(drivers['fake2']!.latest!, 'Looks fine');
     await expectLater(reply, throwsA(contains('budget')));
+  });
+
+  group('proof tools', () {
+    const fixSchema = {
+      'type': 'object',
+      'properties': {
+        'cause': {'type': 'string'},
+      },
+      'required': ['cause'],
+    };
+
+    test("a workflow agent's host has only the proof tools, and its briefing no workflows", () async {
+      final c = await open();
+      await c.runWorkflow('demo', 'source');
+      unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
+      final info = await child();
+      expect(info.isWorkflowAgent, isTrue);
+      expect(host.only[info.id], workflowHostTools);
+      expect(host.only[c.sessionId], isNull);
+      final text = drivers['fake2']!.specs.single.briefing!.sessionSkill!;
+      final tools = text.substring(text.indexOf('## everyai tools'), text.indexOf('## Rules'));
+      expect(
+        RegExp(r'^- `(\w+)`', multiLine: true).allMatches(tools).map((m) => m[1]),
+        unorderedEquals(workflowHostTools),
+      );
+      expect(text, isNot(contains('## Workflows')));
+      expect(text, isNot(contains('run_workflow')));
+      expect(await (host.tools[info.id]! as HostPrompts).workflowPrompts(), isEmpty);
+    });
+
+    test("a workflow agent's memory call is refused; the lead's still writes", () async {
+      final c = await open();
+      await c.runWorkflow('demo', 'source');
+      unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
+      final info = await child();
+      HostCall memory(String text) => HostCall(
+        id: 'm-$text',
+        sessionId: '',
+        name: 'memory',
+        args: {'action': 'add', 'text': text},
+        ended: Completer<HostEnd>().future,
+      );
+      final refused = await container.read(codeSessionProvider(info.id).notifier).call(memory('- child note'));
+      expect(refused, (text: workflowMemoryRefusal, isError: true));
+      final kept = await c.call(memory('- run make'));
+      expect(kept.isError, isFalse);
+      final file = File('${project.path}/.everyai/memory.md').readAsStringSync();
+      expect(file, contains('- run make'));
+      expect(file, isNot(contains('child note')));
+    });
+
+    test("a workflow agent's read-only proof tools run, its commands ask", () async {
+      final c = await open();
+      await c.runWorkflow('demo', 'source');
+      unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
+      final info = await child();
+      final policy = container.read(codeSessionProvider(info.id).notifier).policy;
+      ActionCall mcp(String name) => ActionCall(
+        id: name,
+        raw: const {},
+        toolName: 'mcp__everyai__$name',
+        toolCallId: name,
+        action: const {'kind': 'MCPToolAction'},
+      );
+      expect(policy.decide(mcp('diff_stats'), AgentMode.autoEdit).verdict, Verdict.allow);
+      expect(policy.decide(mcp('bug_check'), AgentMode.autoEdit).verdict, Verdict.ask);
+    });
+
+    test("bug_check's record comes from the child's state file, seeded before its first turn", () async {
+      final c = await open();
+      await c.runWorkflow('demo', 'source');
+      final seed = {
+        'available': true,
+        'state': 'verified',
+        'command': 'dart test test/repro_test.dart',
+        'expect': 'Expected: 3',
+        'files': {'test/repro_test.dart': 'abc'},
+      };
+      final reply = bridge.agent('Refix', {'harness': 'fake2', 'schema': fixSchema, 'bugCheck': seed});
+      final info = await child();
+      final state = File('${tmp.path}/data/driver-sessions/${info.id}/bug_check.json');
+      expect(jsonDecode(state.readAsStringSync()), {
+        'command': 'dart test test/repro_test.dart',
+        'expect': 'Expected: 3',
+        'files': {'test/repro_test.dart': 'abc'},
+        'verified': false,
+      });
+      // The child verifies (the host writes the state), and says something else itself.
+      state.writeAsStringSync(
+        jsonEncode({
+          'command': 'dart test test/repro_test.dart',
+          'expect': '',
+          'files': <String, Object?>{},
+          'verified': true,
+        }),
+      );
+      answer(drivers['fake2']!.latest!, '```json\n{"cause": "off by one", "bug_check": {"state": "made up"}}\n```');
+      final value = await reply as Map;
+      expect(value['bug_check'], {
+        'available': true,
+        'state': 'verified',
+        'command': 'dart test test/repro_test.dart',
+        'expect': '',
+        'files': <String, Object?>{},
+      });
+    });
+
+    test('a fresh bug_check is not_reproduced; an agent with no host says why', () async {
+      final c = await open();
+      await c.runWorkflow('demo', 'source');
+      var reply = bridge.agent('Fix', {'harness': 'fake2', 'schema': fixSchema, 'bugCheck': true});
+      final first = await child();
+      answer(drivers['fake2']!.latest!, '```json\n{"cause": "x"}\n```');
+      expect(((await reply as Map)['bug_check'] as Map)['state'], 'not_reproduced');
+      host.mintFails = StateError('no port');
+      reply = bridge.agent('Fix again', {'harness': 'fake2', 'schema': fixSchema, 'bugCheck': true});
+      final second = await whenValue(
+        container,
+        codeSessionsProvider,
+        (List<CodeSessionInfo> all) => all.any((s) => s.isWorkflowAgent && s.id != first.id),
+      ).then((all) => all.firstWhere((s) => s.isWorkflowAgent && s.id != first.id));
+      expect(drivers['fake2']!.specs.last.briefing, isNull);
+      expect(second.title, isNotEmpty);
+      answer(drivers['fake2']!.latest!, '```json\n{"cause": "x"}\n```');
+      final record = (await reply as Map)['bug_check'] as Map;
+      expect(record['available'], isFalse);
+      expect(record['why'], contains('no port'));
+    });
+  });
+
+  group('a thin bug report', () {
+    QuestionItem card(CodeSessionController c) => container
+        .read(codeSessionProvider(c.sessionId))
+        .transcript
+        .items
+        .whereType<QuestionItem>()
+        .lastWhere((q) => q.call.id.startsWith('bugask-'));
+
+    HostCall bugfix(String bug) => HostCall(
+      id: 'h-$bug',
+      sessionId: '',
+      name: runWorkflowTool,
+      args: {
+        'id': 'bugfix',
+        'args': {'bug': bug},
+      },
+      ended: Completer<HostEnd>().future,
+    );
+
+    const answers = [
+      QuestionAnswer(other: 'Saving a note crashes with a TypeError'),
+      QuestionAnswer(selected: {0}),
+      QuestionAnswer(other: 'It saves'),
+    ];
+
+    test('on an outside lead: asked with no model call, then started with the answers', () async {
+      final c = await open();
+      final r = await c.call(bugfix('fix it'));
+      expect(r, (text: bugAskedResult, isError: false));
+      expect(startedArgs, isNull);
+      final q = card(c);
+      expect(q.questions, hasLength(3));
+      expect(q.answers, isNull);
+      // One at a time: a run waits for the card.
+      final again = await c.call(bugfix('Saving crashes'));
+      expect(again.isError, isTrue);
+      expect(again.text, contains('waiting for the user'));
+      await c.answer(q, answers);
+      await pumpEventQueue();
+      expect(startedArgs!['bug'], startsWith('fix it\nWhat goes wrong: Saving a note crashes with a TypeError'));
+      expect(startedArgs!['bug'], contains('Expected: It saves'));
+      expect(card(c).answers, answers);
+      expect(api.where((p) => p.endsWith('/aux/decide')), isEmpty);
+    });
+
+    test('a concrete report on an outside lead starts at once', () async {
+      final c = await open();
+      final r = await c.call(bugfix('Saving a note crashes'));
+      expect(r.text, startsWith('Started Bug fix'));
+      await pumpEventQueue();
+      expect(startedArgs!['bug'], 'Saving a note crashes');
+    });
+
+    test('empty answers start nothing, and the lead is told', () async {
+      final c = await open();
+      await c.call(bugfix(''));
+      await c.answer(card(c), const [QuestionAnswer(), QuestionAnswer(), QuestionAnswer()]);
+      await pumpEventQueue();
+      expect(startedArgs, isNull);
+      final notices = container.read(codeSessionProvider(c.sessionId)).transcript.items.whereType<NoticeItem>();
+      expect(notices.last.message, "Bug fix didn't start: no bug was given.");
+      lead.add(stateEvent('idle', ExecutionStatus.finished));
+      for (var i = 0; i < 50 && !lead.sent.any((m) => m.contains('state="failed"')); i++) {
+        await pumpEventQueue();
+      }
+      expect(lead.sent.last, contains('state="failed"'));
+      // The card is closed, so another run may start.
+      expect((await c.call(bugfix('Saving a note crashes'))).isError, isFalse);
+    });
+
+    group('on the EveryAI harness', () {
+      setUp(() {
+        drivers['everyai'] = FakeLeadDriver('everyai', session: lead);
+        container.dispose();
+        container = makeContainer();
+      });
+
+      void decides(Object? concrete) => backend = (req) async => req.url.path.endsWith('/aux/decide')
+          ? http.Response(
+              jsonEncode({
+                'answers': [
+                  {'id': 'concrete', 'value': concrete},
+                ],
+              }),
+              200,
+              headers: {'content-type': 'application/json'},
+            )
+          : http.Response('no network in this test', 599);
+
+      test('decide says no symptom: the user is asked', () async {
+        decides(false);
+        final c = await open(harness: 'everyai');
+        expect((await c.call(bugfix('The save flow in notes needs a look please'))).text, bugAskedResult);
+        expect(api.where((p) => p.endsWith('/aux/decide')), hasLength(1));
+        expect(card(c).questions, bugQuestions);
+      });
+
+      test('decide says concrete: it starts at once', () async {
+        decides(true);
+        final c = await open(harness: 'everyai');
+        expect((await c.call(bugfix('the button'))).text, startsWith('Started Bug fix'));
+      });
+
+      test('a workflow agent on it reaches the restricted host, unsaved, and its proof tools are host tools', () async {
+        final c = await open(harness: 'everyai');
+        await c.runWorkflow('demo', 'source');
+        unawaited(bridge.agent('Fix', <String, Object?>{}).catchError((Object _) => null));
+        final info = await child();
+        expect(info.harness, 'everyai');
+        expect(host.only[info.id], workflowHostTools);
+        final briefing = drivers['everyai']!.specs.last.briefing!;
+        expect(briefing.mcpToken, host.live[info.id]!.single);
+        expect(briefing.sessionSkill, isNull);
+        expect(prefs['code.sessions'], isNot(contains(briefing.mcpToken)));
+        final policy = container.read(codeSessionProvider(info.id).notifier).policy;
+        ActionCall mcp(String name) => ActionCall(
+          id: name,
+          raw: const {},
+          toolName: 'everyai__$name',
+          toolCallId: name,
+          action: const {'kind': 'MCPToolAction'},
+        );
+        expect(policy.decide(mcp('diff_stats'), AgentMode.autoEdit).verdict, Verdict.allow);
+        expect(policy.decide(mcp('bug_check'), AgentMode.autoEdit).verdict, Verdict.ask);
+        // The lead on the EveryAI harness has no host tools.
+        expect(c.policy.decide(mcp('diff_stats'), AgentMode.autoEdit).verdict, Verdict.ask);
+      });
+
+      test('a failed decide falls back to the heuristic', () async {
+        final c = await open(harness: 'everyai');
+        expect((await c.call(bugfix('the button'))).text, bugAskedResult);
+        expect((await c.call(bugfix('x'))).isError, isTrue);
+        await c.answer(card(c), answers);
+        await pumpEventQueue();
+        expect(startedArgs!['bug'], contains('What goes wrong'));
+        expect(api.where((p) => p.endsWith('/aux/decide')), hasLength(1));
+      });
+    });
+
+    test('a picked Bug fix asks once its start note is in, then starts', () async {
+      final entry = (await loadBundledWorkflows()).firstWhere((w) => w.id == 'bugfix');
+      final info = await container
+          .read(codeSessionsProvider.notifier)
+          .start(
+            project: container.read(codeProjectsProvider).single,
+            prompt: 'fix it',
+            model: '',
+            mode: AgentMode.autoEdit,
+            harness: 'test',
+            workflow: WorkflowPick.script(entry),
+          );
+      container.listen(codeSessionProvider(info.id), (_, _) {});
+      await whenValue(container, codeSessionProvider(info.id).select((s) => s.connected), (bool c) => c);
+      final c = container.read(codeSessionProvider(info.id).notifier);
+      // Not before the start note: that turn would close the card as answered in chat.
+      expect(container.read(codeSessionProvider(info.id)).transcript.items.whereType<QuestionItem>(), isEmpty);
+      lead.add(userMessageEvent('u1', workflowStartNote(entry, 'fix it')));
+      await whenValue(
+        container,
+        codeSessionProvider(info.id).select((s) => s.transcript.openQuestion?.call.id ?? ''),
+        (String id) => id.startsWith('bugask-'),
+      );
+      expect(startedArgs, isNull);
+      await c.answer(card(c), answers);
+      await pumpEventQueue();
+      expect(startedArgs!['bug'], startsWith('fix it\n'));
+    });
   });
 }

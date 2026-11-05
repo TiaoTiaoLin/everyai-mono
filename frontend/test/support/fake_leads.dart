@@ -252,14 +252,22 @@ final class FakeHost implements HostServer {
   final revokedSessions = <String>[];
   final tools = <String, HostTools>{};
 
+  /// The allowlist each session was minted with (absent: every tool).
+  final only = <String, Set<String>?>{};
+
   /// Live tokens by session; a revoked one leaves.
   final live = <String, Set<String>>{};
   var touchOk = true;
   var _n = 0;
 
+  /// What [mint] throws (the server couldn't start).
+  Object? mintFails;
+
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools) async {
+  Future<HostToken> mint(String sessionId, HostTools tools, {Set<String>? only}) async {
+    if (mintFails case final e?) throw e;
     minted.add(sessionId);
+    this.only[sessionId] = only;
     this.tools[sessionId] = tools;
     final token = 'tok${++_n}';
     (live[sessionId] ??= {}).add(token);

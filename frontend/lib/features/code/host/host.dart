@@ -3,6 +3,9 @@
 import 'dart:async';
 
 import '../domain/agent_mode.dart' show askUserQuestionTool, presentPlanTool;
+import '../domain/phases.dart' show bugCheckTool;
+import 'host_checks.dart' show checkTool, diffStatsTool;
+import 'host_report.dart' show reportIssueTool;
 import 'host_server_stub.dart' if (dart.library.io) 'host_server_io.dart' as impl;
 
 // EveryAI as an MCP server for the agents it drives (Claude Code, Codex, …):
@@ -52,8 +55,9 @@ typedef HostTimer = Timer Function(Duration after, void Function() fire);
 /// The app's one MCP host. It listens only while a token is live.
 abstract interface class HostServer {
   /// A new token for [sessionId], whose calls go to [tools]. Binds the
-  /// server on first use.
-  Future<HostToken> mint(String sessionId, HostTools tools);
+  /// server on first use. With [only], the token sees just those of
+  /// [hostToolSpecs] (same order); tools/call refuses the rest.
+  Future<HostToken> mint(String sessionId, HostTools tools, {Set<String>? only});
 
   /// Marks [token] as used now, so it doesn't expire while the session idles
   /// (call it at each turn). False when it already expired: the agent then
@@ -85,6 +89,11 @@ HostServer createHostServer({
 /// The tools a session token sees, MCP-shaped, in a fixed order (an agent's
 /// prompt cache keeps them). Empty where the server can't run.
 List<Map<String, Object?>> get hostToolSpecs => impl.hostToolSpecs;
+
+/// What a workflow agent's token sees: the proof tools and nothing that
+/// forks, starts a workflow or asks the user (the lead does that). Memory is
+/// there so its refusal can say where the memory is.
+const workflowHostTools = {bugCheckTool, checkTool, diffStatsTool, 'memory', reportIssueTool};
 
 /// The calls that wait for the user, so they get [createHostServer]'s
 /// `heldLimit`.

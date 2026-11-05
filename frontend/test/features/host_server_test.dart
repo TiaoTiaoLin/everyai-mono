@@ -169,6 +169,22 @@ void main() {
     expect(tools.calls.single.sessionId, 's1');
   });
 
+  test('a workflow agent\'s token lists and runs only its tools', () async {
+    final w = await server.mint('wf', tools, only: workflowHostTools);
+    final c = await McpConnection.open('everyai', {
+      'url': '${w.url}',
+      'headers': {'Authorization': 'Bearer ${w.token}'},
+    });
+    addTearDown(c.close);
+    expect([for (final t in c.tools) t['name']], ['memory', 'bug_check', 'check', 'diff_stats', 'report_issue']);
+    for (final name in ['fork', 'run_workflow', 'ask_user_question', 'present_plan']) {
+      final r = await post(rpc('tools/call', {'name': name, 'arguments': <String, Object?>{}}), token: w.token);
+      expect(errorCode(r), -32602, reason: name);
+      expect(r.body, contains('Unknown tool'), reason: name);
+    }
+    expect(tools.calls, isEmpty);
+  });
+
   test('a fork call reaches the session and returns at once, with no held timer', () async {
     final c = await McpConnection.open('everyai', {
       'url': '${tok.url}',

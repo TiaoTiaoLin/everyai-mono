@@ -78,8 +78,7 @@ HostServer createHostServer({
   bind ?? () => HttpServer.bind(InternetAddress.loopbackIPv4, 0),
 );
 
-/// A live token. Stage 5's grants for outside agents would be a second kind
-/// of this record, with their own tool list.
+/// A live token, with the tool list it was minted with.
 final class _Grant {
   _Grant(this.token, this.sessionId, this.tools, this.specs, this.lastUsed);
   final String token;
@@ -136,10 +135,16 @@ final class _HostServer implements HostServer {
   }
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools) async {
+  Future<HostToken> mint(String sessionId, HostTools tools, {Set<String>? only}) async {
     _sweep();
+    final specs = only == null
+        ? hostToolSpecs
+        : [
+            for (final s in hostToolSpecs)
+              if (only.contains(s['name'])) s,
+          ];
     final token = 'eai_host_${base64Url.encode(List.generate(32, (_) => _random.nextInt(256))).replaceAll('=', '')}';
-    final grant = _Grant(token, sessionId, tools, hostToolSpecs, now());
+    final grant = _Grant(token, sessionId, tools, specs, now());
     _grants.add(grant);
     try {
       await _serial(() async {

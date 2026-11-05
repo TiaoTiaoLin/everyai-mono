@@ -167,6 +167,73 @@ void main() {
     await run;
   });
 
+  group('bugCheck', () {
+    const fixed = '```json\n{"status":"done","bug_check":{"state":"verified"}}\n```';
+    const open = {
+      'type': 'object',
+      'properties': {
+        'status': {'type': 'string'},
+      },
+      'required': ['status'],
+    };
+
+    test("the app's record joins the answer, over one the agent wrote, and is journalled", () async {
+      launcher.reply = (call, turn) => fixed;
+      launcher.bugCheck = (id) => {'available': true, 'state': 'reproduced', 'command': 'dart test'};
+      final run = engine().run();
+      final value = await bridge.agent('fix it', {'schema': open, 'bugCheck': true});
+      expect(value, {
+        'status': 'done',
+        'bug_check': {'available': true, 'state': 'reproduced', 'command': 'dart test'},
+      });
+      expect(launcher.calls.single.bugCheck, isEmpty);
+      bridge.finish(null);
+      await run;
+      final agent = lines.map((l) => jsonDecode(l) as Map).firstWhere((m) => m['t'] == 'agent');
+      expect((agent['value'] as Map)['bug_check'], containsPair('state', 'reproduced'));
+    });
+
+    test('a seed reaches the launcher; without the option nothing is added and the key stays', () async {
+      launcher.reply = (call, turn) => '```json\n{"status":"done"}\n```';
+      final run = engine().run();
+      final seed = {'available': true, 'state': 'verified', 'command': 'dart test'};
+      await bridge.agent('fix it', {'schema': _schema, 'bugCheck': seed});
+      expect(launcher.calls.single.bugCheck, seed);
+      expect(await bridge.agent('fix it', {'schema': _schema, 'bugCheck': false}), {'status': 'done'});
+      await bridge.agent('fix it', {'schema': _schema});
+      expect(launcher.calls[1].bugCheck, isNull);
+      expect(launcher.bugChecked, [launcher.started.first.childId]);
+      // Off is the same call as before the option existed (#1, #2 of one key); on is another.
+      final keys = [for (final c in launcher.calls) c.key];
+      expect(keys[2], '${keys[1].split('#').first}#2');
+      expect(keys[0].split('#').first, isNot(keys[1].split('#').first));
+      bridge.finish(null);
+      await run;
+    });
+
+    test('a resumed run replays the record without asking the launcher again', () async {
+      launcher.reply = (call, turn) => '```json\n{"status":"done"}\n```';
+      final first = engine().run();
+      await bridge.agent('fix it', {'schema': _schema, 'bugCheck': true});
+      bridge.finish(null);
+      await first;
+      final journal = [
+        for (final l in lines)
+          if ((jsonDecode(l) as Map)['t'] != 'end') l,
+      ];
+      bridge = FakeBridge();
+      launcher = FakeLauncher();
+      lines = [];
+      final run = engine(journal: WorkflowJournal.parse(journal.join('\n'), (l) async => lines.add(l))).run();
+      final value = await bridge.agent('fix it', {'schema': _schema, 'bugCheck': true});
+      expect((value! as Map)['bug_check'], containsPair('state', 'verified'));
+      expect(launcher.started, isEmpty);
+      expect(launcher.bugChecked, isEmpty);
+      bridge.finish(null);
+      await run;
+    });
+  });
+
   group('caps', () {
     test('the agent past maxAgents is refused with a cap error', () async {
       final run = engine(caps: const WorkflowCaps(maxAgents: 2)).run();
