@@ -72,9 +72,10 @@ void main() {
     });
 
     test('hidden characters in a result are removed and named', () {
-      final r = hostFit(dir, 'x', (text: 'FAIL\u200B: ok\u202E', isError: true));
+      final r = hostFit(dir, 'x', (text: 'FAIL\u{E0049}: ok\u202E', isError: true));
       expect(r, (
-        text: '[Hidden characters removed from the output: zero-width characters, text-direction controls.]\nFAIL: ok',
+        text:
+            '[Hidden characters removed from the output: text-direction controls, invisible tag characters.]\nFAIL: ok',
         isError: true,
       ));
     });

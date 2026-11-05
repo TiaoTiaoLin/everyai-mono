@@ -9,6 +9,7 @@ import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 
 import '../../../../core/security/untrusted.dart';
+import '../../domain/permissions.dart' show commandPaths;
 import 'apply_patch.dart';
 import 'browser_io.dart';
 import 'llm.dart';
@@ -524,10 +525,15 @@ final class ToolRunner {
     this.pathMap = const {},
     this.researchSites,
     this.browser,
+    this.ownFolders = const [],
     Scrubber? scrubber,
   }) : scrubber = scrubber ?? Scrubber.forProject(root, extra: [gateway.apiKey]);
 
   final String root;
+
+  /// Folders outside [root] whose files are the user's own (the session's
+  /// skills, see [skillFolders]): read doesn't mark them as outside text.
+  final List<String> ownFolders;
 
   /// The session's headless browser; null (tests) means none.
   final HeadlessBrowser? browser;
@@ -679,11 +685,27 @@ final class ToolRunner {
 
   String _fit(String text, String name) {
     if (text.length <= maxToolText) return text;
+    const half = maxToolText ~/ 2;
+    return '${text.substring(0, half)}\n\n${_spill(text, name, maxToolText)}\n\n${text.substring(text.length - half)}';
+  }
+
+  /// Saves [text] under `.everyai/spill/` and returns our note for the cut.
+  String _spill(String text, String name, int kept) {
     final dir = Directory(spillDir)..createSync(recursive: true);
     final file = File('${dir.path}/$name.txt')..writeAsStringSync(text);
-    const half = maxToolText ~/ 2;
-    return '${text.substring(0, half)}\n\n[… ${text.length - maxToolText} characters cut. The full output is in '
-        '${file.path}; read it in parts or grep it. …]\n\n${text.substring(text.length - half)}';
+    return '[… ${text.length - kept} characters cut. The full output is in ${file.path}; read it in parts or grep '
+        'it. …]';
+  }
+
+  /// [text] from [source] in an untrusted block, cut like [_fit] when long: the head and the tail each in their own
+  /// block, so our cut note stays outside them (a page can't fake it). Leaves room for the notes around it, so the
+  /// [_fit] that follows keeps it whole.
+  String _untrustedFit(String text, String source, String name) {
+    const kept = maxToolText - 2000;
+    if (text.length <= kept) return untrusted(text, source: source);
+    const half = kept ~/ 2;
+    return '${untrusted(text.substring(0, half), source: source)}\n\n${_spill(text, name, kept)}\n\n'
+        '${untrusted(text.substring(text.length - half), source: source)}';
   }
 
   Future<ToolOutput> _bash(Map<String, Object?> args, Future<void>? cancel) async {
@@ -698,12 +720,14 @@ final class ToolRunner {
       );
     }
     final ms = ((args['timeout'] as num?)?.toInt() ?? 120000).clamp(1000, 600000);
+    final cwd = shell.cwd;
+    final name = 'bash-${DateTime.now().millisecondsSinceEpoch}';
     final r = await shell.run(
       command,
       timeout: Duration(milliseconds: ms),
       cancel: cancel,
     );
-    final out = _commandOutput(command, r.output.trimRight());
+    final out = _commandOutput(command, r.output.trimRight(), name, cwd: cwd);
     final note = r.timedOut
         ? '\n[Killed after ${ms ~/ 1000} s. Run long commands in the background with run_in_background.]'
         : r.cancelled
@@ -711,19 +735,34 @@ final class ToolRunner {
         : '';
     final shown = '${out.isEmpty ? '(no output)' : out}$note${r.exitCode == 0 ? '' : '\n[exit code ${r.exitCode}]'}';
     return ToolOutput(
-      _fit(shown, 'bash-${DateTime.now().millisecondsSinceEpoch}'),
+      _fit(shown, name),
       isError: r.exitCode != 0,
       observation: {'exit_code': r.exitCode, 'cwd': shell.cwd},
     );
   }
 
-  /// [output] of [command] as the model gets it: in an untrusted block when
-  /// the command prints text from outside (see [untrustedCommand]), else
-  /// without hidden characters (named in a note when there were any).
-  String _commandOutput(String command, String output) {
+  /// [output] of [command] (run in [cwd]) as the model gets it: in an
+  /// untrusted block when the command prints text from outside (see
+  /// [untrustedCommand]) or names a file outside the project (`cat
+  /// node_modules/x/README.md`, `head ~/Downloads/page.html`), else without
+  /// hidden characters (named in a note when there were any).
+  String _commandOutput(String command, String output, String name, {String? cwd}) {
     if (output.isEmpty) return output;
-    if (untrustedCommand(command) case final source?) return untrusted(output, source: source);
+    final source = untrustedCommand(command) ?? _outsidePathIn(command, cwd ?? shell.cwd);
+    if (source != null) return _untrustedFit(output, source, name);
     return stripHiddenNoted(output);
+  }
+
+  /// `command output: <path>` for the first path argument of [command] that
+  /// is outside the project (see [outsideProject]), or null. `/dev/…` (null,
+  /// stdin) doesn't count.
+  String? _outsidePathIn(String command, String cwd) {
+    for (final w in commandPaths(command)) {
+      if (w.startsWith('/dev/') || w.contains(r'$')) continue;
+      final path = resolvePath(cwd, w);
+      if (outsideProject(root, path, own: ownFolders)) return 'command output: $path';
+    }
+    return null;
   }
 
   BackgroundShell? _bg(Map<String, Object?> args) => shell.backgroundShell(args['shell_id'] as String? ?? '');
@@ -738,7 +777,7 @@ final class ToolRunner {
       final re = RegExp(f);
       text = text.split('\n').where(re.hasMatch).join('\n');
     }
-    final shown = text.isEmpty ? '(no new output)' : _commandOutput(b.command, text);
+    final shown = text.isEmpty ? '(no new output)' : _commandOutput(b.command, text, 'bg-${b.id}');
     return ToolOutput(_fit('[${b.id}: ${_status(b)}]\n$shown', 'bg-${b.id}'));
   }
 
@@ -786,7 +825,7 @@ final class ToolRunner {
         : !b.running
         ? '${b.id} exited with code ${b.exitCode}.'
         : 'Still running after ${ms ~/ 1000} s with no match.';
-    final shown = fresh.isEmpty ? '(none)' : _commandOutput(b.command, fresh);
+    final shown = fresh.isEmpty ? '(none)' : _commandOutput(b.command, fresh, 'bg-${b.id}');
     return ToolOutput(_fit('$why\n--- output while waiting ---\n$shown', 'bg-${b.id}'));
   }
 
@@ -823,43 +862,43 @@ final class ToolRunner {
     _read[path] = file.lastModifiedSync();
     if (lines.isEmpty) return ToolOutput('(empty file)', observation: {'path': path});
     final end = (offset - 1 + limit).clamp(0, lines.length);
-    final outside = outsideProject(root, path);
+    final outside = outsideProject(root, path, own: ownFolders);
     final body = StringBuffer();
-    // The user's own file: hidden characters come out of what the model sees (edits still match, see applyEdit).
+    // The user's own file: the hidden characters no ordinary text needs come out of what the model sees (edits still
+    // match, see applyEdit); emoji joiners and direction marks stay, so rewriting a line keeps them.
     final hidden = <HiddenKind>{};
     final hiddenLines = <int>[];
     for (var i = offset - 1; i < end; i++) {
       var l = lines[i];
       if (!outside) {
-        final kinds = hiddenIn(l);
+        final kinds = hiddenIn(l, keepWriting: true);
         if (kinds.isNotEmpty) {
           hidden.addAll(kinds);
           hiddenLines.add(i + 1);
-          l = stripHidden(l);
+          l = stripHidden(l, keepWriting: true);
         }
       }
       body.writeln('${'${i + 1}'.padLeft(6)}\t${l.length > 2000 ? '${l.substring(0, 2000)}…' : l}');
     }
     final out = StringBuffer();
+    final name = 'read-${DateTime.now().millisecondsSinceEpoch}';
     if (outside) {
       // Not the user's: a dependency, another tool's output, a file elsewhere on the machine.
-      out.writeln(untrusted(body.toString().trimRight(), source: path));
+      out.writeln(_untrustedFit(body.toString().trimRight(), path, name));
     } else {
       if (hiddenLines.isNotEmpty) {
         final shown = hiddenLines.take(10).join(', ');
         final more = hiddenLines.length > 10 ? ' and ${hiddenLines.length - 10} more' : '';
         out.writeln(
           '[Hidden characters removed (${hiddenLabels({for (final k in HiddenKind.values)
-            if (hidden.contains(k)) k})}) on line${hiddenLines.length == 1 ? '' : 's'} $shown$more. The file still has them; edits work as usual.]',
+            if (hidden.contains(k)) k})}) on line${hiddenLines.length == 1 ? '' : 's'} $shown$more. The file still has them: lines you copy unchanged into edit, apply_patch or write keep them, lines '
+          'you change lose them. To remove one without other changes, use sed.]',
         );
       }
       out.write(body);
     }
     if (end < lines.length) out.writeln('\n[${lines.length - end} more lines; read on with offset ${end + 1}.]');
-    return ToolOutput(
-      _fit(out.toString(), 'read-${DateTime.now().millisecondsSinceEpoch}'),
-      observation: {'path': path},
-    );
+    return ToolOutput(_fit(out.toString(), name), observation: {'path': path});
   }
 
   String? _staleRead(String path) {
@@ -883,7 +922,8 @@ final class ToolRunner {
     }
     // Parts meet on a line break.
     final after = !append || before.isEmpty
-        ? content
+        // Lines copied unchanged from what read showed keep their hidden characters (see keepHidden).
+        ? keepHidden(before.split('\n'), content.split('\n')).join('\n')
         : '$before${before.endsWith('\n') || content.startsWith('\n') ? '' : '\n'}$content';
     file.parent.createSync(recursive: true);
     file.writeAsStringSync(after);
@@ -1089,15 +1129,25 @@ final class ToolRunner {
     if (out.isEmpty) return const ToolOutput('No matches.');
     final lines = out.split('\n');
     final shown = lines.length > 250 ? [...lines.take(250), '[${lines.length - 250} more not shown]'] : lines;
-    // Matching lines are file text: hidden characters out, as read does (paths are left alone; scripts parse them).
+    // Matching lines are file text: hidden characters out, as read does, and lines from files outside the project
+    // (see outsideProject) in an untrusted block. Path lists are left alone; scripts parse them.
     final text = shown.map(_relative).join('\n');
+    final name = 'grep-${DateTime.now().millisecondsSinceEpoch}';
+    if (mode != 'content') return ToolOutput(_fit(text, name));
+    final outside = [
+      where,
+      for (final l in shown)
+        if (_grepFile.firstMatch(l)?.group(1) case final f?) resolvePath(root, f),
+    ].where((p) => outsideProject(root, p, own: ownFolders)).firstOrNull;
     return ToolOutput(
-      _fit(
-        mode == 'content' ? stripHiddenNoted(text, what: 'the matching lines') : text,
-        'grep-${DateTime.now().millisecondsSinceEpoch}',
-      ),
+      outside != null
+          ? _untrustedFit(text, 'grep: $outside', name)
+          : _fit(stripHiddenNoted(text, what: 'the matching lines'), name),
     );
   }
+
+  /// The file of a content-mode match line (`path:12:text`).
+  static final _grepFile = RegExp(r'^([^\n]+?):\d+:');
 
   String _relative(String line) => line.startsWith('$root/') ? line.substring(root.length + 1) : line;
 
@@ -1310,6 +1360,7 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
 /// part of the text once they are left out, or null.
 int? _hiddenLineIn(List<String> lines, String oldStr) {
   final stripped = lines.map(stripHidden).toList();
+  bool hidden(int i) => stripHidden(lines[i], keepWriting: true) != lines[i];
   final joined = stripped.join('\n');
   final want = stripHidden(oldStr);
   final at = joined.indexOf(want);
@@ -1318,7 +1369,7 @@ int? _hiddenLineIn(List<String> lines, String oldStr) {
   final first = '\n'.allMatches(joined.substring(0, at)).length;
   final last = first + '\n'.allMatches(want).length;
   for (var i = first; i <= last && i < lines.length; i++) {
-    if (stripped[i] != lines[i]) return i + 1;
+    if (hidden(i)) return i + 1;
   }
   return null;
 }

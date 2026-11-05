@@ -86,11 +86,7 @@ Future<ToolOutput> runBrowser(
     }
     return ToolOutput('$text\nScreenshot: $path', images: [(label: path, dataUrl: url)]);
   } on BrowserError catch (e) {
-    final log = b.takeLog();
-    return ToolOutput(
-      'Error: ${stripHidden(e.message)}${log.isEmpty ? '' : '\n${untrusted('Page log:\n${log.join('\n')}', source: _page)}'}',
-      isError: true,
-    );
+    return ToolOutput(browserErrorText(action, e.message, b.takeLog()), isError: true);
   }
 }
 
@@ -108,6 +104,17 @@ String browserResultText(String action, String did, List<String> log) {
     if (log.isNotEmpty) 'Page log:\n${log.join('\n')}' else if (action == 'console') '(nothing logged)',
   ].join('\n');
   return log.isEmpty && !_pageTextActions.contains(action) ? text : untrusted(text, source: _page);
+}
+
+/// A failed browser action's text. The message of a page-text action (an
+/// eval that threw, a click hit) can quote the page, so it goes in the block
+/// with the page log; otherwise only the log does.
+String browserErrorText(String action, String message, List<String> log) {
+  final logText = log.isEmpty ? '' : 'Page log:\n${log.join('\n')}';
+  if (_pageTextActions.contains(action)) {
+    return 'Error: the browser action failed.\n${untrusted([message, if (logText.isNotEmpty) logText].join('\n'), source: _page)}';
+  }
+  return 'Error: ${stripHidden(message)}${logText.isEmpty ? '' : '\n${untrusted(logText, source: _page)}'}';
 }
 
 /// Captures window [w] to `.everyai/scratch/screenshots/` under [root] and

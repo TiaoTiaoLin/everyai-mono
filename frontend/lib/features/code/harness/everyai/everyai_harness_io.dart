@@ -32,6 +32,7 @@ import 'project_notes_io.dart';
 import 'script_io.dart';
 import 'shell_io.dart';
 import 'tools_io.dart';
+import 'untrusted_tools.dart' show skillFolders;
 
 /// The EveryAI harness: the agent loop runs here, in the app, against the
 /// gateway. It speaks the same events as the agent-server (the transcript,
@@ -147,6 +148,7 @@ final class EveryAISession
       pathMap: _spec.pathMap,
       researchSites: _spec.researchSites,
       browser: _browser,
+      ownFolders: skillFolders(_spec.skills),
     )..bypass = _spec.mode == AgentMode.bypass;
   }
 
@@ -825,6 +827,7 @@ final class EveryAISession
       pathMap: _spec.pathMap,
       researchSites: _spec.researchSites,
       browser: _browser,
+      ownFolders: skillFolders(_spec.skills),
     )..bypass = _spec.mode == AgentMode.bypass;
     _writeSpec();
   }

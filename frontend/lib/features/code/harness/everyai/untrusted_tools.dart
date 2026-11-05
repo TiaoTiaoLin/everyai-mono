@@ -45,30 +45,41 @@ String? untrustedCommand(String command) {
 String hiddenLabels(Set<HiddenKind> kinds) => kinds.map((k) => k.label).join(', ');
 
 /// [text] without hidden characters and, when any were removed, a note in
-/// front naming them ([what]: what the text is). Clean text comes back as it is.
+/// front naming them ([what]: what the text is). The user's own text: the
+/// characters ordinary writing uses stay (see `stripHidden`'s `keepWriting`).
+/// Clean text comes back as it is.
 String stripHiddenNoted(String text, {String what = 'the output'}) {
-  final hidden = hiddenIn(text);
+  final hidden = hiddenIn(text, keepWriting: true);
   if (hidden.isEmpty) return text;
-  return '[Hidden characters removed from $what: ${hiddenLabels(hidden)}.]\n${stripHidden(text)}';
+  return '[Hidden characters removed from $what: ${hiddenLabels(hidden)}.]\n${stripHidden(text, keepWriting: true)}';
 }
 
 /// [replacement] for [original] lines, where every new line that equals an
 /// original line with its hidden characters removed keeps that original line.
-/// The model saw the lines stripped (read removes hidden characters), so a
-/// line it copied unchanged keeps what it had (an emoji joiner, a direction
-/// mark); only lines it rewrote lose them.
+/// The model saw the lines stripped (read removes the hidden characters
+/// ordinary text never needs), so a line it copied unchanged keeps what it
+/// had; only lines it rewrote lose them. A copy that also lost the writing
+/// marks (an emoji joiner, a direction mark) still counts as unchanged.
 List<String> keepHidden(List<String> original, List<String> replacement) {
   // Stripped text → the original lines that strip to it, in order (each kept once).
-  final left = <String, List<String>>{};
-  for (final l in original) {
-    final s = stripHidden(l);
-    if (s != l) (left[s] ??= []).add(l);
+  final left = <String, List<int>>{};
+  for (var i = 0; i < original.length; i++) {
+    final l = original[i];
+    for (final s in {stripHidden(l, keepWriting: true), stripHidden(l)}) {
+      if (s != l) (left[s] ??= []).add(i);
+    }
   }
   if (left.isEmpty) return replacement;
+  final used = <int>{};
   final out = <String>[];
   for (final line in replacement) {
-    final same = left[line];
-    out.add(same == null || same.isEmpty ? line : same.removeAt(0));
+    final i = left[line]?.where((i) => !used.contains(i)).firstOrNull;
+    if (i == null) {
+      out.add(line);
+    } else {
+      used.add(i);
+      out.add(original[i]);
+    }
   }
   return out;
 }
@@ -82,10 +93,18 @@ const _outsideNotes = {'spill', 'handoffs', 'scratch'};
 
 /// Whether [path] (absolute, normalised) is outside the user's own files in
 /// [root]: elsewhere on the machine, in a dependency folder, or in one of
-/// EveryAI's folders of outside text.
-bool outsideProject(String root, String path) {
+/// EveryAI's folders of outside text. Folders in [own] (the session's skills,
+/// which the prompt tells the model to follow) count as the user's.
+bool outsideProject(String root, String path, {Iterable<String> own = const []}) {
+  if (own.any((d) => path == d || path.startsWith('$d/'))) return false;
   if (!path.startsWith('$root/')) return path != root;
   final parts = path.substring(root.length + 1).split('/');
   if (parts.length > 2 && parts.first == '.everyai' && _outsideNotes.contains(parts[1])) return true;
   return parts.take(parts.length - 1).any(_dependencyFolders.contains);
 }
+
+/// The folders of [skills] (SessionSpec.skills, whose `source` is a SKILL.md path).
+List<String> skillFolders(List<Map<String, Object?>> skills) => [
+  for (final s in skills)
+    if (s['source'] case final String p when p.endsWith('/SKILL.md')) p.substring(0, p.length - '/SKILL.md'.length),
+];
