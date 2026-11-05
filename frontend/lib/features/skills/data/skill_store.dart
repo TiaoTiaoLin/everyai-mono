@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'dart:typed_data';
+
+import '../domain/hidden_instructions.dart';
 
 import '../domain/builtin_skills.dart';
 import '../domain/skill_catalog.dart';
@@ -41,3 +44,15 @@ Future<List<int>?> readSkillFileBytes(String dir, String rel, {int maxBytes = 51
 /// installed; one the user removed stays removed, and a folder of the same
 /// name the user made is left alone.
 Future<void> seedBuiltinSkills(String libraryDir, List<BuiltinSkill> skills) => impl.seedBuiltins(libraryDir, skills);
+
+/// Hidden or suspicious text in [skill]: its `SKILL.md` findings plus a scan of its bundled text files. Read when the
+/// user opens the trust review, so a scan of every skill folder at each session start stays cheap.
+Future<List<InstructionFinding>> scanSkillFolder(InstalledSkill skill) async {
+  final out = [...skill.report.findings];
+  for (final rel in skill.files) {
+    if (!scansSkillFile(rel, 0)) continue;
+    final bytes = await readSkillFileBytes(skill.dir, rel, maxBytes: scannedFileBytes);
+    if (bytes != null) out.addAll(scanInstructions(utf8.decode(bytes, allowMalformed: true), file: rel));
+  }
+  return out;
+}

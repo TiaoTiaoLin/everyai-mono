@@ -10,6 +10,7 @@ import '../../code/domain/code_session.dart';
 import '../../../core/ui/anchored_popover.dart';
 import '../../models/domain/model_catalog.dart';
 import '../../models/models_providers.dart';
+import '../../skills/domain/hidden_instructions.dart';
 import '../agents_providers.dart';
 
 /// Settings → Agents: the agents a Code session can hand work to with
@@ -349,10 +350,11 @@ class _AgentTile extends ConsumerWidget {
       title: 'Trust ${a.name}?',
       message:
           'This agent came with the project, in ${a.path}. Subagents started with it follow its instructions.\n\n'
-          '${a.description}${traits.isEmpty ? '' : '\n${traits.join('\n')}'}',
-      // The whole prompt: trust covers all of it.
+          '${a.description}${traits.isEmpty ? '' : '\n${traits.join('\n')}'}'
+          '${a.findings.isEmpty ? '' : '\n\n${findingsMessage(a.findings)}'}',
+      // The whole prompt as the agent gets it (hidden characters removed): trust covers all of it.
       detail: a.prompt,
-      confirmLabel: 'Trust and turn on',
+      confirmLabel: a.findings.isEmpty ? 'Trust and turn on' : 'Trust anyway',
     );
     if (ok) ctl.trust(a);
   }

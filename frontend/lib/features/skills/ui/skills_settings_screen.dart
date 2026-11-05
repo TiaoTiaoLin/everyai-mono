@@ -9,6 +9,7 @@ import '../../../core/ui/every_icons.dart';
 import '../../code/code_providers.dart' show codeProjectsProvider;
 import '../../code/domain/code_session.dart';
 import '../data/skill_import.dart';
+import '../domain/hidden_instructions.dart';
 import '../data/skill_store.dart';
 import '../skills_providers.dart';
 import 'lead_skills_section.dart';
@@ -155,31 +156,60 @@ class SkillsSettingsBody extends ConsumerWidget {
       await _tell(context, 'No skills found', 'There is no SKILL.md in it.');
       return;
     }
-    final lines = <String>[];
-    for (final c in candidates) {
-      if (!c.ok) {
-        lines.add('${c.dirName}: not imported.\n${c.check.report.errors.map((e) => '• $e').join('\n')}');
-        continue;
-      }
-      try {
-        await ref.read(installedSkillsProvider.notifier).import(c, projectId: project?.id, projectPath: project?.path);
-        final warnings = c.check.report.warnings;
-        lines.add(
-          '${c.dirName}: imported${c.check.report.hasScripts ? ' (has scripts)' : ''}.'
-          '${warnings.isEmpty ? '' : '\n${warnings.map((w) => '• $w').join('\n')}'}',
-        );
-      } on StateError catch (e) {
-        lines.add('${c.dirName}: ${e.message}');
-      } on Object catch (e) {
-        lines.add('${c.dirName}: $e');
-      }
-    }
+    final lines = await importSkillCandidates(context, ref, candidates, project: project);
+    if (lines == null) return;
     if (!context.mounted) return;
     await _tell(context, candidates.length == 1 ? 'Import' : 'Imported skills', lines.join('\n\n'));
   }
 
   static Future<void> _tell(BuildContext context, String title, String message) =>
       showAdaptiveConfirm(context, title: title, message: message, confirmLabel: 'OK');
+}
+
+/// Installs the [candidates] that passed their check, into [project] when given, and returns a summary line for each.
+/// A candidate with hidden or suspicious text is installed only when the user says so (a project import is trusted at
+/// once). Null when the screen went away meanwhile.
+Future<List<String>?> importSkillCandidates(
+  BuildContext context,
+  WidgetRef ref,
+  List<ImportCandidate> candidates, {
+  CodeProject? project,
+}) async {
+  final lines = <String>[];
+  for (final c in candidates) {
+    if (!c.ok) {
+      lines.add('${c.dirName}: not imported.\n${c.check.report.errors.map((e) => '• $e').join('\n')}');
+      continue;
+    }
+    // Hidden or suspicious text: the user decides before anything is installed (a project import is trusted).
+    if (c.findings.isNotEmpty) {
+      if (!context.mounted) return null;
+      final go = await showAdaptiveConfirm(
+        context,
+        title: 'Import ${c.dirName}?',
+        message: '${findingsMessage(c.findings)}\n\nCancel skips this skill.',
+        confirmLabel: 'Import anyway',
+      );
+      if (!context.mounted) return null;
+      if (!go) {
+        lines.add('${c.dirName}: skipped.');
+        continue;
+      }
+    }
+    try {
+      await ref.read(installedSkillsProvider.notifier).import(c, projectId: project?.id, projectPath: project?.path);
+      final warnings = c.check.report.warnings;
+      lines.add(
+        '${c.dirName}: imported${c.check.report.hasScripts ? ' (has scripts)' : ''}.'
+        '${warnings.isEmpty ? '' : '\n${warnings.map((w) => '• $w').join('\n')}'}',
+      );
+    } on StateError catch (e) {
+      lines.add('${c.dirName}: ${e.message}');
+    } on Object catch (e) {
+      lines.add('${c.dirName}: $e');
+    }
+  }
+  return lines;
 }
 
 class _SkillTile extends ConsumerWidget {
@@ -257,16 +287,19 @@ class _SkillTile extends ConsumerWidget {
 
   Future<void> _review(BuildContext context, SkillSettingsNotifier ctl) async {
     final m = skill.manifest!;
+    // The bundled files are scanned now, not on every scan; trust still binds to the digest of all of them.
+    final findings = await scanSkillFolder(skill);
+    if (!context.mounted) return;
     final ok = await showAdaptiveConfirm(
       context,
       title: 'Trust ${m.name}?',
       message:
           'This skill came with the project, in ${skill.dir}. The agent will follow its instructions'
           '${skill.report.hasScripts ? ' and may run its scripts (each command still asks in Ask mode)' : ''}.\n\n'
-          '${m.description}',
-      // The whole body: trust covers all of it.
+          '${m.description}${findings.isEmpty ? '' : '\n\n${findingsMessage(findings)}'}',
+      // The whole body as the agent gets it (hidden characters removed): trust covers all of it.
       detail: m.body,
-      confirmLabel: 'Trust and turn on',
+      confirmLabel: findings.isEmpty ? 'Trust and turn on' : 'Trust anyway',
     );
     if (ok) ctl.trust(skill);
   }

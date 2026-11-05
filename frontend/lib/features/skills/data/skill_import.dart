@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 
+import '../domain/hidden_instructions.dart';
 import '../domain/skill_format.dart';
 
 /// A file offered for import, from a folder or a zip.
@@ -37,13 +38,28 @@ final class SkillFile {
 /// files relative to the skill folder.
 @immutable
 final class ImportCandidate {
-  const ImportCandidate({required this.dirName, required this.check, required this.files});
+  const ImportCandidate({required this.dirName, required this.check, required this.files, this.findings = const []});
 
   final String dirName;
   final SkillCheck check;
   final List<SkillFile> files;
+
+  /// Hidden or suspicious text in `SKILL.md` and the bundled text files: the user is asked before it is imported.
+  final List<InstructionFinding> findings;
   bool get ok => check.report.ok;
 }
+
+/// Bundled files read for [scanInstructions]: text-like and at most this large.
+const scannedFileBytes = 256 * 1024;
+
+final _scannedName = RegExp(
+  r'\.(md|markdown|txt|py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|ps1|json|ya?ml|html?|xml|toml)$',
+  caseSensitive: false,
+);
+
+/// Whether a bundled file at [path] of [size] bytes is scanned for hidden instructions (`SKILL.md` is scanned apart).
+bool scansSkillFile(String path, int size) =>
+    path != 'SKILL.md' && size <= scannedFileBytes && _scannedName.hasMatch(path);
 
 /// The skills in [files]: every folder holding a `SKILL.md` (nested skills
 /// belong to the outer one). A `SKILL.md` at the top takes its folder name
@@ -104,6 +120,7 @@ Future<List<ImportCandidate>> findImportCandidates(List<SkillFile> files, {requi
     }
     final withinLimits = count <= SkillRules.maxFiles && total <= SkillRules.maxTotalBytes;
     final entries = <SkillEntry>[];
+    final findings = <InstructionFinding>[];
     for (final f in own) {
       var head = const <int>[];
       if (withinLimits &&
@@ -114,13 +131,13 @@ Future<List<ImportCandidate>> findImportCandidates(List<SkillFile> files, {requi
         head = await f.head();
       }
       entries.add(SkillEntry(f.path, size: f.size, kind: f.kind, head: head));
+      if (withinLimits && f.kind == SkillEntryKind.file && f.read != null && scansSkillFile(f.path, f.size)) {
+        findings.addAll(scanInstructions(utf8.decode(await f.read!(), allowMalformed: true), file: f.path));
+      }
     }
+    final check = checkSkill(dirName: dirName, skillMd: text, entries: entries);
     out.add(
-      ImportCandidate(
-        dirName: dirName,
-        check: checkSkill(dirName: dirName, skillMd: text, entries: entries),
-        files: own,
-      ),
+      ImportCandidate(dirName: dirName, check: check, files: own, findings: [...check.report.findings, ...findings]),
     );
   }
   return out;

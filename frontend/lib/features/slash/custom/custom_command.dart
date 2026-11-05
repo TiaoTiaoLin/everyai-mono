@@ -4,6 +4,8 @@ import 'package:crypto/crypto.dart';
 
 import 'dart:convert';
 
+import '../../../core/security/untrusted.dart';
+import '../../skills/domain/hidden_instructions.dart';
 import '../slash_command.dart';
 
 /// A prompt saved as a Markdown file: `.everyai/commands/<name>.md` in a
@@ -30,6 +32,7 @@ final class CustomCommand {
     this.project,
     this.projectDir,
     this.digest = '',
+    this.findings = const [],
   });
 
   /// The file name without `.md`.
@@ -59,6 +62,10 @@ final class CustomCommand {
   /// SHA-256 of the file text as read; a project command's trust is bound to it.
   final String digest;
 
+  /// Hidden or suspicious text in the file, for the trust review. [body], [description] and [args] have the hidden
+  /// characters removed; [digest] is over the file as it is.
+  final List<InstructionFinding> findings;
+
   bool get isGlobal => project == null;
 
   /// What trust is filed under: the project folder and the name.
@@ -83,12 +90,12 @@ final class CustomCommand {
     String? pick(List<String> keys) {
       for (final k in keys) {
         final v = meta[k];
-        if (v != null && v.isNotEmpty) return v;
+        if (v != null && v.isNotEmpty) return stripHidden(v);
       }
       return null;
     }
 
-    body = body.trim();
+    body = stripHidden(body).trim();
     final usesArgs = _placeholder.hasMatch(body);
     return CustomCommand(
       name: name,
@@ -101,6 +108,7 @@ final class CustomCommand {
       project: project,
       projectDir: projectDir,
       digest: sha256.convert(utf8.encode(source)).toString(),
+      findings: scanInstructions(source, file: path == null ? '$name.md' : path.split('/').last),
     );
   }
 
