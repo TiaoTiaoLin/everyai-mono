@@ -14,10 +14,10 @@ import 'files_view.dart';
 import 'running_work.dart';
 import 'session_info_view.dart';
 
-/// The session screen's body with its right panel: beside [child] when [tier] is wide (a divider resizes it), over
-/// it on the right otherwise, with the rest of the transcript dimmed (a tap there closes it). An overlaid panel
-/// steps aside when the session puts something in front of the user (a draft card, an approval, a question), since
-/// those land under it.
+/// The session screen's body with its right panel: beside [child] whenever both fit ([besideFrom]; a divider resizes
+/// it), over it on the right only in a window too narrow for that, with the rest of the transcript dimmed (a tap
+/// there closes it). An overlaid panel steps aside when the session puts something in front of the user (a draft
+/// card, an approval, a question), since those land under it.
 class ConsoleLayout extends ConsumerStatefulWidget {
   const ConsoleLayout({super.key, required this.session, required this.tier, required this.child});
 
@@ -29,7 +29,15 @@ class ConsoleLayout extends ConsumerStatefulWidget {
   ConsumerState<ConsoleLayout> createState() => _ConsoleLayoutState();
 }
 
+/// From this width the panel sits beside the transcript, each at least [PanelSplit.minSide] wide. Below the header's
+/// wide tier too: a Linux or Windows window is often under 1000 logical pixels, and an overlay there closed on every
+/// card and couldn't be resized.
+const besideFrom = PanelSplit.minSide * 2;
+
 class _ConsoleLayoutState extends ConsumerState<ConsoleLayout> {
+  /// Whether the panel was last laid out beside the transcript (an overlay is the one that steps aside).
+  bool _beside = true;
+
   /// Keeps [ConsoleLayout.child] (the composer's draft, the transcript's scroll) when the panel opens, closes or
   /// moves between beside and over: the element moves instead of being built again.
   final _childKey = GlobalKey();
@@ -52,7 +60,7 @@ class _ConsoleLayoutState extends ConsumerState<ConsoleLayout> {
       after,
     ) {
       final grew = after.$1 > (before?.$1 ?? 0) || (after.$2 && !(before?.$2 ?? false));
-      if (grew && widget.tier != ConsoleTier.wide && ref.read(consolePanelProvider(id)).open) notifier.close();
+      if (grew && !_beside && ref.read(consolePanelProvider(id)).open) notifier.close();
     });
     final open = ref.watch(consolePanelProvider(id).select((p) => p.open));
     final width = ref.watch(consolePanelProvider(id).select((p) => p.width));
@@ -61,7 +69,8 @@ class _ConsoleLayoutState extends ConsumerState<ConsoleLayout> {
     final panel = _panel ??= ConsolePanelView(session: widget.session);
     return LayoutBuilder(
       builder: (context, box) {
-        if (widget.tier == ConsoleTier.wide) {
+        _beside = widget.tier == ConsoleTier.wide || box.maxWidth >= besideFrom;
+        if (_beside) {
           return PanelSplit(
             key: const ValueKey('console.split'),
             maxWidth: box.maxWidth,
@@ -118,7 +127,7 @@ class ConsolePanelView extends ConsumerWidget {
       body = ChildChatView(key: ValueKey('console.child.$child'), parentId: session.id, childId: child);
     } else if (view == ConsoleView.diff) {
       // The Diff draws its own header, with Close.
-      return DiffPane(session: session, onClose: notifier.close);
+      return _belowBar(context, DiffPane(session: session, onClose: notifier.close));
     } else {
       body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -146,7 +155,18 @@ class ConsolePanelView extends ConsumerWidget {
         color: theme.surface,
         border: Border(left: BorderSide(color: theme.border)),
       ),
-      child: body,
+      child: _belowBar(context, body),
+    );
+  }
+
+  /// [panel] starts below a translucent top bar (the page hands its height down as padding, which only scroll views
+  /// take): the panel's headers (a fork's Back and title, the view's Close) used to sit under the bar.
+  static Widget _belowBar(BuildContext context, Widget panel) {
+    final top = MediaQuery.paddingOf(context).top;
+    if (top == 0) return panel;
+    return Padding(
+      padding: EdgeInsets.only(top: top),
+      child: MediaQuery.removePadding(context: context, removeTop: true, child: panel),
     );
   }
 }

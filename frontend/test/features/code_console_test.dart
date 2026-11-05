@@ -446,9 +446,10 @@ void main() {
       panel.show(ConsoleView.info);
       await tester.pump();
       expect(find.text('my draft'), findsOneWidget);
+      // Below the header's wide tier, a 1200 px window still has room for both side by side.
       wide.value = false;
       await tester.pump();
-      expect(find.byKey(const ValueKey('console.overlay')), findsOneWidget);
+      expect(find.byKey(const ValueKey('console.split')), findsOneWidget);
       expect(find.text('my draft'), findsOneWidget);
       await unmount(tester);
     });
@@ -457,10 +458,11 @@ void main() {
       final s = _session('s');
       await pump(
         tester,
-        ConsoleLayout(session: s, tier: ConsoleTier.medium, child: const Text('transcript')),
+        ConsoleLayout(session: s, tier: ConsoleTier.narrow, child: const Text('transcript')),
         sessions: [s],
-        size: const Size(850, 800),
+        size: const Size(650, 800),
       );
+      expect(find.byKey(const ValueKey('console.overlay')), findsOneWidget);
       expect(container.read(consolePanelProvider('s')).open, isTrue);
       final controller = container.read(codeSessionProvider('s').notifier);
       controller.state = controller.state.copyWith(
@@ -471,6 +473,22 @@ void main() {
       );
       await tester.pump();
       expect(container.read(consolePanelProvider('s')).open, isFalse);
+      await unmount(tester);
+    });
+
+    testWidgets('beside the transcript, a card or question leaves the panel open', (tester) async {
+      final s = _session('s');
+      await pump(
+        tester,
+        ConsoleLayout(session: s, tier: ConsoleTier.medium, child: const Text('transcript')),
+        sessions: [s],
+        size: const Size(850, 800),
+      );
+      expect(find.byKey(const ValueKey('console.split')), findsOneWidget);
+      final controller = container.read(codeSessionProvider('s').notifier);
+      controller.state = controller.state.copyWith(asides: [const Aside(id: 1, kind: AsideKind.commit)]);
+      await tester.pump();
+      expect(container.read(consolePanelProvider('s')).open, isTrue);
       await unmount(tester);
     });
 
@@ -528,7 +546,7 @@ void main() {
       await unmount(tester);
     });
 
-    for (final (width, kind) in [(1200.0, 'split'), (850.0, 'overlay'), (650.0, 'overlay')]) {
+    for (final (width, kind) in [(1200.0, 'split'), (850.0, 'split'), (650.0, 'overlay')]) {
       testWidgets('at $width wide the panel is a $kind${width < 700 ? ' and the icons fold into ⋯' : ''}', (
         tester,
       ) async {
