@@ -17,8 +17,7 @@
 
 <br/><br/>
 
-<!-- Screenshot to come: a Code session with several agents. -->
-<img src="docs/readme/code.webp" alt="A Code session in EveryAI" width="88%"/>
+<img src="docs/readme/console.webp" alt="A Code session: each turn's work folded into a box, a subagent, and Session info in the right panel" width="92%"/>
 
 </div>
 
@@ -56,22 +55,23 @@ flowchart LR
 
 <table>
 <tr>
-<td width="50%" valign="top">🔌 <b>Bring your agents in</b><br/><sub>EveryAI finds the agents on your computer and sets up the rest in one step. Each keeps its own slash commands, modes and tool names.</sub></td>
-<td width="50%" valign="top">⏪ <b>Pick up where you left off</b><br/><sub>Open a folder and resume any earlier session from any agent, with its full history.</sub></td>
+<td width="50%" valign="top"><img src="docs/readme/agents.webp" alt="The agents EveryAI found on this computer"/><br/>🔌 <b>Bring your agents in</b><br/><sub>EveryAI finds the agents on your computer. Each keeps its own slash commands, modes and tool names.</sub></td>
+<td width="50%" valign="top"><img src="docs/readme/picker.webp" alt="Picking the agent for a session"/><br/>🔀 <b>Pick the agent per session</b><br/><sub>Claude Code, Codex, OpenCode or our own harness, on the plan you already pay for.</sub></td>
 </tr>
 <tr>
-<td valign="top">🔁 <b>Never stop on a limit</b><br/><sub>When a plan's limit runs out, another agent carries on and finishes the cut-off turn. Nothing is redone.</sub></td>
-<td valign="top">✨ <b>Superpowers for every agent</b><br/><sub>Ultra, Max, Bug fix and Security review workflows, targeted test checks, checkpoints and rewind, for Claude Code and Codex too.</sub></td>
+<td valign="top"><img src="docs/readme/workflows.webp" alt="The workflow picker"/><br/>✨ <b>Superpowers for every agent</b><br/><sub>Max, Ultra, Bug fix and Security review workflows, plus test checks, checkpoints and rewind, for Claude Code and Codex too.</sub></td>
+<td valign="top"><img src="docs/readme/running.webp" alt="A subagent under Running work"/><br/>🧭 <b>Watch the work</b><br/><sub>Each turn folds into one box, the answer stays in view, and forks and subagents show up live beside the chat.</sub></td>
 </tr>
 <tr>
-<td valign="top">🧭 <b>One team</b> <sup>soon</sup><br/><sub>Lead Mode: EveryAI leads and hands work to the other agents, each in its own worktree.</sub></td>
-<td valign="top">📱 <b>Code from anywhere</b><br/><sub>Pair a phone, tablet or browser with your computer (end-to-end encrypted) and drive its sessions live.</sub></td>
-</tr>
-<tr>
-<td valign="top">🔑 <b>Your keys, your models</b><br/><sub>OpenRouter or Anthropic keys stay in your keychain. Local models are coming soon.</sub></td>
-<td valign="top">🛡️ <b>Safe by default</b><br/><sub>Per-call approvals, a safety floor for risky commands, and a git worktree per session.</sub></td>
+<td valign="top"><img src="docs/readme/approval.webp" alt="An approval card"/><br/>🛡️ <b>Safe by default</b><br/><sub>Per-call approvals, a safety floor for risky commands, and a checkpoint every turn.</sub></td>
+<td valign="top"><img src="docs/readme/keys.webp" alt="Adding your own API key"/><br/>🔑 <b>Your keys, your models</b><br/><sub>OpenRouter or Anthropic keys stay in your keychain. Local models are coming soon.</sub></td>
 </tr>
 </table>
+
+- ⏪ **Pick up where you left off:** open a folder and resume any earlier session from any agent, with its full history.
+- 🔁 **Never stop on a limit:** when a plan runs out, another agent carries on and finishes the cut-off turn.
+- 📱 **Code from anywhere:** pair a phone, tablet or browser with your computer and drive its sessions live.
+- 🤝 **One team** <sup>soon</sup>: Lead Mode, where EveryAI hands work to the other agents, each in its own worktree.
 
 ## ✦ Also in the box: Chat
 

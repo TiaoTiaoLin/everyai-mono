@@ -95,3 +95,18 @@ app. The full `/v1` contract is in [`AGENTS.md`](../AGENTS.md#v1-contract-backen
 | **Checked so far** | daily driver | CI build | CI build | simulator | — | ✅ |
 
 One codebase draws four design languages: Cupertino, Material, Fluent and Adwaita-style.
+
+<details>
+<summary><b>The four design languages</b> (screenshots from 2026-10-30)</summary>
+<br/>
+<table>
+<tr>
+<td width="50%"><img src="readme/design-cupertino.webp" alt="Cupertino"/><br/><sub>Cupertino</sub></td>
+<td width="50%"><img src="readme/design-material.webp" alt="Material"/><br/><sub>Material</sub></td>
+</tr>
+<tr>
+<td><img src="readme/design-fluent.webp" alt="Fluent"/><br/><sub>Fluent</sub></td>
+<td><img src="readme/design-adwaita.webp" alt="Adwaita-style"/><br/><sub>Adwaita-style</sub></td>
+</tr>
+</table>
+</details>
