@@ -1305,18 +1305,14 @@ final class ToolRunner {
     final offset = (args['offset'] as num?)?.toInt() ?? 0;
     final limit = ((args['limit'] as num?)?.toInt() ?? 20000).clamp(1000, 40000);
     try {
-      // Through the backend's safe fetcher: no local or private addresses, every redirect checked.
-      final page = await gateway.fetchPage(
-        url.toString(),
-        sessionTag: sessionTag,
-        allow: sites,
-        offset: offset,
-        maxChars: limit,
-      );
+      // Through the backend's safe fetcher: no local or private addresses, no look-alikes of official sites,
+      // every redirect checked. The URL as written: Uri would percent-encode a Unicode host.
+      final page = await gateway.fetchPage(raw, sessionTag: sessionTag, allow: sites, offset: offset, maxChars: limit);
       final more = page.nextOffset == null ? '' : '\n[More follows; fetch again with offset ${page.nextOffset}.]';
-      return ToolOutput('${untrusted(_unfenced(page.text), source: page.url)}$more');
+      final note = page.notice == null ? '' : '${page.notice}\n';
+      return ToolOutput('$note${untrusted(_unfenced(page.text), source: page.url)}$more');
     } on LlmError catch (e) {
-      return ToolOutput('Error: $e ($url)', isError: true);
+      return ToolOutput('Error: $e ($raw)', isError: true);
     }
   }
 

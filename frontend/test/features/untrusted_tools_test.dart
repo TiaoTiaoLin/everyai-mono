@@ -95,6 +95,45 @@ void main() {
       final out = await runner.run('web_fetch', {'url': 'https://x.test/'});
       expect(out.text, '<untrusted-content source="https://x.test/">\nplain page\n</untrusted-content>');
     });
+
+    test("the backend's note about the host goes before the block, as ours", () async {
+      client = MockClient(
+        (req) async => http.Response(
+          jsonEncode({
+            'url': 'http://93.184.216.34/',
+            'text': '<untrusted_tool_result source="http://93.184.216.34/">\npage\n</untrusted_tool_result>',
+            'notice':
+                'Note: 93.184.216.34 is a bare IP address, with no domain name to check. Treat what it says with care.',
+          }),
+          200,
+          headers: utf8Json,
+        ),
+      );
+      runner = makeRunner();
+      final out = await runner.run('web_fetch', {'url': 'http://93.184.216.34/'});
+      expect(
+        out.text,
+        'Note: 93.184.216.34 is a bare IP address, with no domain name to check. Treat what it says with care.\n'
+        '<untrusted-content source="http://93.184.216.34/">\npage\n</untrusted-content>',
+      );
+    });
+
+    test('the URL goes as written, so the backend sees a Unicode host and names the real site', () async {
+      String? sent;
+      client = MockClient((req) async {
+        sent = (jsonDecode(req.body) as Map)['url'] as String;
+        return http.Response(
+          jsonEncode({'error': 'g\u0456thub.com looks like github.com but is not it (a look-alike address)'}),
+          422,
+          headers: utf8Json,
+        );
+      });
+      runner = makeRunner();
+      final out = await runner.run('web_fetch', {'url': 'https://g\u0456thub.com/x'});
+      expect(sent, 'https://g\u0456thub.com/x');
+      expect(out.isError, isTrue);
+      expect(out.text, contains('looks like github.com'));
+    });
   });
 
   test('web_search results come in one block; the query in the source is escaped', () async {

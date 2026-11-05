@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 
+import '../../../../core/security/official_sites.dart';
 import '../../../../core/security/untrusted.dart';
 import 'browser_io.dart';
 import 'exfil.dart';
@@ -27,6 +28,8 @@ Future<ToolOutput> runBrowser(
   String? str(String k) => (args[k] as String?)?.trim().isEmpty ?? true ? null : (args[k] as String).trim();
   double? at(String k) => (args[k] as num?)?.toDouble();
   var shot = args['screenshot'] == true;
+  // Our own line about the site (a bare IP, a shortener, ...), kept outside the page's untrusted block.
+  String? note;
   try {
     final String did;
     switch (action) {
@@ -40,7 +43,19 @@ Future<ToolOutput> runBrowser(
             ? url
             : 'http://$url';
         if (_openRefusal(target) case final refusal?) return ToolOutput(refusal, isError: true);
-        did = 'Opened ${await b.open(target)}';
+        final before = browserTarget(target);
+        if (before.refusal case final refusal?) return ToolOutput(refusal, isError: true);
+        final opened = await b.open(target);
+        // Chrome follows redirects itself: judge where it landed too.
+        final landed = await b.evaluate('location.href');
+        final after = landed is String ? browserLanded(target, landed) : _clear;
+        if (after.refusal case final refusal?) {
+          await b.open('about:blank');
+          final where = 'The page redirected to another site, so the browser went back to a blank page.';
+          return ToolOutput('$where\n$refusal', isError: true);
+        }
+        note = [before.notice, after.notice].nonNulls.join('\n');
+        did = 'Opened $opened';
       case 'click':
         final sel = str('selector');
         if (sel == null && (at('x') == null || at('y') == null)) {
@@ -76,7 +91,8 @@ Future<ToolOutput> runBrowser(
       default:
         return ToolOutput('Error: unknown browser action "$action".', isError: true);
     }
-    final text = browserResultText(action, did, b.takeLog());
+    final page = browserResultText(action, did, b.takeLog());
+    final text = note == null || note.isEmpty ? page : '$note\n$page';
     if (!shot) return ToolOutput(text);
     final png = await b.screenshot(fullPage: args['full_page'] == true);
     final dir = Directory('$root/.everyai/scratch/screenshots')..createSync(recursive: true);
@@ -111,6 +127,51 @@ String? _openRefusal(String target) {
   }
   final site = exfilHost(uri.host);
   return site == null ? null : guardRefusal('$site is a site that takes uploads');
+}
+
+const _clear = (refusal: null, notice: null);
+
+/// What the browser tool makes of [target] (before opening it, and again where a redirect landed): the refusal
+/// for a look-alike of an official site, a one-line note for a host with a reason for doubt (a bare IP address, a
+/// link shortener, `github.co`), or neither. The agent's own apps are never judged: files, localhost, private
+/// addresses and `.local` names. Checked here, so the outside leads' host browser has the same guard.
+({String? refusal, String? notice}) browserTarget(String target) {
+  final uri = Uri.tryParse(target);
+  if (uri == null || !(uri.isScheme('http') || uri.isScheme('https')) || _localHost(uri.host)) return _clear;
+  final v = judgeHost(uri.host);
+  final shown = _shownHost(uri.host);
+  return switch (v.verdict) {
+    SiteVerdict.ok => _clear,
+    SiteVerdict.warn => (refusal: null, notice: siteNotice(shown, v)),
+    SiteVerdict.refuse => (refusal: guardRefusal(siteRefusal(shown, v)), notice: null),
+  };
+}
+
+/// [browserTarget] for the page Chrome [landed] on after opening [target], when a redirect took it to another host.
+({String? refusal, String? notice}) browserLanded(String target, String landed) =>
+    Uri.tryParse(landed)?.host == Uri.tryParse(target)?.host ? _clear : browserTarget(landed);
+
+/// [host] as a person reads it (Dart's Uri percent-encodes non-ASCII hosts).
+String _shownHost(String host) {
+  try {
+    return Uri.decodeComponent(host);
+  } on Object {
+    return host;
+  }
+}
+
+/// The agent's own machine or network: localhost, loopback, private and link-local addresses, `.local` names.
+bool _localHost(String host) {
+  final h = host.toLowerCase();
+  if (h.isEmpty || h == 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  final ip = InternetAddress.tryParse(h);
+  if (ip == null) return false;
+  if (ip.isLoopback || ip.isLinkLocal) return true;
+  final b = ip.rawAddress;
+  if (ip.type == InternetAddressType.IPv4) {
+    return b[0] == 0 || b[0] == 10 || (b[0] == 172 && b[1] & 0xf0 == 16) || (b[0] == 192 && b[1] == 168);
+  }
+  return b[0] & 0xfe == 0xfc; // fc00::/7 unique local
 }
 
 /// Actions whose result carries text the page controls (its title, an eval result, the console, a hit's class names).
