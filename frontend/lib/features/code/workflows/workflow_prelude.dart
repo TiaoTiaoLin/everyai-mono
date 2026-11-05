@@ -95,7 +95,8 @@ Deno.exit(0);
 const mergeFindingsJs = r'''
 const __stop = new Set("a an the of to in on at is are was be it its this that and or for with from by as can may not no if when which".split(" "));
 const __rank = { blocker: 5, critical: 5, major: 4, high: 4, minor: 3, medium: 3, low: 2, nit: 1 };
-const __words = (f) => new Set(String(f.summary || "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 1 && !__stop.has(w)));
+const __stem = (w) => (w.length > 4 ? w.replace(/(ing|ed|es|s)$/, "") : w);
+const __words = (f) => new Set(String(f.summary || "").toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 1 && !__stop.has(w)).map(__stem));
 function __same(a, b, wa, wb) {
   if (!a.file || a.file !== b.file || a.lens === b.lens) return false;
   let both = 0;
@@ -112,7 +113,14 @@ __g.mergeFindings = (findings) => {
   const find = (i) => (root[i] === i ? i : (root[i] = find(root[i])));
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
-      if (__same(list[i], list[j], words[i], words[j])) root[find(j)] = find(i);
+      const ri = find(i);
+      const rj = find(j);
+      if (ri === rj || !__same(list[i], list[j], words[i], words[j])) continue;
+      // A group never holds two findings of one lens, so a third finding can't chain two of them together.
+      const lensesOf = (r) => new Set(list.filter((_, k) => find(k) === r).map((f) => f.lens));
+      const seen = lensesOf(ri);
+      if ([...lensesOf(rj)].some((l) => seen.has(l))) continue;
+      root[rj] = ri;
     }
   }
   const groups = new Map();
@@ -140,7 +148,8 @@ const workflowCtxKey = '_ctx';
 
 /// The prelude with [args] in place.
 String workflowPrelude(Map<String, Object?> args) =>
-    _prelude.replaceFirst('__ARGS__', jsonEncode(args)).replaceFirst('__MERGE__', mergeFindingsJs);
+    // The marker goes first: the arguments are user text and may hold the marker's name.
+    _prelude.replaceFirst('__MERGE__', mergeFindingsJs).replaceFirst('__ARGS__', jsonEncode(args));
 
 /// [source] as a module whose default export runs it: top-level `export`s
 /// become plain declarations and the body goes inside an async function, so a

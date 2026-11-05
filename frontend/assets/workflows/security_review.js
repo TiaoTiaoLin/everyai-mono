@@ -48,6 +48,7 @@ const FINDING = {
     summary: { type: 'string' },
     exploit: { type: 'string', description: 'the concrete steps an attacker takes, and what they get' },
     fix: { type: 'string' },
+    lenses: { type: 'array', items: { type: 'string' }, description: 'the lenses that reported it, as given' },
   },
   required: ['severity', 'file', 'category', 'summary', 'exploit', 'fix'],
 }
@@ -130,7 +131,7 @@ ${quote(JSON.stringify(all, null, 1))}
 
 For each one, read the code and decide whether the exploit works as described. Keep it only when it does; drop it
 with a reason when the input can't reach that code, another check already stops it, or it needs an attacker who
-already has more access than they gain. Merge duplicates into one finding. Order the kept ones by severity.`,
+already has more access than they gain. Merge duplicates into one finding and keep its `lenses`. Order the kept ones by severity.`,
   { label: 'verify', phase: 'Verify', schema: VERIFIED_SCHEMA, readOnly: true })
   .catch((e) => { log(`verify failed: ${e.message}`); return null })
 

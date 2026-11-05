@@ -133,7 +133,7 @@ return {
   fix_summary: last.fix_summary,
   repro_command: check.available && check.command ? check.command : last.repro_command,
   commits: [...fix.commits, ...(refix ? refix.commits : [])],
-  files: last.files,
+  files: [...new Set([...fix.files, ...(refix ? refix.files : [])])],
   review,
   // The refix's cause, fix, repro, files and commits are the top-level fields above (taken from the last round).
   refix: refix ? { verified: refix.verified } : null,

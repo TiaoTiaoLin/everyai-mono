@@ -327,6 +327,7 @@ void main() {
       final c = await open();
       final dir = container.read(codeSessionsProvider.notifier).byId(c.sessionId)!.diffTarget!.path;
       File('$dir/b.txt').writeAsStringSync('two\n');
+      container.read(workflowOwnPathsProvider(c.sessionId).notifier).set(run.runId, ['b.txt']);
       return (c, dir);
     }
 
@@ -379,6 +380,58 @@ void main() {
       expect(await told(), contains('choice="branch" branch="everyai/bug-fix-abcdef"'));
     });
 
+    test('only the run\'s own files are committed, not the user\'s work in the same folder', () async {
+      final (c, dir) = await dirty();
+      File('$dir/notes.txt').writeAsStringSync('mine\n');
+      File('$dir/a.txt').writeAsStringSync('one, edited by me\n');
+      await c.landWorkflow(run, WorkflowLand.commit, message: 'Bug fix: two');
+      expect(await out(dir, ['show', '--name-only', '--format=', 'HEAD']), 'b.txt');
+      expect(await out(dir, ['status', '--porcelain']), allOf(contains('notes.txt'), contains('a.txt')));
+      // The other cards re-check: nothing of this run is left.
+      final key = (sessionId: c.sessionId, runId: run.runId);
+      expect(await container.read(workflowDirtyProvider(key).future), isFalse);
+    });
+
+    test('a run that changed nothing has nothing to commit or switch to', () async {
+      final (c, dir) = await dirty();
+      container.read(workflowOwnPathsProvider(c.sessionId).notifier).set(run.runId, const []);
+      final key = (sessionId: c.sessionId, runId: run.runId);
+      expect(await container.read(workflowDirtyProvider(key).future), isFalse);
+      final before = await out(dir, ['rev-parse', 'HEAD']);
+      await c.landWorkflow(run, WorkflowLand.branch, message: 'x', branch: 'everyai/none');
+      expect(landed(c)!.text, 'Nothing was left to commit.');
+      expect(await out(dir, ['rev-parse', 'HEAD']), before);
+      expect(await out(dir, ['branch', '--show-current']), isNot('everyai/none'));
+      expect(await told(), isNot(contains('branch=')));
+    });
+
+    test('a run records the files it changed, and only those get the lead\'s wait-for-the-user note', () async {
+      await git(['init', '-q']);
+      await git(['config', 'user.name', 't']);
+      await git(['config', 'user.email', 't@t']);
+      File('${project.path}/a.txt').writeAsStringSync('one\n');
+      await git(['add', '.']);
+      await git(['commit', '-qm', 'init']);
+      // Already there when the run starts: not the run's.
+      File('${project.path}/wip.txt').writeAsStringSync('mine\n');
+      final c = await open();
+      await c.runWorkflow('demo', 'source');
+      File('${project.path}/made.txt').writeAsStringSync('by the run\n');
+      // The git calls at the end are real processes, so wait for the files to be recorded, not for turns.
+      final recorded = Completer<void>();
+      container.listen(workflowOwnPathsProvider(c.sessionId), (_, now) {
+        if (now.isNotEmpty && !recorded.isCompleted) recorded.complete();
+      });
+      bridge.finish({'fixed': true});
+      await recorded.future;
+      for (var i = 0; i < 5000 && !lead.sent.any((m) => m.contains('<workflow-result')); i++) {
+        await pumpEventQueue();
+      }
+      final paths = container.read(workflowOwnPathsProvider(c.sessionId)).values.single;
+      expect(paths, ['made.txt']);
+      expect(lead.sent.singleWhere((m) => m.contains('<workflow-result')), contains('you will be told'));
+    });
+
     test('Leave uncommitted touches nothing and still tells the lead', () async {
       final (c, dir) = await dirty();
       await c.landWorkflow(run, WorkflowLand.leave);
@@ -397,7 +450,9 @@ void main() {
     }
     final msg = lead.sent.singleWhere((m) => m.contains('<workflow-result'));
     expect(msg, contains('not committed'));
-    expect(msg, contains('you will be told'));
+    // Nothing for the user to choose here, so the lead is not left waiting for a note.
+    expect(msg, isNot(contains('you will be told')));
+    expect(msg, contains('Do not commit them unless the user asks'));
   });
 
   test('a worktree agent works in its own copy, merged back when it finishes', () async {

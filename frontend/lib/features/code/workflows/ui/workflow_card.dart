@@ -42,7 +42,7 @@ class WorkflowRunsView extends ConsumerWidget {
             child: WorkflowCard(
               run: run,
               onStop: () => ref.read(codeSessionProvider(sessionId).notifier).stopWorkflow(run.runId),
-              onDismiss: () => store.dismiss(run.runId),
+              onDismiss: () => _dismiss(context, ref, sessionId, store, run),
               landing: _landingOf(context, ref, sessionId, run),
             ),
           ),
@@ -51,15 +51,19 @@ class WorkflowRunsView extends ConsumerWidget {
   }
 }
 
+/// Closing a card that still asks counts as leaving the changes uncommitted, so the lead isn't left waiting.
+void _dismiss(BuildContext context, WidgetRef ref, String sessionId, WorkflowRuns store, WorkflowRun run) {
+  _landingOf(context, ref, sessionId, run)?.onLeave?.call();
+  store.dismiss(run.runId);
+}
+
 WorkflowLanding? _landingOf(BuildContext context, WidgetRef ref, String sessionId, WorkflowRun run) {
   final picked = ref.watch(workflowLandingProvider(sessionId))[run.runId];
   if (picked != null && picked.ok) return WorkflowLanding.chosen(picked.text);
-  final ended = run.status == WorkflowStatus.done || run.status == WorkflowStatus.capped;
-  if (!ended) return null;
+  if (!workflowAsksLanding(run)) return null;
   if (!(ref.watch(workflowDirtyProvider((sessionId: sessionId, runId: run.runId))).value ?? false)) return null;
   final session = ref.read(codeSessionProvider(sessionId).notifier);
   Future<void> ask(WorkflowLand choice) async {
-    final inPlace = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.worktree == null;
     final message = await showAdaptivePrompt(
       context,
       title: choice == WorkflowLand.commit ? 'Commit message' : 'Commit message for the new branch',
@@ -71,7 +75,7 @@ WorkflowLanding? _landingOf(BuildContext context, WidgetRef ref, String sessionI
     if (choice == WorkflowLand.branch) {
       final named = await showAdaptivePrompt(
         context,
-        title: inPlace ? 'Branch name (this switches your checkout to it)' : 'Branch name',
+        title: 'Branch name (this switches your checkout to it)',
         confirmLabel: 'Commit',
         initialValue: workflowBranchName(run),
       );
@@ -84,7 +88,10 @@ WorkflowLanding? _landingOf(BuildContext context, WidgetRef ref, String sessionI
   return WorkflowLanding(
     error: picked?.text,
     onCommit: () => ask(WorkflowLand.commit),
-    onBranch: () => ask(WorkflowLand.branch),
+    // A session with its own branch keeps it: the commit lands there, and the branch is what merge and PR use.
+    onBranch: ref.read(codeSessionsProvider.notifier).byId(sessionId)?.worktree == null
+        ? () => ask(WorkflowLand.branch)
+        : null,
     onLeave: () => session.landWorkflow(run, WorkflowLand.leave),
   );
 }

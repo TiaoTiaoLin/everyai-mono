@@ -9,16 +9,36 @@ import 'workflow_engine.dart';
 /// What the user picks for a finished run's uncommitted work.
 enum WorkflowLand { commit, branch, leave }
 
-/// Whether run [runId]'s work is waiting in the session's folder uncommitted. Read when the run has ended;
-/// a folder outside git, or a clean one, is false (nothing to ask).
+/// Whether a run that ended this way gets the commit choice: it finished its work (done, or capped with some).
+bool workflowAsksLanding(WorkflowRun run) => run.status == WorkflowStatus.done || run.status == WorkflowStatus.capped;
+
+/// The files each run changed in the folder (what differs between the folder when it started and when it ended),
+/// by run id. A run that wrote nothing has none, so nothing is asked.
+final workflowOwnPathsProvider = NotifierProvider.family<WorkflowOwnPaths, Map<String, List<String>>, String>(
+  WorkflowOwnPaths.new,
+);
+
+final class WorkflowOwnPaths extends Notifier<Map<String, List<String>>> {
+  WorkflowOwnPaths(this.sessionId);
+  final String sessionId;
+
+  @override
+  Map<String, List<String>> build() => const {};
+
+  void set(String runId, List<String> paths) => state = {...state, runId: paths};
+}
+
+/// Whether run [runId]'s files are waiting in the session's folder uncommitted. A folder outside git, a run
+/// that changed nothing, or a clean folder is false (nothing to ask).
 final workflowDirtyProvider = FutureProvider.autoDispose.family<bool, ({String sessionId, String runId})>((
   ref,
   key,
 ) async {
   final target = ref.read(codeSessionsProvider.notifier).byId(key.sessionId)?.diffTarget;
-  if (target == null) return false;
+  final paths = ref.watch(workflowOwnPathsProvider(key.sessionId))[key.runId];
+  if (target == null || paths == null || paths.isEmpty) return false;
   try {
-    return await GitService.isDirty(target);
+    return await GitService.isDirtyAmong(target, paths);
   } on Object {
     return false;
   }

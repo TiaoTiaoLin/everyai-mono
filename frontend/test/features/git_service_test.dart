@@ -125,6 +125,44 @@ void main() {
     expect(await GitService.isDirty(w), isFalse);
   });
 
+  test('a commit with paths leaves other work alone; nothing to commit does not switch branches', () async {
+    final w = await start();
+    File('${w.path}/lib/mine.txt').writeAsStringSync('wip\n');
+    File('${w.path}/lib/new.txt').writeAsStringSync('fresh\n');
+    final tree = await GitService.snapshotTree(w);
+    File('${w.path}/lib/new.txt').writeAsStringSync('fresh, changed\n');
+    File('${w.path}/lib/more.txt').writeAsStringSync('more\n');
+    expect((await GitService.changedSince(w, tree))..sort(), ['lib/more.txt', 'lib/new.txt']);
+    expect(await GitService.isDirtyAmong(w, ['lib/new.txt']), isTrue);
+    expect(await GitService.isDirtyAmong(w, []), isFalse);
+
+    expect(await GitService.commitAll(w, 'Just new', paths: ['lib/new.txt']), isTrue);
+    expect(await _git(w.path, ['show', '--name-only', '--format=', 'HEAD']), 'lib/new.txt');
+    expect(await GitService.isDirtyAmong(w, ['lib/new.txt']), isFalse);
+    expect(await _git(w.path, ['status', '--porcelain']), contains('lib/mine.txt'));
+
+    // Nothing of those paths is left: the branch is not created and the checkout stays.
+    expect(await GitService.commitOnNewBranch(w, 'everyai/none', 'x', paths: ['lib/new.txt']), isNull);
+    expect(await _git(w.path, ['branch', '--show-current']), w.branch);
+    expect(await _git(w.path, ['branch', '--list', 'everyai/none']), isEmpty);
+    final sha = await GitService.commitOnNewBranch(w, 'everyai/more', 'More', paths: ['lib/more.txt']);
+    expect(sha, await _git(w.path, ['rev-parse', 'HEAD']));
+    expect(await _git(w.path, ['show', '--name-only', '--format=', 'HEAD']), 'lib/more.txt');
+  });
+
+  test('a commit that fails after the switch goes back and removes the new branch', () async {
+    final w = await start();
+    File('${w.path}/lib/new.txt').writeAsStringSync('fresh\n');
+    final hook = File('${w.repoRoot}/.git/hooks/pre-commit')..writeAsStringSync('#!/bin/sh\nexit 1\n');
+    await Process.run('chmod', ['+x', hook.path]);
+    // The session worktree has its own hooks directory, so the failure comes from a hook path set for it.
+    await _git(w.path, ['config', 'core.hooksPath', '${w.repoRoot}/.git/hooks']);
+    await expectLater(GitService.commitOnNewBranch(w, 'everyai/hooked', 'x'), throwsA(isA<GitError>()));
+    expect(await _git(w.path, ['branch', '--show-current']), w.branch);
+    expect(await _git(w.path, ['branch', '--list', 'everyai/hooked']), isEmpty);
+    expect(await GitService.isDirty(w), isTrue);
+  });
+
   test('the commit hook strips AI credits and still runs the repo\'s own hook', () async {
     // The project's own commit-msg hook appends a marker.
     File('$repo/.git/hooks/commit-msg').writeAsStringSync('#!/bin/sh\necho "Reviewed-by: repo-hook" >> "\$1"\n');

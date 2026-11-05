@@ -263,17 +263,34 @@ Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) async {
   if (await p.exitCode != 0) throw GitError("Couldn't revert that change: ${err.trim()}");
 }
 
-Future<bool> commitAll(SessionWorktree w, String message) async {
-  await _git(w.path, ['add', '-A']);
-  final staged = await _git(w.path, ['diff', '--cached', '--quiet'], check: false);
-  if (staged.exitCode == 0) return false;
-  await _git(w.path, ['commit', '-q', '-m', message]);
+/// Stages [paths] (everything when null).
+Future<void> _stage(SessionWorktree w, List<String>? paths) => _git(w.path, [
+  'add',
+  '-A',
+  if (paths != null) ...['--', ...paths],
+]);
+
+Future<bool> _hasStaged(SessionWorktree w) async =>
+    (await _git(w.path, ['diff', '--cached', '--quiet'], check: false)).exitCode != 0;
+
+/// Commits [paths] (everything when null); false when there was nothing to commit.
+Future<bool> commitAll(SessionWorktree w, String message, {List<String>? paths}) async {
+  await _stage(w, paths);
+  if (!await _hasStaged(w)) return false;
+  await _git(w.path, [
+    'commit',
+    '-q',
+    '-m',
+    message,
+    if (paths != null) ...['--', ...paths],
+  ]);
   return true;
 }
 
-/// Switches to new branch [branch] (the changes come along) and commits everything there; returns the commit.
-/// A name git refuses or a branch that exists changes nothing.
-Future<String> commitOnNewBranch(SessionWorktree w, String branch, String message) async {
+/// Switches to new branch [branch] (the changes come along) and commits [paths] there (everything when null);
+/// returns the commit, or null when there was nothing to commit. A name git refuses, a branch that exists, an
+/// empty commit and a failed commit all leave the checkout on the branch it was on, with no new branch.
+Future<String?> commitOnNewBranch(SessionWorktree w, String branch, String message, {List<String>? paths}) async {
   final name = branch.trim();
   if ((await _git(w.path, ['check-ref-format', '--branch', name], check: false)).exitCode != 0 ||
       name.startsWith('-')) {
@@ -282,10 +299,43 @@ Future<String> commitOnNewBranch(SessionWorktree w, String branch, String messag
   if ((await _git(w.path, ['show-ref', '--verify', '--quiet', 'refs/heads/$name'], check: false)).exitCode == 0) {
     throw GitError('There is a branch called $name already.');
   }
+  await _stage(w, paths);
+  if (!await _hasStaged(w)) return null;
+  final before = await _out(w.path, ['branch', '--show-current']);
   await _git(w.path, ['switch', '-q', '-c', name]);
-  await commitAll(w, message);
+  try {
+    await _git(w.path, [
+      'commit',
+      '-q',
+      '-m',
+      message,
+      if (paths != null) ...['--', ...paths],
+    ]);
+  } on Object {
+    // Back where it was, the new branch gone, so the same try can run again.
+    await _git(w.path, before.isEmpty ? ['switch', '-q', '--detach', '-'] : ['switch', '-q', before], check: false);
+    await _git(w.path, ['branch', '-q', '-D', name], check: false);
+    rethrow;
+  }
   return headCommit(w);
 }
+
+/// The tree of everything in the folder right now (untracked files too, ignored ones not).
+Future<String> snapshotTree(SessionWorktree w) =>
+    _withSnapshot(w, (env) async => (await _out(w.path, ['write-tree'], env: env)).trim());
+
+/// The paths whose content differs between snapshot [tree] and the folder now.
+Future<List<String>> changedSince(SessionWorktree w, String tree) => _withSnapshot(w, (env) async {
+  final out = await _out(w.path, ['diff', '--cached', '--name-only', '--no-renames', '-z', tree], env: env);
+  return [
+    for (final p in out.split('\x00'))
+      if (p.isNotEmpty) p,
+  ];
+});
+
+/// Whether any of [paths] has changes not committed.
+Future<bool> isDirtyAmong(SessionWorktree w, List<String> paths) async =>
+    paths.isNotEmpty && (await _out(w.path, ['status', '--porcelain', '--', ...paths])).isNotEmpty;
 
 Future<String> checkpoint(SessionWorktree w, int turn) => _withSnapshot(w, (env) async {
   final tree = await _out(w.path, ['write-tree'], env: env);

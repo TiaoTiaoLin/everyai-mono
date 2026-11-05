@@ -4167,6 +4167,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Ended runs' results the agent hasn't been sent yet (see [_toLead]).
   final _workflowResults = <String>[];
 
+  /// The folder's tree when each run started, by run id.
+  final _startTrees = <String, String>{};
+
+  /// Runs whose landing is being done, so a second click does nothing.
+  final _landing = <String>{};
+
   /// Runs the workflow [source] (a `.js` file's text, called [name]) with
   /// [args]: its agents are child sessions of this one, and what it returns
   /// comes back to this session as one message. [ctx] (and the run id) is
@@ -4184,6 +4190,15 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     };
     final path = '${await _workflowDir()}/$runId.jsonl';
     final journal = WorkflowJournal.fresh((line) => appendJournalFile(path, line));
+    // What the folder holds now, so the end can tell which files this run changed (not the user's own).
+    final target = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.diffTarget;
+    if (target != null) {
+      try {
+        _startTrees[runId] = await GitService.snapshotTree(target);
+      } on Object {
+        // Not in git: nothing to commit, nothing to ask.
+      }
+    }
     await journal.write({
       't': 'start',
       'name': name,
@@ -4200,18 +4215,27 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// The user's pick for a finished run's uncommitted work: commits it here, commits it on a new branch, or
   /// leaves it. The card shows the outcome (or why it failed, with the buttons kept) and the lead gets one note.
   Future<void> landWorkflow(WorkflowRun run, WorkflowLand choice, {String message = '', String branch = ''}) async {
+    if (!_landing.add(run.runId)) return;
     final landings = ref.read(workflowLandingProvider(sessionId).notifier);
     try {
       var sha = '';
       var committed = true;
       if (choice != WorkflowLand.leave) {
-        final target =
-            ref.read(codeSessionsProvider.notifier).byId(sessionId)?.diffTarget ??
-            (throw const GitError("This folder isn't in git."));
-        if (choice == WorkflowLand.commit) {
-          committed = await GitService.commitAll(target, message);
+        final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+        final target = info?.diffTarget ?? (throw const GitError("This folder isn't in git."));
+        // The files this run changed; the user's own work in the same folder stays out of the commit.
+        final paths = ref.read(workflowOwnPathsProvider(sessionId))[run.runId] ?? const <String>[];
+        if (choice == WorkflowLand.branch && info!.worktree != null) {
+          throw const GitError(
+            'This session has its own branch; commit here, and merge or open a PR from the diff pane.',
+          );
+        }
+        if (paths.isEmpty) {
+          committed = false;
+        } else if (choice == WorkflowLand.commit) {
+          committed = await GitService.commitAll(target, message, paths: paths);
         } else {
-          await GitService.commitOnNewBranch(target, branch, message);
+          committed = await GitService.commitOnNewBranch(target, branch, message, paths: paths) != null;
         }
         if (committed) sha = (await GitService.headCommit(target)).substring(0, 7);
       }
@@ -4221,23 +4245,27 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         ok: true,
         text: switch (choice) {
           WorkflowLand.leave => 'Left uncommitted.',
-          WorkflowLand.commit when !committed => 'Nothing was left to commit.',
+          _ when !committed => 'Nothing was left to commit.',
           WorkflowLand.commit => 'Committed $sha.',
           WorkflowLand.branch => 'Committed $sha on $name.',
         },
       ));
+      // Other finished runs' cards re-check what is still uncommitted.
+      ref.invalidate(workflowDirtyProvider);
       if (ref.exists(codeGitProvider(sessionId))) unawaited(ref.read(codeGitProvider(sessionId).notifier).refresh());
       _toLead(
         workflowLandingMessage(
           run,
           choice,
-          branch: choice == WorkflowLand.branch ? name : '',
+          branch: choice == WorkflowLand.branch && committed ? name : '',
           commit: sha,
           committed: committed,
         ),
       );
     } on Object catch (e) {
       if (ref.mounted) landings.set(run.runId, (ok: false, text: '$e'.replaceFirst('Exception: ', '')));
+    } finally {
+      _landing.remove(run.runId);
     }
   }
 
@@ -4597,9 +4625,25 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     // Detached (the session closed mid-run): the journal stays for the resume.
     if (journal.ended) await retireJournalFile(journalPath);
     if (!ref.mounted || end.status == WorkflowStatus.stopped) return;
-    final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    final dir = info?.workingDir;
+    // The files this run changed, and whether the card will ask what to do with them.
+    final tree = _startTrees.remove(runId);
+    var asks = false;
+    if (tree != null && info?.diffTarget != null) {
+      try {
+        final paths = await GitService.changedSince(info!.diffTarget!, tree);
+        if (!ref.mounted) return;
+        ref.read(workflowOwnPathsProvider(sessionId).notifier).set(runId, paths);
+        asks = workflowAsksLanding(end) && await GitService.isDirtyAmong(info.diffTarget!, paths);
+      } on Object {
+        // Not in git any more: the folder is the user's to look at.
+      }
+    }
+    if (!ref.mounted) return;
     final message = workflowResultMessage(
       end,
+      asksLanding: asks,
       save: dir == null || noLocalFolder(dir) ? null : (json) => saveSpill(dir, 'workflow-$runId.json', json),
     );
     _toLead(message);

@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:every_ai/features/code/workflows/workflow_prelude.dart' show mergeFindingsJs;
+import 'package:every_ai/features/code/workflows/workflow_prelude.dart' show mergeFindingsJs, workflowPrelude;
 import 'package:flutter_test/flutter_test.dart';
 
 // mergeFindings is JavaScript (a workflow global), so these run it in node when there is one.
@@ -59,4 +59,28 @@ void main() {
     );
     expect(await _merge([_f('a', 'cache keys collide'), _f('b', 'cache keys collide often')]), hasLength(1));
   }, skip: skip);
+
+  test('a third finding does not chain two findings of one lens together', () async {
+    final out = await _merge([
+      _f('correctness', 'off by one in loop bound'),
+      _f('correctness', 'loop bound off by one in second loop'),
+      _f('cost', 'off by one loop bound'),
+    ]) as List;
+    expect(out, hasLength(2));
+    expect([for (final f in out) (f as Map)['merged_from'] ?? 1]..sort(), [1, 2]);
+  }, skip: skip);
+
+  test('words that differ only by an ending still match', () async {
+    final out = await _merge([
+      _f('a', 'Missing null check on result causes crash when the script returns nothing'),
+      _f('b', 'Crash when the script returns nothing because result is not null checked'),
+    ]) as List;
+    expect(out, hasLength(1));
+  }, skip: skip);
+
+  test('an argument that holds the merge marker is data, not a place for the merge source', () {
+    final js = workflowPrelude({'report': 'the __MERGE__ marker stays in prelude.js'});
+    expect('__g.mergeFindings = '.allMatches(js), hasLength(1));
+    expect(js, contains('"report":"the __MERGE__ marker stays in prelude.js"'));
+  });
 }
