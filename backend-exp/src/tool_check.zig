@@ -355,7 +355,8 @@ pub fn shown(arena: std.mem.Allocator, name: []const u8, args: Value) ![]const u
     // Only when the app did not take the call itself (no `client_tools`).
     if (eql(name, "ask_user"))
         return std.fmt.allocPrint(arena, "Shown to the user: {d} question(s). The app cannot wait for the answers here, so end your turn now; the user answers in their next message.", .{arr(args, "questions").len});
-    if (eql(name, "security_alert")) return "Shown to the user: a security notice. Don't repeat it in full; carry on without the harmful step.";
+    // Apps older than the alert card show only "Used security_alert", so the reply says it too.
+    if (eql(name, "security_alert")) return "Shown to the user: a security notice. Also say it in one line of your reply (what happened and what to do), then carry on without the harmful step.";
     if (eql(name, "suggest_mode"))
         return std.fmt.allocPrint(arena, "Shown to the user: a button to run this request again in {s} mode. Don't mention it again.", .{str(args, "mode") orelse ""});
     return "Shown to the user.";

@@ -37,16 +37,34 @@ HiddenKind? _kindOf(int r) {
   return null;
 }
 
-/// The hidden kinds found in [text], in a fixed order. A leading byte-order
-/// mark doesn't count.
+/// Whether [text] has right-to-left letters (U+0590–U+08FF but U+061C, U+FB1D–U+FDFF, U+FE70–U+FEFC: Hebrew,
+/// Arabic, Syriac, Thaana and their forms). Direction marks are how such text is written.
+bool _hasRtl(List<int> runes) => runes.any(
+  (r) => (r >= 0x0590 && r <= 0x08FF && r != 0x061C) || (r >= 0xFB1D && r <= 0xFDFF) || (r >= 0xFE70 && r <= 0xFEFC),
+);
+
+/// The hidden kind of `runes[i]` in its context. A zero-width (non-)joiner between two non-ASCII characters is how
+/// Persian, Indic and emoji text is written, and direction marks are ordinary in text with RTL letters.
+HiddenKind? _hiddenAt(List<int> runes, int i, bool rtl) {
+  final r = runes[i];
+  final k = _kindOf(r);
+  if (k == null) return null;
+  if (r == 0x200C || r == 0x200D) {
+    bool letter(int j) => j >= 0 && j < runes.length && runes[j] > 0x7F && _kindOf(runes[j]) == null;
+    if (letter(i - 1) && letter(i + 1)) return null;
+  }
+  if ((r == 0x200E || r == 0x200F || r == 0x061C) && rtl) return null;
+  return k;
+}
+
+/// The hidden kinds found in [text], in a fixed order. A leading byte-order mark doesn't count, nor do joiners and
+/// direction marks used as the script needs them. Mirrors backend `safe_fetch.zig` `hiddenIn`.
 Set<HiddenKind> hiddenIn(String text) {
+  final runes = text.runes.toList();
+  final rtl = _hasRtl(runes);
   final found = <HiddenKind>{};
-  var first = true;
-  for (final r in text.runes) {
-    if (!(first && r == 0xFEFF)) {
-      if (_kindOf(r) case final k?) found.add(k);
-    }
-    first = false;
+  for (var i = runes.isNotEmpty && runes.first == 0xFEFF ? 1 : 0; i < runes.length; i++) {
+    if (_hiddenAt(runes, i, rtl) case final k?) found.add(k);
   }
   return {
     for (final k in HiddenKind.values)
@@ -54,13 +72,14 @@ Set<HiddenKind> hiddenIn(String text) {
   };
 }
 
-/// [text] without hidden characters (see [HiddenKind]). Zero-width joiners
-/// inside emoji sequences are dropped too: the emoji splits, the meaning stays.
+/// [text] without hidden characters (see [HiddenKind] and [hiddenIn]).
 String stripHidden(String text) {
   if (hiddenIn(text).isEmpty) return text;
+  final runes = text.runes.toList();
+  final rtl = _hasRtl(runes);
   final b = StringBuffer();
-  for (final r in text.runes) {
-    if (_kindOf(r) == null) b.writeCharCode(r);
+  for (var i = 0; i < runes.length; i++) {
+    if (_hiddenAt(runes, i, rtl) == null) b.writeCharCode(runes[i]);
   }
   return b.toString();
 }

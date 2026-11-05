@@ -35,7 +35,7 @@
 //! through `wrapUntrusted`, which strips hidden characters, fences it in
 //! `<untrusted-content>` (the app's tag, `core/security/untrusted.dart`) and
 //! defangs any copy of that delimiter inside the text. `urlLeak` checks a
-//! model-chosen URL for the user's secrets before it is fetched.
+//! model-chosen URL for keys and data blobs before it is fetched.
 const std = @import("std");
 const anole = @import("anole");
 const official_sites = @import("official_sites.zig");
@@ -417,10 +417,58 @@ pub const Hidden = packed struct(u4) {
     }
 };
 
-/// The hidden character starting at `text[i]`: its kind and byte length.
-/// Every one is a fixed UTF-8 pattern, so nothing is decoded and invalid
-/// UTF-8 is simply not matched.
-fn hiddenAt(text: []const u8, i: usize) ?struct { kind: u2, len: u3 } {
+const HiddenChar = struct { kind: u2, len: u3 };
+
+/// The hidden character starting at `text[i]` with its context: a zero-width
+/// (non-)joiner between two non-ASCII characters is how Persian, Indic and
+/// emoji text is written, and left-to-right/right-to-left marks are how RTL
+/// text is written, so those are ordinary text (as the app's `hiddenIn`).
+fn hiddenAt(text: []const u8, i: usize, rtl: bool) ?HiddenChar {
+    const h = anyHiddenAt(text, i) orelse return null;
+    if (h.len == 3 and text[i] == 0xE2 and text[i + 1] == 0x80) switch (text[i + 2]) {
+        0x8C, 0x8D => if (joinsLetters(text, i)) return null, // U+200C/D
+        0x8E, 0x8F => if (rtl) return null, // U+200E/F
+        else => {},
+    };
+    if (h.len == 2 and rtl) return null; // U+061C
+    return h;
+}
+
+/// Whether the joiner at `text[i]` sits between two non-ASCII characters
+/// that are not hidden themselves.
+fn joinsLetters(text: []const u8, i: usize) bool {
+    if (i == 0 or text[i - 1] < 0x80) return false;
+    var p = i - 1;
+    while (p > 0 and i - p < 4 and text[p] & 0xC0 == 0x80) p -= 1;
+    if (anyHiddenAt(text, p) != null) return false;
+    const n = i + 3;
+    return n < text.len and text[n] >= 0xC0 and anyHiddenAt(text, n) == null;
+}
+
+/// Whether `text` has right-to-left letters (U+0590-08FF but U+061C,
+/// U+FB1D-FDFF, U+FE70-FEFC: Hebrew, Arabic, Syriac, Thaana and their forms).
+fn hasRtl(text: []const u8) bool {
+    var i: usize = 0;
+    while (i + 1 < text.len) : (i += 1) {
+        const b = text[i];
+        const c = text[i + 1];
+        if (b == 0xD8 and c == 0x9C) continue; // U+061C, a mark itself
+        if ((b == 0xD6 and c >= 0x90) or (b >= 0xD7 and b <= 0xDF)) return true;
+        if (i + 2 >= text.len) continue;
+        if (b == 0xE0 and c >= 0xA0 and c <= 0xA3) return true;
+        if (b == 0xEF) {
+            const d = text[i + 2];
+            if ((c == 0xAC and d >= 0x9D) or (c >= 0xAD and c <= 0xB7)) return true;
+            if ((c == 0xB9 and d >= 0xB0) or c == 0xBA or (c == 0xBB and d <= 0xBC)) return true;
+        }
+    }
+    return false;
+}
+
+/// The hidden-class character starting at `text[i]`, whatever its context:
+/// its kind and byte length. Every one is a fixed UTF-8 pattern, so nothing
+/// is decoded and invalid UTF-8 is simply not matched.
+fn anyHiddenAt(text: []const u8, i: usize) ?HiddenChar {
     const r = text[i..];
     if (r.len >= 2 and r[0] == 0xD8 and r[1] == 0x9C) return .{ .kind = 1, .len = 2 }; // U+061C
     if (r.len >= 3 and r[0] == 0xE2 and r[1] == 0x80) switch (r[2]) {
@@ -443,12 +491,14 @@ fn hiddenAt(text: []const u8, i: usize) ?struct { kind: u2, len: u3 } {
     return null;
 }
 
-/// The hidden kinds in `text`. A leading byte-order mark doesn't count.
+/// The hidden kinds in `text`. A leading byte-order mark doesn't count, nor
+/// do joiners and direction marks used as the script needs them.
 pub fn hiddenIn(text: []const u8) Hidden {
     var bits: u4 = 0;
+    const rtl = hasRtl(text);
     var i: usize = if (std.mem.startsWith(u8, text, "\xEF\xBB\xBF")) 3 else 0;
     while (i < text.len) {
-        if (hiddenAt(text, i)) |h| {
+        if (hiddenAt(text, i, rtl)) |h| {
             bits |= @as(u4, 1) << h.kind;
             i += h.len;
         } else i += 1;
@@ -460,10 +510,11 @@ pub fn hiddenIn(text: []const u8) Hidden {
 /// when anything else was hidden; as the app's `stripHidden`).
 pub fn stripHidden(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
     if (!hiddenIn(text).any()) return text;
+    const rtl = hasRtl(text);
     var out: std.ArrayList(u8) = try .initCapacity(arena, text.len);
     var i: usize = 0;
     while (i < text.len) {
-        if (hiddenAt(text, i)) |h| {
+        if (hiddenAt(text, i, rtl)) |h| {
             i += h.len;
         } else {
             out.appendAssumeCapacity(text[i]);
@@ -548,22 +599,19 @@ fn opensTag(rest: []const u8) bool {
 
 // ---------------------------------------------------------------- leaks
 
-/// What `url` would carry off, or null when it looks clean: one of `known`
-/// (the user's keys and tokens, the server's own), a key shape, or a long
-/// opaque blob, in the URL as written or percent-decoded. Mirrors the Code
-/// harness's `Scrubber` (`features/code/harness/everyai/scrub.dart`).
-pub fn urlLeak(arena: std.mem.Allocator, url: []const u8, known: []const []const u8) !?[]const u8 {
-    return leakIn(arena, url, known, true);
+/// What `url` would carry off, or null when it looks clean: a key shape or a
+/// long opaque blob, in the URL as written or percent-decoded. Mirrors the
+/// Code harness's `Scrubber` (`features/code/harness/everyai/scrub.dart`),
+/// tightened for URLs: a match here refuses the fetch, where the Scrubber only
+/// redacts, so news slugs, commit links and content hashes must pass.
+pub fn urlLeak(arena: std.mem.Allocator, url: []const u8) !?[]const u8 {
+    return leakIn(arena, url, true);
 }
 
 /// `urlLeak` for any text that leaves the server (a search query), with the
 /// blob check only when `blobs` (someone may search for a file's hash).
-pub fn leakIn(arena: std.mem.Allocator, text: []const u8, known: []const []const u8, blobs: bool) !?[]const u8 {
+pub fn leakIn(arena: std.mem.Allocator, text: []const u8, blobs: bool) !?[]const u8 {
     const decoded = try percentDecoded(arena, text);
-    for (known) |k| {
-        if (k.len < 8) continue;
-        if (std.mem.indexOf(u8, text, k) != null or std.mem.indexOf(u8, decoded, k) != null) return "one of the user's keys or sign-in tokens";
-    }
     if (keyShapeIn(text) orelse keyShapeIn(decoded)) |what| return what;
     return if (blobs) blobIn(text) orelse blobIn(decoded) else null;
 }
@@ -578,7 +626,7 @@ fn isUpperAlnum(c: u8) bool {
     return std.ascii.isDigit(c) or std.ascii.isUpper(c);
 }
 fn isB64(c: u8) bool {
-    return isKeyChar(c) or c == '+' or c == '/';
+    return isKeyChar(c) or c == '+';
 }
 
 /// How many bytes of `s` from `i` satisfy `pred`.
@@ -588,6 +636,15 @@ fn runOf(s: []const u8, i: usize, comptime pred: fn (u8) bool) usize {
     return j - i;
 }
 
+/// Whether a `sk-`/`rk-`/`pk-` tail looks random: some `-`/`_` piece of 16 or
+/// more that mixes two of upper case, lower case and digits. A slug of words
+/// (`sk-hynix-posts-record-quarterly-profit`) has none.
+fn randomTail(run: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, run, "-_");
+    while (it.next()) |piece| if (piece.len >= 16 and kinds(piece) >= 2) return true;
+    return false;
+}
+
 /// The first key shape in `s`, named for the model.
 fn keyShapeIn(s: []const u8) ?[]const u8 {
     var i: usize = 0;
@@ -595,11 +652,17 @@ fn keyShapeIn(s: []const u8) ?[]const u8 {
         const rest = s[i..];
         const boundary = i == 0 or !isAlnum(s[i - 1]);
         if (boundary) {
-            for ([_][]const u8{ "sk-", "rk-", "pk-" }) |p| if (std.mem.startsWith(u8, rest, p) and runOf(s, i + 3, isKeyChar) >= 20) return "an API key";
+            for ([_][]const u8{ "sk-", "rk-", "pk-" }) |p| if (std.mem.startsWith(u8, rest, p)) {
+                const n = runOf(s, i + 3, isKeyChar);
+                if (n >= 20 and randomTail(s[i + 3 .. i + 3 + n])) return "an API key";
+            };
             for ([_][]const u8{ "ghp_", "gho_", "ghs_", "ghu_", "ghr_" }) |p| if (std.mem.startsWith(u8, rest, p) and runOf(s, i + 4, isAlnum) >= 20) return "a GitHub token";
             if (std.mem.startsWith(u8, rest, "hf_") and runOf(s, i + 3, isAlnum) >= 20) return "a Hugging Face token";
-            if ((std.mem.startsWith(u8, rest, "AKIA") or std.mem.startsWith(u8, rest, "ASIA")) and runOf(s, i + 4, isUpperAlnum) == 16 and (i + 20 == s.len or !isAlnum(s[i + 20]))) return "an AWS key";
-            if (std.mem.startsWith(u8, rest, "xox") and rest.len > 4 and std.mem.indexOfScalar(u8, "abposr", rest[3]) != null and rest[4] == '-' and runOf(s, i + 5, isKeyChar) >= 10) return "a Slack token";
+            // An access key id after `Credential=` is a presigned link's own (not a secret).
+            if ((std.mem.startsWith(u8, rest, "AKIA") or std.mem.startsWith(u8, rest, "ASIA")) and runOf(s, i + 4, isUpperAlnum) == 16 and
+                (i + 20 == s.len or !isAlnum(s[i + 20])) and !std.ascii.endsWithIgnoreCase(s[0..i], "credential="))
+                return "an AWS key";
+            if (std.mem.startsWith(u8, rest, "xox") and rest.len > 4 and std.mem.indexOfScalar(u8, "abprs", rest[3]) != null and rest[4] == '-' and runOf(s, i + 5, isKeyChar) >= 10) return "a Slack token";
             if (std.mem.startsWith(u8, rest, "AIza") and runOf(s, i + 4, isKeyChar) >= 30) return "a Google API key";
             if (std.mem.startsWith(u8, rest, "eyJ") and jwtAt(s, i + 3)) return "a JWT";
         }
@@ -612,20 +675,24 @@ fn keyShapeIn(s: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The first blob in `s`: longer than any commit hash or content id a URL needs.
+/// The first blob in `s`: longer than any commit hash or content id (a
+/// sha256 is 64 hex) a URL needs. `/` joins a base64 run only in the query
+/// or fragment; in the path it separates segments, each judged alone.
 fn blobIn(s: []const u8) ?[]const u8 {
+    const query = std.mem.indexOfAny(u8, s, "?#") orelse s.len;
     var i: usize = 0;
     while (i < s.len) {
-        const n = runOf(s, i, isB64);
-        if (n == 0) {
+        var j = i;
+        while (j < s.len and (isB64(s[j]) or (s[j] == '/' and j > query))) j += 1;
+        if (j == i) {
             i += 1;
             continue;
         }
-        const run = s[i .. i + n];
-        if (longestHex(run) >= 64) return "a long hex blob";
+        const run = s[i..j];
+        if (longestHex(run) > 64) return "a long hex blob";
         // A path of lower-case words is long too; a blob mixes cases and digits.
-        if (n >= 120 and mixed(run)) return "a long base64 blob";
-        i += n;
+        if (run.len >= 120 and kinds(run) == 3) return "a long base64 blob";
+        i = j;
     }
     return null;
 }
@@ -655,7 +722,8 @@ fn longestHex(run: []const u8) usize {
     return best;
 }
 
-fn mixed(run: []const u8) bool {
+/// How many of upper case, lower case and digits `run` has (0-3).
+fn kinds(run: []const u8) u2 {
     var upper = false;
     var lower = false;
     var digit = false;
@@ -664,7 +732,7 @@ fn mixed(run: []const u8) bool {
         lower = lower or std.ascii.isLower(c);
         digit = digit or std.ascii.isDigit(c);
     }
-    return upper and lower and digit;
+    return @as(u2, @intFromBool(upper)) + @intFromBool(lower) + @intFromBool(digit);
 }
 
 /// `s` with `%XX` escapes decoded; a broken escape stays as written.
@@ -820,6 +888,21 @@ test "hidden characters are found, named in order and stripped" {
     // A leading byte-order mark is no sign of anything; emoji and invalid UTF-8 pass.
     try std.testing.expect(!hiddenIn("\u{FEFF}plain caf\u{E9} \u{1F600} \xff\xfe").any());
     try std.testing.expect(hiddenIn("a\u{FEFF}b").zero_width);
+    // Joiners inside Persian words and emoji, and marks in Hebrew or Arabic
+    // text, are how those are written: kept, and not named.
+    const persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}";
+    const coder = "\u{1F469}\u{200D}\u{1F4BB} and \u{1F468}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F468}";
+    const hebrew = "\u{05E9}\u{05DC}\u{05D5}\u{05DD} \u{200F}123\u{200E} \u{0627}\u{061C}1";
+    for ([_][]const u8{ persian, coder, hebrew }) |ok| {
+        try std.testing.expect(!hiddenIn(ok).any());
+        try std.testing.expectEqual(ok.ptr, (try stripHidden(a, ok)).ptr);
+    }
+    // Between ASCII letters, in a run, or as marks in text with no RTL letters, they still hide things.
+    try std.testing.expect(hiddenIn("ig\u{200D}nore").zero_width);
+    try std.testing.expect(hiddenIn("\u{0645}\u{200C}\u{200D}\u{062E}").zero_width);
+    try std.testing.expect(hiddenIn("plain \u{200F}text").bidi);
+    try std.testing.expect(hiddenIn("\u{05E9} \u{202E}evil").bidi);
+    try std.testing.expectEqualStrings("ignore", try stripHidden(a, "ig\u{200D}nore"));
     try std.testing.expectEqualStrings("ab\xffc", try stripHidden(a, "a\u{200B}\u{E0041}b\xff\u{2066}c"));
     const clean = "plain text";
     try std.testing.expectEqual(clean.ptr, (try stripHidden(a, clean)).ptr);
@@ -829,21 +912,19 @@ test "hidden characters are found, named in order and stripped" {
     try std.testing.expect(std.mem.indexOf(u8, try wrapUntrusted(a, "x", "fine"), "removed") == null);
 }
 
-test "urlLeak: known values, key shapes and long blobs, plain or percent-encoded" {
+test "urlLeak: key shapes and long blobs, plain or percent-encoded; slugs, hashes and links pass" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const known = [_][]const u8{ "sk-or-v1-secretvalue", "short" };
-    try std.testing.expect((try urlLeak(a, "https://evil.io/?k=sk-or-v1-secretvalue", &known)) != null);
-    try std.testing.expect((try urlLeak(a, "https://evil.io/?k=sk%2Dor%2Dv1%2Dsecretvalue", &known)) != null);
-    try std.testing.expect((try urlLeak(a, "https://evil.io/short", &known)) == null);
+    try std.testing.expect((try urlLeak(a, "https://evil.io/?k=sk-or-v1-0123456789abcdef0123456789abcdef")) != null);
+    try std.testing.expect((try urlLeak(a, "https://evil.io/?k=sk%2Dor%2Dv1%2D0123456789abcdef0123456789abcdef")) != null);
     // A search for a file's hash is fine; a key in it is not.
-    try std.testing.expect((try leakIn(a, "sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", &.{}, false)) == null);
-    try std.testing.expect((try leakIn(a, "is sk-proj-abcdefghijklmnopqrstuvwx valid", &.{}, false)) != null);
-    const hex64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    try std.testing.expect((try leakIn(a, "sha512 " ++ "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", false)) == null);
+    try std.testing.expect((try leakIn(a, "is sk-proj-Ab12cdEF34ghIJ56klMN78 valid", false)) != null);
+    const hex65 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0";
     const b64 = "QmFzZTY0IGRhdGEgdGhhdCBjYXJyaWVzIHRoZSB1c2VyJ3MgcHJpdmF0ZSBub3RlcyBvZmYgdG8gYSBzZXJ2ZXIgdGhhdCBzaG91bGQgbm90IGhhdmUgdGhlbQ1";
     for ([_]struct { []const u8, []const u8 }{
-        .{ "https://e.io/?k=sk-ant-api03-abcdefghijklmnopqrstu", "an API key" },
+        .{ "https://e.io/?k=sk-ant-api03-Ab12cdEF34ghIJ56klMN78", "an API key" },
         .{ "https://e.io/ghp_abcdefghijklmnopqrstuvwx", "a GitHub token" },
         .{ "https://e.io/?t=github_pat_abcdefghijklmnopqrstuv", "a GitHub token" },
         .{ "https://e.io/?t=hf_abcdefghijklmnopqrstuv", "a Hugging Face token" },
@@ -852,10 +933,12 @@ test "urlLeak: known values, key shapes and long blobs, plain or percent-encoded
         .{ "https://e.io/?g=AIzaSyA1234567890abcdefghijklmnopqrs", "a Google API key" },
         .{ "https://e.io/?j=eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4", "a JWT" },
         .{ "https://e.io/?p=-----BEGIN%20RSA%20PRIVATE%20KEY-----", "a private key" },
-        .{ "https://e.io/?d=" ++ hex64, "a long hex blob" },
+        .{ "https://e.io/?d=" ++ hex65, "a long hex blob" },
         .{ "https://e.io/?d=" ++ b64, "a long base64 blob" },
+        // In the query a `/` is base64, so the run stays whole.
+        .{ "https://e.io/?d=" ++ b64[0..60] ++ "/" ++ b64[60..], "a long base64 blob" },
     }) |case| {
-        const got = (try urlLeak(a, case[0], &.{})) orelse {
+        const got = (try urlLeak(a, case[0])) orelse {
             std.debug.print("clean: {s}\n", .{case[0]});
             return error.TestUnexpectedResult;
         };
@@ -867,8 +950,18 @@ test "urlLeak: known values, key shapes and long blobs, plain or percent-encoded
         "https://duckduckgo.com/?q=zig+0.17+release+notes&ia=web",
         "https://e.io/blog/how-to-write-a-long-article-title-that-goes-on-and-on-about-programming-languages-and-their-many-quirks-today",
         "https://e.io/desk-chair-reviews",
+        // News slugs that start like key prefixes.
+        "https://www.reuters.com/technology/sk-hynix-posts-record-quarterly-profit-ai-demand-2026-10-24/",
+        "https://e.io/news/pk-subban-retires-after-a-long-career-in-hockey",
+        "https://example.com/xoxo-gossip-girl-reboot-cast",
+        // A deep link at a commit: path segments are judged one at a time.
+        "https://github.com/FlutterFire/flutterfire/tree/0123456789abcdef0123456789abcdef01234567/packages/firebase_auth/firebase_auth_platform_interface/lib/src/method_channel",
+        "https://github.com/spring-projects/spring-framework/blob/a1b2c3d4e5f60718293a4b5c6d7e8f9012345678/spring-webmvc/src/main/java/org/springframework/web/servlet/DispatcherServlet.java",
+        // A presigned link: the access key id after Credential=, a 64-hex signature.
+        "https://bucket.s3.amazonaws.com/report.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261105%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261105T000000Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "https://hub.docker.com/layers/library/nginx/latest/images/sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     }) |u| {
-        if (try urlLeak(a, u, &.{})) |what| {
+        if (try urlLeak(a, u)) |what| {
             std.debug.print("{s}: {s}\n", .{ u, what });
             return error.TestUnexpectedResult;
         }
