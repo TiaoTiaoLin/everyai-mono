@@ -102,7 +102,12 @@ final class PermissionPolicy {
     this.workingDir,
     this.hostTools = false,
     this.tempDirs = const [],
+    this.isLink,
   });
+
+  /// Whether a path on disk is a symlink (see temp_dirs_io.dart), or null to
+  /// not look: scratch writes through a link don't count as scratch.
+  final bool Function(String path)? isLink;
 
   /// The OS temp folders (see temp_dirs_io.dart), where writes never ask
   /// outside Plan mode, like the project's `.everyai/scratch/`.
@@ -159,7 +164,7 @@ final class PermissionPolicy {
     if (readOnly) return const Decision(Verdict.allow, DecisionSource.readOnly);
     final edits = _editPaths(call);
     // Scratch space is the agent's own: writes there (and making folders there) never ask.
-    bool scratch(String p) => isScratchWrite(p, workingDir: workingDir, tempDirs: tempDirs);
+    bool scratch(String p) => isScratchWrite(p, workingDir: workingDir, tempDirs: tempDirs, isLink: isLink);
     if (edits.isNotEmpty ? edits.every(scratch) : command != null && _mkdirsOnly(command, scratch)) {
       return const Decision(Verdict.allow, DecisionSource.scratch);
     }
@@ -857,21 +862,49 @@ const outsideProject = 'edits a file outside the project';
 /// Whether writing [path] stays in scratch space: under the project's
 /// `.everyai/scratch/` or one of [tempDirs], with no `..` and nothing that
 /// [editDangerReason] would flag inside that folder (`.git`, `.env`, keys).
-/// A relative [path] is taken from [workingDir].
-bool isScratchWrite(String path, {String? workingDir, List<String> tempDirs = const []}) {
+/// A relative [path] is taken from [workingDir]. Inside a project that lives
+/// in a temp folder only its own scratch folder counts, so its edits still
+/// ask. [isLink] (when given) refuses a path with a symlink between the
+/// project (or the temp folder) and the file: a cloned repo's
+/// `.everyai/scratch` could point anywhere.
+bool isScratchWrite(
+  String path, {
+  String? workingDir,
+  List<String> tempDirs = const [],
+  bool Function(String path)? isLink,
+}) {
   if (path.isEmpty || path.split('/').contains('..')) return false;
   final dir = workingDir == null || workingDir.isEmpty ? null : workingDir.replaceAll(RegExp(r'/+$'), '');
   final abs = path.startsWith('/') ? path : (dir == null ? null : '$dir/$path');
   if (abs == null) return false;
-  final roots = [if (dir != null) '$dir/.everyai/scratch', ...tempDirs];
-  for (final root in roots) {
-    final base = root.endsWith('/') ? root : '$root/';
-    if (abs.startsWith(base) && abs.length > base.length) {
-      return editDangerReason(abs, workingDir: base.substring(0, base.length - 1)) == null;
+  final inProject = dir != null && _privateAliases(dir).any((d) => abs == d || abs.startsWith('$d/'));
+  final roots = [
+    if (dir != null) (from: '$dir/', root: '$dir/.everyai/scratch/'),
+    if (!inProject)
+      for (final t in tempDirs) (from: t.endsWith('/') ? t : '$t/', root: t.endsWith('/') ? t : '$t/'),
+  ];
+  for (final (:from, :root) in roots) {
+    if (!abs.startsWith(root) || abs.length <= root.length) continue;
+    if (editDangerReason(abs, workingDir: root.substring(0, root.length - 1)) != null) return false;
+    if (isLink == null) return true;
+    // Every folder below [from] down to the file itself (the temp root may be a link: /tmp on macOS).
+    var at = from.substring(0, from.length - 1);
+    for (final part in abs.substring(from.length).split('/')) {
+      if (part.isEmpty) continue;
+      at = '$at/$part';
+      if (isLink(at)) return false;
     }
+    return true;
   }
   return false;
 }
+
+/// [dir] and its macOS `/private` twin (`/tmp`, `/var` are links into it).
+List<String> _privateAliases(String dir) => [
+  dir,
+  if (dir.startsWith('/private/')) dir.substring('/private'.length),
+  if (dir.startsWith('/tmp/') || dir.startsWith('/var/')) '/private$dir',
+];
 
 /// Whether [command] only makes folders (`mkdir`, `mkdir -p`) and every
 /// folder passes [scratch]. Words with expansions or globs don't count.

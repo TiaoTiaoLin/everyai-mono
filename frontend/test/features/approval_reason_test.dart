@@ -15,8 +15,8 @@ ActionCall _write(String path, {String id = 'w'}) =>
 const _dir = '/work/app';
 const _policy = PermissionPolicy(workingDir: _dir);
 
-String _why(ActionCall c, AgentMode mode, {String? outsideKind, bool askMcp = false}) =>
-    askReason(_policy.decide(c, mode), c, mode, outsideKind: outsideKind, askMcp: askMcp);
+String _why(ActionCall c, AgentMode mode, {String? outsideKind}) =>
+    askReason(_policy.decide(c, mode), c, mode, outsideKind: outsideKind);
 
 void main() {
   test('each mode says what it asks about', () {
@@ -32,10 +32,6 @@ void main() {
     final mcp = _call({'kind': 'MCPToolAction'}, tool: 'browser_click');
     expect(_why(mcp, AgentMode.autoEdit), startsWith('MCP tools ask unless the session is in Full auto'));
     expect(_why(mcp, AgentMode.fullAuto), isEmpty);
-    expect(
-      _why(mcp, AgentMode.fullAuto, askMcp: true),
-      'Before the plan is approved, MCP tools ask even in Full auto.',
-    );
     expect(_why(_sh('rm -rf build'), AgentMode.autoEdit), endsWith('so it asks in every mode but Full auto.'));
     expect(
       _why(_write('/etc/hosts'), AgentMode.fullAuto),

@@ -2,3 +2,6 @@
 
 /// No temp folders off the native platforms.
 List<String> systemTempDirs() => const [];
+
+/// Nothing on disk to look at.
+bool isSymlink(String path) => false;

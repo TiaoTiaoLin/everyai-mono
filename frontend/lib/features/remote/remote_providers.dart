@@ -552,6 +552,7 @@ final class RemoteSessionState {
     this.reasons = const {},
     this.rememberBy = const {},
     this.perCall = false,
+    this.forks = false,
     this.link = RemoteLinkStatus.connecting,
     this.loaded = false,
     this.gone,
@@ -574,6 +575,9 @@ final class RemoteSessionState {
 
   /// The host's session takes one answer per call.
   final bool perCall;
+
+  /// A fork's or subagent's: "for this session" covers all the session's forks.
+  final bool forks;
   final RemoteLinkStatus link;
 
   /// The host sent the session at least once.
@@ -590,6 +594,7 @@ final class RemoteSessionState {
     Map<String, String>? reasons,
     Map<String, String>? rememberBy,
     bool? perCall,
+    bool? forks,
     RemoteLinkStatus? link,
     bool? loaded,
     String? gone,
@@ -600,6 +605,7 @@ final class RemoteSessionState {
     reasons: reasons ?? this.reasons,
     rememberBy: rememberBy ?? this.rememberBy,
     perCall: perCall ?? this.perCall,
+    forks: forks ?? this.forks,
     link: link ?? this.link,
     loaded: loaded ?? this.loaded,
     gone: gone ?? this.gone,
@@ -742,6 +748,7 @@ final class MirrorFold {
               if (e.value case final String rule) e.key: rule,
           },
           perCall: m['per_call'] == true,
+          forks: m['forks'] == true,
           remember: [
             for (final p in m['remember'] as List<Object?>? ?? const [])
               if (p is String) p,

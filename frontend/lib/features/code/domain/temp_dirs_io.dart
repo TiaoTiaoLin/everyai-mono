@@ -35,3 +35,6 @@ List<String> _find() {
   }
   return out.toList();
 }
+
+/// Whether [path] is a symlink (false when it doesn't exist yet).
+bool isSymlink(String path) => FileSystemEntity.isLinkSync(path);

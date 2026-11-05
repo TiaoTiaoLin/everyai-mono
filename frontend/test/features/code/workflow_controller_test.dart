@@ -273,6 +273,46 @@ void main() {
     expect(c.policy.session, contains('npm test *'));
   });
 
+  test("a read-only agent neither uses nor adds to the lead's session approvals", () async {
+    final c = await open();
+    await c.setMode(AgentMode.ask);
+    lead
+      ..add(actionEvent(id: 'l1', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'npm test'}))
+      ..add(stateEvent('lw', ExecutionStatus.waitingForConfirmation));
+    await whenValue(
+      container,
+      codeSessionProvider(c.sessionId).select((s) => s.transcript.pending.length),
+      (int n) => n == 1,
+    );
+    await c.approve(ApprovalScope.session);
+    expect(c.policy.session, contains('npm test *'));
+    await c.runWorkflow('demo', 'source');
+    unawaited(bridge.agent('Review', {'harness': 'fake2', 'readOnly': true}).catchError((Object _) => null));
+    final kid = await child();
+    expect(kid.ownApprovals, isTrue);
+    expect(kid.sharesApprovals, isFalse);
+    container.listen(codeSessionProvider(kid.id), (_, _) {});
+    final reviewer = container.read(codeSessionProvider(kid.id).notifier);
+    expect(reviewer.policy.session, isNot(contains('npm test *')));
+    final s = drivers['fake2']!.conversations.values.single;
+    s
+      ..add(actionEvent(id: 'r1', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'npm test'}))
+      ..add(stateEvent('rw', ExecutionStatus.waitingForConfirmation));
+    await whenValue(
+      container,
+      codeSessionProvider(kid.id).select((s) => s.transcript.pending.length),
+      (int n) => n == 1,
+    );
+    expect(s.answers, isEmpty);
+    // Its own "for this session" stays its own.
+    s
+      ..add(actionEvent(id: 'r2', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'make lint'}))
+      ..add(stateEvent('rw2', ExecutionStatus.waitingForConfirmation));
+    await reviewer.approve(ApprovalScope.session);
+    expect(reviewer.policy.session, isNotEmpty);
+    expect(c.policy.session, isNot(contains('make lint *')));
+  });
+
   test("a user's no tells the agent why the app asked", () async {
     final c = await open();
     await c.setMode(AgentMode.ask);

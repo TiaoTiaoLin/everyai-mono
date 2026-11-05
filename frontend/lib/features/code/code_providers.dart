@@ -1163,6 +1163,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     String? rolePrompt,
     String? workingDir,
     bool ownTag = false,
+    bool ownApprovals = false,
     List<Map<String, Object?>>? clientTools,
     bool fork = false,
     ForkCopy? forkCopy,
@@ -1244,6 +1245,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       parentId: parent.id,
       parentCallId: callId,
       ownTag: ownTag,
+      ownApprovals: ownApprovals,
       forkCopy: forkCopy,
       tier: parent.tier,
       // The parent's own mode (Claude's `auto` over Accept edits) when the child runs as it does.
@@ -2129,15 +2131,18 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// What decides this session's actions: stored rules (global, project),
   /// then `settings.json` rules, plus approvals remembered for the session
-  /// (a fork's or subagent's include its parent's, shared by all its forks).
+  /// (a fork's or subagent's include its parent's, shared by all its forks,
+  /// unless it is a stricter child that keeps its own: see
+  /// [CodeSessionInfo.ownApprovals]).
   PermissionPolicy get policy {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     return PermissionPolicy(
       rules: ref.read(codePermissionsProvider).rulesFor(info?.projectId) + _settingsRules,
-      session: {..._sessionAllowed, ...?_parentController?._sessionAllowed},
+      session: {..._sessionAllowed, ...?(info?.ownApprovals ?? false ? null : _parentController?._sessionAllowed)},
       workingDir: info == null || isDemoPath(info.workingDir) ? null : info.workingDir,
       hostTools: info != null && isOutsideLead(info.harness, info.workingDir),
       tempDirs: systemTempDirs(),
+      isLink: isSymlink,
     );
   }
 
@@ -2164,8 +2169,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Remembers [patterns] "for this session": a fork's or subagent's go to
   /// its parent, so they cover every fork of the session. The other live
   /// children (and the parent) then settle what they wait on that now runs.
+  /// A child that keeps its own approvals keeps these too.
   void _allowForSession(List<String> patterns) {
-    final root = _parentController ?? this;
+    final own = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.ownApprovals ?? false;
+    final root = (own ? null : _parentController) ?? this;
     root._sessionAllowed.addAll(patterns);
     final sessions = ref.read(codeSessionsProvider);
     for (final id in [
@@ -5454,6 +5461,8 @@ final class _WorkflowLauncher implements AgentLauncher {
       harness: harness,
       // Its own spend, so the run's cost cap can read it.
       ownTag: harness == everyaiHarnessName,
+      // The lead's "for this session" approvals don't loosen a read-only agent.
+      ownApprovals: call.readOnly,
     );
     return (childId: info.id, harness: harness, model: model, note: note);
   }

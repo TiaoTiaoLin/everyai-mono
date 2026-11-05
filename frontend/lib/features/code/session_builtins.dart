@@ -85,6 +85,7 @@ mixin _SessionBuiltins on Notifier<CodeSessionState> {
             brief: reviewBrief(files: files, baseCommit: w?.baseCommit, focus: focus),
             mode: AgentMode.plan,
             callId: 'review-${aside.id}',
+            ownApprovals: true,
           );
       if (!ref.mounted) return;
       final running = aside.withChild(child.id);

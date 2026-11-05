@@ -11,9 +11,8 @@ import 'permissions.dart';
 ///
 /// [outsideKind] names the outside harness ("Claude Code") when the call is
 /// one of its own tools the rules can't judge (`autoDecidable` is false),
-/// which always asks. [askMcp]: a Max/Ultra flow before the plan is approved
-/// (see [PermissionPolicy.decideAll]).
-String askReason(Decision d, ActionCall call, AgentMode mode, {String? outsideKind, bool askMcp = false}) {
+/// which always asks.
+String askReason(Decision d, ActionCall call, AgentMode mode, {String? outsideKind}) {
   if (outsideKind != null && d.verdict == Verdict.allow) {
     final tool = call.toolName.isEmpty ? 'tool' : '${call.toolName} tool';
     return "$outsideKind's own $tool can't be checked by EveryAI's rules, so it always asks.";
@@ -23,9 +22,6 @@ String askReason(Decision d, ActionCall call, AgentMode mode, {String? outsideKi
     DecisionSource.dangerous when d.why == outsideProject =>
       'Edits outside the project ask in every mode, Full auto included.',
     DecisionSource.dangerous => 'This ${_bare(d.why)}, so it asks in every mode but Full auto.',
-    // Full auto would run it, but the Max/Ultra gate asks.
-    DecisionSource.mode when isMcpTool(call) && askMcp && d.verdict == Verdict.allow =>
-      'Before the plan is approved, MCP tools ask even in Full auto.',
     DecisionSource.mode when d.verdict != Verdict.ask => '',
     DecisionSource.mode when isMcpTool(call) =>
       'MCP tools ask unless the session is in Full auto or an Mcp(...) rule allows them.',
@@ -51,10 +47,9 @@ Map<String, String> approvalReasons(
   Iterable<ActionCall> pending,
   AgentMode mode, {
   String? Function(ActionCall call)? outsideKind,
-  bool askMcp = false,
 }) => {
   for (final c in pending)
-    if (askReason(policy.decide(c, mode), c, mode, outsideKind: outsideKind?.call(c), askMcp: askMcp) case final why
+    if (askReason(policy.decide(c, mode), c, mode, outsideKind: outsideKind?.call(c)) case final why
         when why.isNotEmpty)
       c.id: why,
 };

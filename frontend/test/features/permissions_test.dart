@@ -415,6 +415,31 @@ void main() {
       );
     });
 
+    test('a project in a temp folder still asks for its own edits', () {
+      for (final dir in ['/tmp/proj', '/private/tmp/proj']) {
+        final inTemp = PermissionPolicy(workingDir: dir, tempDirs: temp);
+        for (final path in ['/tmp/proj/lib/main.dart', '/private/tmp/proj/lib/main.dart', 'lib/main.dart']) {
+          expect(inTemp.decide(write(path), AgentMode.ask).verdict, Verdict.ask, reason: '$dir: $path');
+        }
+        expect(inTemp.decide(_sh('mkdir -p lib/x'), AgentMode.ask).verdict, Verdict.ask, reason: dir);
+        // Its own scratch folder and the rest of the temp folder stay free.
+        expect(inTemp.decide(write('.everyai/scratch/a.py'), AgentMode.ask).verdict, Verdict.allow, reason: dir);
+        expect(inTemp.decide(write('/tmp/other.txt'), AgentMode.ask).verdict, Verdict.allow, reason: dir);
+      }
+    });
+
+    test('a symlink on the way to the file is not scratch', () {
+      final links = {'$_dir/.everyai/scratch', '/tmp/evil'};
+      final linked = PermissionPolicy(workingDir: _dir, tempDirs: temp, isLink: links.contains);
+      for (final path in ['$_dir/.everyai/scratch/x.plist', '/tmp/evil/pre-commit']) {
+        expect(linked.decide(write(path), AgentMode.ask).verdict, Verdict.ask, reason: path);
+      }
+      expect(linked.decide(_sh('mkdir -p .everyai/scratch/a'), AgentMode.ask).verdict, Verdict.ask);
+      // The temp folder itself may be a link (/tmp on macOS); what is below it isn't.
+      final tmpLink = PermissionPolicy(workingDir: _dir, tempDirs: temp, isLink: (p) => p == '/tmp');
+      expect(tmpLink.decide(write('/tmp/out/a.json'), AgentMode.ask).verdict, Verdict.allow);
+    });
+
     test('a way out of scratch, a secret file or a deny rule still counts', () {
       for (final path in [
         '$_dir/.everyai/scratch/../settings.json',

@@ -82,6 +82,7 @@ final class CodeSessionInfo {
     this.parentId,
     this.parentCallId = '',
     this.ownTag = false,
+    this.ownApprovals = false,
     this.pinned = false,
     this.prNumber,
     this.forkCopy,
@@ -182,6 +183,14 @@ final class CodeSessionInfo {
   /// step or orchestrator), so its cost can be read alone.
   final bool ownTag;
 
+  /// A child stricter than its parent (a read-only workflow agent, a
+  /// `/review`): it neither uses nor adds to the "for this session"
+  /// approvals its parent's other children share.
+  final bool ownApprovals;
+
+  /// Its approval card's "for this session" covers all the session's forks.
+  bool get sharesApprovals => parentId != null && !ownApprovals;
+
   /// Kept at the top of the sidebar (Pinned) until unpinned.
   final bool pinned;
 
@@ -240,6 +249,7 @@ final class CodeSessionInfo {
     parentId: parentId,
     parentCallId: parentCallId,
     ownTag: ownTag,
+    ownApprovals: ownApprovals,
     pinned: pinned ?? this.pinned,
     prNumber: clearPr ? null : prNumber ?? this.prNumber,
     // Once merged back, the copy is gone.
@@ -284,6 +294,7 @@ final class CodeSessionInfo {
     pinned: json['pinned'] == true,
     prNumber: json['pr'] as int?,
     ownTag: json['own_tag'] == true || (json['parent_call_id'] as String? ?? '').startsWith('ultra-'),
+    ownApprovals: json['own_approvals'] == true,
     forkCopy: ForkCopy.fromJson(json['fork_copy']),
     // Max and Ultra were tiers, and Bug fix a mode: Max is a workflow now, kept on the session; Ultra and Bug
     // fix run once, so those sessions go on as Thorough with none.
@@ -321,6 +332,7 @@ final class CodeSessionInfo {
     'parent_id': ?parentId,
     if (parentCallId.isNotEmpty) 'parent_call_id': parentCallId,
     if (ownTag) 'own_tag': true,
+    if (ownApprovals) 'own_approvals': true,
     if (pinned) 'pinned': true,
     'pr': ?prNumber,
     if (forkCopy case final f?) 'fork_copy': f.toJson(),
