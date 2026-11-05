@@ -35,12 +35,16 @@ Outcome _out(String text, {bool error = false, bool warned = false, List<String>
     (error: error, warned: warned, text: text, fences: fences);
 
 /// Secret placeholders (`{{NAME}}`, `{{NAME|pct}}`, `{{NAME|b64}}`) filled with values in known key shapes, made at
-/// run time so no secret-shaped string sits in git. The same values go to the [Scrubber] as environment variables.
+/// run time so no secret-shaped string sits in git. The values go to the [Scrubber] as environment variables, all of
+/// them or those a case's `input.env` names.
 final class Secrets {
   Secrets([int seed = 20261105]) : _random = Random(seed);
 
   final Random _random;
   final values = <String, String>{};
+
+  /// Every form a value was written in (raw, percent-encoded, base64), so a check for leaks sees encoded ones too.
+  final written = <String>{};
 
   static const _alnum = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
@@ -59,11 +63,13 @@ final class Secrets {
   /// [text] with its placeholders filled.
   String fill(String text) => text.replaceAllMapped(RegExp(r'\{\{([A-Z_]+)(?:\|(pct|b64))?\}\}'), (m) {
     final v = values[m[1]!] ??= _make(m[1]!);
-    return switch (m[2]) {
+    final form = switch (m[2]) {
       'pct' => [for (final c in utf8.encode(v)) '%${c.toRadixString(16).padLeft(2, '0').toUpperCase()}'].join(),
       'b64' => base64Url.encode(utf8.encode(v)),
       _ => v,
     };
+    written.add(form);
+    return form;
   });
 
   /// [input] with every string in it filled.
@@ -74,8 +80,12 @@ final class Secrets {
     _ => input,
   };
 
-  /// The filled values as environment variables (the names are secret-named, so the [Scrubber] keeps them).
-  Map<String, String> get env => {for (final e in values.entries) e.key: e.value};
+  /// The filled values as environment variables (the [Scrubber] keeps a value when its name is secret-named): all of
+  /// them, or only [names] (the others stand for values the session learns from the project's `.env` files).
+  Map<String, String> env([List<Object?>? names]) => {
+    for (final e in values.entries)
+      if (names == null || names.contains(e.key)) e.key: e.value,
+  };
 }
 
 /// One case's sandbox: a project folder and a folder outside it, under a temp dir.
@@ -137,7 +147,8 @@ final class GuardBench {
       gateway: GatewayClient(baseUrl: 'http://gateway.invalid/v1', apiKey: 'sk-eai-redteam', client: client),
       sessionTag: '',
       researchSites: sites,
-      scrubber: Scrubber(env: secrets.env),
+      // As Scrubber.forProject builds it, with the case's environment instead of the real one.
+      scrubber: Scrubber(env: secrets.env(input['env'] as List?), values: Scrubber.dotEnvValues(root)),
       pushTargets: const {'origin'},
       packages: packages,
     );
@@ -159,7 +170,10 @@ final class GuardBench {
   Outcome _seen(ToolRunner runner, ToolOutput out, {bool warned = false}) =>
       _out(runner.scrubber.redact(out.text), error: out.isError, warned: warned);
 
+  /// Every guard's input may also take env (the placeholder names that are environment variables; default all) and
+  /// env_file (the project's `.env`, written before the session starts).
   Future<Outcome> run(String guard, Map<String, Object?> input, String payload) async {
+    if (input['env_file'] case final String text) _place('.env', text);
     switch (guard) {
       // input: url; research_sites (a research job); backend_fence: false (a page without the backend's fence).
       case 'web_fetch':
