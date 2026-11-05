@@ -214,7 +214,7 @@ final class ScriptBudget {
   /// webFetch and webSearch calls per script, together (each search costs money).
   final int webCalls;
 
-  /// Bytes of bridge replies per script.
+  /// Characters of bridge results per script.
   final int maxBytes;
   int decides = 0;
   int queries = 0;
@@ -241,9 +241,10 @@ final class ScriptBudget {
     return null;
   }
 
-  /// Why a [size]-byte reply is refused, or null (and counts it).
+  /// Why a [size]-character reply is refused, or null (and counts it). Only
+  /// the total is capped: readFile has its own file limit and every other
+  /// reply is fitted tool text.
   String? take(String fn, int size) {
-    if (size > _maxReadBytes) return '$fn returned over ${_mb(_maxReadBytes)}; narrow it (a path, a glob, a range)';
     if (bytes + size > maxBytes) {
       return 'bridge limit reached (${_mb(maxBytes)} per script); filter with grep or narrow the paths';
     }
@@ -366,8 +367,10 @@ final class ScriptRunner {
         final result = await (model ? queryLanes : toolLanes).run(
           () => _bridge(fn, args, budget: budget, level: level, cancel: cancel),
         );
+        if (budget.take(fn, result is String ? result.length : jsonEncode(result).length) case final refusal?) {
+          throw Exception(refusal);
+        }
         reply = jsonEncode({'id': id, 'result': result});
-        if (budget.take(fn, reply.length) case final refusal?) throw Exception(refusal);
         calls.add((fn: fn, detail: _detail(fn, args), failed: false));
       } on Object catch (e) {
         final message = e is LlmError ? e.message : '$e'.replaceFirst('Exception: ', '');
@@ -393,10 +396,10 @@ final class ScriptRunner {
       return const [];
     }
 
+    // Malformed UTF-8 (a raw byte, or a character the cap cut in half) becomes U+FFFD instead of failing the run.
+    const decoder = Utf8Decoder(allowMalformed: true);
     final pending = <Future<void>>[];
-    final stdoutDone = process.stdout.map(count).transform(utf8.decoder).transform(const LineSplitter()).forEach((
-      line,
-    ) {
+    final stdoutDone = process.stdout.map(count).transform(decoder).transform(const LineSplitter()).forEach((line) {
       if (line.startsWith('\x1e')) {
         try {
           final req = jsonDecode(line.substring(1));
@@ -410,7 +413,7 @@ final class ScriptRunner {
       }
       keep(line);
     });
-    final stderrDone = process.stderr.map(count).transform(utf8.decoder).transform(const LineSplitter()).forEach(keep);
+    final stderrDone = process.stderr.map(count).transform(decoder).transform(const LineSplitter()).forEach(keep);
 
     var timedOut = false;
     final timer = Timer(timeout, () {
@@ -660,12 +663,10 @@ final class ScriptRunner {
   }
 
   /// [r] as the model reads it: what it printed is data it gathered (files,
-  /// pages, model answers), so it comes in an untrusted block, fitted first
-  /// so the cut can't drop the closing tag. The status line stays outside.
-  String describe(ScriptResult r) {
-    final body = tools.fit(scriptBody(r), 'script-${DateTime.now().millisecondsSinceEpoch}');
-    return '${scriptHead(r)}${untrusted(body, source: 'run_script output')}';
-  }
+  /// pages, model answers), so it comes in an untrusted block. The status
+  /// line and our cut note stay outside it.
+  String describe(ScriptResult r) =>
+      '${scriptHead(r)}${tools.fitUntrusted(scriptBody(r), 'run_script output', 'script-${DateTime.now().millisecondsSinceEpoch}')}';
 }
 
 /// The status line of [r] (none when it ran to the end), with its line break.

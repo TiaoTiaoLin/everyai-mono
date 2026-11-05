@@ -218,6 +218,15 @@ try { await grep(".", { path: ".env" }); console.log("ALLOWED"); } catch (e) { c
     final direct = await runner().tools.run(ToolNames.grep, {'pattern': '.', 'path': '.env', 'output_mode': 'content'});
     expect(direct.isError, isTrue);
     expect(direct.text, isNot(contains('MARKER-ENV')));
+    // A harmless-looking link to a secret is checked where it points.
+    Link('${tmp.path}/repo/lib/notes.txt').createSync('${tmp.path}/repo/.env');
+    final linked = await runner().tools.run(ToolNames.grep, {
+      'pattern': '.',
+      'path': 'lib/notes.txt',
+      'output_mode': 'content',
+    });
+    expect(linked.isError, isTrue);
+    expect(linked.text, isNot(contains('MARKER-ENV')));
   }, skip: deno == null ? 'no deno' : false);
 
   test('webFetch and webSearch share one cap per script', () async {
@@ -260,6 +269,35 @@ for (const f of ["lib/mid.txt", "lib/mid.txt", "lib/big.txt"]) {
     expect(r.output.length, lessThan(110000));
   }, skip: deno == null ? 'no deno' : false);
 
+  test('malformed UTF-8 is printed as is: a raw byte, or a character the stream cap cuts in half', () async {
+    final raw = await runner().run(
+      'Deno.stdout.writeSync(new Uint8Array([0xff, 10]));\nconsole.log((await readFile("lib/a.dart")).trim());',
+      budget: ScriptBudget(const ScriptCaps()),
+      timeout: const Duration(seconds: 30),
+    );
+    expect((raw.exitCode, raw.timedOut), (0, false), reason: raw.output);
+    expect(raw.output, contains('\uFFFD'));
+    expect(raw.output, contains('void a() {}'));
+    // Three paddings, so one of them puts a chunk boundary inside a three-byte character.
+    for (final pad in ['', 'a', 'aa']) {
+      final r = await runner(maxStream: 1000000).run(
+        'const e = new TextEncoder();\nDeno.stdout.writeSync(e.encode("$pad"));\n'
+        'for (let i = 0; i < 40; i++) Deno.stdout.writeSync(e.encode("€".repeat(30001)));\nwhile (true) {}',
+        budget: ScriptBudget(const ScriptCaps()),
+      );
+      expect(r.output, endsWith('[The script wrote more than 1 MB and was stopped.]'), reason: 'pad "$pad"');
+    }
+  }, skip: deno == null ? 'no deno' : false);
+
+  test('a file under the readFile limit is read whole, however much JSON escaping it needs', () async {
+    File('${tmp.path}/repo/lib/quotes.json').writeAsStringSync('"' * 2500000);
+    final r = await runner().run(
+      'console.log("read", (await readFile("lib/quotes.json")).length);',
+      budget: ScriptBudget(const ScriptCaps()),
+    );
+    expect(r.output, contains('read 2500000'));
+  }, skip: deno == null ? 'no deno' : false);
+
   test('a bridged webFetch gets the same secret check as the tool, before any request', () async {
     final r = await runner().run(r'''
 try { await webFetch("https://x.test/?q=abcdefgh12345678"); console.log("ALLOWED"); } catch (e) { console.log("refused:", e.message); }
@@ -284,6 +322,10 @@ try { await webFetch("https://x.test/?q=abcdefgh12345678"); console.log("ALLOWED
     );
     expect(long.split('\n').last, '</untrusted-content>');
     expect(long.length, lessThan(40000));
+    // Our cut note sits between two blocks, outside both.
+    final note = long.indexOf('[… ');
+    expect(long.lastIndexOf('</untrusted-content>', note), greaterThan(long.lastIndexOf('<untrusted-content', note)));
+    expect(long.indexOf('<untrusted-content', note), lessThan(long.indexOf('</untrusted-content>', note)));
   }, skip: deno == null ? 'no deno' : false);
 
   test('a runaway program is stopped at its timeout', () async {

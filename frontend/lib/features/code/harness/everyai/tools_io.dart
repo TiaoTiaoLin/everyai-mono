@@ -836,7 +836,7 @@ final class ToolRunner {
   /// [text] from [source] in an untrusted block, cut like [_fit] when long: the head and the tail each in their own
   /// block, so our cut note stays outside them (a page can't fake it). Leaves room for the notes around it, so the
   /// [_fit] that follows keeps it whole.
-  String _untrustedFit(String text, String source, String name) {
+  String fitUntrusted(String text, String source, String name) {
     const kept = maxToolText - 2000;
     if (text.length <= kept) return untrusted(text, source: source);
     const half = kept ~/ 2;
@@ -891,7 +891,7 @@ final class ToolRunner {
   String _commandOutput(String command, String output, String name, {String? cwd}) {
     if (output.isEmpty) return output;
     final source = untrustedCommand(command) ?? _outsidePathIn(command, cwd ?? shell.cwd);
-    if (source != null) return _untrustedFit(output, source, name);
+    if (source != null) return fitUntrusted(output, source, name);
     return stripHiddenNoted(output);
   }
 
@@ -1029,7 +1029,7 @@ final class ToolRunner {
     final name = 'read-${DateTime.now().millisecondsSinceEpoch}';
     if (outside) {
       // Not the user's: a dependency, another tool's output, a file elsewhere on the machine.
-      out.writeln(_untrustedFit(body.toString().trimRight(), path, name));
+      out.writeln(fitUntrusted(body.toString().trimRight(), path, name));
     } else {
       if (hiddenLines.isNotEmpty) {
         final shown = hiddenLines.take(10).join(', ');
@@ -1225,7 +1225,8 @@ final class ToolRunner {
     final where = resolvePath(root, args['path'] as String? ?? '');
     final mode = args['output_mode'] as String? ?? 'files_with_matches';
     // Secret files never show up in grep (a `.env` glob included): their lines would reach the model unscrubbed.
-    if (secretPath(where)) {
+    // A named path is searched whatever the globs say, so a link to a secret is checked where it points too.
+    if (secretPath(where) || secretPath(_real(where))) {
       return ToolOutput('Error: ${_relative(where)} looks like a secret; grep skips secret files.', isError: true);
     }
     final env = (await ShellEnv.load()).env;
@@ -1292,7 +1293,7 @@ final class ToolRunner {
     ].where((p) => outsideProject(root, p, own: ownFolders)).firstOrNull;
     return ToolOutput(
       outside != null
-          ? _untrustedFit(text, 'grep: $outside', name)
+          ? fitUntrusted(text, 'grep: $outside', name)
           : _fit(stripHiddenNoted(text, what: 'the matching lines'), name),
     );
   }

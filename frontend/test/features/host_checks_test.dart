@@ -524,5 +524,15 @@ for (const f of [() => decide("x", [{id: "a", kind: "bool", prompt: "?"}]), () =
       expect(r.text, startsWith('[The script failed'));
       expect(r.text, isNot(contains('S3CRET-HOST')));
     }, skip: deno == null ? 'no deno' : false);
+
+    test('a long result is spilled before it is wrapped: the note outside, every block closed', () async {
+      final r = await hostRunScript(dir, stateDir, {'code': 'console.log("z".repeat(100000));'});
+      final note = r.text.indexOf('omitted. Full output');
+      expect(note, greaterThan(0), reason: r.text);
+      expect(r.text.substring(0, note), endsWith('</untrusted-content>\n… the rest '));
+      expect('<untrusted-content'.allMatches(r.text).length, '</untrusted-content>'.allMatches(r.text).length);
+      final path = RegExp(r'saved to (\S+);').firstMatch(r.text)!.group(1)!;
+      expect(File('$dir/$path').readAsStringSync(), 'z' * 100000);
+    }, skip: deno == null ? 'no deno' : false);
   });
 }

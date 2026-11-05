@@ -3,11 +3,13 @@
 import 'package:http/http.dart' as http;
 
 import '../../../core/security/untrusted.dart';
+import '../domain/spill.dart';
 import '../harness/everyai/llm.dart';
 import '../harness/everyai/script_io.dart';
 import '../harness/everyai/shell_io.dart';
 import '../harness/everyai/tools_io.dart';
 import '../harness/harness.dart' show ScriptCaps;
+import '../spill/spill.dart';
 import 'host.dart' show HostResult;
 
 bool get hostScriptsAvailable => findDeno() != null;
@@ -55,7 +57,14 @@ Future<HostResult> hostRunScript(
     timeout: Duration(seconds: seconds),
     cancel: cancel,
   );
-  // Printed text is data the program read: an untrusted block, the status line outside it. The host spills long
-  // results itself.
-  return (text: '${scriptHead(r)}${untrusted(scriptBody(r), source: 'run_script output')}', isError: r.exitCode != 0);
+  // Printed text is data the program read: an untrusted block, the status line outside it. A long result is spilled
+  // here, before wrapping, so the preview's note sits outside the block and hostFit leaves the preview alone.
+  String wrap(String text) => untrusted(text, source: 'run_script output');
+  final body = scriptBody(r);
+  final spill = spillText(body);
+  final path = spill == null
+      ? null
+      : saveSpill(root, Spill.fileName('host-script-${DateTime.now().millisecondsSinceEpoch}'), body);
+  final shown = path == null ? wrap(body) : spillPreview(spill!, path, wrap: wrap);
+  return (text: '${scriptHead(r)}$shown', isError: r.exitCode != 0);
 }
