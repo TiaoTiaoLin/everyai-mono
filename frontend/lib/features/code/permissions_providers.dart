@@ -98,3 +98,13 @@ final class CodePermissions extends Notifier<StoredPermissions> {
     _put(projectId, PermissionRules(allow: [...r.allow]..remove(pattern), deny: [...r.deny]..remove(pattern)));
   }
 }
+
+/// Bumped whenever Settings writes a `settings.json` layer, so running sessions read their rules again.
+final settingsFilesRevisionProvider = NotifierProvider<SettingsFilesRevision, int>(SettingsFilesRevision.new);
+
+final class SettingsFilesRevision extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void bump() => state++;
+}

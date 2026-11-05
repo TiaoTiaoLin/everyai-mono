@@ -31,7 +31,7 @@ String askReason(Decision d, ActionCall call, AgentMode mode, {String? outsideKi
       AgentMode.plan => 'Plan mode asks before looking things up.',
       AgentMode.ask => 'Ask mode asks before every edit and command.',
       AgentMode.autoEdit => 'Auto-edit asks before commands and anything else that is not a file edit.',
-      AgentMode.fullAuto => '',
+      AgentMode.fullAuto || AgentMode.bypass => '',
     },
     _ => '',
   };

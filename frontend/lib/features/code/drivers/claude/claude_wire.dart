@@ -43,7 +43,8 @@ const _mcpTimeoutMs = '330000';
 String permissionModeFor(AgentMode mode) => switch (mode) {
   AgentMode.plan => 'plan',
   AgentMode.autoEdit => 'acceptEdits',
-  AgentMode.ask || AgentMode.fullAuto => 'default',
+  // Bypass too: our hook allows every call, so nothing reaches Claude's own prompts.
+  AgentMode.ask || AgentMode.fullAuto || AgentMode.bypass => 'default',
 };
 
 /// Claude Code's own permission modes for the picker, each under the app's

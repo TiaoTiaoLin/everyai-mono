@@ -98,7 +98,11 @@ void main() {
             await _until(() {
               final state = container.read(codeSessionProvider(info.id));
               if (state.transcript.openQuestion case final q?) {
-                unawaited(controller.answer(q, [for (final _ in q.questions) const QuestionAnswer(selected: {0})]));
+                unawaited(
+                  controller.answer(q, [
+                    for (final _ in q.questions) const QuestionAnswer(selected: {0}),
+                  ]),
+                );
               }
               return state.transcript.pending;
             }, (p) => p.isNotEmpty);
@@ -108,7 +112,11 @@ void main() {
             await _until(() {
               final state = container.read(codeSessionProvider(info.id));
               if (state.transcript.openQuestion case final q?) {
-                unawaited(controller.answer(q, [for (final _ in q.questions) const QuestionAnswer(selected: {0})]));
+                unawaited(
+                  controller.answer(q, [
+                    for (final _ in q.questions) const QuestionAnswer(selected: {0}),
+                  ]),
+                );
               }
               return state.status;
             }, (s) => s == SessionStatus.done);

@@ -132,6 +132,8 @@ final class PermissionPolicy {
   /// what the rest of the policy says about a floor hit (see floor_advice.dart).
   Decision decide(ActionCall call, AgentMode mode, {bool floor = true}) {
     if (isClientTool(call)) return const Decision(Verdict.allow, DecisionSource.clientTool);
+    // Bypass: the user turned every EveryAI check off (floor, rules, risk) for this session.
+    if (mode == AgentMode.bypass) return const Decision(Verdict.allow, DecisionSource.mode);
     final command = _command(call);
     // Keys typed into a running shell are checked like a command.
     if (floor ? command ?? _typed(call) : null case final text?) {
@@ -181,7 +183,7 @@ final class PermissionPolicy {
       }
     }
     final allowed = switch (mode) {
-      AgentMode.fullAuto => true,
+      AgentMode.fullAuto || AgentMode.bypass => true,
       AgentMode.autoEdit => edits.isNotEmpty,
       AgentMode.ask || AgentMode.plan => false,
     };
@@ -205,7 +207,11 @@ final class PermissionPolicy {
     if (decisions.any((e) => e.$2.source == DecisionSource.plan)) {
       return (accept: false, reason: AgentMode.planRefusal);
     }
-    if (askMcp && decisions.any((e) => isMcpTool(e.$1) && e.$2.source == DecisionSource.mode)) return null;
+    if (askMcp &&
+        mode != AgentMode.bypass &&
+        decisions.any((e) => isMcpTool(e.$1) && e.$2.source == DecisionSource.mode)) {
+      return null;
+    }
     if (decisions.every((e) => e.$2.verdict == Verdict.allow)) return (accept: true, reason: null);
     return null;
   }
@@ -243,6 +249,25 @@ final class PermissionPolicy {
         _ => false,
       };
       if (hit) return raw;
+    }
+    // A chain (`cd app && npm test | tail`) is allowed when every simple command in it is: each part matched by a
+    // command rule. Anything the parser can't vouch for (`$(…)`, subshells, heredocs) still asks.
+    if (allowing && command != null) {
+      final segments = shellSegments(command);
+      if (segments != null && segments.length > 1) {
+        final rules = [
+          for (final raw in patterns)
+            if (_Rule.parse(raw) case final r? when r.kind == _RuleKind.command) (raw, r.glob),
+        ];
+        final used = <String>[];
+        for (final seg in segments) {
+          final words = seg.join(' ');
+          final hit = rules.where((r) => globMatches(r.$2, words)).firstOrNull;
+          if (hit == null) return null;
+          if (!used.contains(hit.$1)) used.add(hit.$1);
+        }
+        return used.join(', ');
+      }
     }
     return null;
   }
@@ -983,26 +1008,66 @@ const _threeWord = {
 /// edits keep the file (`Edit(lib/main.dart)`); MCP tools keep the tool
 /// (`Mcp(browser_take_screenshot)`).
 String? rememberPattern(ActionCall call, {String? workingDir}) {
+  final all = rememberPatterns(call, workingDir: workingDir);
+  return all == null || all.length != 1 ? null : all.single;
+}
+
+/// The rules "allow similar for this session" stores for [call]: one per simple command of a chain
+/// (`cd app && npm test` gives `cd *` and `npm test *`), else as [rememberPattern]. Null when any part can't be
+/// remembered (dangerous, unparsed, `$(…)`).
+List<String>? rememberPatterns(ActionCall call, {String? workingDir}) {
   if (_command(call) case final command?) {
     if (dangerReason(command) != null) return null;
     final segments = shellSegments(command);
-    if (segments == null || segments.length != 1) return null;
-    final w = segments.single;
-    if (w.isEmpty || RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=').hasMatch(w.first)) return null;
-    // An exact rule must read back as the same words.
-    bool plain(String x) => x.isNotEmpty && !x.contains('*') && !x.contains('?') && !x.contains(' ');
-    String? exact() => w.every(plain) ? w.join(' ') : null;
-    if (_exactOnly.contains(w.first)) return exact();
-    final arity = w.length >= 2 && _threeWord.contains('${w[0]} ${w[1]}')
-        ? 3
-        : _twoWord.contains(w.first)
-        ? 2
-        : 1;
-    final prefix = w.take(arity).toList();
-    if (prefix.skip(1).any((x) => x.startsWith('-'))) return exact();
-    if (!prefix.every(plain)) return null;
-    return '${prefix.join(' ')} *';
+    if (segments == null || segments.isEmpty) return null;
+    final out = <String>[];
+    for (final w in segments) {
+      final p = _segmentPattern(w);
+      if (p == null) return null;
+      if (!out.contains(p)) out.add(p);
+    }
+    return out;
   }
+  final single = _singlePattern(call, workingDir: workingDir);
+  return single == null ? null : [single];
+}
+
+/// "Allow all similar for this session": the whole kind of [call]. Any command (`*`: the floor and risky commands
+/// still ask, and so does anything the parser can't vouch for), any edit in the project (`Edit(**)`: edits outside it
+/// still ask), any MCP tool (`Mcp(*)`). Null for anything else.
+String? broadPattern(ActionCall call) {
+  if (_command(call) != null) return '*';
+  if (_editPath(call) != null || _editPaths(call).isNotEmpty) return 'Edit(**)';
+  if (isMcpTool(call)) return 'Mcp(*)';
+  return null;
+}
+
+/// What a broad pattern covers, for the button ("all commands").
+String broadLabel(String pattern) => switch (pattern) {
+  '*' => 'all commands',
+  'Edit(**)' => 'all edits in the project',
+  'Mcp(*)' => 'all MCP tools',
+  _ => pattern,
+};
+
+String? _segmentPattern(List<String> w) {
+  if (w.isEmpty || RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=').hasMatch(w.first)) return null;
+  // An exact rule must read back as the same words.
+  bool plain(String x) => x.isNotEmpty && !x.contains('*') && !x.contains('?') && !x.contains(' ');
+  String? exact() => w.every(plain) ? w.join(' ') : null;
+  if (_exactOnly.contains(w.first)) return exact();
+  final arity = w.length >= 2 && _threeWord.contains('${w[0]} ${w[1]}')
+      ? 3
+      : _twoWord.contains(w.first)
+      ? 2
+      : 1;
+  final prefix = w.take(arity).toList();
+  if (prefix.skip(1).any((x) => x.startsWith('-'))) return exact();
+  if (!prefix.every(plain)) return null;
+  return '${prefix.join(' ')} *';
+}
+
+String? _singlePattern(ActionCall call, {String? workingDir}) {
   if (_editPath(call) case final path?) {
     if (path.isEmpty || editDangerReason(path, workingDir: workingDir) != null) return null;
     final rel = relativeTo(path, workingDir);
@@ -1024,6 +1089,10 @@ enum ApprovalScope {
 
   /// Until the app quits.
   session,
+
+  /// Until the app quits, the whole kind of action (every command, every edit in the project, every MCP tool; see
+  /// [broadPattern]). The floor and risky actions still ask.
+  sessionAll,
 
   /// Stored in the project's permissions.
   always,

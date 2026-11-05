@@ -3,6 +3,17 @@
 EveryAI is in alpha. Signed releases start at `0.1.0-alpha.1`; the earlier unsigned dev build was
 `0.1.0-dev-nonsigned`. Earlier changes are listed by date and pull request.
 
+## Unreleased
+
+- **Bypass permissions:** a new mode, after Full auto, that turns every EveryAI check off (safety floor, deny rules,
+  risk prompts, the window question for screenshots). It asks you to confirm before it turns on, and forks,
+  subagents and workflow agents inherit it.
+- **Fewer approvals on long runs:** "Allow similar for this session" now works for chained commands
+  (`cd app && npm test | tail`), one rule per part. A new "Allow all commands / all edits in the project / all MCP
+  tools for this session" covers the whole kind; the floor and risky actions still ask. Allow rules match a chain
+  when every part is allowed. Rules changed in Settings apply to the running session at once, including a card
+  already waiting.
+
 ## 0.1.0-alpha.2 (2026-11-05): updates in the app, and the prober fixes
 
 - **Updates without reinstalling.** Each launch checks GitHub Releases (Settings → About: Check now, and "Get
