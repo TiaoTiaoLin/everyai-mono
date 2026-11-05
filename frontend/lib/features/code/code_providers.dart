@@ -75,6 +75,7 @@ import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
 import 'host/host_report.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
+import 'limit_providers.dart';
 import 'mcp_providers.dart';
 import 'panes/file_tree.dart' as fs;
 import 'permissions_providers.dart';
@@ -1324,6 +1325,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
       ref.read(preferencesProvider)['$codeLayoutPrefix$g'] = null;
+      ref.read(preferencesProvider)['$codeLimitBannerPrefix$g'] = null;
     }
     state = [
       for (final s in state)
@@ -2154,6 +2156,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     // A state change refreshes the meter; the cost lives in our ledger, or an outside driver reports it.
     if (event is StateChange) ref.read(codeUsageProvider(sessionId).notifier).refreshSoon();
     if (event is UsageReport) ref.read(codeUsageProvider(sessionId).notifier).report(event);
+    if (event is PlanLimits) ref.read(codePlanLimitsProvider(sessionId).notifier).set(event);
     final wasRunning = state.transcript.running;
     _trackContext(event);
     _builder.add(event);
@@ -3382,6 +3385,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     _freshLead = true;
     state = state.copyWith(transcript: _builder.snapshot, waited: '', handoffProblem: '', clearChanging: true);
     if (ref.exists(codeUsageProvider(sessionId))) ref.read(codeUsageProvider(sessionId).notifier).leadChanged();
+    // The old lead's plan limits (and a banner closed for them) end with it.
+    ref.read(codePlanLimitsProvider(sessionId).notifier).clear();
+    ref.read(preferencesProvider)['$codeLimitBannerPrefix$sessionId'] = null;
     await _openContext(next);
     if (!ref.mounted) {
       ready.complete();

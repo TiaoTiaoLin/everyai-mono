@@ -27,6 +27,7 @@ import 'package:every_ai/features/code/handoff/native_import.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart' show NativeCommand, NativeMode, HarnessError;
 import 'package:every_ai/features/code/host/host_providers.dart';
+import 'package:every_ai/features/code/limit_providers.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:every_ai/features/code/workflows/workflow_picker.dart';
@@ -215,6 +216,24 @@ void main() {
     final timeline = await readTimeline(dir);
     expect([for (final s in timeline) (s.harness, s.conversationId)], [('alpha', 'alpha-c1')]);
     expect((await loadHandoffs(dir)).single.kind, HandoffKind.full);
+  });
+
+  test("the old lead's plan limits and a banner closed for them end with it", () async {
+    final info = await start();
+    final c = await open(info.id);
+    final a = d('alpha').latest!;
+    final full = PlanLimits.of(
+      id: 'a-limits',
+      windows: [PlanWindow(name: 'five_hour', used: 1, resetsAt: DateTime.now().add(const Duration(hours: 2)))],
+    );
+    a.add(full);
+    await pumpEventQueue();
+    expect(container.read(codePlanLimitsProvider(info.id))?.windows.single.used, 1);
+    prefs['$codeLimitBannerPrefix${info.id}'] = 'plan:five_hour:full@0';
+    await c.switchLead('beta', run: false);
+    await handedOff(info.id, 'beta');
+    expect(container.read(codePlanLimitsProvider(info.id)), isNull);
+    expect(prefs['$codeLimitBannerPrefix${info.id}'], isNull);
   });
 
   test('with Max on, the new lead is told about it with its next message', () async {
