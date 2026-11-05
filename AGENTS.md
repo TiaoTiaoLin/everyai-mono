@@ -4,6 +4,13 @@ Context for the next agent. Keep it current: update the **Progress log** and
 **Next steps** whenever you finish a step. Plans under `~/.claude/plans/` and the TODO*.md files are the
 owner's local notes (gitignored); the task board is the GitHub Project.
 
+## What EveryAI is (owner, 2026-11-04)
+A coding **harness and orchestrator for every coding agent**: Claude Code, Codex, OpenCode, ACP agents and our own
+EveryAI harness in one native workspace, with our workflows, checks, rewind and tools on top. **BYOK** (users' own keys
+and subscriptions; EveryAI spends nothing on sessions it doesn't lead), **local AI** next, and outside agents keep
+their **native feel**. OpenRouter is plumbing, not the product; billing is parked. Public docs: `README.md`,
+`docs/ROADMAP.md`, `docs/CODE_ROADMAP.md`, `docs/ARCHITECTURE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`.
+
 ## Rules (from the user — do not break)
 - **Commits:** author as your own git identity (the owner's agents commit as
   `xuckless` with the GitHub noreply address). **No Claude/AI identifiers**
