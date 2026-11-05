@@ -291,6 +291,27 @@ void main() {
     expect(clean, contains('<rect'));
   });
 
+  test('sanitizeSvg leaves nothing an HTML parser would bring to life', () {
+    const open = '<svg xmlns="http://www.w3.org/2000/svg">';
+    // XML keeps `--!>` inside the comment; HTML ends the comment there.
+    final comment = sanitizeSvg('$open<!-- a --!><img src=x onerror=alert(1)> --><rect/></svg>');
+    expect(comment, isNot(contains('onerror')));
+    expect(comment, contains('<rect/>'));
+    // Markup inside title/desc is HTML to a browser (`image` becomes `img`).
+    const input =
+        '$open<title>Chart<image src="https://evil.example/x?d=1" srcset="https://evil.example/y 1x"/></title>'
+        '<desc><![CDATA[<img src=x onerror=alert(1)>]]></desc>'
+        '<text><![CDATA[a < b]]></text><image src="https://evil.example/z" width="1"/></svg>';
+    final title = sanitizeSvg(input);
+    expect(title, isNot(contains('evil.example')));
+    expect(title, isNot(contains('<img')));
+    expect(title, isNot(contains('CDATA')));
+    expect(title, contains('<title>Chart</title>'));
+    expect(title, contains('<text>a &lt; b</text>'));
+    // A second call (the cache) gives the same answer.
+    expect(sanitizeSvg(input), title);
+  });
+
   group('QuizView', () {
     Widget host(Visual visual) => ProviderScope(
       overrides: [preferencesProvider.overrideWithValue(Preferences.inMemory())],

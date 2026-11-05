@@ -7,19 +7,34 @@ import '../../../../core/theme/every_theme.dart';
 /// Keeps what an illustration may have: drawing elements from an allowlist,
 /// links to `#id` fragments and inline raster images, and CSS whose `url()`
 /// points at `#id`. Everything else goes: scripts, `foreignObject`, SMIL
-/// animation (it can rewrite an href), event handlers, the doctype (its
-/// entities could expand to markup), `@import`, and CSS with escapes or
-/// `image-set`. The tree is parsed, not matched with patterns, because the
-/// result also reaches browsers (downloads), which run script and fetch.
-/// Invalid XML gives '' (flutter_svg can't draw it either).
+/// animation (it can rewrite an href), event handlers, `src`/`srcset`, the
+/// doctype (its entities could expand to markup), comments, `@import`, and CSS
+/// with escapes or `image-set`. `title` and `desc` keep only their text: an
+/// HTML parser reads markup inside them as HTML, and ends a comment at `--!>`
+/// where XML doesn't. The tree is parsed, not matched with patterns, because
+/// the result also reaches browsers and Markdown editors (downloads), which
+/// run script and fetch. Invalid XML gives '' (flutter_svg can't draw it
+/// either). Results are cached: a streaming answer rebuilds the same SVG on
+/// every token.
 String sanitizeSvg(String svg) {
+  if (_cache.remove(svg) case final hit?) return _cache[svg] = hit;
+  final clean = _sanitize(svg);
+  _cache[svg] = clean;
+  if (_cache.length > 16) _cache.remove(_cache.keys.first);
+  return clean;
+}
+
+/// Most recently used last.
+final _cache = <String, String>{};
+
+String _sanitize(String svg) {
   final XmlDocument doc;
   try {
     doc = XmlDocument.parse(svg);
   } on XmlException {
     return '';
   }
-  doc.children.removeWhere((n) => n is XmlDoctype || n is XmlProcessing);
+  doc.children.removeWhere((n) => n is XmlDoctype || n is XmlProcessing || n is XmlComment);
   final root = doc.rootElement;
   if (root.name.local != 'svg') return '';
   _clean(root);
@@ -40,19 +55,25 @@ bool _allowed(XmlElement e) {
 void _clean(XmlElement e) {
   e.attributes.removeWhere((a) {
     final name = a.name.local.toLowerCase();
-    if (name.startsWith('on') || name == 'base') return true;
+    if (name.startsWith('on') || name == 'base' || name == 'src' || name == 'srcset') return true;
     if (name == 'href') return !_safeRef(a.value);
     a.value = _css(a.value);
     return _outsideUrl.hasMatch(a.value);
   });
-  if (e.name.local.toLowerCase() == 'style') {
-    final css = _css(e.innerText);
+  final tag = e.name.local.toLowerCase();
+  if (tag == 'style' || tag == 'title' || tag == 'desc') {
+    final text = tag == 'style' ? _css(e.innerText) : e.innerText;
     e.children
       ..clear()
-      ..add(XmlText(_outsideUrl.hasMatch(css) ? '' : css));
+      ..add(XmlText(tag == 'style' && _outsideUrl.hasMatch(text) ? '' : text));
     return;
   }
-  e.children.removeWhere((n) => n is XmlProcessing || (n is XmlElement && !_allowed(n)));
+  e.children.removeWhere((n) => n is XmlProcessing || n is XmlComment || (n is XmlElement && !_allowed(n)));
+  // CDATA is text in XML but not inside HTML's integration points; plain text
+  // is escaped the same way everywhere.
+  for (final (i, n) in e.children.indexed.toList()) {
+    if (n is XmlCDATA) e.children[i] = XmlText(n.value);
+  }
   for (final child in e.childElements) {
     _clean(child);
   }
