@@ -30,7 +30,7 @@ Future<T> whenValue<T>(ProviderContainer c, ProviderListenable<T> p, bool Functi
 /// An outside agent's session: the test plays its events and reads what it
 /// was sent and answered. With [replays], a new listener gets every event
 /// played so far first, as a reopened conversation does.
-final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands, NativeModes {
+final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands, NativeModes, TakesSkillOverrides {
   FakeLeadSession({this.id = 'c1', this.replays = false, List<HarnessEvent> history = const []}) {
     _history.addAll(history);
   }
@@ -42,6 +42,10 @@ final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeComm
   final _history = <HarnessEvent>[];
   final answers = <({bool accept, String? reason})>[];
   final sent = <String>[];
+  var skillsOff = <String>{};
+
+  @override
+  void setSkillsOff(Set<String> off) => skillsOff = off;
   final steered = <String>[];
   var closed = false;
   var interrupts = 0;

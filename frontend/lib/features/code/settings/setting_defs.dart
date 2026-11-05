@@ -262,8 +262,8 @@ const settingDefs = <SettingDef>[
   SettingDef(
     key: 'skills',
     title: 'Skills',
-    help: 'SKILL.md folders the agent loads when a task needs them.',
-    scopes: _g,
+    help: 'SKILL.md folders the agent loads when a task needs them, and which of Claude Code\'s are on per project.',
+    scopes: _gp,
     kind: SettingKind.link,
     store: SettingStore.none,
     addable: false,

@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../harness/events.dart';
 import '../settings/agent_settings.dart' show AgentType;
 import 'agent_mode.dart';
+import 'notice.dart';
 import 'transcript.dart';
 
 /// The subagent client tool: the app runs each call as a child conversation
@@ -385,7 +386,7 @@ const sharedFolderNote =
 /// A background subagent's report, sent to its parent when it ends.
 String taskNotification(String childId, String title, SubagentReport report) =>
     '<task-notification>\n<task-id>$childId</task-id>\n<description>$title</description>\n'
-    '<status>${report.status.wire}</status>\n<result>\n${report.text}\n</result>\n</task-notification>';
+    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(report.text)}\n</result>\n</task-notification>';
 
 final _notification = RegExp(
   r'^<task-notification>\n<task-id>([^<]*)</task-id>\n<description>([^<]*)</description>\n<status>([^<]*)</status>\n'
@@ -394,7 +395,7 @@ final _notification = RegExp(
 
 /// A [taskNotification] read back, for the transcript; null for other text.
 ({String childId, String title, SubagentStatus status, String result})? parseTaskNotification(String text) {
-  final m = _notification.firstMatch(text.trim());
+  final m = _notification.firstMatch(unwrapNotice(text.trim()));
   if (m == null) return null;
   return (childId: m[1]!, title: m[2]!, status: SubagentStatus.parse(m[3]!), result: m[4]!);
 }

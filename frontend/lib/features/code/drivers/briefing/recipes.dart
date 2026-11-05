@@ -8,11 +8,27 @@ import 'briefing_types.dart';
 
 String _bearer(String ref) => 'Bearer $ref';
 
+/// The one `--settings` JSON for a Claude Code process: skill bodies' inline `!` shell lines never run, and each
+/// skill in [skillsOff] is off (`skillOverrides`, the CLI's per-skill switch; names sorted, so the line is stable).
+/// Passed inline per process: nothing is written to `~/.claude` or the project.
+String claudeSettingsJson({Set<String> skillsOff = const {}}) => jsonEncode({
+  'disableSkillShellExecution': true,
+  if (skillsOff.isNotEmpty)
+    'skillOverrides': {
+      for (final n in [...skillsOff]..sort()) n: 'off',
+    },
+});
+
 /// Claude Code (`claude -p --input-format stream-json ...`). The briefing folder is a session-only plugin
 /// (`--plugin-dir`), so the skills load for this run only; the session text is appended to the system prompt (no
 /// extra model round trip to load it). Skill shell execution is switched off whatever a skill body says.
 /// [strictMcp] ignores the user's own MCP servers.
-Delivery claudeCode(BriefingInput i, {bool strictMcp = false, bool grantSkillAccess = true}) {
+Delivery claudeCode(
+  BriefingInput i, {
+  bool strictMcp = false,
+  bool grantSkillAccess = true,
+  Set<String> skillsOff = const {},
+}) {
   final mcp = {
     'mcpServers': {
       everyaiServerName: {
@@ -31,7 +47,7 @@ Delivery claudeCode(BriefingInput i, {bool strictMcp = false, bool grantSkillAcc
       '--append-system-prompt',
       i.sessionText,
       '--settings',
-      jsonEncode({'disableSkillShellExecution': true}),
+      claudeSettingsJson(skillsOff: skillsOff),
       if (grantSkillAccess) ...['--add-dir', i.skillDir],
       if (strictMcp) '--strict-mcp-config',
     ],

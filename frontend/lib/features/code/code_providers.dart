@@ -37,6 +37,7 @@ import 'domain/review.dart';
 import 'domain/rewind.dart';
 import 'domain/spill.dart';
 import 'domain/fork_files.dart';
+import 'domain/notice.dart';
 import 'domain/subagents.dart';
 import 'domain/temp_dirs.dart';
 import 'domain/questions.dart';
@@ -61,6 +62,7 @@ import 'drivers/driver.dart';
 import 'drivers/driver_policy.dart';
 import 'drivers/driver_process.dart' show closeAllDriverProcesses;
 import 'drivers/driver_registry.dart';
+import 'drivers/lead_skills.dart';
 import 'drivers/terminal/terminal_driver.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
@@ -175,6 +177,9 @@ final _hostTokensProvider = Provider<Map<String, String>>((ref) => {});
 
 /// The briefing text each outside session's agent was last sent (the transcript's "EveryAI briefing" row).
 final _briefingTextsProvider = Provider<Map<String, String>>((ref) => {});
+
+/// Each outside session's notice nonce (see [wrapNotice]), kept with its briefing folder; empty when none.
+final _noticeNoncesProvider = Provider<Map<String, String>>((ref) => {});
 
 /// What the session text tells an outside agent about each host tool it is
 /// offered, in `hostToolSpecs` order.
@@ -756,6 +761,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       script: !demo && !outside ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
       pathMap: pathMap,
       briefing: briefing,
+      skillsOff: !outside
+          ? const {}
+          : leadSkillsOff(ref.read(preferencesProvider), projectId, harness ?? byId(sessionId)?.harness ?? ''),
     );
   }
 
@@ -829,12 +837,16 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   }) async {
     final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
     final notes = await hostProjectNotes(workingDir);
+    // A fork gets no notices; the others keep one nonce for the session's whole life.
+    final nonce = asFork ? '' : await sessionNoticeNonce(await _driverDir(id), newNoticeNonce);
+    ref.read(_noticeNoncesProvider)[id] = nonce;
     final text = [
       sessionBriefing(
         SessionSkillInput(
           worktree: workingDir,
           projectRoot: projectDir,
           lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
+          noticeNonce: nonce,
           hostTools: asFork ? _forkHostToolInfos : _hostToolInfos,
           // The bundled ones only: they are fixed per app version, so a resumed
           // conversation's prompt stays the same when the user trusts a project
@@ -951,6 +963,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   Future<void> _unbrief(String id) async {
     ref.read(_hostTokensProvider).remove(id);
     ref.read(_briefingTextsProvider).remove(id);
+    ref.read(_noticeNoncesProvider).remove(id);
     try {
       await ref.read(hostServerProvider).revokeSession(id);
       await removeBriefing(await _driverDir(id));
@@ -1889,6 +1902,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       ref.onDispose(alerts.dispose);
       listenSelf((prev, next) => alerts.onChange(prev?.status, next.status));
     }
+    // A switch in Settings → Skills reaches the lead's next process.
+    ref.listen(leadSkillsProvider, (_, _) => _applySkillsOff());
     // The budget holds whether or not the session is on screen: every new
     // reading (and a lowered budget) is checked here.
     if (info != null) {
@@ -1979,6 +1994,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       live[sessionId] = session;
       // After attaching: a reopen briefs the agent then, and that is the text to show.
       _showBriefing();
+      _applySkillsOff();
       await _openContext(info);
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
@@ -2919,6 +2935,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(old.close());
       ref.read(_liveProvider)[sessionId] = live;
       _session = live;
+      _applySkillsOff();
       _events.clear();
       if (!_mirror.isClosed) _mirror.add(null);
       _carried = _builder.snapshot.items;
@@ -4050,7 +4067,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       );
       _forksReported.add((childId: bg.childId, title: bg.title, status: report.status));
       // While the agent works this joins its next step; when idle it wakes it.
-      _notifyLead(taskNotification(bg.childId, bg.title, report));
+      _notifyLead(taskNotification(bg.childId, bg.title, report), id: bg.childId);
       return;
     }
     _reports[callId] = report;
@@ -4174,8 +4191,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Kept apart from the user's queue, which Stop and a reset clear (and a
   /// spent budget skips): the run's journal is retired by now, so this is
   /// the only copy.
-  void _toLead(String text) {
-    _workflowResults.add(text);
+  void _toLead(String text, {String? runId}) {
+    _workflowResults.add(_onOutsideLead ? _notice('workflow-result', runId ?? 'workflow', text) : text);
     _sendQueued();
   }
 
@@ -4268,7 +4285,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       end,
       save: dir == null || noLocalFolder(dir) ? null : (json) => saveSpill(dir, 'workflow-$runId.json', json),
     );
-    _toLead(message);
+    _toLead(message, runId: runId);
   }
 
   // ------------------------------------------------------ orchestrating forks
@@ -4298,7 +4315,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         ),
     ]);
     if (_background.containsKey(callId)) {
-      _notifyLead(forkQuestionMessage(childId, title, text));
+      _notifyLead(forkQuestionMessage(childId, title, text), kind: 'fork-question', id: childId);
       return;
     }
     for (final MapEntry<String, String>(key: id, value: kid) in [..._childOf.entries]) {
@@ -4326,13 +4343,28 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends [text] (a background fork's report or question) to this agent: at
   /// once on the EveryAI harness, which takes it into its next step; an
   /// outside lead gets it when its turn ends.
-  void _notifyLead(String text) {
+  void _notifyLead(String text, {String kind = 'fork-report', String id = 'fork'}) {
     if (!_onOutsideLead) {
       unawaited(_session?.send(text).catchError((Object _) {}));
       return;
     }
-    _forkNotices.add(text);
+    _forkNotices.add(_notice(kind, id, text));
     _sendForkNotices();
+  }
+
+  /// Tells an outside lead which of its skills are off in this project.
+  void _applySkillsOff() {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || _session is! TakesSkillOverrides) return;
+    (_session as TakesSkillOverrides).setSkillsOff(
+      leadSkillsOff(ref.read(preferencesProvider), info.projectId, info.harness),
+    );
+  }
+
+  /// [body] as a signed notice for an outside lead ([wrapNotice]); as it is when the session has no nonce.
+  String _notice(String kind, String id, String body) {
+    final nonce = ref.read(_noticeNoncesProvider)[sessionId] ?? '';
+    return nonce.isEmpty ? body : wrapNotice(kind: kind, id: id, nonce: nonce, body: body);
   }
 
   /// Not through [send]: that would close the lead's own open cards. A
@@ -4505,7 +4537,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     switch (name) {
       case checkForksTool:
         // Reports and questions held for the end of an outside lead's turn come with the answer instead.
-        final held = [..._forkNotices];
+        // A tool result, not a user message: no notice wrapper.
+        final held = [for (final n in _forkNotices) unwrapNotice(n)];
         _forkNotices.clear();
         return [
           if (_activeForks.isEmpty)

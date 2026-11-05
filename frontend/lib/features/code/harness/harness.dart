@@ -60,12 +60,16 @@ final class SessionSpec {
     this.script,
     this.reviewModel,
     this.briefing,
+    this.skillsOff = const {},
   });
 
   /// What an outside harness (a coding CLI driven by the app) is handed to
   /// reach EveryAI's own tools and the session's skill; null for the EveryAI
   /// harness, which has them built in.
   final DriverBriefing? briefing;
+
+  /// Skills of an outside lead that are off in this project (by the lead's own names).
+  final Set<String> skillsOff;
 
   /// The agent has bug_check, to prove a reproduction and a fix (Bug fix).
   final bool bugCheck;
@@ -578,4 +582,10 @@ final class HarnessError implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// A session whose lead has skills that can be switched off per project (Claude Code). A new set takes effect
+/// from the next process the session starts.
+abstract interface class TakesSkillOverrides {
+  void setSkillsOff(Set<String> off);
 }

@@ -5,3 +5,5 @@ Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills
     (skillDir: '', names: const <String>[], written: 0, skipped: const <String>[]);
 
 Future<void> removeBriefing(String sessionDir) async {}
+
+Future<String> sessionNoticeNonce(String sessionDir, String Function() make) async => '';

@@ -8,6 +8,7 @@ import '../settings/context_files.dart' show splitContextNotes;
 import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
 import 'agent_mode.dart';
 import 'compaction.dart' show splitCompacted, splitHandoff;
+import 'notice.dart';
 import 'questions.dart';
 import 'rewind.dart' show splitRewindNote;
 import 'subagents.dart';
@@ -770,7 +771,7 @@ final class TranscriptBuilder {
 /// [TranscriptBuilder] shows none of these as a [UserTurn]; nor is any of
 /// them a request a handoff finishes.
 bool isHarnessNote(String text) {
-  final t = text.trimLeft();
+  final t = unwrapNotice(text.trimLeft());
   return splitCompacted(t) != null ||
       t.startsWith('<$researchWorkflowTag') ||
       parsePhaseNote(t) != null ||

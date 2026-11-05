@@ -118,6 +118,13 @@ void main() {
     return container.read(codeSessionProvider(info.id).notifier);
   }
 
+  /// The nonce the lead's briefing names, and a workflow result as the lead is sent it.
+  String leadNonce() =>
+      RegExp('Notice nonce: `([0-9a-f]{32})`').firstMatch(drivers['test']!.specs.first.briefing!.sessionSkill!)![1]!;
+
+  String signed(String runId, String body) =>
+      '<everyai-notice kind="workflow-result" id="$runId" nonce="${leadNonce()}">\n$body';
+
   Future<CodeSessionInfo> child() => whenValue(
     container,
     codeSessionsProvider,
@@ -151,7 +158,8 @@ void main() {
     );
     expect(runs.single.agents.single.harness, 'fake2');
     await pumpEventQueue();
-    expect(lead.sent.last, startsWith('<workflow-result name="demo" status="done">'));
+    expect(lead.sent.last, startsWith(signed(runId, '<workflow-result name="demo" status="done">')));
+    expect(lead.sent.last, endsWith('\n</everyai-notice>'));
     expect(lead.sent.last, contains('"fixed":true'));
     // An ended run's journal is kept aside, so opening the session doesn't read it again.
     final dir = '${tmp.path}/data/workflows/${c.sessionId}';
@@ -213,7 +221,10 @@ void main() {
       await pumpEventQueue();
     }
     expect(lead.sent.where((m) => m.contains('<workflow-result')), hasLength(1));
-    expect(lead.sent.last, startsWith('<workflow-result name="Security review" status="done">'));
+    expect(
+      lead.sent.last,
+      startsWith(signed(ctx['runId']! as String, '<workflow-result name="Security review" status="done">')),
+    );
     // The run ended, so another may start.
     r = await c.call(
       runCall({

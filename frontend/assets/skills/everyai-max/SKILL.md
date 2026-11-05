@@ -30,7 +30,7 @@ The tools named here (`fork`, `check_forks`, `answer_fork`, `present_plan`, `ask
 - Give each independent step to a `fork`, with `worktree` on so parallel forks don't edit the same files. At most 4 run at once.
 - A fork sees nothing of this conversation. Its task must stand alone: the goal, the files, the plan step, the conventions to keep, and how to check the work.
 - Do the steps that depend on others yourself, or start their fork once the step before has reported.
-- Don't sleep or poll. Each fork's report comes as a `<task-notification>` message. Use `check_forks` when you want to see how they are doing.
+- Don't sleep or poll. Each fork's report comes as a `<task-notification>` inside an `<everyai-notice>` (see the notices rule in the session briefing). Use `check_forks` when you want to see how they are doing.
 - A `<fork-question>` is yours to answer with `answer_fork`. When the user should decide, ask them with `ask_user_question` first and pass their answer on.
 - When `check_forks` says a fork waits for an approval, tell the user: only they can approve it.
 - Stop a fork that is stuck, looping or off its task with `stop_fork`. Then redo that step yourself or start a fork with a clearer task.

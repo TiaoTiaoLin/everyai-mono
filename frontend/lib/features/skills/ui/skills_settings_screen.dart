@@ -11,6 +11,7 @@ import '../../code/domain/code_session.dart';
 import '../data/skill_import.dart';
 import '../data/skill_store.dart';
 import '../skills_providers.dart';
+import 'lead_skills_section.dart';
 
 /// Settings → Skills: the Agent Skills Code sessions (and, without project
 /// skills or script skills, Chat) can use. Skills in the
@@ -76,6 +77,7 @@ class SkillsSettingsBody extends ConsumerWidget {
         ),
         if (skills case AsyncError(:final error))
           Text("Couldn't read the skills folders: $error", style: TextStyle(color: theme.danger)),
+        const LeadSkillsSection(),
         section('EveryAI library', [
           ...all.where((s) => s.source == SkillSource.library),
         ], empty: 'Nothing imported yet'),

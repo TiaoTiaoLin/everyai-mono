@@ -18,3 +18,8 @@ Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills
 
 /// Deletes `<sessionDir>/briefing` (call when the session is removed). A link there is removed, not followed.
 Future<void> removeBriefing(String sessionDir) => impl.removeBriefing(sessionDir);
+
+/// The session's notice nonce (`<sessionDir>/notice-nonce`): [make]'s value the first time, the same one after, so a
+/// reopened session or a lead switch keeps it. Empty where there are no files (the web).
+Future<String> sessionNoticeNonce(String sessionDir, String Function() make) =>
+    impl.sessionNoticeNonce(sessionDir, make);
