@@ -597,7 +597,7 @@ void main() {
   test('the checks answer an outside lead without a model, and run no command it has no approval for', () async {
     final info = await start();
     await open(info.id);
-    expect((await hostCall(info.id, 'diff_stats', const {}).result).text, contains('git diff --stat'));
+    expect((await hostCall(info.id, 'diff_stats', const {}).result).text, contains('not a git repository'));
     expect((await hostCall(info.id, 'goal_check', const {}).result).text, contains('No goal is set'));
     final check = await hostCall(info.id, 'check', {
       'files': ['notes.txt'],

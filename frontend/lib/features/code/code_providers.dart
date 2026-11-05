@@ -1718,6 +1718,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// and their report goes to this session as a task notification.
   final _background = <String, ({String childId, String title})>{};
 
+  /// Forks that reported, oldest first (check_forks sums them up; the reports themselves went to the lead).
+  final _forksReported = <({String childId, String title, SubagentStatus status})>[];
+
   /// Puts whether background agents run or a rewind is under way into the state ([CodeSessionState.sideWork]).
   void _syncSideWork() {
     final now = _background.isNotEmpty || _rewinding;
@@ -3976,6 +3979,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         subagentNeedsInput: _childWaiting.isNotEmpty,
         sideWork: _background.isNotEmpty || _rewinding,
       );
+      _forksReported.add((childId: bg.childId, title: bg.title, status: report.status));
       // While the agent works this joins its next step; when idle it wakes it.
       _notifyLead(taskNotification(bg.childId, bg.title, report));
       return;
@@ -4439,6 +4443,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
             held.isEmpty ? 'No forks are running. Every fork you started has reported.' : 'No forks are running.'
           else
             for (final id in _activeForks.keys) _forkStatus(id),
+          if (_forksReported.isNotEmpty)
+            [
+              'Forks that reported (you got each report as a task notification):',
+              for (final f in _forksReported) '- ${f.childId} "${f.title}": ${f.status.name}',
+            ].join('\n'),
           ...held,
         ].join('\n\n');
       case answerForkTool:

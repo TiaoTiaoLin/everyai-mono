@@ -104,9 +104,28 @@ void main() {
       ]);
     });
 
-    test('without a worktree it says what to use instead', () async {
-      final r = await hostCheckTool(call(diffStatsTool), context());
-      expect(r.text, contains('git diff --stat'));
+    test("without a worktree: what isn't committed in the folder, new files too", () async {
+      final runs = <String>[];
+      final r = await hostCheckTool(
+        call(diffStatsTool),
+        context(
+          runs: runs,
+          answer: (_) => (exit: 0, out: ' a.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\nnew.txt\n'),
+        ),
+      );
+      expect(runs.single, startsWith('git diff --stat HEAD'));
+      expect(r.isError, isFalse);
+      expect(r.text, contains('not committed yet'));
+      expect(r.text, contains(' a.txt | 2 +-'));
+      expect(r.text, contains('New files: new.txt'));
+    });
+
+    test('without a worktree, outside a repository or when the gate refuses, it says so', () async {
+      final bare = await hostCheckTool(call(diffStatsTool), context(answer: (_) => (exit: 128, out: 'fatal')));
+      expect(bare.text, contains('not a git repository'));
+      final refused = await hostCheckTool(call(diffStatsTool), context(refusal: (_) => 'Not approved.'));
+      expect(refused.isError, isTrue);
+      expect(refused.text, startsWith('Not approved.'));
     });
   });
 
@@ -174,7 +193,10 @@ void main() {
           'cd py && python -m pytest tests/test_util.py',
         ],
       );
-      expect(found.unmatched, ['README.md', 'app/lib/none.dart']);
+      expect(found.unmatched, [
+        'README.md (no project file such as pubspec.yaml, package.json or go.mod in its folder or above)',
+        'app/lib/none.dart (looked for app/test/none_test.dart)',
+      ]);
     });
 
     test('runs the detected tests through the gate; a failure is an error result', () async {

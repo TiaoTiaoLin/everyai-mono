@@ -8,7 +8,7 @@ compatibility: Code sessions only (a shell, git and the EveryAI coding tools).
 
 This is an approach, not a script. Take the steps in order when the task needs them, skip what it doesn't need, and keep a small task small.
 
-On the EveryAI harness, `fork` is `run_subagent` with `run_in_background: true`, and `worktree` on is `isolation: "worktree"`. Elsewhere these tools come from the `everyai` MCP server.
+The tools named here (`fork`, `check_forks`, `answer_fork`, `present_plan`, `ask_user_question`) come from the `everyai` MCP server. Only on the EveryAI harness itself, which has no such server, is `fork` its `run_subagent` tool with `run_in_background: true` (and `worktree` on is `isolation: "worktree"`).
 
 ## 1. Research
 - Read enough to know which parts of the code the task touches, how they fit, and how the project builds and tests.

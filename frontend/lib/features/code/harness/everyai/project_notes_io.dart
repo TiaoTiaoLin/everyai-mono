@@ -155,7 +155,9 @@ ToolOutput runMemory(String root, Map<String, Object?> args) {
   file.parent.createSync(recursive: true);
   file.writeAsStringSync(next.trim().isEmpty ? '' : '${next.trimRight()}\n');
   return ToolOutput(
-    'Project memory saved (${next.trim().length}/$projectMemoryLimit characters). Later sessions start with it.',
+    next.trim().isEmpty
+        ? 'Project memory updated: it is empty now, so later sessions start without it.'
+        : 'Project memory updated (${next.trim().length}/$projectMemoryLimit characters). Later sessions start with it.',
     observation: {'path': file.path},
   );
 }

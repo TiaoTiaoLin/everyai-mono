@@ -43,6 +43,7 @@ import 'console/bottom_drawer.dart';
 import 'console/console_layout.dart';
 import '../panes/panes_providers.dart' show codePaneProvider;
 import 'transcript/approval_card.dart';
+import 'transcript/session_approval.dart';
 import 'transcript/aside_card.dart';
 import 'transcript/goal_card.dart';
 import 'transcript/lead_offer_card.dart';
@@ -275,6 +276,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                       padding: const EdgeInsets.only(bottom: 8),
                                       child: PlanView(tasks: t.plan, compact: true),
                                     ),
+                                  // A fork or subagent waiting on the user asks here too, not only in its own view.
+                                  ChildApprovals(parentId: sessionId),
                                   if (showStartBuilding)
                                     Padding(
                                       padding: const EdgeInsets.only(bottom: 8),

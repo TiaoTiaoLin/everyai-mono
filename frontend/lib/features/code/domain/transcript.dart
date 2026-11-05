@@ -205,8 +205,8 @@ const planApprovedMessage = 'The plan is approved. Build it now, then verify it 
 
 /// The same approval as the result of the held `present_plan` call.
 const planApprovedReason =
-    'Not an error and not a refusal: the user approved this plan in the app, and Plan mode has ended. You may '
-    'now edit files and run commands. $planApprovedMessage';
+    'Not an error and not a refusal: the user approved this plan in the app (Plan mode, if it was on, has ended). '
+    'You may now edit files and run commands. $planApprovedMessage';
 
 /// Opens the result of a held `present_plan` call when the user wants changes.
 const planRevisionLead = 'Not an error: the user wants changes to this plan before building. Their reply:';

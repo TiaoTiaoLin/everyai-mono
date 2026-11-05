@@ -157,7 +157,9 @@ Future<HostResult> hostCheckTool(HostCall call, HostCheckContext c) async {
   switch (call.name) {
     case diffStatsTool:
       final w = c.worktree;
-      return hostDiffStats(w, w == null ? null : await GitService.changes(w));
+      // No worktree of its own: the uncommitted changes in the folder it works in.
+      if (w == null) return impl.hostDiffStatsHere(c, call.ended);
+      return hostDiffStats(w, await GitService.changes(w));
     case goalCheckTool:
       return hostGoalCheck(c.goal);
     case runScriptTool:
@@ -301,7 +303,7 @@ typedef CheckRun = ({String dir, String command});
       if (dir.isEmpty) break;
     }
     if (hit == null) {
-      unmatched.add(raw);
+      unmatched.add('$raw (no project file such as pubspec.yaml, package.json or go.mod in its folder or above)');
     } else {
       (groups[hit] ??= []).add(hit.$1.isEmpty ? file : file.substring(hit.$1.length + 1));
     }
@@ -327,7 +329,16 @@ typedef CheckRun = ({String dir, String command});
         _ => null,
       };
       if (found == null) {
-        unmatched.add(join(dir, f));
+        // Say where the test was looked for, so the agent can pass the right file.
+        final looked = switch (marker) {
+          'pubspec.yaml' when f.startsWith('lib/') && f.endsWith('.dart') =>
+            ' (looked for ${join(dir, 'test/${f.substring(4, f.length - 5)}_test.dart')})',
+          _ when f.endsWith('.py') =>
+            ' (looked for ${join(dir, join(_parent(f), 'test_${_base(f)}'))} and ${join(dir, 'tests/test_${_base(f)}')})',
+          'pubspec.yaml' => ' (only lib/ files map to tests under test/)',
+          _ => '',
+        };
+        unmatched.add('${join(dir, f)}$looked');
       } else {
         tests.add(found);
       }

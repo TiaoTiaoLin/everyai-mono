@@ -62,6 +62,12 @@ final class ClaudeDriver
   List<DriverModel>? _models;
   Future<String?>? _path;
 
+  /// Whether each model has Claude's `auto` mode, from any `initialize`
+  /// reply so far. A new session (a fork above all) on a known model lists
+  /// `auto` from the start; without it, a Full auto fork fell back to Accept
+  /// edits before its own reply came, and every command asked.
+  final _autoModes = <String, bool>{};
+
   @override
   DriverInfo get info => const DriverInfo(
     id: 'claude-code',
@@ -139,7 +145,9 @@ final class ClaudeDriver
             .timeout(const Duration(seconds: 20));
         c.send(jsonEncode(controlRequest('req_1', {'subtype': 'initialize'})));
         final r = (await reply)?['response'] as Map<String, Object?>?;
-        if (modelsOf(r?['response'] as Map<String, Object?>? ?? const {}) case final m?) return _models = m;
+        final init = r?['response'] as Map<String, Object?>? ?? const {};
+        _learnAutoModes(init);
+        if (modelsOf(init) case final m?) return _models = m;
       } finally {
         await c.close();
       }
@@ -160,6 +168,7 @@ final class ClaudeDriver
       effort: spec.effort,
       mode: spec.mode,
       sent: false,
+      autoMode: _autoModes[spec.model] ?? false,
     );
     await writeTextFile('$dir/$id.json', jsonEncode(meta.toJson()));
     final briefing = await _briefing(spec.briefing);
@@ -259,6 +268,21 @@ final class ClaudeDriver
         else if (await readTextFile('$dir/$id.json') != null)
           id: ExecutionStatus.idle,
     };
+  }
+
+  /// Records which models [init] (an `initialize` reply) says have `auto`.
+  void _learnAutoModes(Map<String, Object?> init) {
+    for (final m in init['models'] as List<Object?>? ?? const []) {
+      if (m case {'value': final String v}) _autoModes[v] = m['supportsAutoMode'] == true;
+    }
+  }
+
+  /// Whether [model] (the app's name for it) has `auto`, as [init] says; also remembered for new sessions.
+  bool _autoModeIn(Map<String, Object?> init, String model) {
+    _learnAutoModes(init);
+    final auto = claudeAutoMode(init, model);
+    _autoModes[model] = auto;
+    return auto;
   }
 
   Future<String> _dir() async => '${await dataDir()}/driver-sessions/${info.id}';
@@ -792,7 +816,7 @@ final class ClaudeSession
 
   /// What `initialize` says about modes: whether the model has `auto`, and the mode it runs in.
   void _initialized(Map<String, Object?> init) {
-    final auto = claudeAutoMode(init, _meta.model);
+    final auto = _driver._autoModeIn(init, _meta.model);
     if (auto != _meta.autoMode) unawaited(_save(_meta.copyWith(autoMode: auto)));
     _modes.set(modes: claudeModes(autoMode: auto));
     if (init['current_permission_mode'] case final String mode) _modeSaid(mode);

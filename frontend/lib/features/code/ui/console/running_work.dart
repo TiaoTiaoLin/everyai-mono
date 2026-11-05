@@ -15,6 +15,7 @@ import '../../workflows/workflow_engine.dart' show WorkflowAgentStatus, Workflow
 import '../../workflows/workflow_runs.dart' show workflowRunsProvider;
 import '../session_view.dart' show StatusPill, TranscriptList;
 import '../transcript/transcript_items.dart' show TranscriptScope;
+import '../transcript/session_approval.dart';
 import 'console_state.dart';
 
 /// Session info's Running work: the session's workflows and their agents, its forks and subagents (custom agents
@@ -235,7 +236,8 @@ class _ShellRow extends StatelessWidget {
 }
 
 /// A child session's chat in the right panel: Back to the view under it, its title and status, a way to open it as
-/// a full session, then its transcript (read here; approvals and the composer are on its own screen).
+/// a full session, its approval card when it waits on the user, then its transcript (the composer is on its own
+/// screen).
 class ChildChatView extends ConsumerWidget {
   const ChildChatView({super.key, required this.parentId, required this.childId});
 
@@ -296,12 +298,13 @@ class ChildChatView extends ConsumerWidget {
       children: [
         header,
         Container(height: 1, color: theme.border),
+        // Answered here, on the child's own controller.
         if (state.transcript.pending.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-            child: Text(
-              'It is waiting for your approval: open the full session to answer.',
-              style: theme.type.caption.tint(theme.warning),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 320),
+              child: SingleChildScrollView(child: SessionApprovalCard(sessionId: childId)),
             ),
           ),
         Expanded(

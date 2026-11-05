@@ -21,6 +21,39 @@ Future<({int exit, String out})> _run(HostCheckContext c, String command, Future
   return (exit: r.exitCode, out: '${r.output}$note');
 }
 
+/// diff_stats for a session with no worktree of its own: what isn't committed yet in its folder (`git diff --stat
+/// HEAD`, plus new files), since there is no session base to count from.
+Future<HostResult> hostDiffStatsHere(HostCheckContext c, Future<void> cancel) async {
+  const command = 'git diff --stat HEAD && git ls-files --others --exclude-standard';
+  if (c.refusal(command) case final why?) return (text: '$why\n(command: $command)', isError: true);
+  final r = await _run(c, command, cancel);
+  if (r.exit != 0) {
+    return (
+      text: 'This folder is not a git repository with a commit, so there is nothing to count from.',
+      isError: false,
+    );
+  }
+  final lines = r.out.trimRight().split('\n').where((l) => l.trim().isNotEmpty).toList();
+  final stat = [
+    for (final l in lines)
+      if (l.contains('|') || l.contains('changed')) l,
+  ];
+  final added = [
+    for (final l in lines)
+      if (!l.contains('|') && !l.contains('changed')) l.trim(),
+  ];
+  if (stat.isEmpty && added.isEmpty) return (text: 'No uncommitted changes in the project folder.', isError: false);
+  return (
+    text: [
+      'This session works in the project folder itself (no worktree of its own), so these are the changes not '
+          'committed yet, against HEAD. They may include the user\'s own edits.',
+      ...stat,
+      if (added.isNotEmpty) 'New files: ${added.join(', ')}',
+    ].join('\n'),
+    isError: false,
+  );
+}
+
 Future<HostResult> hostCheck(HostCheckContext c, List<String> files, Future<void> cancel) async {
   final found = detectChecks(
     files,
@@ -37,8 +70,8 @@ Future<HostResult> hostCheck(HostCheckContext c, List<String> files, Future<void
   if (found.runs.isEmpty) {
     return (
       text:
-          '$missed The app knows Dart/Flutter, jest, vitest, Go, Cargo and pytest projects; run the right tests '
-          'yourself.',
+          '$missed Pass the test files themselves (they run as given), or run the right tests yourself. The app knows '
+          'Dart/Flutter, jest, vitest, Go, Cargo and pytest projects.',
       isError: true,
     );
   }
