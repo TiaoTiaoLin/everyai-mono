@@ -9,23 +9,22 @@ import 'git_service.dart' show GitError;
 
 export 'repo_check_io.dart' show checkRepo;
 
-/// Subcommands that run no repository program (with [guardFlags] on), so they skip the config read.
-const _plain = {
-  'rev-parse', 'config', 'symbolic-ref', 'check-ref-format', 'show-ref', 'for-each-ref', 'update-ref', //
-  'rev-list', 'branch', 'remote', 'log', 'read-tree', 'write-tree', 'check-ignore', 'merge-file',
-};
+/// Subcommands that only read (with [guardFlags] on), so they skip the config read. Anything that writes a ref
+/// or the index can fire a hook set in config (`hook.<name>.command`), which only [repoGuard] turns off.
+const _plain = {'rev-parse', 'check-ref-format', 'show-ref', 'for-each-ref', 'rev-list', 'log', 'check-ignore'};
 
-/// The full argument list for an EveryAI git call in [dir]: [guardFlags], the overrides for programs the
-/// repository's own config names ([repoGuard]), then [args], diffs with [diffFlags]. Throws [GitError] when the
-/// repository can't be guarded.
-Future<List<String>> guardedArgs(String dir, List<String> args) async {
+/// The repository's guard for [dir]: [guardFlags] plus [repoGuard]'s overrides, and its refusal.
+Future<({List<String> args, String? refusal})> _guard(String dir, {Map<String, String>? env}) async {
   final fixed = guardFlags(Platform.isWindows ? 'NUL' : '/dev/null');
-  final cmd = args.isEmpty ? '' : args.first;
-  final call = [
-    if (cmd == 'diff' || cmd == 'show') ...[cmd, ...diffFlags, ...args.skip(1)] else ...args,
-  ];
-  if (_plain.contains(cmd)) return ['-C', dir, ...fixed, ...call];
-  final res = await Process.run('git', ['-C', dir, ...fixed, 'config', '--list', '--show-scope', '-z']);
+  final res = await Process.run('git', [
+    '-C',
+    dir,
+    ...fixed,
+    'config',
+    '--list',
+    '--show-scope',
+    '-z',
+  ], environment: env);
   if (res.exitCode != 0) {
     final err = '${res.stderr}'.trim();
     // --show-scope came in git 2.26; without it the repository's config can't be told from the user's.
@@ -33,13 +32,40 @@ Future<List<String>> guardedArgs(String dir, List<String> args) async {
     throw GitError('git config: $err');
   }
   final guard = repoGuard(parseConfigList('${res.stdout}'));
-  if (guard.refusal case final why?) throw GitError(why);
-  return ['-C', dir, ...fixed, ...guard.args, ...call];
+  return (args: [...fixed, ...guard.args], refusal: guard.refusal);
+}
+
+/// The full argument list for an EveryAI git call in [dir]: [guardFlags], the overrides for programs the
+/// repository's own config names ([repoGuard]), then [args], diffs with [diffFlags]. Throws [GitError] when the
+/// call would store files the repository's config can't be guarded for.
+Future<List<String>> guardedArgs(String dir, List<String> args, {Map<String, String>? env}) async {
+  final cmd = args.isEmpty ? '' : args.first;
+  final call = [
+    if (cmd == 'diff' || cmd == 'show') ...[cmd, ...diffFlags, ...args.skip(1)] else ...args,
+  ];
+  if (_plain.contains(cmd)) return ['-C', dir, ...guardFlags(Platform.isWindows ? 'NUL' : '/dev/null'), ...call];
+  final guard = await _guard(dir, env: env);
+  if (guard.refusal case final why? when storesFiles(cmd)) throw GitError(why);
+  return ['-C', dir, ...guard.args, ...call];
 }
 
 /// Runs git in [dir] the way EveryAI's own calls do: nothing the repository defines runs (see `git_guard.dart`).
 Future<ProcessResult> runGit(String dir, List<String> args, {Map<String, String>? env}) async =>
-    Process.run('git', await guardedArgs(dir, args), environment: env);
+    Process.run('git', await guardedArgs(dir, args, env: env), environment: env);
+
+/// [base] (the app's environment when null) plus the guard as `GIT_CONFIG_*` variables, for a program that runs
+/// git itself in [dir] (a shell, gh). Diffs it runs still need [diffFlags]. Never throws: without a readable
+/// config only [guardFlags] are in it.
+Future<Map<String, String>> guardedEnv(String dir, {Map<String, String>? base}) async {
+  final env = base ?? Platform.environment;
+  List<String> args;
+  try {
+    args = (await _guard(dir, env: env)).args;
+  } on Object {
+    args = guardFlags(Platform.isWindows ? 'NUL' : '/dev/null');
+  }
+  return {...env, ...configEnv(args, count: int.tryParse(env['GIT_CONFIG_COUNT'] ?? '') ?? 0)};
+}
 
 Future<ProcessResult> _git(String dir, List<String> args, {Map<String, String>? env, bool check = true}) async {
   final res = await runGit(dir, args, env: env);
@@ -251,13 +277,12 @@ Future<String> headCommit(SessionWorktree w) => _out(w.path, ['rev-parse', 'HEAD
 
 Future<BranchPr?> prFor(SessionWorktree w) async {
   try {
-    final res = await Process.run('gh', [
-      'pr',
-      'view',
-      w.branch,
-      '--json',
-      'number,url,state,headRefOid',
-    ], workingDirectory: w.path);
+    final res = await Process.run(
+      'gh',
+      ['pr', 'view', w.branch, '--json', 'number,url,state,headRefOid'],
+      workingDirectory: w.path,
+      environment: await guardedEnv(w.path),
+    );
     // Non-zero: no pull request for the branch, no remote, or gh isn't signed in.
     return res.exitCode == 0 ? parsePrView('${res.stdout}') : null;
   } on ProcessException {
@@ -445,18 +470,24 @@ Future<void> push(SessionWorktree w) async {
 Future<String> createPr(SessionWorktree w, {required String title, required String body}) async {
   final ProcessResult res;
   try {
-    res = await Process.run('gh', [
-      'pr',
-      'create',
-      '--head',
-      w.branch,
-      '--base',
-      w.baseBranch,
-      '--title',
-      title,
-      '--body',
-      body,
-    ], workingDirectory: w.path);
+    res = await Process.run(
+      'gh',
+      [
+        'pr',
+        'create',
+        '--head',
+        w.branch,
+        '--base',
+        w.baseBranch,
+        '--title',
+        title,
+        '--body',
+        body,
+        // gh runs git itself (status, remotes): the same guard reaches it through the environment.
+      ],
+      workingDirectory: w.path,
+      environment: await guardedEnv(w.path),
+    );
   } on ProcessException {
     throw const GitError('Creating a pull request needs the GitHub CLI: install gh and run `gh auth login`.');
   }

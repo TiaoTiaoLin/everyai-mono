@@ -119,4 +119,31 @@ void main() {
     expect((items.first as NoticeItem).detail, '- .envrc: direnv runs it');
     expect((items[1] as UserTurn).text, 'fix it');
   });
+
+  test('hooks set in config, git-lfs programs and a cleaning filter are listed; the filter says what is off', () async {
+    await _git(repo, ['config', 'hook.x.command', './evil.sh']);
+    await _git(repo, ['config', 'lfs.customtransfer.t.path', './agent.sh']);
+    await _git(repo, ['config', 'filter.nb.clean', 'python -m nbstripout']);
+    final found = await GitService.checkRepo(repo);
+    expect(found.map((f) => f.where), [
+      'git config hook.x.command',
+      'git config lfs.customtransfer.t.path',
+      'git config filter.nb.clean',
+    ]);
+    expect(found[0].what, 'runs ./evil.sh');
+    expect(found[1].what, startsWith("EveryAI's checkpoints and commits are off while it is set; runs ./agent.sh"));
+    expect(found[2].what, startsWith("EveryAI's checkpoints and commits are off"));
+  });
+
+  test('a continuation after compaction carries the list the session started with', () {
+    final note = repoCheckNote(const [RepoFinding('package.json', 'script "prepare": husky')]);
+    final first = modeNote(AgentMode.ask, '${note}fix it');
+    expect(repoCheckIn(['plain', first]), '- package.json: script "prepare": husky');
+    final next = continuationMessage(summary: '## Goal\nx', recent: '', repoCheck: repoCheckIn([first]));
+    expect(next, contains('$repoCheckLine\n<repo-check>\n<untrusted-content source="repository files">'));
+    // A second compaction finds it in the first continuation.
+    expect(repoCheckIn([next]), '- package.json: script "prepare": husky');
+    expect(continuationMessage(summary: 's', recent: ''), isNot(contains('<repo-check>')));
+    expect(repoCheckIn(['plain']), '');
+  });
 }

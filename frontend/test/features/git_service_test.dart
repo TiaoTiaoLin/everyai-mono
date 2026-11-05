@@ -1,6 +1,10 @@
 import 'dart:io';
 
 import 'package:every_ai/features/code/git/git_service.dart';
+import 'package:every_ai/features/code/git/git_service_io.dart' show guardedEnv, runGit;
+import 'package:every_ai/features/code/harness/everyai/repro_paths_io.dart';
+import 'package:every_ai/features/code/settings/settings_io.dart' show resolveCommitStyle;
+import 'package:every_ai/features/code/settings/agent_settings.dart' show CommitStyle;
 import 'package:flutter_test/flutter_test.dart';
 
 Future<String> _git(String dir, List<String> args) async {
@@ -323,7 +327,14 @@ void main() {
 
     // Git as the test's own setup, with the repository's programs off.
     Future<String> safe(String dir, List<String> args) => _git(dir, [
-      '-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'filter.s.smudge=', //
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'filter.s.smudge=',
+      '-c',
+      'hook.x.enabled=false', //
       ...args,
     ]);
 
@@ -343,8 +354,19 @@ void main() {
         ('gpg.program', '$run gpg'),
         ('core.sshCommand', '$run ssh'),
         ('credential.helper', '!$run credential'),
+        // A hook set in config (git 2.54) runs whatever hooksPath says.
+        ('hook.x.command', '"$run" config-hook'),
       ]) {
         await _git(repo, ['config', k, v]);
+      }
+      for (final event in [
+        'reference-transaction',
+        'pre-commit',
+        'post-commit',
+        'post-checkout',
+        'post-index-change',
+      ]) {
+        await _git(repo, ['config', '--add', 'hook.x.event', event]);
       }
       for (final name in [
         'pre-commit',
@@ -432,8 +454,49 @@ void main() {
       final view = SessionWorktree(repoRoot: repo, path: repo, branch: 'main', baseBranch: 'main', baseCommit: head);
       await expectLater(GitService.changes(view), throwsA(message));
       await expectLater(GitService.commitAll(view, 'Secret'), throwsA(message));
+      // Checkouts and reads only smudge, which is blanked: a session still starts, and its changes stay off.
+      final w = await start();
+      expect(File('${w.path}/README.md').existsSync(), isTrue);
+      expect(await GitService.isDirty(w), isFalse);
+      await expectLater(GitService.changes(w), throwsA(message));
       expect(File(marks).existsSync(), isFalse);
       expect(await _git(repo, ['rev-parse', 'HEAD']), head);
+    });
+
+    test('EveryAI\'s other git callers run none of them either', () async {
+      await arm();
+      await _git(repo, ['config', 'log.showSignature', 'true']);
+      File('$repo/lib/a.txt').writeAsStringSync('changed\n');
+      File('$repo/lib/a_test.txt').writeAsStringSync('new test\n');
+      // Bug fix's repro snapshot, the commit style, the review diff (runGit) and the shell probe (guardedEnv).
+      expect(await reproPaths(repo, 'run lib/a_test.txt'), contains('lib/a_test.txt'));
+      expect(await resolveCommitStyle(repo, CommitStyle.auto), isNotNull);
+      expect('${(await runGit(repo, ['diff', 'HEAD', '--stat', '-p'])).stdout}', contains('lib/a.txt'));
+      final shell = await Process.run(
+        'sh',
+        ['-c', 'git status --porcelain && git log -1 --format=%s'],
+        workingDirectory: repo,
+        environment: await guardedEnv(repo),
+      );
+      expect('${shell.stdout}', contains('Initial commit'));
+      expect(File(marks).existsSync() ? File(marks).readAsStringSync() : '', isEmpty);
+      await Process.run('git', ['-C', repo, 'status']);
+      expect(File(marks).readAsStringSync(), contains('fsmonitor'));
+    });
+
+    test('the user\'s own hooks folder still runs on EveryAI\'s commits; the repository\'s does not', () async {
+      final run = await arm();
+      final mine = Directory('${tmp.path}/my-hooks')..createSync();
+      final hook = File('${mine.path}/pre-commit')..writeAsStringSync('#!/bin/sh\n"$run" my-pre-commit\n');
+      await Process.run('chmod', ['+x', hook.path]);
+      final global = File('${tmp.path}/gitconfig')
+        ..writeAsStringSync('[user]\n\tname = Dev\n\temail = dev@example.com\n[core]\n\thooksPath = ${mine.path}\n');
+      final env = {'GIT_CONFIG_GLOBAL': global.path};
+      File('$repo/lib/a.txt').writeAsStringSync('changed\n');
+      await runGit(repo, ['add', '-A'], env: env);
+      final commit = await runGit(repo, ['commit', '-q', '-m', 'Mine'], env: env);
+      expect(commit.exitCode, 0, reason: '${commit.stderr}');
+      expect(File(marks).readAsStringSync().trim().split('\n'), ['my-pre-commit']);
     });
   });
 }

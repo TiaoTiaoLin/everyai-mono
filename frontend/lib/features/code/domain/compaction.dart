@@ -4,7 +4,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
-import '../git/repo_check.dart' show splitRepoCheck;
+import '../../../core/security/untrusted.dart';
+import '../git/repo_check.dart' show repoCheckLine, splitRepoCheck;
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
@@ -120,6 +121,20 @@ String _between(String text, String open, String close) {
   if (start < 0) return '';
   final end = text.indexOf(close, start + open.length);
   return text.substring(start + open.length, end < 0 ? text.length : end).trim();
+}
+
+/// The repo-check list a session started with (see `repo_check.dart`), from the first of [userTexts] that has
+/// one, or ''. A continuation carries it, since the first message that had it is gone after compaction.
+String repoCheckIn(Iterable<String> userTexts) {
+  for (final raw in userTexts) {
+    final text = splitModeNote(splitSessionBlock(raw).$2).$2;
+    if (splitRepoCheck(text).$1 case final list?) return list;
+    if (splitCompacted(text) != null) {
+      final kept = _between(text, '<repo-check>', '</repo-check>');
+      if (kept.isNotEmpty) return _between(kept, '>', '</untrusted-content>').trim();
+    }
+  }
+  return '';
 }
 
 /// The user's text of a message: session block, mode, repo-check, context, workflow and rewind notes split off.
@@ -503,8 +518,8 @@ String checklist(Iterable<({String title, String status})> items) => [
 
 /// The first message of the continuation conversation: [summary], then what
 /// the agent was working from ([plan] the user approved, its [todos], the
-/// current text of the [files] it touched last, the [skills] it loaded),
-/// then the kept turns. With [resume] the agent is told to carry on;
+/// current text of the [files] it touched last, the [skills] it loaded, the
+/// [repoCheck] list it started with), then the kept turns. With [resume] the agent is told to carry on;
 /// otherwise the conversation starts without running and the user's next
 /// message follows.
 String continuationMessage({
@@ -515,6 +530,7 @@ String continuationMessage({
   String todos = '',
   String files = '',
   String skills = '',
+  String repoCheck = '',
 }) {
   final b = StringBuffer()
     ..writeln(compactedOpen)
@@ -536,6 +552,8 @@ String continuationMessage({
     files,
   );
   section('skills', 'Skills you loaded earlier in the session; follow them as before:', skills);
+  final checked = untrusted(repoCheck.replaceAll('</repo-check', '<_repo-check'), source: 'repository files');
+  if (repoCheck.trim().isNotEmpty) section('repo-check', repoCheckLine, checked);
   if (recent.trim().isNotEmpty) {
     b
       ..writeln()

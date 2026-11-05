@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import '../git/git_service_io.dart' show runGit;
+
 import 'agent_settings.dart';
 import 'settings.dart' show localSettingsPath, projectSettingsPath;
 
@@ -63,7 +65,7 @@ Future<Map<String, Object?>?> _read(String path) async {
 Future<CommitStyle> resolveCommitStyle(String projectDir, CommitStyle style) async {
   if (style != CommitStyle.auto) return style;
   try {
-    final res = await Process.run('git', ['-C', projectDir, 'log', '-30', '--format=%s']);
+    final res = await runGit(projectDir, ['log', '-30', '--format=%s']);
     if (res.exitCode != 0) return CommitStyle.conventional;
     return detectCommitStyle(const LineSplitter().convert(res.stdout as String));
   } on Object {

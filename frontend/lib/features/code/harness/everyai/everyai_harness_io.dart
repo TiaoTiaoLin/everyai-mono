@@ -21,6 +21,7 @@ import '../events.dart';
 import '../harness.dart';
 import '../../drivers/briefing/briefing_types.dart' show everyaiServerName;
 import '../../drivers/usage_limit.dart';
+import '../../git/git_service_io.dart' show runGit;
 import 'browser_io.dart';
 import 'llm.dart';
 import 'mcp_io.dart';
@@ -1150,6 +1151,10 @@ final class EveryAISession
       todos: kept.todos,
       files: kept.files,
       skills: kept.skills,
+      repoCheck: repoCheckIn([
+        for (final e in _history)
+          if (e is ChatMessage && e.fromUser) e.text,
+      ]),
     );
     final eid = _newId();
     _emit({
@@ -1751,18 +1756,9 @@ final class EveryAISession
   /// review.
   Future<String> _workingDiff() async {
     try {
-      final d = await Process.run('git', [
-        'diff',
-        'HEAD',
-        '--no-color',
-        '--stat',
-        '-p',
-      ], workingDirectory: _spec.workingDir);
-      final n = await Process.run('git', [
-        'ls-files',
-        '--others',
-        '--exclude-standard',
-      ], workingDirectory: _spec.workingDir);
+      // EveryAI's own git: nothing the repository defines runs (git_guard.dart).
+      final d = await runGit(_spec.workingDir, ['diff', 'HEAD', '--no-color', '--stat', '-p']);
+      final n = await runGit(_spec.workingDir, ['ls-files', '--others', '--exclude-standard']);
       final text = '${d.stdout}${'${n.stdout}'.trim().isEmpty ? '' : '\nNew files:\n${n.stdout}'}';
       return text.length > 16000 ? '${text.substring(0, 16000)}\n[…cut]' : text;
     } on Object {

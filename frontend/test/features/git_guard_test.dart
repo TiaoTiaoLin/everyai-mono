@@ -69,17 +69,84 @@ void main() {
     expect(guard.args, isEmpty);
   });
 
-  test('a filter that cleans files, or one dressed up as git-crypt, is refused', () {
+  test('a filter that cleans files, or one dressed up as git-crypt, is blanked and storing files is refused', () {
     for (final entry in [
       _local('filter.x.clean', './x.sh'),
       _local('filter.x.process', './x.sh'),
       _local('filter.lfs.clean', 'git-lfs clean -- %f; ./x.sh'),
       _local('filter.git-crypt.clean', '"/tmp/git-crypt" clean'),
     ]) {
+      final name = entry.key.split('.')[1];
       final guard = repoGuard([entry]);
-      expect(guard.refusal, contains('filter "${entry.key.split('.')[1]}"'), reason: entry.value);
-      expect(guard.args, isEmpty);
+      expect(guard.refusal, contains('filter "$name"'), reason: entry.value);
+      expect(guard.args, [
+        '-c', 'filter.$name.clean=', '-c', 'filter.$name.smudge=', '-c', 'filter.$name.process=', //
+        '-c', 'filter.$name.required=false',
+      ]);
+      expect(blocksStoring(entry), isTrue);
     }
+    expect([
+      for (final c in ['add', 'commit', 'stash', 'apply']) storesFiles(c),
+    ], everyElement(isTrue));
+    expect(
+      [
+        for (final c in ['worktree', 'status', 'diff', 'restore', 'switch', 'read-tree']) storesFiles(c),
+      ],
+      [for (var i = 0; i < 6; i++) false],
+    );
+  });
+
+  test('hooks set in config are turned off by name; an event added to the user\'s own command is theirs', () {
+    final guard = repoGuard([
+      _global('hook.scan.command', '/usr/local/bin/gitleaks protect'),
+      _local('hook.x.command', './evil.sh'),
+      _local('hook.x.event', 'reference-transaction'),
+      _local('hook.y.event', 'pre-commit'),
+      _local('hook.scan.event', 'post-commit'),
+    ]);
+    expect(guard.args, ['-c', 'hook.x.enabled=false', '-c', 'hook.y.enabled=false']);
+    expect(isRepoProgram(_local('hook.x.command', './evil.sh')), isTrue);
+    expect(isRepoProgram(_global('hook.x.command', './evil.sh')), isFalse);
+  });
+
+  test('git-lfs programs from the repository turn the lfs filter off and refuse storing files', () {
+    for (final entry in [
+      _local('lfs.standalonetransferagent', 'x'),
+      _local('lfs.customtransfer.x.path', './evil.sh'),
+      _local('lfs.extension.e.smudge', './evil.sh %f'),
+    ]) {
+      final guard = repoGuard([_global('filter.lfs.process', 'git-lfs filter-process'), entry]);
+      expect(guard.refusal, contains(entry.key), reason: entry.key);
+      expect(guard.args, containsAllInOrder(['-c', 'filter.lfs.process=', '-c', 'filter.lfs.required=false']));
+      expect(isRepoProgram(entry), isTrue);
+    }
+    expect(isRepoProgram(_global('lfs.customtransfer.x.path', '/usr/bin/agent')), isFalse);
+  });
+
+  test('the user\'s own hooks folder comes back; a relative one or the repository\'s does not', () {
+    expect(repoGuard([_global('core.hookspath', '/Users/sam/.githooks')]).args, [
+      '-c',
+      'core.hooksPath=/Users/sam/.githooks',
+    ]);
+    expect(repoGuard([_global('core.hookspath', '~/.githooks')]).args, ['-c', 'core.hooksPath=~/.githooks']);
+    expect(repoGuard([_global('core.hookspath', '.githooks')]).args, isEmpty);
+    expect(repoGuard([_local('core.hookspath', '/tmp/hooks')]).args, isEmpty);
+    expect(isRepoProgram(_local('core.hookspath', '.husky')), isFalse);
+  });
+
+  test('the guard reaches git started by another program through the environment', () {
+    expect(
+      configEnv(['-c', 'core.fsmonitor=false', '-c', 'hook.x.enabled=false', '-c', 'filter.s.smudge='], count: 1),
+      {
+        'GIT_CONFIG_KEY_1': 'core.fsmonitor',
+        'GIT_CONFIG_VALUE_1': 'false',
+        'GIT_CONFIG_KEY_2': 'hook.x.enabled',
+        'GIT_CONFIG_VALUE_2': 'false',
+        'GIT_CONFIG_KEY_3': 'filter.s.smudge',
+        'GIT_CONFIG_VALUE_3': '',
+        'GIT_CONFIG_COUNT': '4',
+      },
+    );
   });
 
   test('program keys are named for the repo check, the user\'s own are not', () {

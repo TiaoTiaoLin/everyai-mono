@@ -38,8 +38,8 @@ const _close = '</everyai-repo-check>';
 /// The one line of ours in the note. Constant, in the first user message.
 const repoCheckLine =
     'EveryAI found things in this repository that can run code by themselves (listed below as data). EveryAI\'s own '
-    'git features never run them. Don\'t run install or build steps, these hooks or these tasks unless the task '
-    'needs them, and tell the user first when one is on this list.';
+    'git calls turn them off; your commands don\'t. Run install or build steps, these hooks or these tasks only when '
+    'the task needs them, and say in your final message which ones on this list you ran.';
 
 /// The block that goes in front of a session's first message, or '' with no
 /// [findings]. Ends with a blank line so the message follows it.

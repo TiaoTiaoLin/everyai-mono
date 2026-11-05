@@ -3100,7 +3100,15 @@ final class CodeSessionController extends Notifier<CodeSessionState>
           );
       final summary = cleanSummary(await summarize(summaryRequest(plan, focus: focus)));
       if (summary == null) return const CompactOutcome.failed("The summary didn't come back in the expected form.");
-      final message = continuationMessage(summary: summary, recent: renderTail(plan), resume: resume);
+      final message = continuationMessage(
+        summary: summary,
+        recent: renderTail(plan),
+        resume: resume,
+        repoCheck: repoCheckIn([
+          for (final e in _events)
+            if (e is ChatMessage && e.fromUser) e.text,
+        ]),
+      );
       final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
       final sessions = ref.read(codeSessionsProvider.notifier);
       final spec = await sessions.specFor(

@@ -38,7 +38,9 @@ Future<List<RepoFinding>> checkRepo(String dir) async {
       out.addAll(_hooks(abs, hooksPath));
     }
     for (final e in entries.where(isRepoProgram)) {
-      out.add(RepoFinding('git config ${e.key}', 'runs ${e.value}'));
+      // The refusal itself only shows when a checkpoint or commit fails, so the note says it up front.
+      final off = blocksStoring(e) ? 'EveryAI\'s checkpoints and commits are off while it is set; ' : '';
+      out.add(RepoFinding('git config ${e.key}', '${off}runs ${e.value}'));
     }
     if (File('$top/.gitmodules').existsSync()) {
       final mods = await git(['config', '--file', '$top/.gitmodules', '--list', '-z']);

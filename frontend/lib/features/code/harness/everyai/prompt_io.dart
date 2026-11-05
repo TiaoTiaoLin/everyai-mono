@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../../../../core/config/version.dart';
+import '../../git/git_service_io.dart' show guardedEnv;
 import 'model_family.dart';
 import 'shell_io.dart';
 
@@ -144,7 +145,8 @@ fi
     final res = await Process.run(
       env.shell,
       ['-c', script],
-      environment: env.env,
+      // Its git calls are EveryAI's own: nothing the repository defines runs (git_guard.dart).
+      environment: await guardedEnv(workingDir, base: env.env),
       workingDirectory: workingDir,
     ).timeout(const Duration(seconds: 8));
     for (final line in (res.stdout as String).split('\n')) {
