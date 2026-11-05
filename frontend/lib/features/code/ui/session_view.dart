@@ -298,7 +298,11 @@ class CodeSessionScreen extends ConsumerWidget {
                                                   onDenyCall: controller.perCall
                                                       ? (id) => controller.deny(null, [id])
                                                       : null,
-                                                  flags: approvalFlags(controller.policy, t.pending, state.mode),
+                                                  flags: approvalFlags(
+                                                    controller.policy,
+                                                    t.pending,
+                                                    controller.checkMode,
+                                                  ),
                                                   reasons: controller.askReasons(t.pending),
                                                   forks: info.sharesApprovals,
                                                 ),
@@ -408,6 +412,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                               nativeModes: state.inNativeMode ? state.nativeModes : null,
                                               nativeMode: state.nativeMode,
                                               harnessLabel: driver?.info.label ?? '',
+                                              nativeBypass: controller.checksBypassed,
+                                              onNativeBypass: controller.setBypassChecks,
                                               onNativeModeChanged: (id) async {
                                                 final why = await controller.setNativeMode(id);
                                                 if (why != null && context.mounted) showAdaptiveToast(context, why);

@@ -61,6 +61,8 @@ class CodeComposer extends ConsumerStatefulWidget {
     this.nativeModes,
     this.nativeMode,
     this.onNativeModeChanged,
+    this.nativeBypass = false,
+    this.onNativeBypass,
     this.harnessLabel = '',
     this.sessionId,
   });
@@ -123,6 +125,10 @@ class CodeComposer extends ConsumerStatefulWidget {
   final List<NativeMode>? nativeModes;
   final String? nativeMode;
   final ValueChanged<String>? onNativeModeChanged;
+
+  /// "Bypass EveryAI checks" under an outside lead's modes: on, and how to switch it.
+  final bool nativeBypass;
+  final ValueChanged<bool>? onNativeBypass;
 
   /// The harness's name, the native picker's header.
   final String harnessLabel;
@@ -401,6 +407,8 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
             current: widget.nativeMode,
             policy: widget.mode,
             onChanged: widget.onNativeModeChanged!,
+            bypass: widget.nativeBypass,
+            onBypass: widget.onNativeBypass,
           )
         : ModeMenu(mode: widget.mode, onChanged: widget.onModeChanged);
     final parts = [
@@ -647,7 +655,9 @@ class ModeMenu extends StatelessWidget {
 /// An outside harness's own modes under its names (Claude Code's Default ·
 /// Accept edits · Plan mode, Codex's presets, OpenCode's agents, an ACP
 /// agent's modes). A greyed one can't be picked and says why. The chip's
-/// colour comes from the [policy] the current one runs under.
+/// colour comes from the [policy] the current one runs under. Below the modes,
+/// the "Bypass EveryAI checks" switch ([onBypass]), which leaves the lead's
+/// mode as it is.
 class NativeModeMenu extends StatelessWidget {
   const NativeModeMenu({
     super.key,
@@ -656,6 +666,8 @@ class NativeModeMenu extends StatelessWidget {
     required this.current,
     required this.policy,
     required this.onChanged,
+    this.bypass = false,
+    this.onBypass,
   });
 
   final String harness;
@@ -664,14 +676,26 @@ class NativeModeMenu extends StatelessWidget {
   final AgentMode policy;
   final ValueChanged<String> onChanged;
 
+  /// EveryAI's checks are off for this session.
+  final bool bypass;
+  final ValueChanged<bool>? onBypass;
+
+  Future<void> _toggleBypass(BuildContext context) async {
+    if (!bypass && !await confirmBypass(context)) return;
+    onBypass?.call(!bypass);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final label = nativeModeOf(modes, current)?.label ?? current ?? policy.label;
     return AnchoredPopover(
       width: 300,
-      // An agent may list many modes: the list scrolls rather than overflow.
-      builder: (context, close) => SingleChildScrollView(
+      // Tall enough for the modes and the Bypass switch under them; a short window still caps it (and it scrolls).
+      maxHeight: 640,
+      // An agent may list many modes: the list scrolls rather than overflow. The popover closes before the Bypass
+      // confirmation, so that asks from this widget's context.
+      builder: (_, close) => SingleChildScrollView(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -691,10 +715,26 @@ class NativeModeMenu extends StatelessWidget {
                         onChanged(m.id);
                       },
               ),
+            if (onBypass != null) ...[
+              Container(height: 1, color: theme.border, margin: const EdgeInsets.symmetric(vertical: 6)),
+              PopoverRow(
+                key: const ValueKey('composer.bypassChecks'),
+                title: 'Bypass EveryAI checks',
+                subtitle: "EveryAI's floor, rules and risk prompts off for this session",
+                selected: bypass,
+                trailing: IgnorePointer(
+                  child: AdaptiveSwitch(value: bypass, onChanged: (_) {}),
+                ),
+                onTap: () {
+                  close();
+                  _toggleBypass(context);
+                },
+              ),
+            ],
           ],
         ),
       ),
-      child: _ModeChip(label: label, policy: policy),
+      child: _ModeChip(label: label, policy: bypass ? AgentMode.bypass : policy),
     );
   }
 }

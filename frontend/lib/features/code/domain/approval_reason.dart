@@ -15,13 +15,14 @@ import 'permissions.dart';
 String askReason(Decision d, ActionCall call, AgentMode mode, {String? outsideKind}) {
   if (outsideKind != null && d.verdict == Verdict.allow) {
     final tool = call.toolName.isEmpty ? 'tool' : '${call.toolName} tool';
-    return "$outsideKind's own $tool can't be checked by EveryAI's rules, so it always asks.";
+    return "$outsideKind's own $tool can't be checked by EveryAI's rules, so it asks once (Allow keeps it) unless the "
+        'session is in Full auto.';
   }
   return switch (d.source) {
     DecisionSource.floor => 'This ${_bare(d.why)}, which is on the safety floor.',
     DecisionSource.dangerous when d.why == outsideProject =>
-      'Edits outside the project ask in every mode, Full auto included.',
-    DecisionSource.dangerous => 'This ${_bare(d.why)}, so it asks in every mode but Full auto.',
+      'Edits outside the project ask once in every mode but Full auto; Allow keeps the folder.',
+    DecisionSource.dangerous => 'This ${_bare(d.why)}, so it asks once in every mode but Full auto; Allow keeps it.',
     DecisionSource.mode when d.verdict != Verdict.ask => '',
     DecisionSource.mode when isMcpTool(call) =>
       'MCP tools ask unless the session is in Full auto or an Mcp(...) rule allows them.',

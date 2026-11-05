@@ -90,6 +90,7 @@ final class CodeSessionInfo {
     this.leads = const {},
     this.pendingHandoff = '',
     this.nativeMode = '',
+    this.bypassChecks = false,
     this.pendingRewind = '',
     this.workflow,
     this.toldWorkflow,
@@ -135,6 +136,10 @@ final class CodeSessionInfo {
   /// session reopens; '' for none (the EveryAI harness, or not picked). A
   /// lead switch clears it.
   final String nativeMode;
+
+  /// "Bypass EveryAI checks" (the switch under an outside lead's modes): EveryAI's floor, rules and risk prompts
+  /// are off for this session and the ones it starts. The lead's own mode and permission system are untouched.
+  final bool bypassChecks;
 
   /// The note telling a lead that kept the conversation that the files were
   /// rewound: it goes out with the next message, even after a restart. ''
@@ -226,6 +231,7 @@ final class CodeSessionInfo {
     Map<String, LeadRecord>? leads,
     String? pendingHandoff,
     String? nativeMode,
+    bool? bypassChecks,
     String? pendingRewind,
     bool merged = false,
     String? workflow,
@@ -262,6 +268,7 @@ final class CodeSessionInfo {
     pendingHandoff: pendingHandoff ?? this.pendingHandoff,
     // Another lead's modes have other names.
     nativeMode: nativeMode ?? (harness != null && harness != this.harness ? '' : this.nativeMode),
+    bypassChecks: bypassChecks ?? this.bypassChecks,
     pendingRewind: pendingRewind ?? this.pendingRewind,
     workflow: clearWorkflow ? null : workflow ?? this.workflow,
     toldWorkflow: clearToldWorkflow ? null : toldWorkflow ?? this.toldWorkflow,
@@ -309,6 +316,7 @@ final class CodeSessionInfo {
     },
     pendingHandoff: json['pending_handoff'] as String? ?? '',
     nativeMode: json['native_mode'] as String? ?? '',
+    bypassChecks: json['bypass_checks'] == true,
     pendingRewind: json['pending_rewind'] as String? ?? '',
     workflow: json['workflow'] as String? ?? (json['tier'] == 'max' ? 'max' : null),
     // An old Max session's lead never heard of the workflow, so it is told on the next message.
@@ -343,6 +351,7 @@ final class CodeSessionInfo {
     if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
     if (pendingHandoff.isNotEmpty) 'pending_handoff': pendingHandoff,
     if (nativeMode.isNotEmpty) 'native_mode': nativeMode,
+    if (bypassChecks) 'bypass_checks': true,
     if (pendingRewind.isNotEmpty) 'pending_rewind': pendingRewind,
     'workflow': ?workflow,
     'told_workflow': ?toldWorkflow,

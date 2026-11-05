@@ -388,7 +388,8 @@ ChildSetup childSetup(
   };
   final effort = preferred != null && preferred.effort.isNotEmpty ? preferred.effort : agent.effort;
   return (
-    mode: agent.mode == null ? parentMode : stricterMode(parentMode, agent.mode!),
+    // Bypass reaches every agent of the session: a role can't make its child stricter then.
+    mode: agent.mode == null || parentMode == AgentMode.bypass ? parentMode : stricterMode(parentMode, agent.mode!),
     model: model,
     // A model it fell back to keeps the orchestrator's effort.
     effort: model == parentModel && wanted != null && wanted != parentModel ? parentEffort : effort ?? parentEffort,

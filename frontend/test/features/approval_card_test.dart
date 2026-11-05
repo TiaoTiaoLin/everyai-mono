@@ -71,7 +71,7 @@ void main() {
     expect(denied, ['b']);
 
     await tester.tap(find.text('Allow all  ${Host.enterKeys(command: true)}'));
-    expect(all, ApprovalScope.once);
+    expect(all, ApprovalScope.always, reason: 'asked once, saved for good');
   });
 
   testWidgets('answered rows are settled', (tester) async {

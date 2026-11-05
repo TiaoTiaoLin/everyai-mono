@@ -1237,33 +1237,35 @@ void main() {
     String setMode(String req, String mode) =>
         _out(controlRequest(req, {'subtype': 'set_permission_mode', 'mode': mode}));
 
-    test("Claude's own modes: auto once the model says it has it, bypass greyed; current from initialize", () async {
-      final channel = ReplayChannel(_fixture('init_image_turn.jsonl'));
-      final session = await driverIn(_Spawner([channel])).start(_spec());
-      final native = session as NativeModes;
-      final before = await native.nativeModes.first;
-      expect([for (final m in before.modes) m.id], ['default', 'acceptEdits', 'plan', 'bypassPermissions']);
-      expect(before.current, 'default');
-      await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
-      await _played(channel);
-      final after = await native.nativeModes.first;
-      expect([for (final m in after.modes) m.id], ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']);
-      expect(after.current, 'default');
-      expect(nativeModeOf(after.modes, 'auto')!.policy, AgentMode.fullAuto);
-      expect(nativeModeOf(after.modes, 'bypassPermissions')!.blocked, contains('Not offered'));
-      expect(
-        [
-          for (final m in after.modes)
-            if (m.blocked == null) m.policy,
-        ],
-        [AgentMode.ask, AgentMode.autoEdit, AgentMode.plan, AgentMode.fullAuto],
-      );
-      await session.close();
-      // The reopened session lists auto before its CLI starts again.
-      final again = await driverIn(_Spawner([])).attach(session.id);
-      expect([for (final m in (await (again as NativeModes).nativeModes.first).modes) m.id], contains('auto'));
-      await again.close();
-    });
+    test(
+      "Claude's own modes: auto once the model says it has it, bypass not listed; current from initialize",
+      () async {
+        final channel = ReplayChannel(_fixture('init_image_turn.jsonl'));
+        final session = await driverIn(_Spawner([channel])).start(_spec());
+        final native = session as NativeModes;
+        final before = await native.nativeModes.first;
+        expect([for (final m in before.modes) m.id], ['default', 'acceptEdits', 'plan']);
+        expect(before.current, 'default');
+        await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
+        await _played(channel);
+        final after = await native.nativeModes.first;
+        expect([for (final m in after.modes) m.id], ['default', 'acceptEdits', 'plan', 'auto']);
+        expect(after.current, 'default');
+        expect(nativeModeOf(after.modes, 'auto')!.policy, AgentMode.fullAuto);
+        expect(
+          [
+            for (final m in after.modes)
+              if (m.blocked == null) m.policy,
+          ],
+          [AgentMode.ask, AgentMode.autoEdit, AgentMode.plan, AgentMode.fullAuto],
+        );
+        await session.close();
+        // The reopened session lists auto before its CLI starts again.
+        final again = await driverIn(_Spawner([])).attach(session.id);
+        expect([for (final m in (await (again as NativeModes).nativeModes.first).modes) m.id], contains('auto'));
+        await again.close();
+      },
+    );
 
     test('a switch is set_permission_mode under the native id; a greyed one throws and sends nothing', () async {
       final channel = ReplayChannel(_script([_init, _say('Go.'), _done('r1'), setMode('req_2', 'acceptEdits')]));

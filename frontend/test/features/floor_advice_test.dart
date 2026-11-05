@@ -22,15 +22,32 @@ void main() {
     expect(v.reason, contains('ask them'));
   });
 
-  test('once advised about a floor reason, the user decides, however the retry is worded', () {
-    final advised = <String>{};
-    expect(
-      outsideVerdict(policy, _sh('rm -rf ~'), AgentMode.fullAuto, advised: advised)?.reason,
-      startsWith(floorAdviceLead),
-    );
-    for (final retry in ['rm -rf ~', 'rm  -rf   ~', 'cd /tmp && rm -rf ~']) {
-      expect(outsideVerdict(policy, _sh(retry), AgentMode.fullAuto, advised: advised), isNull, reason: retry);
+  test('once advised about a floor reason, Ask leaves it to the user and Full auto refuses, however it is worded', () {
+    for (final mode in [AgentMode.ask, AgentMode.fullAuto]) {
+      final advised = <String>{};
+      final first = outsideVerdict(policy, _sh('rm -rf ~'), mode, advised: advised);
+      if (mode == AgentMode.fullAuto) expect(first?.reason, startsWith(floorAdviceLead));
+      advised.add(floorReason('rm -rf ~')!);
+      for (final retry in ['rm -rf ~', 'rm  -rf   ~', 'cd /tmp && rm -rf ~']) {
+        final v = outsideVerdict(policy, _sh(retry), mode, advised: advised);
+        if (mode == AgentMode.fullAuto) {
+          expect(v?.accept, isFalse, reason: retry);
+        } else {
+          expect(v, isNull, reason: retry);
+        }
+      }
     }
+  });
+
+  test('a floor hit the user allowed word for word is not asked again', () {
+    const allowed = PermissionPolicy(
+      workingDir: '/p',
+      rules: PermissionRules(allow: ['Exact(rm -rf ~)']),
+    );
+    expect(
+      outsideVerdict(allowed, _sh('rm -rf ~'), AgentMode.ask, advised: {floorReason('rm -rf ~')!})?.accept,
+      isTrue,
+    );
   });
 
   test('a host-run check that hits the floor is refused outright, with no advice', () {

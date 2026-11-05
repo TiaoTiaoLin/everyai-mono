@@ -41,7 +41,7 @@ class SessionApprovalCard extends ConsumerWidget {
       rememberBy: controller.rememberBy(),
       onAllowCall: controller.perCall ? (id, scope) => controller.approve(scope, [id]) : null,
       onDenyCall: controller.perCall ? (id) => controller.deny(null, [id]) : null,
-      flags: approvalFlags(controller.policy, pending, state.mode),
+      flags: approvalFlags(controller.policy, pending, controller.checkMode),
       reasons: controller.askReasons(pending),
       forks: info.sharesApprovals,
     );

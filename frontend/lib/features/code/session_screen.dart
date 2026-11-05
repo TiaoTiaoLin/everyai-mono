@@ -59,6 +59,12 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
   TranscriptBuilder get _builder;
   PermissionPolicy get policy;
 
+  /// EveryAI's checks are off for this session (see CodeSessionController.checksBypassed).
+  bool get checksBypassed;
+
+  /// The mode EveryAI's checks decide by.
+  AgentMode get checkMode;
+
   /// Cards the app raised for a host call, by card id: the answers, or null
   /// when the card was given up (a chat message, Stop, the call ended).
   final _localAsks = <String, Completer<List<QuestionAnswer>?>>{};
@@ -180,7 +186,7 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
       case OwnWindow(:final window, :final others):
         return _withImages(call, await a.capture(window, root, others));
       // Bypass permissions: no question, the window is captured like the session's own.
-      case ForeignWindow(:final window) when state.mode == AgentMode.bypass:
+      case ForeignWindow(:final window) when checksBypassed:
         return _withImages(call, await a.capture(window, root, 0));
       case ForeignWindow(:final window):
         final title = window.title.isEmpty ? '' : ' — “${window.title}”';
@@ -356,7 +362,7 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
     if (picked.problem case final problem?) return (run: null, problem: problem);
     if (gen != _screenGen || !ref.mounted) return (run: null, problem: stopped);
     final command = picked.command!;
-    if (hostRunDenial(policy: policy, mode: state.mode, tool: appRunTool, command: command) case final why?) {
+    if (hostRunDenial(policy: policy, mode: checkMode, tool: appRunTool, command: command) case final why?) {
       return (run: null, problem: '$why\n(command: $command)');
     }
     final dir = await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId);
@@ -401,7 +407,7 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
       return (command: saved, problem: null);
     }
     String? allowed(String? c) =>
-        c != null && hostRunDenial(policy: policy, mode: state.mode, tool: appRunTool, command: c) == null ? c : null;
+        c != null && hostRunDenial(policy: policy, mode: checkMode, tool: appRunTool, command: c) == null ? c : null;
     final detected = [
       for (final c in await detectRunCommandsIn(info.workingDir, a.os))
         if (allowed(c) != null) c,
