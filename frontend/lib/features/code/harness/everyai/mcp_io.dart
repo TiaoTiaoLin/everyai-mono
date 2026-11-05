@@ -353,6 +353,9 @@ final class McpTools {
 
   Iterable<String> get names => _byName.keys;
 
+  /// The server a tool [name] comes from, or null when it isn't one of these.
+  String? serverOf(String name) => _byName[name]?.$1.name;
+
   /// Function specs for the model, in a stable order (the prompt cache).
   List<Map<String, Object?>> get specs {
     final names = _byName.keys.toList()..sort();

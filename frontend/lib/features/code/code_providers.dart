@@ -76,6 +76,7 @@ import 'host/host_providers.dart';
 import 'host/host_report.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
+import 'panes/file_tree.dart' as fs;
 import 'permissions_providers.dart';
 import 'settings/context_files.dart';
 import 'settings/script_caps.dart';
@@ -1322,6 +1323,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
+      ref.read(preferencesProvider)['$codeLayoutPrefix$g'] = null;
     }
     state = [
       for (final s in state)
@@ -1364,9 +1366,23 @@ final class CodeSessionState {
     this.nativeModes = const [],
     this.nativeMode,
     this.armed,
+    this.sideWork = false,
   });
 
   final Transcript transcript;
+
+  /// Work outside the transcript that may change the files: background agents still running, or a rewind under way.
+  final bool sideWork;
+
+  /// The agent (or the app for it) may be writing in the session's folder: the Files view's editor is read-only and
+  /// [CodeSessionController.saveFile] refuses. A card or plan waiting for the user doesn't count.
+  bool get filesLocked =>
+      transcript.running ||
+      transcript.pending.isNotEmpty ||
+      transcript.openSubagents.isNotEmpty ||
+      queued.isNotEmpty ||
+      switching ||
+      sideWork;
 
   /// The lead's own modes (`NativeModes`), which the picker shows instead of
   /// ours; empty for the EveryAI harness and leads without them. [mode] is
@@ -1460,7 +1476,9 @@ final class CodeSessionState {
     bool clearNativeMode = false,
     WorkflowEntry? armed,
     bool clearArmed = false,
+    bool? sideWork,
   }) => CodeSessionState(
+    sideWork: sideWork ?? this.sideWork,
     nativeModes: nativeModes ?? this.nativeModes,
     nativeMode: clearNativeMode ? null : nativeMode ?? this.nativeMode,
     armed: clearArmed ? null : armed ?? this.armed,
@@ -1692,6 +1710,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Background subagents by call id: their call was answered at the start,
   /// and their report goes to this session as a task notification.
   final _background = <String, ({String childId, String title})>{};
+
+  /// Puts whether background agents run or a rewind is under way into the state ([CodeSessionState.sideWork]).
+  void _syncSideWork() {
+    final now = _background.isNotEmpty || _rewinding;
+    if (ref.mounted && state.sideWork != now) state = state.copyWith(sideWork: now);
+  }
 
   /// Whether forks left in the background before a restart are watched again.
   bool _resumedBackground = false;
@@ -2281,9 +2305,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   void _refreshGitSoon() {
     if (_gitTimer?.isActive ?? false) return;
     _gitTimer = Timer(const Duration(milliseconds: 400), () {
-      if (ref.mounted && ref.exists(codeGitProvider(sessionId))) {
-        unawaited(ref.read(codeGitProvider(sessionId).notifier).refresh());
-      }
+      if (ref.mounted && ref.exists(codeGitProvider(sessionId))) ref.read(codeGitProvider(sessionId).notifier).edited();
     });
   }
 
@@ -2878,7 +2900,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       _childWaiting.remove(callId);
     }
     _background.clear();
-    state = state.copyWith(subagentNeedsInput: _childWaiting.isNotEmpty);
+    state = state.copyWith(subagentNeedsInput: _childWaiting.isNotEmpty, sideWork: _rewinding);
     await Future.wait([
       for (final c in children)
         if (ref.exists(codeSessionProvider(c))) ref.read(codeSessionProvider(c).notifier).stop(),
@@ -3398,6 +3420,33 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     return LeadSwitchOutcome.switched(handoff.kind, path: path, why: why);
   }
 
+  /// Saves the user's edit of [path] from the Files view. Refused while the agent works (a turn, an approval, a
+  /// subagent, a background agent, a queued message, a rewind or a lead switch: [CodeSessionState.filesLocked]), or
+  /// outside the session's folder; [changedOnDisk] when the file no longer holds [expected] (what
+  /// was read at open) unless [overwrite]. No checkpoint of its own: the next message's checkpoint takes the edit in,
+  /// so rewinding to before that message keeps it and rewinding further drops it.
+  Future<SaveOutcome> saveFile(String path, String text, {required String? expected, bool overwrite = false}) async {
+    if (state.filesLocked || _switching || _rewinding || _background.isNotEmpty) {
+      return const SaveOutcome.refused(agentWorking);
+    }
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || noLocalFolder(info.workingDir) || !await fs.insideRoot(info.workingDir, path)) {
+      return const SaveOutcome.refused("Only files in this session's folder can be saved here.");
+    }
+    if (!overwrite && await fs.readText(path) != expected) return const SaveOutcome.changedOnDisk();
+    try {
+      await fs.writeText(path, text);
+    } on Object catch (e) {
+      return SaveOutcome.refused("Couldn't save: $e");
+    }
+    if (ref.mounted && ref.exists(codeGitProvider(sessionId))) {
+      await ref.read(codeGitProvider(sessionId).notifier).refresh();
+    }
+    return const SaveOutcome.saved();
+  }
+
+  static const agentWorking = 'The agent is working: save when it stops.';
+
   /// Takes the session back to just before user turn [turn] (1-based): the
   /// agent's conversation moves its head to before that message, so it
   /// forgets it and everything after (the server keeps the old branch), and
@@ -3420,10 +3469,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (turn < 1 || turn > turns.length) return const RewindOutcome.nothing();
     if (_rewinding) return const RewindOutcome.busy();
     _rewinding = true;
+    _syncSideWork();
     try {
       return await _rewind(info, session, turns, turn, native);
     } finally {
       _rewinding = false;
+      _syncSideWork();
       // What the user wrote meanwhile goes out now, with the note.
       if (ref.mounted) _sendQueued();
     }
@@ -3727,6 +3778,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         final child = sessions.byId(childId);
         if (child == null) continue;
         _background[callId] = (childId: childId, title: child.title);
+        _syncSideWork();
         _watch(callId, childId);
       }
     }
@@ -3769,6 +3821,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       if (call.str('isolation') == 'worktree' && child.forkCopy == null) _fellBack[callId] = sharedFolderNote;
       if (call.action['run_in_background'] == true && !onParentModel) {
         _background[callId] = (childId: child.id, title: child.title);
+        _syncSideWork();
         _reports[callId] = backgroundStarted(child.id, note: _fellBack.remove(callId));
         _deliver();
       }
@@ -3891,7 +3944,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       _childOf.remove(callId);
       _childSubs.remove(callId)?.close();
       _childWaiting.remove(callId);
-      state = state.copyWith(subagentNeedsInput: _childWaiting.isNotEmpty);
+      state = state.copyWith(
+        subagentNeedsInput: _childWaiting.isNotEmpty,
+        sideWork: _background.isNotEmpty || _rewinding,
+      );
       // While the agent works this joins its next step; when idle it wakes it.
       _notifyLead(taskNotification(bg.childId, bg.title, report));
       return;
@@ -4150,6 +4206,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       _background[id] = (childId: kid, title: t);
       _reports[id] = id == callId ? forkAsks(kid, t, text) : movedToBackground(kid);
     }
+    _syncSideWork();
     _deliver();
   }
 
@@ -4295,6 +4352,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         return no('the session stopped before the fork started.');
       }
       _background[callId] = (childId: child.id, title: child.title);
+      _syncSideWork();
       _watch(callId, child.id);
       return (
         text:
@@ -4844,6 +4902,40 @@ bool editsFiles(String toolName) =>
 /// Prefs key prefix of what outside drivers reported per session (see [CodeUsage]).
 const codeUsageReportsPrefix = 'code.usage_reports.';
 
+/// What [CodeSessionController.saveFile] did.
+@immutable
+final class SaveOutcome {
+  const SaveOutcome.saved() : kind = SaveKind.saved, reason = null;
+  const SaveOutcome.refused(String this.reason) : kind = SaveKind.refused;
+  const SaveOutcome.changedOnDisk() : kind = SaveKind.changedOnDisk, reason = null;
+
+  final SaveKind kind;
+
+  /// Why it was refused, for the user.
+  final String? reason;
+}
+
+enum SaveKind { saved, refused, changedOnDisk }
+
+/// Text another part of the session screen puts into its composer at the caret (Files' "Mention in composer"); [seq]
+/// changes on every request, so the same text twice lands twice.
+final composerInsertProvider = NotifierProvider.family<ComposerInsert, ({String text, int seq})?, String>(
+  ComposerInsert.new,
+);
+
+final class ComposerInsert extends Notifier<({String text, int seq})?> {
+  ComposerInsert(this.sessionId);
+  final String sessionId;
+
+  @override
+  ({String text, int seq})? build() => null;
+
+  void insert(String text) => state = (text: text, seq: (state?.seq ?? 0) + 1);
+}
+
+/// Preferences key prefix of each session's console layout (the right panel's view and width), by session id.
+const codeLayoutPrefix = 'code.layout.';
+
 /// Tokens and spend of a Code session, from the backend's ledger (the gateway
 /// attributes every model call to the session). Demo sessions have none.
 final codeUsageProvider = AsyncNotifierProvider.family<CodeUsage, UsageTotals, String>(CodeUsage.new);
@@ -5008,15 +5100,39 @@ final class GitSnapshot {
 final codeGitProvider = AsyncNotifierProvider.family<CodeGit, GitSnapshot, String>(CodeGit.new);
 
 /// The session's worktree: its diff, and what the user can do with it.
-final class CodeGit extends AsyncNotifier<GitSnapshot> {
+base class CodeGit extends AsyncNotifier<GitSnapshot> {
   CodeGit(this.sessionId);
   final String sessionId;
 
   CodeSessionInfo? get _info => ref.read(codeSessionsProvider.notifier).byId(sessionId);
   SessionWorktree get _w => _info?.worktree ?? (throw const GitError('This session has no git worktree.'));
 
+  /// Whether anything shows this diff now (the Diff, Session info, the git button); a session working in the
+  /// background diffs again only when it is looked at.
+  bool _watched = true;
+  bool _stale = false;
+
   @override
-  Future<GitSnapshot> build() => _load();
+  Future<GitSnapshot> build() {
+    ref.onCancel(() => _watched = false);
+    ref.onResume(() {
+      _watched = true;
+      if (_stale) {
+        _stale = false;
+        unawaited(refresh());
+      }
+    });
+    return _load();
+  }
+
+  /// The agent edited files: diffs again now if this is shown, else when it next is.
+  void edited() {
+    if (_watched) {
+      unawaited(refresh());
+    } else {
+      _stale = true;
+    }
+  }
 
   Future<GitSnapshot> _load() async {
     final info = _info;
@@ -5092,6 +5208,25 @@ final nativeCommandsProvider = StreamProvider.autoDispose.family<List<NativeComm
   ref.watch(codeSessionProvider(sessionId).select((s) => s.connected));
   final live = ref.read(_liveProvider)[sessionId];
   return live is HasNativeCommands ? (live as HasNativeCommands).commands : Stream.value(null);
+});
+
+/// What Session info can itemise of [sessionId]'s context, as it was sent: the EveryAI harness's own prompt parts and
+/// tools ([HasContextParts]); for an outside lead only what EveryAI added (the briefing and the host's MCP tools),
+/// since the harness's own prompt is its business. Empty before the session connects.
+final codeContextPartsProvider = Provider.autoDispose.family<List<ContextPart>, String>((ref, sessionId) {
+  final info = ref.watch(codeSessionsProvider.select((all) => all.where((s) => s.id == sessionId).firstOrNull));
+  ref.watch(codeSessionProvider(sessionId).select((s) => (s.connected, s.transcript.running)));
+  if (info == null) return const [];
+  final live = ref.read(_liveProvider)[sessionId];
+  if (live is HasContextParts) return (live as HasContextParts).contextParts;
+  if (!isOutsideLead(info.harness, info.workingDir)) return const [];
+  return [
+    if (ref.read(_briefingTextsProvider)[sessionId] case final text? when text.isNotEmpty)
+      ContextPart(ContextKind.briefing, text),
+    // A terminal CLI is only pasted into: it never gets the host's MCP server.
+    if (ref.read(driverRegistryProvider).resolve(info.harness) is! TerminalDriver)
+      for (final t in hostToolSpecs) ContextPart(ContextKind.mcpTools, jsonEncode(t), name: 'everyai'),
+  ];
 });
 
 /// The composer's `/` menu for [sessionId]: an outside lead's own commands

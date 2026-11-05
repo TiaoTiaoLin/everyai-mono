@@ -19,46 +19,6 @@ import '../permissions_providers.dart';
 import '../../settings/settings_registry.dart';
 import '../../settings/ui/settings_modal.dart';
 
-/// How much of the session header fits, from the width the page really has
-/// (not the window: the sidebar and the panes take part of it).
-enum TopBarTier {
-  /// Everything.
-  wide,
-
-  /// The Changes button goes (the panes have it).
-  narrow;
-
-  static TopBarTier forWidth(double width) => width >= 820 ? wide : narrow;
-}
-
-/// The session's top bar: only what isn't in the composer, the session
-/// settings popover. Model, effort, tier and mode live in the composer, and
-/// the spend and its cap in the composer's usage meter.
-class CodeTopBar extends ConsumerWidget {
-  const CodeTopBar({super.key, required this.sessionId});
-
-  final String sessionId;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final info = ref.watch(codeSessionsProvider.select((all) => all.where((s) => s.id == sessionId).firstOrNull));
-    if (info == null) return const SizedBox.shrink();
-
-    // The session controller stops the run at the budget; this only says so.
-    ref.listen(codeUsageProvider(sessionId), (before, after) {
-      final budget = ref.read(codeSettingsProvider).budgets[sessionId];
-      final was = before?.value?.chargedMicros ?? 0;
-      final now = after.value?.chargedMicros ?? was;
-      if (!crossedBudget(was, now, budget)) return;
-      if (context.mounted) {
-        showAdaptiveToast(context, 'Stopped: this session reached its ${formatMicros((budget! * 1e6).round())} budget');
-      }
-    });
-
-    return _SettingsChip(projectId: info.projectId, sessionId: sessionId);
-  }
-}
-
 /// The settings popover on the New session page, for the session about to
 /// start (the Agent menu in the composer has the tier, model and cap).
 class CodeDraftBar extends StatelessWidget {
@@ -119,13 +79,34 @@ Widget _check(EveryTheme theme, bool on) =>
     on ? AdaptiveIcon(EveryIcon.check, size: 14, color: theme.accent) : const SizedBox(width: 14);
 
 /// Shortcuts to the settings a session runs with.
-class _SettingsChip extends ConsumerWidget {
-  const _SettingsChip({required this.projectId, this.sessionId});
+class _SettingsChip extends StatelessWidget {
+  const _SettingsChip({required this.projectId});
+
+  final String projectId;
+
+  @override
+  Widget build(BuildContext context) => AnchoredPopover(
+    width: 320,
+    builder: (context, close) => SessionSettingsList(projectId: projectId, close: close),
+    child: const _Chip(icon: EveryIcon.settings, label: '', semantics: 'Session settings'),
+  );
+}
+
+/// The rows of a session's settings (permissions, MCP, skills, prompt, auto-compact, forks, research sites), in a
+/// popover: the New session page's chip, and the console's ⋯ menu.
+class SessionSettingsList extends ConsumerWidget {
+  const SessionSettingsList({super.key, required this.projectId, this.sessionId, required this.close, this.leading});
 
   final String projectId;
 
   /// Null on the New session page: the settings the next session starts with.
   final String? sessionId;
+
+  /// Closes the popover.
+  final VoidCallback close;
+
+  /// A row above the header (the ⋯ menu's Back).
+  final Widget? leading;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -138,116 +119,111 @@ class _SettingsChip extends ConsumerWidget {
 
     String plural(int n, String word) => '$n $word${n == 1 ? '' : 's'}';
 
-    return AnchoredPopover(
-      width: 320,
-      builder: (context, close) {
-        void open(SettingsSection section, {String? anchor, SettingsScope? scope}) {
-          close();
-          showSettings(
-            context,
-            section: section,
-            anchor: anchor,
-            args: {if (scope != null) 'scope': scope.name, 'project': projectId, 'session': ?sessionId},
-          );
-        }
+    void open(SettingsSection section, {String? anchor, SettingsScope? scope}) {
+      close();
+      showSettings(
+        context,
+        section: section,
+        anchor: anchor,
+        args: {if (scope != null) 'scope': scope.name, 'project': projectId, 'session': ?sessionId},
+      );
+    }
 
-        // Scrolls: the rows outgrow the popover's height cap on short windows.
-        return SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(vertical: 5),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              PopoverHeader(sessionId == null ? 'New session settings' : 'Session settings'),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.permissions'),
-                title: 'Permissions',
-                subtitle: '${plural(rules.allow.length, 'allow rule')} · ${plural(rules.deny.length, 'deny rule')}',
-                onTap: () => open(SettingsSection.code, anchor: 'permissions', scope: SettingsScope.project),
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.mcp'),
-                title: 'MCP servers',
-                subtitle: '${plural(mcp, 'server')} on',
-                onTap: () => open(SettingsSection.mcp),
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.skills'),
-                title: 'Skills',
-                subtitle: '${plural(skills, 'skill')} on',
-                onTap: () => open(SettingsSection.skills),
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.prompt'),
-                title: 'System prompt',
-                subtitle: promptCount == 0 ? 'None' : 'Global and project · ${plural(promptCount, 'prompt')} set',
-                onTap: () => open(SettingsSection.code, anchor: 'prompt', scope: SettingsScope.project),
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.compact'),
-                title: 'Auto-compact',
-                subtitle: prompts.autoCompactPercent == 0
-                    ? 'Off · EveryAI sessions'
-                    : 'At ${prompts.autoCompactPercent}% of the context · EveryAI sessions',
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AdaptiveIconButton(
-                      icon: EveryIcon.chevronLeft,
-                      tooltip: 'Earlier',
-                      size: 13,
-                      onPressed: () =>
-                          ref.read(codeSettingsProvider.notifier).setAutoCompact(prompts.autoCompactPercent - 10),
-                    ),
-                    AdaptiveIconButton(
-                      icon: EveryIcon.chevronRight,
-                      tooltip: 'Later',
-                      size: 13,
-                      onPressed: () =>
-                          ref.read(codeSettingsProvider.notifier).setAutoCompact(prompts.autoCompactPercent + 10),
-                    ),
-                  ],
-                ),
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.forks'),
-                title: 'Forks',
-                subtitle: prompts.forksIsolated
-                    ? 'Each in its own worktree, merged back when done · EveryAI sessions'
-                    : 'Share this session\'s folder · EveryAI sessions',
-                trailing: _check(EveryTheme.of(context), prompts.forksIsolated),
-                onTap: () => ref.read(codeSettingsProvider.notifier).setForksIsolated(!prompts.forksIsolated),
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.research'),
-                title: 'Research sites',
-                subtitle: '${plural(prompts.researchSites.length, 'site')} · what Max and Ultra research may read',
-                onTap: () async {
-                  close();
-                  final next = await showAdaptivePrompt(
-                    context,
-                    title: 'Research sites (comma separated; *.example.com for subdomains; empty for the defaults)',
-                    confirmLabel: 'Save',
-                    initialValue: prompts.researchSites.join(', '),
-                  );
-                  if (next != null) ref.read(codeSettingsProvider.notifier).setResearchSites(next.split(','));
-                },
-              ),
-              PopoverRow(
-                key: const ValueKey('top-bar.settings.json'),
-                title: 'All Code settings…',
-                subtitle: 'Global, project and session layers',
-                onTap: () => open(
-                  SettingsSection.code,
-                  anchor: 'json',
-                  scope: sessionId == null ? SettingsScope.project : SettingsScope.session,
-                ),
-              ),
-            ],
+    // Scrolls: the rows outgrow the popover's height cap on short windows.
+    return SingleChildScrollView(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ?leading,
+          PopoverHeader(sessionId == null ? 'New session settings' : 'Session settings'),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.permissions'),
+            title: 'Permissions',
+            subtitle: '${plural(rules.allow.length, 'allow rule')} · ${plural(rules.deny.length, 'deny rule')}',
+            onTap: () => open(SettingsSection.code, anchor: 'permissions', scope: SettingsScope.project),
           ),
-        );
-      },
-      child: const _Chip(icon: EveryIcon.settings, label: '', semantics: 'Session settings'),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.mcp'),
+            title: 'MCP servers',
+            subtitle: '${plural(mcp, 'server')} on',
+            onTap: () => open(SettingsSection.mcp),
+          ),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.skills'),
+            title: 'Skills',
+            subtitle: '${plural(skills, 'skill')} on',
+            onTap: () => open(SettingsSection.skills),
+          ),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.prompt'),
+            title: 'System prompt',
+            subtitle: promptCount == 0 ? 'None' : 'Global and project · ${plural(promptCount, 'prompt')} set',
+            onTap: () => open(SettingsSection.code, anchor: 'prompt', scope: SettingsScope.project),
+          ),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.compact'),
+            title: 'Auto-compact',
+            subtitle: prompts.autoCompactPercent == 0
+                ? 'Off · EveryAI sessions'
+                : 'At ${prompts.autoCompactPercent}% of the context · EveryAI sessions',
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AdaptiveIconButton(
+                  icon: EveryIcon.chevronLeft,
+                  tooltip: 'Earlier',
+                  size: 13,
+                  onPressed: () =>
+                      ref.read(codeSettingsProvider.notifier).setAutoCompact(prompts.autoCompactPercent - 10),
+                ),
+                AdaptiveIconButton(
+                  icon: EveryIcon.chevronRight,
+                  tooltip: 'Later',
+                  size: 13,
+                  onPressed: () =>
+                      ref.read(codeSettingsProvider.notifier).setAutoCompact(prompts.autoCompactPercent + 10),
+                ),
+              ],
+            ),
+          ),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.forks'),
+            title: 'Forks',
+            subtitle: prompts.forksIsolated
+                ? 'Each in its own worktree, merged back when done · EveryAI sessions'
+                : 'Share this session\'s folder · EveryAI sessions',
+            trailing: _check(EveryTheme.of(context), prompts.forksIsolated),
+            onTap: () => ref.read(codeSettingsProvider.notifier).setForksIsolated(!prompts.forksIsolated),
+          ),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.research'),
+            title: 'Research sites',
+            subtitle: '${plural(prompts.researchSites.length, 'site')} · what Max and Ultra research may read',
+            onTap: () async {
+              close();
+              final next = await showAdaptivePrompt(
+                context,
+                title: 'Research sites (comma separated; *.example.com for subdomains; empty for the defaults)',
+                confirmLabel: 'Save',
+                initialValue: prompts.researchSites.join(', '),
+              );
+              if (next != null) ref.read(codeSettingsProvider.notifier).setResearchSites(next.split(','));
+            },
+          ),
+          PopoverRow(
+            key: const ValueKey('top-bar.settings.json'),
+            title: 'All Code settings…',
+            subtitle: 'Global, project and session layers',
+            onTap: () => open(
+              SettingsSection.code,
+              anchor: 'json',
+              scope: sessionId == null ? SettingsScope.project : SettingsScope.session,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
