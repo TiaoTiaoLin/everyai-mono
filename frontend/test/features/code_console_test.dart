@@ -392,6 +392,11 @@ void main() {
         size: const Size(1200, 1000),
       );
       expect(find.text('Running work'), findsOneWidget);
+      // A finished fork starts folded under its group; the header opens it.
+      expect(find.byKey(const ValueKey('console.running.c')), findsNothing);
+      await tester.ensureVisible(find.text('Forks and subagents · 1 done'));
+      await tester.tap(find.text('Forks and subagents · 1 done'));
+      await tester.pump();
       await tester.ensureVisible(find.byKey(const ValueKey('console.running.c')));
       await tester.tap(find.byKey(const ValueKey('console.running.c')));
       await tester.pump();
