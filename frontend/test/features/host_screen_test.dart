@@ -96,6 +96,34 @@ void main() {
       expect(await pick(6), isA<OwnWindow>());
     });
 
+    test('a granted browser window turned to a bank is skipped', () async {
+      Future<WindowPick> pick({bool Function(ScreenWindow)? granted}) => pickSessionWindow(
+        windows,
+        pids: const {},
+        root: '/p',
+        executableOf: (pid) async => '/Applications/Safari.app/Contents/MacOS/Safari',
+        granted: granted,
+        windowId: 2,
+      );
+      expect(((await pick(granted: (w) => w.id == 2)) as NoWindow).skipped, [
+        'Safari (looks like a banking or payment page)',
+      ]);
+      expect(((await pick()) as NoWindow).skipped, hasLength(1));
+    });
+
+    test('a password manager the session started is known by its bundle, whatever its name', () async {
+      final pick = await pickSessionWindow(
+        windows,
+        pids: const {40},
+        root: '/p',
+        executableOf: (pid) async => pid == 40
+            ? '/System/Applications/Passwords.app/Contents/MacOS/Passwords'
+            : '/Applications/x.app/Contents/MacOS/x',
+        windowId: 4,
+      );
+      expect((pick as NoWindow).skipped, ['Schlüsselbundverwaltung (a password manager)']);
+    });
+
     test('an own window still says which named windows were skipped', () {
       final pick = pickWindow(windows, own: (w) => w.pid == 30, app: 'o') as OwnWindow;
       expect(pick.window.id, 3);

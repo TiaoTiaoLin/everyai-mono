@@ -99,10 +99,14 @@ String? sensitiveWindow(ScreenWindow w, {required bool own, String exe = ''}) {
 /// title, any case), else the frontmost other window matching [app]. Windows
 /// smaller than 40 px a side (status items, tooltips) never count, nor do
 /// [sensitiveWindow]s ([exe] gives a window's executable when known), not even
-/// granted ones: those the query named come back as `skipped`.
+/// granted ones: those the query named come back as `skipped`. [started] says
+/// which windows the session itself started (default [own]): a window the
+/// user granted is own, but its title still counts, since the user may since
+/// have turned that browser window to their bank.
 WindowPick pickWindow(
   List<ScreenWindow> all, {
   required bool Function(ScreenWindow) own,
+  bool Function(ScreenWindow)? started,
   String? app,
   int? windowId,
   String Function(ScreenWindow w)? exe,
@@ -115,7 +119,7 @@ WindowPick pickWindow(
   final windows = <ScreenWindow>[];
   for (final w in all) {
     if (w.width < 40 || w.height < 40) continue;
-    if (sensitiveWindow(w, own: own(w), exe: exe?.call(w) ?? '') case final why?) {
+    if (sensitiveWindow(w, own: (started ?? own)(w), exe: exe?.call(w) ?? '') case final why?) {
       if (asked(w)) skipped.add('${w.owner} ($why)');
       continue;
     }
@@ -139,15 +143,15 @@ WindowPick pickWindow(
 /// How a screenshot names [w] ("Counter — Home (800x600)").
 String windowLabel(ScreenWindow w) => '${w.owner}${w.title.isEmpty ? '' : ' — ${w.title}'} (${w.width}x${w.height})';
 
-/// The executable of each window's process in [all], except [pids].
+/// The executable of each window's process in [all], the session's own too
+/// (a password manager it started is still one).
 Future<Map<int, String>> _executables(
   List<ScreenWindow> all, {
-  required Set<int> pids,
   required Future<String> Function(int pid) executableOf,
 }) async {
   final exe = <int, String>{};
   for (final w in all) {
-    if (w.width < 40 || w.height < 40 || pids.contains(w.pid) || exe.containsKey(w.pid)) continue;
+    if (w.width < 40 || w.height < 40 || exe.containsKey(w.pid)) continue;
     exe[w.pid] = await executableOf(w.pid);
   }
   return exe;
@@ -165,11 +169,12 @@ Future<WindowPick> pickSessionWindow(
   String? app,
   int? windowId,
 }) async {
-  final exe = await _executables(all, pids: pids, executableOf: executableOf);
+  final exe = await _executables(all, executableOf: executableOf);
   bool owner(ScreenWindow w) => pids.contains(w.pid) || (exe[w.pid] ?? '').startsWith('$root/');
   return pickWindow(
     all,
     own: (w) => owner(w) || (granted?.call(w) ?? false),
+    started: owner,
     app: app,
     windowId: windowId,
     exe: (w) => exe[w.pid] ?? '',

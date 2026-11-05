@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:every_ai/features/code/harness/everyai/browser_io.dart';
@@ -128,6 +129,12 @@ setTimeout(() => { throw new Error('boom'); }, 10);
           browser.click(x: xy[0].toDouble(), y: xy[1].toDouble()),
           throwsA(isA<BrowserError>().having((e) => e.message, 'message', contains('a password field'))),
         );
+        // Space on the focused button presses it just the same.
+        await browser.evaluate('document.getElementById("signin").focus()');
+        await expectLater(
+          browser.press('Space'),
+          throwsA(isA<BrowserError>().having((e) => e.message, 'message', contains('Space would press a button'))),
+        );
         expect(await browser.describe(), startsWith('Forms'));
         // A payment frame we can't look into counts by its name.
         await browser.evaluate('document.getElementById("stripe").focus()');
@@ -167,9 +174,15 @@ setTimeout(() => { throw new Error('boom'); }, 10);
       final dir = '${tmp.path}/.everyai/scratch/downloads';
       for (final round in [1, 2]) {
         await runner.run('browser', {'action': 'open', 'url': '${tmp.path}/dl.html'});
+        final landed = browser.events.firstWhere(
+          (e) => e.method == 'Browser.downloadProgress' && e.params['state'] == 'completed',
+        );
         final clicked = await runner.run('browser', {'action': 'click', 'selector': '#get'});
-        expect(clicked.text, contains('scratch/downloads/notes'), reason: 'round $round');
-        expect(clicked.text, contains('Downloaded '), reason: 'round $round');
+        await landed;
+        // In the click's own log, or the next one's when the download began late.
+        final log = '${clicked.text}\n${browser.takeLog().join('\n')}';
+        expect(log, contains('Downloaded '), reason: 'round $round');
+        expect(log, contains('scratch/downloads/notes'), reason: 'round $round');
       }
       expect(Directory(dir).listSync().map((f) => f.uri.pathSegments.last), contains('notes.txt'));
       expect(File('$dir/notes.txt').readAsStringSync(), 'hi');
@@ -177,6 +190,96 @@ setTimeout(() => { throw new Error('boom'); }, 10);
     skip: chrome == null ? 'no Chrome installed' : null,
     timeout: const Timeout(Duration(minutes: 1)),
   );
+
+  group('pages from a server', () {
+    late HttpServer app;
+    late HttpServer other;
+    setUp(() async {
+      app = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      // Framed by another origin: Dart's default X-Frame-Options would refuse that.
+      other = await HttpServer.bind(InternetAddress.loopbackIPv4, 0)
+        ..defaultResponseHeaders.clear();
+      app.listen((req) {
+        final res = req.response..headers.contentType = ContentType.html;
+        if (req.uri.path == '/big.bin') {
+          // A download that never ends.
+          res
+            ..headers.contentType = ContentType.binary
+            ..headers.set('content-disposition', 'attachment; filename="big.bin"')
+            ..add(List.filled(1024, 0));
+          unawaited(res.flush());
+          return;
+        }
+        res
+          ..write(
+            '<!doctype html><title>App</title>'
+            '<iframe id="auth" style="display:block;width:300px;height:100px;border:0" '
+            'src="http://${req.uri.queryParameters['frame'] ?? '127.0.0.1'}:${other.port}/"></iframe>'
+            '<a id="big" href="/big.bin" style="display:block;width:80px;height:30px">Big</a>'
+            '<button id="inc" style="width:80px;height:30px">+1</button>',
+          )
+          ..close();
+      });
+      // Another origin (another port): the page's script can't look inside.
+      other.listen((req) {
+        req.response
+          ..headers.contentType = ContentType.html
+          ..write(
+            '<!doctype html><body style="margin:0">'
+            '<input id="pw" type="password" style="display:block;width:200px;height:40px">'
+            '<input id="name" style="display:block;width:200px;height:40px">',
+          )
+          ..close();
+      });
+    });
+    tearDown(() async {
+      await browser.close();
+      await app.close(force: true);
+      await other.close(force: true);
+    });
+
+    test(
+      'a frame from another origin is checked inside: no password, but its plain fields take text',
+      () async {
+        // The same site (one process), and another site (the frame runs in its own process).
+        for (final host in ['127.0.0.1', 'localhost']) {
+          await browser.open('http://127.0.0.1:${app.port}/?frame=$host');
+          final frame = await browser.evaluate(
+            '(() => { const r = document.getElementById("auth").getBoundingClientRect(); return [r.left, r.top]; })()',
+          );
+          final at = (frame! as List).cast<num>();
+          await browser.click(x: at[0] + 100.0, y: at[1] + 20.0);
+          await expectLater(
+            browser.type('secret'),
+            throwsA(isA<BrowserError>().having((e) => e.message, 'message', contains('a password field'))),
+            reason: host,
+          );
+          await expectLater(browser.press('a'), throwsA(_refused), reason: host);
+          await browser.click(x: at[0] + 100.0, y: at[1] + 60.0);
+          expect(await browser.type('Ada'), 'Typed 3 characters.', reason: host);
+        }
+      },
+      skip: chrome == null ? 'no Chrome installed' : null,
+      timeout: const Timeout(Duration(minutes: 1)),
+    );
+
+    test(
+      'a download that never ends holds only the click that started it',
+      () async {
+        browser.downloadWait = const Duration(seconds: 1);
+        await browser.open('http://127.0.0.1:${app.port}/');
+        final began = browser.events.firstWhere((e) => e.method == 'Browser.downloadWillBegin');
+        await browser.click(selector: '#big');
+        await began;
+        browser.takeLog();
+        await browser.click(selector: '#inc');
+        await browser.press('Tab');
+        expect(browser.takeLog().where((l) => l.startsWith('Download still running')), isEmpty);
+      },
+      skip: chrome == null ? 'no Chrome installed' : null,
+      timeout: const Timeout(Duration(minutes: 1)),
+    );
+  });
 
   test('screenshot never takes a window this session did not start', () async {
     // The user's apps on screen; nothing of the session's among them.
