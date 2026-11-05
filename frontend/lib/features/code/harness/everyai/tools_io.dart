@@ -14,6 +14,7 @@ import 'apply_patch.dart';
 import 'browser_io.dart';
 import 'exfil.dart';
 import 'llm.dart';
+import 'package_registry_io.dart';
 import 'shell_io.dart';
 import 'screen_tools_io.dart';
 import 'window_capture_io.dart';
@@ -533,6 +534,7 @@ final class ToolRunner {
     Scrubber? scrubber,
     this.pushTargets,
     this.loadLoginEnv = false,
+    this.packages,
   }) : scrubber = scrubber ?? Scrubber.forProject(root, extra: [gateway.apiKey]);
 
   final String root;
@@ -551,6 +553,10 @@ final class ToolRunner {
   /// The session runs in Bypass permissions: the research sandbox is off. The tools' own guardrails (see [_guard])
   /// stay on.
   bool bypass = false;
+
+  /// Checks the packages a bash command installs (see [PackageGuard]); null (tests) means no check. In every mode,
+  /// Bypass too, like [_guard]. The session owns it, so its lookup cache outlives a model switch.
+  final PackageGuard? packages;
 
   /// Stops secrets leaving in fetched URLs and search queries, and hides them in tool output (see
   /// [EveryAiSession]).
@@ -832,17 +838,20 @@ final class ToolRunner {
   Future<ToolOutput> _bash(Map<String, Object?> args, Future<void>? cancel) async {
     final command = (args['command'] as String? ?? '').trim();
     if (command.isEmpty) return const ToolOutput('Error: command is empty.', isError: true);
+    final cwd = shell.cwd;
+    final check = await packages?.check(command, cwd: cwd, root: root);
+    if (check?.refusal case final why?) return ToolOutput(why, isError: true);
     if (args['run_in_background'] == true) {
       final bg = await shell.start(command, description: args['description'] as String? ?? '');
       return ToolOutput(
         'Started in the background as ${bg.id} (pid ${bg.pid}). Use bash_output to read its output, monitor '
-        'to wait for a line or its exit, and kill_shell to stop it.',
+        'to wait for a line or its exit, and kill_shell to stop it.${PackageGuard.block(check?.notes ?? const [])}',
         observation: {'shell_id': bg.id},
       );
     }
     final ms = ((args['timeout'] as num?)?.toInt() ?? 120000).clamp(1000, 600000);
-    final cwd = shell.cwd;
     final name = 'bash-${DateTime.now().millisecondsSinceEpoch}';
+    final locks = check == null ? null : packages!.snapshot(cwd, root, check.scan);
     final r = await shell.run(
       command,
       timeout: Duration(milliseconds: ms),
@@ -855,8 +864,11 @@ final class ToolRunner {
         ? '\n[Stopped by the user.]'
         : '';
     final shown = '${out.isEmpty ? '(no output)' : out}$note${r.exitCode == 0 ? '' : '\n[exit code ${r.exitCode}]'}';
+    final checked = check == null
+        ? ''
+        : PackageGuard.block([...check.notes, ...packages!.lockNotes(locks!, check.scan, command)]);
     return ToolOutput(
-      _fit(shown, name),
+      '${_fit(shown, name)}$checked',
       isError: r.exitCode != 0,
       observation: {'exit_code': r.exitCode, 'cwd': shell.cwd},
     );

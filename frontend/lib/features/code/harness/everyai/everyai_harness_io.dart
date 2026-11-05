@@ -23,6 +23,7 @@ import '../../drivers/briefing/briefing_types.dart' show everyaiServerName;
 import '../../drivers/usage_limit.dart';
 import 'browser_io.dart';
 import 'llm.dart';
+import 'package_registry_io.dart';
 import 'mcp_io.dart';
 import 'model_family.dart';
 import 'prompt_io.dart';
@@ -138,7 +139,8 @@ final class EveryAISession
         HasContextParts {
   EveryAISession._(this.id, this._spec, this._dir, http.Client? client)
     : _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey, client: client),
-      _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell') {
+      _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell'),
+      _packages = PackageGuard(RegistryLookup(client ?? http.Client())) {
     _tools = ToolRunner(
       root: _spec.workingDir,
       shell: _shell,
@@ -150,11 +152,15 @@ final class EveryAISession
       browser: _browser,
       ownFolders: skillFolders(_spec.skills),
       loadLoginEnv: true,
+      packages: _packages,
     )..bypass = _spec.mode == AgentMode.bypass;
   }
 
   @override
   final String id;
+
+  /// The bash tool's package check, kept across model switches (its registry lookups are cached).
+  final PackageGuard _packages;
   SessionSpec _spec;
   final Directory _dir;
   GatewayClient _gateway;
@@ -843,6 +849,7 @@ final class EveryAISession
       scrubber: old.scrubber..remember([_gateway.apiKey]),
       pushTargets: old.pushTargets,
       loadLoginEnv: true,
+      packages: _packages,
     )..bypass = _spec.mode == AgentMode.bypass;
     _writeSpec();
   }
