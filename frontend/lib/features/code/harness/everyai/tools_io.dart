@@ -565,7 +565,7 @@ final class ToolRunner {
 
   /// [args] with the parent's folders swapped for this session's copies,
   /// longest first, so a fork's inherited paths land in its own worktree.
-  Map<String, Object?> _mapped(Map<String, Object?> args) {
+  Map<String, Object?> mapped(Map<String, Object?> args) {
     if (pathMap.isEmpty) return args;
     final froms = pathMap.keys.toList()..sort((a, b) => b.length - a.length);
     String map(String s) {
@@ -602,10 +602,10 @@ final class ToolRunner {
 
   /// Why a research job may not make this call at all, before it is shown
   /// for approval: such a call is never run, so no one should be asked.
-  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) => _researchRefusal(tool, _mapped(raw));
+  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) => _researchRefusal(tool, mapped(raw));
 
   Future<ToolOutput> run(String tool, Map<String, Object?> raw, {Future<void>? cancel}) async {
-    final args = _mapped(raw);
+    final args = mapped(raw);
     if (_researchRefusal(tool, args) case final refusal?) return ToolOutput(refusal, isError: true);
     try {
       return switch (tool) {

@@ -340,6 +340,7 @@ class RemoteSessionScreen extends ConsumerWidget {
                                 : null,
                             onDenyCall: remote.perCall ? (id) => act(() => controller.deny(null, [id])) : null,
                             flags: remote.flags,
+                            reasons: remote.reasons,
                           ),
                         )
                       else if (t.plan.isNotEmpty && t.running)

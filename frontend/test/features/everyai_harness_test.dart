@@ -610,6 +610,36 @@ void main() {
     await shell.killAll();
   });
 
+  test("a fork's write to the parent's scratch is judged on its own copy's path, and runs in Ask", () async {
+    final copy = Directory('${tmp.path}/copy')..createSync();
+    gateway
+      ..reply(
+        calls: [
+          ('write', {'file_path': '$work/.everyai/scratch/probe.py', 'content': 'print(1)'}),
+        ],
+      )
+      ..reply(text: 'Done.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: copy.path,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.ask,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-1',
+        initialMessage: 'probe',
+        pathMap: {work: copy.path},
+      ),
+    );
+    final events = await drive(session);
+    final write = events.whereType<ActionCall>().single;
+    expect(write.str('path'), '${copy.path}/.everyai/scratch/probe.py');
+    // The model's own words stay as it sent them.
+    expect(write.raw['tool_call'].toString(), contains('$work/.everyai/scratch/probe.py'));
+    expect(PermissionPolicy(workingDir: copy.path).decide(write, AgentMode.ask).verdict, Verdict.allow);
+    expect(File('${copy.path}/.everyai/scratch/probe.py').existsSync(), isTrue);
+  });
+
   test('cd carries over between commands and a timeout kills the command', () async {
     Directory('$work/sub').createSync();
     final shell = SessionShell(root: work, sessionTag: 't', scratchDir: '${tmp.path}/sh');

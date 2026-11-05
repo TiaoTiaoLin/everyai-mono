@@ -25,6 +25,7 @@ import '../slash/skills/learn_sources.dart';
 import '../slash/skills/skill_draft.dart' show skillDrafterProvider;
 import '../usage/usage_totals.dart';
 import 'domain/agent_mode.dart';
+import 'domain/approval_reason.dart';
 import 'domain/code_session.dart';
 import 'domain/compaction.dart';
 import 'domain/floor_advice.dart';
@@ -37,6 +38,7 @@ import 'domain/rewind.dart';
 import 'domain/spill.dart';
 import 'domain/fork_files.dart';
 import 'domain/subagents.dart';
+import 'domain/temp_dirs.dart';
 import 'domain/questions.dart';
 import 'domain/session_commands.dart';
 import 'domain/transcript.dart';
@@ -1244,6 +1246,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       ownTag: ownTag,
       forkCopy: forkCopy,
       tier: parent.tier,
+      // The parent's own mode (Claude's `auto` over Accept edits) when the child runs as it does.
+      nativeMode: mode == parent.mode && harness == parent.harness ? parent.nativeMode : '',
     );
     state = [...state, info];
     _save();
@@ -1628,6 +1632,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// The lead has said which of its own modes it is in since [_watchModes].
   var _modesSeen = false;
+
+  /// The mode the session started in when the lead didn't list it yet (see
+  /// [retargetFor]); null once it moved there or the user picked a mode.
+  AgentMode? _wantedMode;
+
   var _builder = TranscriptBuilder();
 
   /// What earlier conversations showed (before a compaction): kept on screen
@@ -2119,15 +2128,55 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   /// What decides this session's actions: stored rules (global, project),
-  /// then `settings.json` rules, plus approvals remembered for the session.
+  /// then `settings.json` rules, plus approvals remembered for the session
+  /// (a fork's or subagent's include its parent's, shared by all its forks).
   PermissionPolicy get policy {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     return PermissionPolicy(
       rules: ref.read(codePermissionsProvider).rulesFor(info?.projectId) + _settingsRules,
-      session: {..._sessionAllowed},
+      session: {..._sessionAllowed, ...?_parentController?._sessionAllowed},
       workingDir: info == null || isDemoPath(info.workingDir) ? null : info.workingDir,
       hostTools: info != null && isOutsideLead(info.harness, info.workingDir),
+      tempDirs: systemTempDirs(),
     );
+  }
+
+  /// The live controller of the session that started this one, if any.
+  /// Through the container: the parent listens to this session.
+  CodeSessionController? get _parentController {
+    final parent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.parentId;
+    if (parent == null || !ref.container.exists(codeSessionProvider(parent))) return null;
+    return ref.container.read(codeSessionProvider(parent).notifier);
+  }
+
+  /// Why each of [calls] (default: the pending ones) waits for the user, by
+  /// call id (see [askReason]).
+  Map<String, String> askReasons([List<ActionCall>? calls]) {
+    final outside = _driver.info.id == everyaiHarnessName ? null : _driver.info.label;
+    return approvalReasons(
+      policy,
+      calls ?? state.transcript.pending,
+      state.mode,
+      outsideKind: outside == null ? null : (c) => autoDecidable(c) ? null : outside,
+    );
+  }
+
+  /// Remembers [patterns] "for this session": a fork's or subagent's go to
+  /// its parent, so they cover every fork of the session. The other live
+  /// children (and the parent) then settle what they wait on that now runs.
+  void _allowForSession(List<String> patterns) {
+    final root = _parentController ?? this;
+    root._sessionAllowed.addAll(patterns);
+    final sessions = ref.read(codeSessionsProvider);
+    for (final id in [
+      root.sessionId,
+      for (final s in sessions)
+        if (s.parentId == root.sessionId) s.id,
+    ]) {
+      if (id == sessionId || !ref.container.exists(codeSessionProvider(id))) continue;
+      final c = ref.container.read(codeSessionProvider(id).notifier);
+      c._autoRespond(c.state.transcript);
+    }
   }
 
   void _onEvent(HarnessEvent event) {
@@ -3787,7 +3836,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     if (pending.isNotEmpty || state.transcript.held.any(isTaskCall)) {
       _answered = [...pending, ...state.transcript.held].map((c) => c.id).join(',');
-      await _session?.respond(accept: false, reason: denialMessage(DenialKind.cancelled));
+      final asked = askedLine(askReasons(pending).values);
+      await _session?.respond(accept: false, reason: denialMessage(DenialKind.cancelled, asked: asked));
     }
     // Ctrl-C reaches only the terminal's foreground command; background jobs,
     // servers and commands left running after a timeout are ended here. A
@@ -4626,7 +4676,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (scope != ApprovalScope.once) {
       final patterns = rememberable(targets) ?? const <String>[];
       if (scope == ApprovalScope.session) {
-        _sessionAllowed.addAll(patterns);
+        _allowForSession(patterns);
       } else {
         final projectId = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.projectId;
         final store = ref.read(codePermissionsProvider.notifier);
@@ -4648,6 +4698,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// denial text with [reason] word for word.
   Future<void> deny([String? reason, List<String>? callIds]) async {
     final pending = state.transcript.pending;
+    final asked = askReasons();
+    final refused = [
+      for (final c in pending)
+        if (callIds == null ? !_decided.containsKey(c.id) : callIds.contains(c.id)) ?asked[c.id],
+    ];
     if (!perCall || callIds == null) _answered = pending.map((c) => c.id).join(',');
     if (perCall) {
       _markDecided([
@@ -4657,7 +4712,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     await _session?.respond(
       accept: false,
-      reason: denialMessage(DenialKind.denied, reason: reason),
+      reason: denialMessage(DenialKind.denied, reason: reason, asked: askedLine(refused)),
       callIds: perCall ? callIds : null,
     );
   }
@@ -4692,6 +4747,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   Future<void> setMode(AgentMode mode) async {
+    _wantedMode = null;
     // A lead with its own modes moves to the one that maps to [mode] (`/plan`, Start building, a handoff).
     if (_session is NativeModes && state.nativeModes.isNotEmpty) {
       final to = nativeModeFor(state.nativeModes, mode);
@@ -4717,6 +4773,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// mode's, kept with the session. Null once moved, else why not (the mode
   /// is greyed, or the harness refused; nothing changes then).
   Future<String?> setNativeMode(String id) async {
+    _wantedMode = null;
     final session = _session;
     if (session is! NativeModes) return 'This agent has no modes of its own.';
     final m = nativeModeOf(state.nativeModes, id);
@@ -4746,6 +4803,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     unawaited(_modesSub?.cancel());
     _modesSub = null;
     _modesSeen = false;
+    _wantedMode = null;
     if (session is! NativeModes) {
       state = state.copyWith(nativeModes: const [], clearNativeMode: true);
       return;
@@ -4778,7 +4836,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
           ? now
           : nativeModeFor(set.modes, state.mode);
       if (target == null) return;
-      if (target.policy != state.mode && saved == null) {
+      final wanted = target.policy != state.mode && saved == null ? state.mode : null;
+      if (wanted != null) {
         _builder.addNotice(
           NoticeItem(
             'mode-${_events.length}-${target.id}',
@@ -4789,12 +4848,22 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       }
       if (target.id != set.current) {
         unawaited(setNativeMode(target.id));
+      } else {
+        // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
+        state = state.copyWith(mode: target.policy);
+        if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
+      }
+      // After setNativeMode, which clears it: a later list may offer the mode wanted.
+      _wantedMode = wanted;
+      return;
+    }
+    // The mode the session started in is listed now (Claude's `auto` once the model's modes are known).
+    if ((_wantedMode == null ? null : retargetFor(_wantedMode!, set.modes)) case final to?) {
+      _wantedMode = null;
+      if (to.id != set.current) {
+        unawaited(setNativeMode(to.id));
         return;
       }
-      // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
-      state = state.copyWith(mode: target.policy);
-      if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
-      return;
     }
     final now = nativeModeOf(set.modes, set.current);
     if (now == null || now.blocked != null || set.current == before) return;

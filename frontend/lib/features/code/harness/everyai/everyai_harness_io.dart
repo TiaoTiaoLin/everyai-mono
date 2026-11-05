@@ -1219,7 +1219,7 @@ final class EveryAISession
             ? {'kind': 'MCPToolAction', ...?args}
             : args == null
             ? {'kind': actionKinds[call.name] ?? ''}
-            : actionFor(call.name, args, _spec.workingDir),
+            : actionFor(call.name, _tools.mapped(args), _spec.workingDir),
         'security_risk': 'UNKNOWN',
       });
       // A fork's questions go to the agent that started it (the app routes

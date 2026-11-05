@@ -549,6 +549,7 @@ final class RemoteSessionState {
     this.session = const CodeSessionState(),
     this.remember,
     this.flags = const {},
+    this.reasons = const {},
     this.rememberBy = const {},
     this.perCall = false,
     this.link = RemoteLinkStatus.connecting,
@@ -564,6 +565,9 @@ final class RemoteSessionState {
 
   /// Pending calls the host's rules call dangerous, with why.
   final Map<String, String> flags;
+
+  /// Why each pending call asks (the rule or the mode), from the host.
+  final Map<String, String> reasons;
 
   /// Per pending call, the rule "for this session / always" would store.
   final Map<String, String> rememberBy;
@@ -583,6 +587,7 @@ final class RemoteSessionState {
     List<String>? remember,
     bool clearRemember = false,
     Map<String, String>? flags,
+    Map<String, String>? reasons,
     Map<String, String>? rememberBy,
     bool? perCall,
     RemoteLinkStatus? link,
@@ -592,6 +597,7 @@ final class RemoteSessionState {
     session: session ?? this.session,
     remember: clearRemember ? null : remember ?? this.remember,
     flags: flags ?? this.flags,
+    reasons: reasons ?? this.reasons,
     rememberBy: rememberBy ?? this.rememberBy,
     perCall: perCall ?? this.perCall,
     link: link ?? this.link,
@@ -743,6 +749,10 @@ final class MirrorFold {
           clearRemember: m['remember'] == null,
           flags: {
             for (final e in (m['flags'] as Map<String, Object?>? ?? const {}).entries)
+              if (e.value case final String why) e.key: why,
+          },
+          reasons: {
+            for (final e in (m['reasons'] as Map<String, Object?>? ?? const {}).entries)
               if (e.value case final String why) e.key: why,
           },
           loaded: true,

@@ -16,7 +16,9 @@ import 'shell_readonly.dart';
 ///    catastrophic commands in every mode, Full auto included;
 /// 3. the user's `deny` rules block what they match;
 /// 4. Plan mode refuses anything that isn't read-only;
-/// 5. read-only actions run;
+/// 5. read-only actions run, and so do writes to scratch space
+///    ([isScratchWrite]: the project's `.everyai/scratch/` and the OS temp
+///    folders);
 /// 6. dangerous actions ([dangerReason], [editDangerReason]) always ask,
 ///    except in Full auto;
 /// 7. `allow` rules and approvals remembered for the session run, but only
@@ -28,7 +30,7 @@ import 'shell_readonly.dart';
 enum Verdict { allow, ask, deny }
 
 /// Which step of the policy decided.
-enum DecisionSource { clientTool, floor, rule, plan, readOnly, dangerous, allowRule, mode }
+enum DecisionSource { clientTool, floor, rule, plan, readOnly, scratch, dangerous, allowRule, mode }
 
 @immutable
 final class Decision {
@@ -99,7 +101,12 @@ final class PermissionPolicy {
     this.session = const {},
     this.workingDir,
     this.hostTools = false,
+    this.tempDirs = const [],
   });
+
+  /// The OS temp folders (see temp_dirs_io.dart), where writes never ask
+  /// outside Plan mode, like the project's `.everyai/scratch/`.
+  final List<String> tempDirs;
 
   /// The session runs on an outside agent, whose MCP calls to the app's own
   /// host ([trustedHostTools]) run without asking: they only show a card or
@@ -151,6 +158,11 @@ final class PermissionPolicy {
     if (mode == AgentMode.plan && !readOnly && !lookup) return const Decision(Verdict.deny, DecisionSource.plan);
     if (readOnly) return const Decision(Verdict.allow, DecisionSource.readOnly);
     final edits = _editPaths(call);
+    // Scratch space is the agent's own: writes there (and making folders there) never ask.
+    bool scratch(String p) => isScratchWrite(p, workingDir: workingDir, tempDirs: tempDirs);
+    if (edits.isNotEmpty ? edits.every(scratch) : command != null && _mkdirsOnly(command, scratch)) {
+      return const Decision(Verdict.allow, DecisionSource.scratch);
+    }
     final danger = command != null
         ? dangerReason(command)
         : [for (final e in edits) ?editDangerReason(e, workingDir: workingDir)].firstOrNull;
@@ -842,6 +854,42 @@ String? _gitDanger(List<String> w) {
 /// Why an edit outside the session's folder asks first, in every mode.
 const outsideProject = 'edits a file outside the project';
 
+/// Whether writing [path] stays in scratch space: under the project's
+/// `.everyai/scratch/` or one of [tempDirs], with no `..` and nothing that
+/// [editDangerReason] would flag inside that folder (`.git`, `.env`, keys).
+/// A relative [path] is taken from [workingDir].
+bool isScratchWrite(String path, {String? workingDir, List<String> tempDirs = const []}) {
+  if (path.isEmpty || path.split('/').contains('..')) return false;
+  final dir = workingDir == null || workingDir.isEmpty ? null : workingDir.replaceAll(RegExp(r'/+$'), '');
+  final abs = path.startsWith('/') ? path : (dir == null ? null : '$dir/$path');
+  if (abs == null) return false;
+  final roots = [if (dir != null) '$dir/.everyai/scratch', ...tempDirs];
+  for (final root in roots) {
+    final base = root.endsWith('/') ? root : '$root/';
+    if (abs.startsWith(base) && abs.length > base.length) {
+      return editDangerReason(abs, workingDir: base.substring(0, base.length - 1)) == null;
+    }
+  }
+  return false;
+}
+
+/// Whether [command] only makes folders (`mkdir`, `mkdir -p`) and every
+/// folder passes [scratch]. Words with expansions or globs don't count.
+bool _mkdirsOnly(String command, bool Function(String) scratch) {
+  final segments = shellSegments(command);
+  if (segments == null || segments.isEmpty) return false;
+  for (final w in segments) {
+    if (w.first != 'mkdir') return false;
+    final paths = [
+      for (final a in w.skip(1))
+        if (!a.startsWith('-')) a,
+    ];
+    if (w.skip(1).any((a) => a.startsWith('-') && a != '-p' && a != '--parents')) return false;
+    if (paths.isEmpty || paths.any((a) => a.contains(RegExp(r'[$`*?~\\]')) || !scratch(a))) return false;
+  }
+  return true;
+}
+
 String? editDangerReason(String path, {String? workingDir}) {
   final dir = workingDir;
   if (dir != null && dir.isNotEmpty && path.startsWith('/')) {
@@ -968,10 +1016,13 @@ const _stopClause =
     '(a different command, tool or file).';
 
 /// The tool result the agent reads for [kind]. The text is fixed so the
-/// agent always gets the same unambiguous signal; the user's [reason]
-/// follows word for word.
-String denialMessage(DenialKind kind, {String? reason}) {
+/// agent always gets the same unambiguous signal; why the app asked
+/// ([asked], see approval_reason.dart) comes next, then the user's [reason]
+/// word for word.
+String denialMessage(DenialKind kind, {String? reason, String? asked}) {
   final said = reason?.trim() ?? '';
+  final why = asked?.trim() ?? '';
+  final because = why.isEmpty ? '' : "\n\nIt needed the user's OK because: $why";
   final head = switch (kind) {
     DenialKind.denied => '$deniedLead $_stopClause',
     DenialKind.timedOut =>
@@ -981,10 +1032,10 @@ String denialMessage(DenialKind kind, {String? reason}) {
   };
   if (said.isEmpty) {
     return kind == DenialKind.denied
-        ? '$head If you cannot continue without it, end your turn and say what you needed and why.'
-        : head;
+        ? '$head If you cannot continue without it, end your turn and say what you needed and why.$because'
+        : '$head$because';
   }
-  return '$head\n\n$_reasonLead$said';
+  return '$head$because\n\n$_reasonLead$said';
 }
 
 const _reasonLead = "The user's reason, word for word (follow it if it asks for something else):\n";

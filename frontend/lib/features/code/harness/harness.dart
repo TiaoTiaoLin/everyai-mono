@@ -481,6 +481,14 @@ NativeMode? nativeModeFor(List<NativeMode> modes, AgentMode mode) {
   return best;
 }
 
+/// The native mode a session that fell back from [wanted] (its own mode
+/// wasn't listed yet: Claude's `auto` before the model's modes are known)
+/// moves to once [modes] offers one with that policy, or null.
+NativeMode? retargetFor(AgentMode wanted, List<NativeMode> modes) {
+  final m = nativeModeFor(modes, wanted);
+  return m != null && m.policy == wanted ? m : null;
+}
+
 /// A session whose mode picker shows the harness's own modes instead of
 /// Ask / Auto-edit / Plan / Full auto. Sessions without it keep ours.
 abstract interface class NativeModes {

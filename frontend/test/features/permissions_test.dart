@@ -387,6 +387,95 @@ void main() {
     });
   });
 
+  group('scratch space', () {
+    const temp = ['/tmp/', '/private/tmp/', '/var/folders/xy/T/'];
+    const policy = PermissionPolicy(workingDir: _dir, tempDirs: temp);
+    ActionCall write(String path) => _call({'kind': 'WriteFileAction', 'path': path, 'content': 'x'}, tool: 'write');
+
+    test("writes under the project's .everyai/scratch never ask, except in Plan", () {
+      final scratch = write('$_dir/.everyai/scratch/probe.py');
+      for (final mode in [AgentMode.ask, AgentMode.autoEdit, AgentMode.fullAuto]) {
+        expect(policy.decide(scratch, mode), isA<Decision>().having((d) => d.source, 'source', DecisionSource.scratch));
+        expect(policy.decide(scratch, mode).verdict, Verdict.allow, reason: '$mode');
+      }
+      expect(policy.decide(scratch, AgentMode.plan).verdict, Verdict.deny);
+      // Relative paths are the project's.
+      expect(policy.decide(write('.everyai/scratch/a.txt'), AgentMode.ask).verdict, Verdict.allow);
+    });
+
+    test('the OS temp folders are scratch space too', () {
+      for (final path in ['/tmp/out.json', '/private/tmp/x/y.txt', '/var/folders/xy/T/run.log']) {
+        expect(policy.decide(write(path), AgentMode.ask).verdict, Verdict.allow, reason: path);
+        expect(policy.decide(write(path), AgentMode.fullAuto).verdict, Verdict.allow, reason: path);
+      }
+      // Without the temp folders, /tmp is outside the project.
+      expect(
+        const PermissionPolicy(workingDir: _dir).decide(write('/tmp/out.json'), AgentMode.fullAuto).verdict,
+        Verdict.ask,
+      );
+    });
+
+    test('a way out of scratch, a secret file or a deny rule still counts', () {
+      for (final path in [
+        '$_dir/.everyai/scratch/../settings.json',
+        '$_dir/.everyai/scratch/../../x',
+        '/tmp/../etc/hosts',
+        '$_dir/.everyai/scratch/.env',
+        '/tmp/repo/.git/config',
+        '$_dir/.everyai/scratchy/a',
+      ]) {
+        expect(policy.decide(write(path), AgentMode.ask).verdict, Verdict.ask, reason: path);
+      }
+      const denying = PermissionPolicy(
+        workingDir: _dir,
+        rules: PermissionRules(deny: ['Edit(.everyai/scratch/**)']),
+      );
+      expect(denying.decide(write('$_dir/.everyai/scratch/a.py'), AgentMode.fullAuto).verdict, Verdict.deny);
+    });
+
+    test('a patch goes by the mode unless every file it writes is scratch', () {
+      ActionCall patch(List<String> paths) =>
+          _call({'kind': 'ApplyPatchAction', 'patch': '*** Begin Patch', 'paths': paths}, tool: 'apply_patch');
+      expect(policy.decide(patch(['$_dir/.everyai/scratch/a', '/tmp/b']), AgentMode.ask).verdict, Verdict.allow);
+      expect(
+        policy.decide(patch(['$_dir/.everyai/scratch/a', '$_dir/lib/b.dart']), AgentMode.ask).verdict,
+        Verdict.ask,
+      );
+    });
+
+    test('making folders there is free; running what is there is not', () {
+      expect(policy.decide(_sh('mkdir -p .everyai/scratch/a'), AgentMode.ask).verdict, Verdict.allow);
+      expect(policy.decide(_sh('mkdir /tmp/x && mkdir -p /tmp/y/z'), AgentMode.ask).verdict, Verdict.allow);
+      for (final c in [
+        'python3 .everyai/scratch/a.py',
+        'mkdir -p .everyai/scratch/a lib/b',
+        r'mkdir -p $HOME/x',
+        'mkdir -p .everyai/scratch/a && rm -rf lib',
+        'mkdir -m 777 /tmp/x',
+      ]) {
+        expect(policy.decide(_sh(c), AgentMode.ask).verdict, Verdict.ask, reason: c);
+      }
+      expect(policy.decide(_sh('mkdir -p .everyai/scratch/a'), AgentMode.plan).verdict, Verdict.deny);
+    });
+  });
+
+  group('why it asked, for the agent', () {
+    test("a denial names why the app asked and keeps the user's words readable", () {
+      const asked = 'Ask mode asks before every edit and command.';
+      final denied = denialMessage(DenialKind.denied, reason: 'use yarn', asked: asked);
+      expect(denied, startsWith(deniedLead));
+      expect(denied, contains("It needed the user's OK because: $asked"));
+      expect(typedReason(denied), 'use yarn');
+      expect(denialSummary(denied), 'Denied: use yarn');
+      final bare = denialMessage(DenialKind.denied, asked: asked);
+      expect(bare, contains("It needed the user's OK because: $asked"));
+      expect(typedReason(bare), isNull);
+      expect(denialSummary(bare), 'Denied');
+      expect(denialSummary(denialMessage(DenialKind.cancelled, asked: asked)), 'Cancelled');
+      expect(denialMessage(DenialKind.denied, asked: ''), denialMessage(DenialKind.denied));
+    });
+  });
+
   test('stored permissions merge global and project rules', () {
     final s = StoredPermissions.fromJson({
       'global': {

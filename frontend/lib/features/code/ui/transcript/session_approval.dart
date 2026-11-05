@@ -42,6 +42,8 @@ class SessionApprovalCard extends ConsumerWidget {
       onAllowCall: controller.perCall ? (id, scope) => controller.approve(scope, [id]) : null,
       onDenyCall: controller.perCall ? (id) => controller.deny(null, [id]) : null,
       flags: approvalFlags(controller.policy, pending, state.mode),
+      reasons: controller.askReasons(pending),
+      forks: info.parentId != null,
     );
     if (label == null) return card;
     return Column(

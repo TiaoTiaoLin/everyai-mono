@@ -48,6 +48,7 @@ Map<String, Object?> mirrorState(
   CodeSessionState state, {
   required List<String>? remember,
   required Map<String, String> flags,
+  Map<String, String> reasons = const {},
   Map<String, String> rememberBy = const {},
   bool perCall = false,
 }) => {
@@ -58,6 +59,7 @@ Map<String, Object?> mirrorState(
   'subagent_needs_input': state.subagentNeedsInput,
   'remember': ?remember,
   'flags': flags,
+  'reasons': reasons,
   'remember_by': rememberBy,
   'per_call': perCall,
   'decided': state.decided,
@@ -212,6 +214,7 @@ final class HostMirror {
       rememberBy: controller.rememberBy(),
       perCall: controller.perCall,
       flags: approvalFlags(controller.policy, state.transcript.pending, state.mode),
+      reasons: controller.askReasons(),
     );
   }
 

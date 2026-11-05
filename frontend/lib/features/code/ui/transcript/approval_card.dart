@@ -30,6 +30,8 @@ class ApprovalCard extends StatefulWidget {
     required this.onMode,
     this.remember,
     this.flags = const {},
+    this.reasons = const {},
+    this.forks = false,
     this.onAllowCall,
     this.onDenyCall,
     this.decided = const {},
@@ -68,6 +70,14 @@ class ApprovalCard extends StatefulWidget {
 
   /// Why an action needs a look, by call id (from the danger classifier).
   final Map<String, String> flags;
+
+  /// Why each action asks at all (the rule or the mode), by call id; shown
+  /// muted where no [flags] warning is.
+  final Map<String, String> reasons;
+
+  /// A fork's or subagent's card: "for this session" covers all the forks of
+  /// the session that started it.
+  final bool forks;
 
   @override
   State<ApprovalCard> createState() => _ApprovalCardState();
@@ -123,6 +133,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                         _Preview(
                           call: c,
                           flag: widget.flags[c.id],
+                          reason: widget.reasons[c.id],
                           workingDir: widget.workingDir,
                           session: widget.session,
                         ),
@@ -170,7 +181,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                       onPressed: () => widget.onAllow(ApprovalScope.always),
                     ),
                     AdaptiveButton(
-                      label: 'Allow for session',
+                      label: widget.forks ? 'Allow for all forks of this session' : 'Allow for session',
                       emphasis: ButtonEmphasis.secondary,
                       onPressed: () => widget.onAllow(ApprovalScope.session),
                     ),
@@ -238,6 +249,8 @@ class _ApprovalCardState extends State<ApprovalCard> {
                         _CallRow(
                           call: c,
                           flag: widget.flags[c.id],
+                          reason: widget.reasons[c.id],
+                          sessionLabel: widget.forks ? 'Allow for all forks of this session' : 'Allow for this session',
                           decided: widget.decided[c.id],
                           rule: widget.rememberBy[c.id],
                           workingDir: widget.workingDir,
@@ -304,6 +317,8 @@ class _CallRow extends StatelessWidget {
     required this.onAllow,
     required this.onDeny,
     this.flag,
+    this.reason,
+    this.sessionLabel = 'Allow for this session',
     this.decided,
     this.rule,
     this.workingDir,
@@ -312,6 +327,8 @@ class _CallRow extends StatelessWidget {
 
   final ActionCall call;
   final String? flag;
+  final String? reason;
+  final String sessionLabel;
   final String? workingDir;
   final String? session;
 
@@ -332,7 +349,7 @@ class _CallRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _Preview(call: call, flag: flag, workingDir: workingDir, session: session),
+          _Preview(call: call, flag: flag, reason: reason, workingDir: workingDir, session: session),
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Row(
@@ -357,7 +374,7 @@ class _CallRow extends StatelessWidget {
                     AdaptiveMenuButton(
                       tooltip: 'Remember: $r',
                       actions: [
-                        MenuAction(label: 'Allow for this session', onSelected: () => onAllow(ApprovalScope.session)),
+                        MenuAction(label: sessionLabel, onSelected: () => onAllow(ApprovalScope.session)),
                         MenuAction(label: 'Always allow', onSelected: () => onAllow(ApprovalScope.always)),
                       ],
                       child: const MenuTrigger('Always'),
@@ -376,9 +393,10 @@ class _CallRow extends StatelessWidget {
 }
 
 class _Preview extends StatelessWidget {
-  const _Preview({required this.call, this.flag, this.workingDir, this.session});
+  const _Preview({required this.call, this.flag, this.reason, this.workingDir, this.session});
   final ActionCall call;
   final String? flag;
+  final String? reason;
   final String? workingDir;
   final String? session;
 
@@ -469,6 +487,11 @@ class _Preview extends StatelessWidget {
                   ),
                 ],
               ),
+            )
+          else if (reason case final why?)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Asks because: $why', style: theme.type.caption.tint(theme.textMuted)),
             ),
           if (risk == 'HIGH' || risk == 'MEDIUM')
             Padding(
