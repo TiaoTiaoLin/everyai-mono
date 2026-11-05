@@ -83,6 +83,7 @@ final class CodeSessionInfo {
     this.parentCallId = '',
     this.ownTag = false,
     this.pinned = false,
+    this.prNumber,
     this.forkCopy,
     this.tier = HarnessTier.efficient,
     this.leads = const {},
@@ -184,6 +185,9 @@ final class CodeSessionInfo {
   /// Kept at the top of the sidebar (Pinned) until unpinned.
   final bool pinned;
 
+  /// The pull request opened for this session's branch, once there is one (the sidebar's PR badge).
+  final int? prNumber;
+
   /// A fork's own worktree, merged back into the parent's folder when it
   /// finishes; null for a fork sharing the parent's folder.
   final ForkCopy? forkCopy;
@@ -197,6 +201,8 @@ final class CodeSessionInfo {
   CodeSessionInfo copyWith({
     String? title,
     bool? pinned,
+    int? prNumber,
+    bool clearPr = false,
     AgentMode? mode,
     String? branch,
     String? conversationId,
@@ -235,6 +241,7 @@ final class CodeSessionInfo {
     parentCallId: parentCallId,
     ownTag: ownTag,
     pinned: pinned ?? this.pinned,
+    prNumber: clearPr ? null : prNumber ?? this.prNumber,
     // Once merged back, the copy is gone.
     forkCopy: merged ? null : forkCopy,
     tier: tier ?? this.tier,
@@ -275,6 +282,7 @@ final class CodeSessionInfo {
     parentCallId: json['parent_call_id'] as String? ?? '',
     // Ultra children saved before the flag was kept billed under their own id too.
     pinned: json['pinned'] == true,
+    prNumber: json['pr'] as int?,
     ownTag: json['own_tag'] == true || (json['parent_call_id'] as String? ?? '').startsWith('ultra-'),
     forkCopy: ForkCopy.fromJson(json['fork_copy']),
     // Max and Ultra were tiers, and Bug fix a mode: Max is a workflow now, kept on the session; Ultra and Bug
@@ -314,6 +322,7 @@ final class CodeSessionInfo {
     if (parentCallId.isNotEmpty) 'parent_call_id': parentCallId,
     if (ownTag) 'own_tag': true,
     if (pinned) 'pinned': true,
+    'pr': ?prNumber,
     if (forkCopy case final f?) 'fork_copy': f.toJson(),
     'tier': tier.name,
     if (leads.isNotEmpty) 'leads': {for (final MapEntry(:key, :value) in leads.entries) key: value.toJson()},
