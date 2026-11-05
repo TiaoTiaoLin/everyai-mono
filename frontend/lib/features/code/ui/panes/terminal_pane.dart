@@ -8,6 +8,15 @@ import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../domain/code_session.dart';
 import '../../panes/panes_providers.dart';
+import '../console/bottom_drawer.dart' show isDrawerToggle;
+
+/// The terminal's own key filter, which runs before the shell gets a key: ⌃` toggles the drawer ([toggle]) instead.
+/// It is handled here: a key the filter lets through goes to the shell, never up to the drawer's shortcut.
+KeyEventResult terminalKeys(KeyEvent event, VoidCallback toggle) {
+  if (!isDrawerToggle(event)) return KeyEventResult.ignored;
+  if (event is KeyDownEvent) toggle();
+  return KeyEventResult.handled;
+}
 
 /// A shell in the session's folder (its worktree), kept running while the
 /// app is open; right click copies the selection or pastes.
@@ -90,6 +99,8 @@ class _TerminalPaneState extends ConsumerState<TerminalPane> {
                 fontSize: EveryTheme.of(context).type.callout.fontSize!,
               ),
               onSecondaryTapDown: (_, _) => _copyOrPaste(),
+              onKeyEvent: (_, event) =>
+                  terminalKeys(event, ref.read(codePaneProvider(widget.session.id).notifier).toggleDrawer),
             ),
           ),
         ),

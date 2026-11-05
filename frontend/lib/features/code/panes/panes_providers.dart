@@ -5,15 +5,14 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../../core/preferences.dart';
 import '../code_providers.dart';
 import '../domain/local_ports.dart';
 import 'processes.dart';
 import 'pty.dart';
 
-/// The tabs beside a Code session.
+/// The tabs of a Code session's bottom drawer.
 enum CodePane {
-  diff('Changes'),
-  tasks('Tasks'),
   terminal('Terminal'),
   processes('Processes'),
   preview('Preview');
@@ -22,41 +21,73 @@ enum CodePane {
   final String label;
 }
 
-/// Which pane is open beside a session (null: none), and the last one open.
+/// A session's console layout, Preferences `code.layout.<id>`: `{"panel", "panel_width", "drawer",
+/// "drawer_height"}`. The right panel (`ConsolePanels`) and the drawer each write their own keys and keep the other's.
+Map<String, Object?> readCodeLayout(Preferences prefs, String sessionId) {
+  final raw = prefs['$codeLayoutPrefix$sessionId'];
+  if (raw == null) return const {};
+  try {
+    return (jsonDecode(raw) as Map).cast<String, Object?>();
+  } on Object {
+    return const {};
+  }
+}
+
+void writeCodeLayout(Preferences prefs, String sessionId, Map<String, Object?> changes) =>
+    prefs['$codeLayoutPrefix$sessionId'] = jsonEncode({...readCodeLayout(prefs, sessionId), ...changes});
+
+/// The drawer under a session's transcript: the tab open (null: closed), the last one open, and its height (null:
+/// the default).
 @immutable
 final class PaneState {
-  const PaneState({this.open, this.last = CodePane.terminal, this.focus, this.focusSeq = 0});
+  const PaneState({this.open, this.last = CodePane.terminal, this.height});
   final CodePane? open;
   final CodePane last;
-
-  /// A file the Changes pane should scroll to (absolute or repo-relative);
-  /// [focusSeq] changes on every request, so asking twice scrolls twice.
-  final String? focus;
-  final int focusSeq;
+  final double? height;
 }
 
 final codePaneProvider = NotifierProvider.family<CodePanes, PaneState, String>(CodePanes.new);
 
+/// A session's bottom drawer, remembered in `code.layout.<id>` (`drawer`, `drawer_height`); it starts closed.
 final class CodePanes extends Notifier<PaneState> {
   CodePanes(this.sessionId);
   final String sessionId;
 
   @override
-  PaneState build() => const PaneState();
+  PaneState build() {
+    final j = readCodeLayout(ref.read(preferencesProvider), sessionId);
+    final open = CodePane.values.asNameMap()[j['drawer']];
+    final last = CodePane.values.asNameMap()[j['drawer_last']] ?? open ?? CodePane.terminal;
+    return PaneState(open: open, last: last, height: (j['drawer_height'] as num?)?.toDouble());
+  }
 
-  void show(CodePane pane) => state = PaneState(open: pane, last: pane);
+  void _save() => writeCodeLayout(ref.read(preferencesProvider), sessionId, {
+    'drawer': state.open?.name,
+    'drawer_last': state.last.name,
+    'drawer_height': state.height?.round(),
+  });
 
-  /// Opens Changes scrolled to [path].
-  void showFile(String path) =>
-      state = PaneState(open: CodePane.diff, last: CodePane.diff, focus: path, focusSeq: state.focusSeq + 1);
+  void show(CodePane pane) {
+    state = PaneState(open: pane, last: pane, height: state.height);
+    _save();
+  }
 
-  /// Opens [pane], or closes it when it is the one open.
+  /// Opens [pane], or closes the drawer when it is the tab open.
   void toggle(CodePane pane) => state.open == pane ? close() : show(pane);
 
-  /// Opens the last pane, or closes the open one.
-  void toggleLast() => state.open != null ? close() : show(state.last);
+  /// Opens the last tab, or closes the drawer (⌃` and the header button).
+  void toggleDrawer() => state.open != null ? close() : show(state.last);
 
-  void close() => state = PaneState(last: state.last);
+  void close() {
+    state = PaneState(last: state.last, height: state.height);
+    _save();
+  }
+
+  /// A new height; [persist] is false while dragging, true at the end.
+  void setHeight(double height, {bool persist = true}) {
+    state = PaneState(open: state.open, last: state.last, height: height);
+    if (persist) _save();
+  }
 }
 
 /// The shell in the Terminal pane: its pid while running, how it ended, and

@@ -7,6 +7,7 @@ import '../harness/events.dart';
 import '../harness/harness.dart';
 import '../host/host.dart' show savedPlansTool;
 import '../host/host_prompts.dart' show runWorkflowTool;
+import '../host/host_report.dart' show reportIssueTool;
 import '../host/host_max_tools.dart' show maxHostTools;
 import 'briefing/briefing_types.dart' show everyaiServerName;
 import 'driver.dart';
@@ -83,6 +84,7 @@ const hostToolNames = {
   savedPlansTool,
   bugCheckTool,
   runWorkflowTool,
+  reportIssueTool,
   ...maxHostTools,
   'check',
   'diff_stats',
@@ -99,6 +101,7 @@ const trustedHostTools = {
   presentPlanTool,
   'memory',
   savedPlansTool,
+  reportIssueTool,
   ...maxHostTools,
   'diff_stats',
   'goal_check',

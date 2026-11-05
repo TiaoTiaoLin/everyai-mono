@@ -20,6 +20,7 @@ import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_max_tools.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
+import 'package:every_ai/features/code/host/host_report.dart';
 import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -153,6 +154,15 @@ void main() {
     ..add(stateEvent('f-${s.id}', ExecutionStatus.finished));
 
   List<String> notices(FakeLeadSession s) => s.sent.where((t) => t.contains('<task-notification>')).toList();
+
+  test('report_issue builds a link that names the session\'s model and sends nothing', () async {
+    final l = await lead();
+    final r = await hostCall(l.info.id, reportIssueTool, {'title': 'T', 'tool': 'check', 'happened': 'it hung'});
+    expect(r.isError, isFalse, reason: r.text);
+    final link = Uri.parse(r.text.split('\n').last);
+    expect(link.queryParameters['body'], contains('Model: lead-model'));
+    expect(link.queryParameters['labels'], 'feedback');
+  });
 
   test('fork starts a briefed child on the lead\'s harness and returns at once', () async {
     final l = await lead();

@@ -394,6 +394,7 @@ final class ClaudeDecoder {
     'assistant' => _assistant(line),
     'user' => _user(line),
     'result' => _result(line),
+    'rate_limit_event' => [?planLimitsOf(line['rate_limit_info'], id: _id(line))],
     _ => const [],
   };
 
@@ -557,6 +558,49 @@ UsageReport? usageOf(Map<String, Object?> result, {required String? apiKeySource
     costMicros: models.isEmpty ? null : (cost * 1e6).round(),
     onPlan: apiKeySource == 'none' && models.isNotEmpty && models.every((m) => m['provider'] == 'firstParty'),
   );
+}
+
+/// How much of the plan's limits a `rate_limit_event`'s `rate_limit_info`
+/// says is used, or null when it gives no number. Each `unifiedWindows`
+/// entry is one window (`utilization` 0 to 1, `resetsAt` in epoch seconds);
+/// without them the top-level `rateLimitType` window. Recorded: only
+/// `status: allowed` with `seven_day`; `allowed_warning` (Claude Code's own
+/// "close to the limit") and `five_hour` aren't, so the shape is read
+/// loosely. A `utilization` over 1 is read as a percent.
+PlanLimits? planLimitsOf(Object? info, {required String id}) {
+  if (info is! Map<String, Object?>) return null;
+  int? minutesOf(String name) => switch (name) {
+    'five_hour' => 300,
+    _ when name.startsWith('seven_day') => 10080,
+    _ => null,
+  };
+  PlanWindow? window(String name, Object? w) {
+    if (w is! Map<String, Object?>) return null;
+    final raw = (w['utilization'] as num?)?.toDouble();
+    if (raw == null) return null;
+    final at = w['resetsAt'] as num?;
+    return PlanWindow(
+      name: name,
+      used: (raw > 1 ? raw / 100 : raw).clamp(0, 1).toDouble(),
+      resetsAt: at == null ? null : DateTime.fromMillisecondsSinceEpoch((at * 1000).round(), isUtc: true),
+      minutes: minutesOf(name),
+    );
+  }
+
+  final windows = [
+    if (info['unifiedWindows'] case final Map<String, Object?> all)
+      for (final e in all.entries) ?window(e.key, e.value)
+    else if (info['rateLimitType'] case final String type)
+      ?window(type, info),
+  ];
+  if (windows.isEmpty) return null;
+  final warning =
+      info['status'] == 'allowed_warning' ||
+      (info['unifiedWindows'] is Map<String, Object?> &&
+          (info['unifiedWindows']! as Map<String, Object?>).values.any(
+            (w) => w is Map<String, Object?> && w['status'] == 'allowed_warning',
+          ));
+  return PlanLimits.of(id: id, windows: windows, warning: warning);
 }
 
 /// The models `initialize` lists, or null when the reply has none.

@@ -790,7 +790,7 @@ String? dangerReason(String command) {
       'dart' || 'flutter' when args.length >= 2 && args[0] == 'pub' && args[1] == 'publish' => 'publishes a package',
       'gem' when args.isNotEmpty && args.first == 'push' => 'publishes a package',
       'docker' when args.isNotEmpty && args.first == 'push' => 'publishes an image',
-      'gh' when _gh(args) => 'changes GitHub (merges, releases or deletes)',
+      'gh' when _gh(args) => 'changes GitHub (merges, releases, deletes or posts)',
       _ => null,
     };
     if (why != null) return why;
@@ -805,6 +805,7 @@ bool _gh(List<String> args) {
     'repo' => const {'delete', 'archive', 'rename', 'edit'}.contains(args[1]),
     'pr' => const {'merge', 'close'}.contains(args[1]),
     'release' => const {'create', 'delete', 'upload'}.contains(args[1]),
+    'issue' => const {'create', 'comment', 'edit'}.contains(args[1]),
     'secret' || 'variable' => const {'set', 'delete', 'remove'}.contains(args[1]),
     _ => false,
   };

@@ -76,6 +76,23 @@ sealed class HarnessEvent {
         costMicros: (json['cost_micros'] as num?)?.toInt(),
         onPlan: json['on_plan'] == true,
       ),
+      'PlanLimits' => PlanLimits(
+        id: id,
+        raw: json,
+        warning: json['warning'] == true,
+        windows: [
+          for (final w in (json['windows'] as List<Object?>? ?? const []).whereType<Map<String, Object?>>())
+            PlanWindow(
+              name: w['name'] as String? ?? '',
+              used: (w['used'] as num?)?.toDouble() ?? 0,
+              resetsAt: switch (w['resets_at']) {
+                final num at => DateTime.fromMillisecondsSinceEpoch((at * 1000).round(), isUtc: true),
+                _ => null,
+              },
+              minutes: (w['minutes'] as num?)?.toInt(),
+            ),
+        ],
+      ),
       final kind => UnknownEvent(id: id, raw: json, kind: '$kind'),
     };
   }
@@ -383,6 +400,51 @@ final class UsageReport extends HarnessEvent {
   final int? contextTokens;
   final int? costMicros;
   final bool onPlan;
+}
+
+/// One window of a plan's usage limit: how much of it is [used] (0 to 1),
+/// when it starts over and how long it is, when the harness says.
+@immutable
+final class PlanWindow {
+  const PlanWindow({required this.name, required this.used, this.resetsAt, this.minutes});
+
+  /// The harness's own name for it (`five_hour`, `seven_day`, `codex/primary`).
+  final String name;
+  final double used;
+  final DateTime? resetsAt;
+  final int? minutes;
+
+  Map<String, Object?> toJson() => {
+    'name': name,
+    'used': used,
+    if (resetsAt case final at?) 'resets_at': at.millisecondsSinceEpoch ~/ 1000,
+    'minutes': ?minutes,
+  };
+}
+
+/// How much of the user's plan limits an outside harness says is used,
+/// before one runs out (Claude Code's `rate_limit_event`, Codex's
+/// `account/rateLimits/updated`); the latest one counts. [warning]: the
+/// harness itself says the limit is close. Running out is a usage-limit
+/// [ConversationFailure] instead.
+final class PlanLimits extends HarnessEvent {
+  const PlanLimits({required super.id, required super.raw, required this.windows, this.warning = false});
+
+  /// One with its [raw] filled in, so the remote mirror carries it.
+  factory PlanLimits.of({required String id, required List<PlanWindow> windows, bool warning = false}) => PlanLimits(
+    id: id,
+    raw: {
+      'kind': 'PlanLimits',
+      'id': id,
+      'windows': [for (final w in windows) w.toJson()],
+      'warning': warning,
+    },
+    windows: windows,
+    warning: warning,
+  );
+
+  final List<PlanWindow> windows;
+  final bool warning;
 }
 
 final class UnknownEvent extends HarnessEvent {
