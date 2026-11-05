@@ -173,8 +173,12 @@ final class PermissionPolicy {
     final danger = command != null
         ? dangerReason(command)
         : [for (final e in edits) ?editDangerReason(e, workingDir: workingDir)].firstOrNull;
-    // Full auto covers the project, not the rest of the disk.
-    if (danger != null && (mode != AgentMode.fullAuto || (edits.isNotEmpty && danger == outsideProject))) {
+    // Full auto never asks. Elsewhere a risky action asks once: Allow saves it as a rule without wildcards (the exact
+    // command, the file, the folder outside the project), which settles it from then on.
+    if (danger != null && mode != AgentMode.fullAuto) {
+      if (_matching(call, [...rules.allow, ...session].where(_pinned).toList(), allowing: true) case final rule?) {
+        return Decision(Verdict.allow, DecisionSource.allowRule, rule: rule);
+      }
       return Decision(Verdict.ask, DecisionSource.dangerous, why: danger);
     }
     if (danger == null) {
@@ -209,6 +213,7 @@ final class PermissionPolicy {
     }
     if (askMcp &&
         mode != AgentMode.bypass &&
+        mode != AgentMode.fullAuto &&
         decisions.any((e) => isMcpTool(e.$1) && e.$2.source == DecisionSource.mode)) {
       return null;
     }
@@ -235,17 +240,13 @@ final class PermissionPolicy {
           allowing ? _allowsCommand(rule.glob, command) : _deniesCommand(rule.glob, command),
         // A patch is allowed only when the rule covers every file it writes, and denied when it covers any.
         _RuleKind.edit when edits.isNotEmpty =>
-          allowing
-              ? edits.every((e) => _pathMatches(rule.glob, _relative(e)))
-              : edits.any((e) => _pathMatches(rule.glob, _relative(e))),
-        _RuleKind.read when read != null => _pathMatches(rule.glob, _relative(read)),
-        _RuleKind.read when !allowing && command != null => _commandReads(
-          command,
-        ).any((p) => _pathMatches(rule.glob, _relative(p))),
+          allowing ? edits.every((e) => _covers(rule.glob, e)) : edits.any((e) => _covers(rule.glob, e)),
+        _RuleKind.read when read != null => _covers(rule.glob, read),
+        _RuleKind.read when !allowing && command != null => _commandReads(command).any((p) => _covers(rule.glob, p)),
         _RuleKind.mcp => isMcpTool(call) && globMatches(rule.glob, call.toolName),
-        _RuleKind.edit when !allowing && command != null => _commandWrites(
-          command,
-        ).any((p) => _pathMatches(rule.glob, _relative(p))),
+        _RuleKind.exact when allowing && command != null => _collapse(command) == _collapse(rule.glob),
+        _RuleKind.tool when allowing => _ownTool(call) && call.toolName == rule.glob,
+        _RuleKind.edit when !allowing && command != null => _commandWrites(command).any((p) => _covers(rule.glob, p)),
         _ => false,
       };
       if (hit) return raw;
@@ -273,7 +274,34 @@ final class PermissionPolicy {
   }
 
   String _relative(String path) => relativeTo(path, workingDir);
+
+  /// Whether a path rule's [glob] covers [path]: matched against the path relative to the project and against the
+  /// absolute path (rules may name either), and a rule naming a folder without wildcards (`src`, `/home/me/app/`)
+  /// covers everything in it.
+  bool _covers(String glob, String path) {
+    final dir = workingDir;
+    final abs = path.startsWith('/') || dir == null || dir.isEmpty ? path : '${dir.endsWith('/') ? dir : '$dir/'}$path';
+    for (final target in {_relative(path), abs}) {
+      if (_pathMatches(glob, target)) return true;
+      if (!glob.contains(RegExp(r'[*?\[]'))) {
+        final folder = glob.length > 1 && glob.endsWith('/') ? glob.substring(0, glob.length - 1) : glob;
+        if (folder.isNotEmpty && (target == folder || target.startsWith('$folder/'))) return true;
+      }
+    }
+    return false;
+  }
 }
+
+/// A rule with no wildcards: the only kind that settles a risky action (see [PermissionPolicy.decide]).
+bool _pinned(String raw) {
+  final r = _Rule.parse(raw);
+  if (r == null || r.kind == _RuleKind.mcp) return false;
+  return r.kind == _RuleKind.exact || r.kind == _RuleKind.tool || !r.glob.contains(RegExp(r'[*?\[]'));
+}
+
+/// A call none of the command, path or MCP rules can judge: an outside lead's own tool.
+bool _ownTool(ActionCall call) =>
+    _command(call) == null && _editPaths(call).isEmpty && _readPath(call) == null && !isMcpTool(call);
 
 /// [path] relative to [dir] when it is inside it, else unchanged.
 String relativeTo(String path, String? dir) {
@@ -353,7 +381,7 @@ String? _readPath(ActionCall call) => switch (call.actionKind) {
   _ => null,
 };
 
-enum _RuleKind { command, edit, read, mcp }
+enum _RuleKind { command, edit, read, mcp, exact, tool }
 
 final class _Rule {
   const _Rule(this.kind, this.glob);
@@ -375,6 +403,10 @@ final class _Rule {
       'read' => _Rule(_RuleKind.read, glob),
       // A glob on an MCP tool's name: `Mcp(browser_take_screenshot)`, `Mcp(playwright_*)`.
       'mcp' => _Rule(_RuleKind.mcp, glob),
+      // One whole command, word for word (how a risky command is remembered).
+      'exact' => _Rule(_RuleKind.exact, glob),
+      // An outside lead's own tool by name (`Tool(WebFetch)`), for kinds the other rules can't judge.
+      'tool' => _Rule(_RuleKind.tool, glob),
       _ => null,
     };
   }
@@ -1017,7 +1049,8 @@ String? rememberPattern(ActionCall call, {String? workingDir}) {
 /// remembered (dangerous, unparsed, `$(…)`).
 List<String>? rememberPatterns(ActionCall call, {String? workingDir}) {
   if (_command(call) case final command?) {
-    if (dangerReason(command) != null) return null;
+    // A risky command is remembered word for word.
+    if (dangerReason(command) != null) return ['Exact(${_collapse(command)})'];
     final segments = shellSegments(command);
     if (segments == null || segments.isEmpty) return null;
     final out = <String>[];
@@ -1069,11 +1102,22 @@ String? _segmentPattern(List<String> w) {
 
 String? _singlePattern(ActionCall call, {String? workingDir}) {
   if (_editPath(call) case final path?) {
-    if (path.isEmpty || editDangerReason(path, workingDir: workingDir) != null) return null;
+    if (path.isEmpty) return null;
+    final danger = editDangerReason(path, workingDir: workingDir);
+    // Outside the project: the file's folder, by its absolute path (it covers everything in it).
+    if (danger == outsideProject) {
+      if (!path.startsWith('/') || path.split('/').contains('..') || path.contains(RegExp(r'[*?\[)]'))) return null;
+      final cut = path.lastIndexOf('/');
+      return cut <= 0 ? null : 'Edit(${path.substring(0, cut)})';
+    }
     final rel = relativeTo(path, workingDir);
     if (rel.startsWith('/') && workingDir != null && workingDir.isNotEmpty) return null;
     if (rel.contains('*') || rel.contains('?') || rel.contains(')')) return null;
+    // A risky file (.env, .git, the agent's settings) is remembered alone; other edits cover the file.
     return 'Edit($rel)';
+  }
+  if (_ownTool(call) && call.toolName.isNotEmpty && !call.toolName.contains(RegExp(r'[*?)]'))) {
+    return 'Tool(${call.toolName})';
   }
   if (isMcpTool(call) && call.toolName.isNotEmpty) {
     if (call.toolName.contains('*') || call.toolName.contains('?') || call.toolName.contains(')')) return null;

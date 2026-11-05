@@ -577,7 +577,8 @@ final class ClaudeSession
   void _modeSaid(String id) {
     if (id.isEmpty || id == _modes.latest.current) return;
     final m = nativeModeOf(_modes.latest.modes, id);
-    if (m?.blocked != null) {
+    final hidden = claudeHiddenModes[id];
+    if (m?.blocked != null || hidden != null) {
       final back = _meta.permissionMode;
       _request({'subtype': 'set_permission_mode', 'mode': back});
       _emit(
@@ -585,7 +586,8 @@ final class ClaudeSession
           'kind': 'ConversationErrorEvent',
           'id': const Uuid().v4(),
           'source': 'environment',
-          'detail': 'Claude Code moved to ${m!.label}, which EveryAI doesn\'t offer; it was set back to $back.',
+          'detail':
+              'Claude Code moved to ${m?.label ?? hidden}, which EveryAI doesn\'t offer; it was set back to $back.',
         }),
       );
       return;

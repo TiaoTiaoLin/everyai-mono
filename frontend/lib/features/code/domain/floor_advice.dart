@@ -43,10 +43,14 @@ String floorAdviceSubject(ActionCall call) {
   final rest = policy.decide(call, mode, floor: false);
   if (rest.source == DecisionSource.rule) return (accept: false, reason: policyDenial([(call, rest)]));
   if (rest.source == DecisionSource.plan) return (accept: false, reason: AgentMode.planRefusal);
+  // The user allowed this exact action before: it isn't asked again.
+  if (rest.source == DecisionSource.allowRule) return (accept: true, reason: null);
   if (rest.verdict == Verdict.allow && !(advised?.contains(d.why) ?? false)) {
     advised?.add(d.why);
     return (accept: false, reason: floorAdvice(call, d.why));
   }
+  // Full auto never asks: after the advice, a floor hit is refused.
+  if (mode == AgentMode.fullAuto) return (accept: false, reason: policyDenial([(call, d)]));
   return null;
 }
 

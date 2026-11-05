@@ -216,7 +216,7 @@ final class HostMirror {
       rememberBy: controller.rememberBy(),
       perCall: controller.perCall,
       forks: _ref.read(codeSessionsProvider.notifier).byId(id)?.sharesApprovals ?? false,
-      flags: approvalFlags(controller.policy, state.transcript.pending, state.mode),
+      flags: approvalFlags(controller.policy, state.transcript.pending, controller.checkMode),
       reasons: controller.askReasons(),
     );
   }

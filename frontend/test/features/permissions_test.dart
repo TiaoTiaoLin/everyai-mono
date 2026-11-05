@@ -335,10 +335,45 @@ void main() {
       expect(rememberPattern(_sh('git -C sub status -s')), 'git -C sub status -s');
       expect(rememberPattern(_sh('npm test && npm run lint')), isNull);
       expect(rememberPattern(_sh('npm test > out.txt')), isNull);
-      expect(rememberPattern(_sh('git reset --hard')), isNull);
+      // Risky ones are kept word for word, the file itself, or the folder outside the project.
+      expect(rememberPattern(_sh('git reset --hard')), 'Exact(git reset --hard)');
       expect(rememberPattern(_sh('FOO=1 npm test')), isNull);
-      expect(rememberPattern(_edit('/etc/hosts'), workingDir: _dir), isNull);
-      expect(rememberPattern(_edit('$_dir/.env'), workingDir: _dir), isNull);
+      expect(rememberPattern(_edit('/etc/hosts'), workingDir: _dir), 'Edit(/etc)');
+      expect(rememberPattern(_edit('$_dir/.env'), workingDir: _dir), 'Edit(.env)');
+    });
+
+    test('asked once, settled for good: a saved risky action, outside folder or absolute rule is not asked again', () {
+      PermissionPolicy saved(List<String> allow) => PermissionPolicy(
+        workingDir: _dir,
+        rules: PermissionRules(allow: allow),
+      );
+      // A risky command: only its exact words.
+      final reset = saved([rememberPattern(_sh('git reset --hard'))!]);
+      expect(reset.decide(_sh('git reset --hard'), AgentMode.ask).verdict, Verdict.allow);
+      expect(reset.decide(_sh('git reset --hard HEAD~3'), AgentMode.ask).verdict, Verdict.ask);
+      // A folder outside the project: everything in it.
+      final etc = saved([rememberPattern(_edit('/etc/hosts'), workingDir: _dir)!]);
+      expect(etc.decide(_edit('/etc/nginx/site.conf'), AgentMode.ask).verdict, Verdict.allow);
+      expect(etc.decide(_edit('/var/x'), AgentMode.ask).verdict, Verdict.ask);
+      // A broad rule never settles a risky action.
+      expect(saved(['*']).decide(_sh('git reset --hard'), AgentMode.ask).verdict, Verdict.ask);
+      // The rules from the screenshot: absolute project paths, a folder without wildcards covering everything in it.
+      final abs = saved(['Edit($_dir)']);
+      expect(abs.decide(_edit('$_dir/lib/deep/a.dart'), AgentMode.ask).verdict, Verdict.allow);
+      expect(saved(['Edit($_dir/*)']).decide(_edit('$_dir/a.dart'), AgentMode.ask).verdict, Verdict.allow);
+      expect(saved(['Edit($_dir/)']).decide(_edit('$_dir/lib/a.dart'), AgentMode.ask).verdict, Verdict.allow);
+      // Full auto never asks, outside the project included.
+      expect(
+        const PermissionPolicy(workingDir: _dir).decide(_edit('/etc/hosts'), AgentMode.fullAuto).verdict,
+        Verdict.allow,
+      );
+    });
+
+    test("an outside lead's own tool is remembered by name", () {
+      final call = _call({'kind': 'ClaudeWebFetchAction', 'url': 'https://x'}, tool: 'WebFetch');
+      expect(rememberPattern(call), 'Tool(WebFetch)');
+      final p = PermissionPolicy(rules: PermissionRules(allow: [rememberPattern(call)!]));
+      expect(p.decide(call, AgentMode.ask).source, DecisionSource.allowRule);
     });
 
     test('a remembered pattern approves the same command next time', () {
@@ -408,10 +443,14 @@ void main() {
         expect(policy.decide(write(path), AgentMode.ask).verdict, Verdict.allow, reason: path);
         expect(policy.decide(write(path), AgentMode.fullAuto).verdict, Verdict.allow, reason: path);
       }
-      // Without the temp folders, /tmp is outside the project.
+      // Without the temp folders, /tmp is outside the project: Ask asks, Full auto never does.
+      expect(
+        const PermissionPolicy(workingDir: _dir).decide(write('/tmp/out.json'), AgentMode.ask).verdict,
+        Verdict.ask,
+      );
       expect(
         const PermissionPolicy(workingDir: _dir).decide(write('/tmp/out.json'), AgentMode.fullAuto).verdict,
-        Verdict.ask,
+        Verdict.allow,
       );
     });
 
@@ -564,7 +603,7 @@ void main() {
     test('allow similar remembers each part of a chain', () {
       expect(rememberPatterns(_sh('cd app && npm run build | tail -5')), ['cd *', 'npm run build *', 'tail *']);
       expect(rememberPattern(_sh('cd app && npm test')), isNull, reason: 'one rule only for a simple command');
-      expect(rememberPatterns(_sh('rm -rf / && ls')), isNull, reason: 'dangerous: approved once only');
+      expect(rememberPatterns(_sh('rm -rf / && ls')), ['Exact(rm -rf / && ls)'], reason: 'risky: kept word for word');
     });
 
     test('allow all similar covers the kind, and the floor and risky actions still ask', () {

@@ -32,24 +32,28 @@ void main() {
     final mcp = _call({'kind': 'MCPToolAction'}, tool: 'browser_click');
     expect(_why(mcp, AgentMode.autoEdit), startsWith('MCP tools ask unless the session is in Full auto'));
     expect(_why(mcp, AgentMode.fullAuto), isEmpty);
-    expect(_why(_sh('rm -rf build'), AgentMode.autoEdit), endsWith('so it asks in every mode but Full auto.'));
     expect(
-      _why(_write('/etc/hosts'), AgentMode.fullAuto),
-      'Edits outside the project ask in every mode, Full auto included.',
+      _why(_sh('rm -rf build'), AgentMode.autoEdit),
+      endsWith('so it asks once in every mode but Full auto; Allow keeps it.'),
+    );
+    expect(_why(_write('/etc/hosts'), AgentMode.fullAuto), isEmpty, reason: 'Full auto never asks');
+    expect(
+      _why(_write('/etc/hosts'), AgentMode.ask),
+      'Edits outside the project ask once in every mode but Full auto; Allow keeps the folder.',
     );
     expect(
       _why(_write('$_dir/.env'), AgentMode.ask),
-      'This edits an environment file, which may hold secrets, so it asks in every mode but Full auto.',
+      'This edits an environment file, which may hold secrets, so it asks once in every mode but Full auto; Allow keeps it.',
     );
     // On a card only for an outside lead, after the floor advice.
     expect(_why(_sh('rm -rf /'), AgentMode.fullAuto), 'This ${floorReason('rm -rf /')}, which is on the safety floor.');
   });
 
-  test("an outside harness's own tools say why they always ask", () {
+  test("an outside harness's own tools say why they ask", () {
     final own = _call({'kind': 'WebSearchAction'}, tool: 'WebSearch');
     expect(
       _why(own, AgentMode.fullAuto, outsideKind: 'Claude Code'),
-      "Claude Code's own WebSearch tool can't be checked by EveryAI's rules, so it always asks.",
+      "Claude Code's own WebSearch tool can't be checked by EveryAI's rules, so it asks once (Allow keeps it) unless the session is in Full auto.",
     );
   });
 

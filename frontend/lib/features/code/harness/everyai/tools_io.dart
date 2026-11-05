@@ -532,7 +532,10 @@ final class ToolRunner {
 
   /// Set for a research job: its sandbox (see [SessionSpec.researchSites]).
   final List<String>? researchSites;
-  bool get research => researchSites != null;
+  bool get research => researchSites != null && !bypass;
+
+  /// The session runs in Bypass permissions: no EveryAI refusals (the research sandbox, secrets in URLs or queries).
+  bool bypass = false;
 
   /// Stops secrets leaving in fetched URLs and search queries.
   final Scrubber scrubber;
@@ -1082,7 +1085,7 @@ final class ToolRunner {
     if (url == null || !(url.isScheme('http') || url.isScheme('https'))) {
       return const ToolOutput('Error: give an http(s) URL.', isError: true);
     }
-    if (scrubber.leak(raw) case final what?) {
+    if ((bypass ? null : scrubber.leak(raw)) case final what?) {
       return ToolOutput('Error: refused: the URL contains $what. Never put secrets in URLs.', isError: true);
     }
     final sites = researchSites;
@@ -1113,7 +1116,7 @@ final class ToolRunner {
   Future<ToolOutput> _webSearch(Map<String, Object?> args) async {
     final query = (args['query'] as String? ?? '').trim();
     if (query.isEmpty) return const ToolOutput('Error: query is empty.', isError: true);
-    if (scrubber.leak(query) case final what?) {
+    if ((bypass ? null : scrubber.leak(query)) case final what?) {
       return ToolOutput('Error: refused: the query contains $what. Never put secrets in searches.', isError: true);
     }
     final sites = researchSites;

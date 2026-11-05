@@ -263,7 +263,7 @@ void main() {
     return p;
   }
 
-  test('Full auto: an outside floor hit gets advice, then the user decides', () async {
+  test('Full auto: an outside floor hit gets advice, then is refused (Full auto never asks)', () async {
     // Every outside driver with approvals answers per call.
     session = _PerCallSession();
     final controller = await open(AgentMode.fullAuto);
@@ -272,16 +272,12 @@ void main() {
     expect(a.accept, isFalse);
     expect(a.reason, startsWith(floorAdviceLead));
     expect(a.reason, contains(floorReason('rm -rf ~')!));
-    // The model asks the user and runs it again: now it waits on the card, with the warning.
+    // Run again: no card in Full auto, it is refused.
     session.forgetAnswers();
     session.add(resultEvent(id: 'r1', actionId: 'a1', toolName: 'Bash', text: a.reason!));
     session.ask('Bash', 'TerminalAction', {'command': 'rm -rf ~'});
-    final waiting = await pending();
-    expect(session.answers, isEmpty);
-    final state = container.read(codeSessionProvider('s1'));
-    expect(approvalFlags(controller.policy, waiting, state.mode), {waiting.single.id: floorReason('rm -rf ~')});
-    await controller.approve(ApprovalScope.once, [waiting.single.id]);
-    expect((await answered()).accept, isTrue);
+    expect((await answered()).accept, isFalse);
+    expect(controller.policy, isNotNull);
   });
 
   test('Ask: an outside floor hit waits on the card with a warning', () async {
@@ -342,8 +338,14 @@ void main() {
     expect(a.reason, contains('git push *'));
   });
 
-  test('a tool of the driver\'s own is never approved on its own, even in Full auto', () async {
+  test('a tool of the driver\'s own runs in Full auto, and asks in Ask until Allow keeps it', () async {
     await open(AgentMode.fullAuto);
+    session.ask('Task', 'ClaudeTaskAction', {'prompt': 'look around'});
+    expect((await answered()).accept, isTrue);
+  });
+
+  test('a tool of the driver\'s own asks in Ask', () async {
+    await open(AgentMode.ask);
     session.ask('Task', 'ClaudeTaskAction', {'prompt': 'look around'});
     await _when(
       container,

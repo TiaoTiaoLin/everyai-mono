@@ -676,7 +676,7 @@ void main() {
     expect(status.stdout, isEmpty);
   });
 
-  test('Full auto still asks before editing outside the project', () {
+  test('Full auto never asks, edits outside the project included', () {
     const policy = PermissionPolicy(workingDir: '/work');
     ActionCall edit(String path) => HarnessEvent.decode({
       'kind': 'ActionEvent',
@@ -685,7 +685,8 @@ void main() {
       'action': {'kind': 'FileEditorAction', 'command': 'create', 'path': path, 'file_text': 'x'},
     }) as ActionCall;
     expect(policy.decide(edit('/work/a.txt'), AgentMode.fullAuto).verdict, Verdict.allow);
-    expect(policy.decide(edit('/etc/hosts'), AgentMode.fullAuto).verdict, Verdict.ask);
+    expect(policy.decide(edit('/etc/hosts'), AgentMode.fullAuto).verdict, Verdict.allow);
+    expect(policy.decide(edit('/etc/hosts'), AgentMode.ask).verdict, Verdict.ask);
   });
 
   test('reading an image shows the picture to a vision model, after the tool results', () async {

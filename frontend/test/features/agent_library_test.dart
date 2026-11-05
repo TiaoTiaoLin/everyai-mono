@@ -186,6 +186,11 @@ void main() {
       expect(s.rolePrompt, contains('Look for bugs only.'));
     });
 
+    test('under Bypass a role keeps Bypass: every agent of the session runs without EveryAI checks', () {
+      final s = childSetup(a, parentMode: AgentMode.bypass, parentModel: 'm', parentEffort: 'low');
+      expect(s.mode, AgentMode.bypass);
+    });
+
     test('an agent never loosens the parent\'s permissions', () {
       final loose = _parse('---\ndescription: d\npermissions: full-auto\n---\nb');
       expect(childSetup(loose, parentMode: AgentMode.ask, parentModel: 'm').mode, AgentMode.ask);

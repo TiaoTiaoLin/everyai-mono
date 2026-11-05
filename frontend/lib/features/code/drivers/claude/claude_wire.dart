@@ -49,9 +49,10 @@ String permissionModeFor(AgentMode mode) => switch (mode) {
 
 /// Claude Code's own permission modes for the picker, each under the app's
 /// policy for it (our hook still decides every call). `auto` only when the
-/// session's model supports it ([claudeAutoMode]); `bypassPermissions` is
-/// listed greyed, never offered; `dontAsk` and `manual` are left out (our
-/// hook's answers would undo `dontAsk`).
+/// session's model supports it ([claudeAutoMode]); `bypassPermissions` is not
+/// listed (see [claudeHiddenModes]; EveryAI's own "Bypass EveryAI checks" sits
+/// under the list); `dontAsk` and `manual` are left out (our hook's answers
+/// would undo `dontAsk`).
 List<NativeMode> claudeModes({required bool autoMode}) => [
   const NativeMode(
     id: 'default',
@@ -78,13 +79,11 @@ List<NativeMode> claudeModes({required bool autoMode}) => [
       description: "Works without asking; EveryAI's safety check still runs before each call",
       policy: AgentMode.fullAuto,
     ),
-  const NativeMode(
-    id: 'bypassPermissions',
-    label: 'Bypass permissions',
-    policy: AgentMode.fullAuto,
-    blocked: 'Not offered: it would skip the check EveryAI runs before each call.',
-  ),
 ];
+
+/// Claude Code modes the picker doesn't show and EveryAI never switches to, by id → label. If Claude reports one
+/// anyway, the session is set back.
+const claudeHiddenModes = {'bypassPermissions': 'Bypass permissions'};
 
 /// Whether [model] (the session's, as the app names it) supports Claude's
 /// `auto` mode, from the `initialize` reply's `models` (`supportsAutoMode`).

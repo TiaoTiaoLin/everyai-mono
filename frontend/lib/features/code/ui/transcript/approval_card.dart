@@ -103,8 +103,8 @@ class _ApprovalCardState extends State<ApprovalCard> {
     if (widget.onAllowCall != null && widget.onDenyCall != null && calls.length > 1) return _stacked(theme, edits);
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.enter, meta: true): () => widget.onAllow(ApprovalScope.once),
-        const SingleActivator(LogicalKeyboardKey.enter, control: true): () => widget.onAllow(ApprovalScope.once),
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true): () => widget.onAllow(ApprovalScope.always),
+        const SingleActivator(LogicalKeyboardKey.enter, control: true): () => widget.onAllow(ApprovalScope.always),
         const SingleActivator(LogicalKeyboardKey.escape): () => setState(() => _denying = true),
       },
       child: Focus(
@@ -175,12 +175,12 @@ class _ApprovalCardState extends State<ApprovalCard> {
                       emphasis: ButtonEmphasis.secondary,
                       onPressed: () => widget.onMode(AgentMode.autoEdit),
                     ),
+                  AdaptiveButton(
+                    label: 'Just this once',
+                    emphasis: ButtonEmphasis.secondary,
+                    onPressed: () => widget.onAllow(ApprovalScope.once),
+                  ),
                   if (remember != null) ...[
-                    AdaptiveButton(
-                      label: 'Always allow',
-                      emphasis: ButtonEmphasis.secondary,
-                      onPressed: () => widget.onAllow(ApprovalScope.always),
-                    ),
                     AdaptiveButton(
                       label: widget.forks
                           ? 'Allow similar for all forks of this session'
@@ -195,9 +195,10 @@ class _ApprovalCardState extends State<ApprovalCard> {
                       emphasis: ButtonEmphasis.secondary,
                       onPressed: () => widget.onAllow(ApprovalScope.sessionAll),
                     ),
+                  // Asked once, kept for good: Allow saves the rule for this project.
                   AdaptiveButton(
-                    label: 'Allow once  ${Host.enterKeys(command: true)}',
-                    onPressed: () => widget.onAllow(ApprovalScope.once),
+                    label: 'Allow  ${Host.enterKeys(command: true)}',
+                    onPressed: () => widget.onAllow(ApprovalScope.always),
                   ),
                 ],
               ),
@@ -205,7 +206,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                 Padding(
                   padding: const EdgeInsets.only(top: 6),
                   child: Text(
-                    'Similar and always cover: ${remember.join(', ')}',
+                    'Allow saves for this project: ${remember.join(', ')}',
                     textAlign: TextAlign.end,
                     style: theme.type.caption.tint(theme.textMuted),
                   ),
@@ -237,8 +238,8 @@ class _ApprovalCardState extends State<ApprovalCard> {
     final open = calls.where((c) => !widget.decided.containsKey(c.id)).length;
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.enter, meta: true): () => widget.onAllow(ApprovalScope.once),
-        const SingleActivator(LogicalKeyboardKey.enter, control: true): () => widget.onAllow(ApprovalScope.once),
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true): () => widget.onAllow(ApprovalScope.always),
+        const SingleActivator(LogicalKeyboardKey.enter, control: true): () => widget.onAllow(ApprovalScope.always),
         const SingleActivator(LogicalKeyboardKey.escape): () => setState(() => _denying = true),
       },
       child: Focus(
@@ -328,7 +329,7 @@ class _ApprovalCardState extends State<ApprovalCard> {
                     ),
                   AdaptiveButton(
                     label: 'Allow all  ${Host.enterKeys(command: true)}',
-                    onPressed: () => widget.onAllow(ApprovalScope.once),
+                    onPressed: () => widget.onAllow(ApprovalScope.always),
                   ),
                 ],
               ),
@@ -399,23 +400,21 @@ class _CallRow extends StatelessWidget {
                   )
                 else ...[
                   AdaptiveButton(label: 'Deny', emphasis: ButtonEmphasis.secondary, onPressed: onDeny),
-                  if (rule != null || broadPattern(call) != null)
-                    AdaptiveMenuButton(
-                      tooltip: rule == null ? 'Allow more' : 'Remember: $rule',
-                      actions: [
-                        if (rule != null) ...[
-                          MenuAction(label: sessionLabel, onSelected: () => onAllow(ApprovalScope.session)),
-                          MenuAction(label: 'Always allow', onSelected: () => onAllow(ApprovalScope.always)),
-                        ],
-                        if (broadPattern(call) case final b?)
-                          MenuAction(
-                            label: 'Allow ${broadLabel(b)} for this session',
-                            onSelected: () => onAllow(ApprovalScope.sessionAll),
-                          ),
-                      ],
-                      child: const MenuTrigger('More'),
-                    ),
-                  AdaptiveButton(label: 'Allow', onPressed: () => onAllow(ApprovalScope.once)),
+                  AdaptiveMenuButton(
+                    tooltip: rule == null ? 'Allow more' : 'Allow saves: $rule',
+                    actions: [
+                      MenuAction(label: 'Just this once', onSelected: () => onAllow(ApprovalScope.once)),
+                      if (rule != null)
+                        MenuAction(label: sessionLabel, onSelected: () => onAllow(ApprovalScope.session)),
+                      if (broadPattern(call) case final b?)
+                        MenuAction(
+                          label: 'Allow ${broadLabel(b)} for this session',
+                          onSelected: () => onAllow(ApprovalScope.sessionAll),
+                        ),
+                    ],
+                    child: const MenuTrigger('More'),
+                  ),
+                  AdaptiveButton(label: 'Allow', onPressed: () => onAllow(ApprovalScope.always)),
                 ],
               ],
             ),

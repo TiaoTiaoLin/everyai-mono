@@ -1208,7 +1208,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         !isDemoPath(parent.workingDir) && (agent == null ? role == null && asked == null : setup.model == parent.model);
     // A researcher is sandboxed: the research sites only, no shell, no secrets.
     final research = agent?.name == 'researcher' || task.agent == 'researcher';
-    final sites = research ? ref.read(codeSettingsProvider).researchSites : null;
+    // Under Bypass a researcher has no sandbox either.
+    final sites = research && mode != AgentMode.bypass ? ref.read(codeSettingsProvider).researchSites : null;
     // A fork gets its own worktree unless the user's setting or the call says to share the folder.
     final isolate =
         fork &&
@@ -1947,7 +1948,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
           goal: state.goal,
           refusal: (command) => hostRunRefusal(
             policy: policy,
-            mode: state.mode,
+            mode: checkMode,
             tool: name,
             args: call.args,
             command: command,
@@ -2337,7 +2338,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     return approvalReasons(
       policy,
       calls ?? state.transcript.pending,
-      state.mode,
+      checkMode,
       outsideKind: outside == null ? null : (c) => autoDecidable(c) ? null : outside,
     );
   }
@@ -2432,7 +2433,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         ..refreshSoon(delay: const Duration(milliseconds: 300))
         ..refreshSoon(delay: const Duration(seconds: 4), force: true);
     }
-    if (looped) _raiseDoomLoop(_doom.looped!);
+    if (looped && !checksBypassed) _raiseDoomLoop(_doom.looped!);
     _autoRespond(transcript);
     _syncSubagents();
     _syncForkTools();
@@ -2583,7 +2584,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(session?.respond(accept: false, reason: reason).then((_) => session.resume()));
       return;
     }
-    final verdict = _gated(waiting, policy.decideAll(waiting, state.mode));
+    final verdict = checksBypassed && _driver.info.id != everyaiHarnessName
+        ? _bypassVerdict(waiting)
+        : _gated(waiting, policy.decideAll(waiting, checkMode));
     if (verdict == null) return;
     // Over budget: nothing is approved on its own; the run stops instead.
     if (verdict.accept && !_withinBudget()) {
@@ -2613,11 +2616,24 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     return registry.resolve(name) ?? registry.resolve(everyaiHarnessName)!;
   }
 
+  /// Under Bypass on an outside lead: EveryAI's own host tools run; everything else the lead asks about goes to the
+  /// user as the lead asked it (its own permissions), with nothing decided or refused by EveryAI. Null when not
+  /// bypassed or on the EveryAI harness (Bypass allows everything there through [PermissionPolicy.decide]).
+  ({bool accept, String? reason})? _bypassVerdict(List<ActionCall> calls) {
+    if (!checksBypassed || _driver.info.id == everyaiHarnessName) return null;
+    return calls.every((c) => hostToolOf(c) != null) ? (accept: true, reason: null) : null;
+  }
+
   /// [verdict], except that an outside driver's own tools (kinds the rules
   /// can't judge) are never approved without the user, even in Full auto.
+  /// Full auto approves them too (it never asks), and so does a rule the user saved for that tool (`Tool(…)`).
   ({bool accept, String? reason})? _gated(List<ActionCall> calls, ({bool accept, String? reason})? verdict) {
     if (verdict == null || !verdict.accept || _driver.info.id == everyaiHarnessName) return verdict;
-    return calls.every(autoDecidable) ? verdict : null;
+    if (checkMode == AgentMode.fullAuto) return verdict;
+    final p = policy;
+    return calls.every((c) => autoDecidable(c) || p.decide(c, checkMode).source == DecisionSource.allowRule)
+        ? verdict
+        : null;
   }
 
   /// Answers given to the calls waiting now (see [CodeSessionState.decided]).
@@ -2654,11 +2670,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       if (_isSubagent && isHeldTool(call)) continue;
       final verdict = switch (_mustWait([call], t)) {
         final reason? => (accept: false, reason: reason),
+        null when checksBypassed && _driver.info.id != everyaiHarnessName => _bypassVerdict([call]),
         null => _gated(
           [call],
           _driver.info.id == everyaiHarnessName
-              ? policy.decideAll([call], state.mode)
-              : outsideVerdict(policy, call, state.mode, advised: _floorAdvised),
+              ? policy.decideAll([call], checkMode)
+              : outsideVerdict(policy, call, checkMode, advised: _floorAdvised),
         ),
       };
       if (verdict == null) continue;
@@ -2676,6 +2693,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Why the [waiting] actions are refused before the mode decides: one
   /// changes a file a running subagent works on.
   String? _mustWait(List<ActionCall> waiting, Transcript t) {
+    if (checksBypassed) return null;
     final dir = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
     if (dir == null) return null;
     final owned = _subagentFiles();
@@ -4111,7 +4129,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     try {
       final child = await ref
           .read(codeSessionsProvider.notifier)
-          .startSubagent(parent: parent, call: call, mode: subagentMode(state.mode), onParentModel: onParentModel);
+          .startSubagent(parent: parent, call: call, mode: subagentMode(checkMode), onParentModel: onParentModel);
       if (!ref.mounted || _abandoned.remove(callId)) {
         unawaited(ref.read(_liveProvider)[child.id]?.interrupt());
         return;
@@ -4720,7 +4738,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       runId: runId,
       name: name,
       bridge: bridge,
-      launcher: _WorkflowLauncher(ref, sessionId, 'wf-$runId', () => state.mode, _workflowChildWaiting),
+      launcher: _WorkflowLauncher(ref, sessionId, 'wf-$runId', () => checkMode, _workflowChildWaiting),
       journal: journal,
       onProgress: (run) {
         if (ref.mounted) runs.put(run);
@@ -4940,7 +4958,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         parent: info,
         title: title,
         brief: hostForkBrief(SubagentTask(description: title, prompt: task)),
-        mode: subagentMode(state.mode),
+        mode: subagentMode(checkMode),
         callId: callId,
         harness: harness,
         model: model,
@@ -5199,6 +5217,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (scope != ApprovalScope.once) {
       final patterns = scope == ApprovalScope.sessionAll
           ? broadPatterns(targets)
+          : scope == ApprovalScope.always
+          // Allow keeps what can be kept, call by call: one call without a rule doesn't stop the others' rules.
+          ? {for (final c in targets) ...?rememberPatterns(c, workingDir: policy.workingDir)}.toList()
           : rememberable(targets) ?? const <String>[];
       if (scope == ApprovalScope.session || scope == ApprovalScope.sessionAll) {
         _allowForSession(patterns);
@@ -5292,6 +5313,28 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final sessions = ref.read(codeSessionsProvider.notifier);
     if (sessions.byId(sessionId) case final info?) sessions.update(info.copyWith(mode: mode));
     await _session?.setMode(mode, holdClientTools: _holds);
+    _answered = '';
+    _autoRespond(state.transcript);
+  }
+
+  /// "Bypass EveryAI checks" is on for this session, or for the session that started it.
+  @override
+  bool get checksBypassed =>
+      state.mode == AgentMode.bypass ||
+      (ref.read(codeSessionsProvider.notifier).byId(sessionId)?.bypassChecks ?? false) ||
+      (_parentController?.checksBypassed ?? false);
+
+  /// The mode EveryAI's checks decide by: [AgentMode.bypass] while the checks are bypassed, else the session's.
+  /// Only for EveryAI's own decisions; the lead keeps its mode.
+  @override
+  AgentMode get checkMode => checksBypassed ? AgentMode.bypass : state.mode;
+
+  /// Turns "Bypass EveryAI checks" on or off; a card already waiting is decided again.
+  void setBypassChecks(bool on) {
+    final sessions = ref.read(codeSessionsProvider.notifier);
+    final info = sessions.byId(sessionId);
+    if (info == null || info.bypassChecks == on) return;
+    sessions.update(info.copyWith(bypassChecks: on));
     _answered = '';
     _autoRespond(state.transcript);
   }

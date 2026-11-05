@@ -171,7 +171,8 @@ void main() {
       expect(policy.decide(twoFiles, AgentMode.ask).verdict, Verdict.ask);
       expect(policy.decide(twoFiles, AgentMode.autoEdit).verdict, Verdict.allow);
       final outside = call(patch(['*** Add File: /etc/x.conf', '+a']));
-      expect(policy.decide(outside, AgentMode.fullAuto).verdict, Verdict.ask);
+      expect(policy.decide(outside, AgentMode.ask).verdict, Verdict.ask);
+      expect(policy.decide(outside, AgentMode.fullAuto).verdict, Verdict.allow, reason: 'Full auto never asks');
     });
 
     test('an Edit rule allows a patch only when it covers every file', () {

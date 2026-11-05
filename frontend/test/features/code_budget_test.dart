@@ -56,6 +56,8 @@ void main() {
       expect(_info('c', parent: 'a', ownTag: true).billingTag, 'c');
       final back = CodeSessionInfo.fromJson(_info('c', parent: 'a', ownTag: true).toJson());
       expect(back.ownTag, isTrue);
+      expect(back.bypassChecks, isFalse);
+      expect(CodeSessionInfo.fromJson(back.copyWith(bypassChecks: true).toJson()).bypassChecks, isTrue);
       // Saved before the flag: an Ultra call id still marks it.
       final legacy = {..._info('d', parent: 'a').toJson(), 'parent_call_id': 'ultra-r1-a.s-1'};
       expect(CodeSessionInfo.fromJson(legacy).billingTag, 'd');

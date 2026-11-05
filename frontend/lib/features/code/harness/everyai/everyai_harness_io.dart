@@ -147,7 +147,7 @@ final class EveryAISession
       pathMap: _spec.pathMap,
       researchSites: _spec.researchSites,
       browser: _browser,
-    );
+    )..bypass = _spec.mode == AgentMode.bypass;
   }
 
   @override
@@ -801,6 +801,7 @@ final class EveryAISession
   @override
   Future<void> setMode(AgentMode mode, {bool holdClientTools = false}) async {
     _spec = _withSpec(mode: mode);
+    _tools.bypass = mode == AgentMode.bypass;
     _writeSpec();
   }
 
@@ -824,7 +825,7 @@ final class EveryAISession
       pathMap: _spec.pathMap,
       researchSites: _spec.researchSites,
       browser: _browser,
-    );
+    )..bypass = _spec.mode == AgentMode.bypass;
     _writeSpec();
   }
 
@@ -1288,7 +1289,7 @@ final class EveryAISession
         _result(call, actionId, ToolOutput(early, isError: true));
         continue;
       }
-      if (args != null && _repeats(call) >= doomRepeats) {
+      if (args != null && _spec.mode != AgentMode.bypass && _repeats(call) >= doomRepeats) {
         _result(
           call,
           actionId,
