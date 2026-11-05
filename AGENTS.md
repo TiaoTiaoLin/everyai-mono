@@ -666,6 +666,13 @@ owner's local notes (gitignored); the task board is the GitHub Project.
     Headlines type themselves out (`TypewriterText`). Gate: `onboardingAcceptedProvider` in the shell.
   - Unsigned macOS Release: `keychain-access-groups` removed from `Release.entitlements` (needs a team); add it back
     for the signed release. macOS shows the version as 0.1.0 (Flutter drops the pre-release part there).
+- **Signed releases (2026-11-04, commit "Signed releases…").** macOS: `frontend/macos/scripts/release_macos.sh`
+  (Developer ID re-sign inside out, Deno with JIT entitlements, embedded Developer ID profile for
+  `keychain-access-groups` via `Runner/DeveloperID.entitlements`, DMG, notarytool, staple, spctl); `asc.py` renews the
+  profile (expires 2027-12-05). Windows: `msix_config` (Store identity `AliDirect.EveryAI`, 9PHCKCV3J9S9; the Store
+  signs). `.github/workflows/release.yml` on `v*`: DMG + Store MSIX as a draft Partner Center submission + draft GitHub
+  Release; secrets are set on the repo. Credentials and IDs: `TODO-deployment.md` → Credentials (local copies in
+  `~/.applesigning/`). Verified: notarization accepted, stapled, the app from the DMG launches.
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).

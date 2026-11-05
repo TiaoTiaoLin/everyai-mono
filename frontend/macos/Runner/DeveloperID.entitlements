@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Signed Developer ID release (macos/scripts/release_macos.sh): Release.entitlements plus the keychain group.
+	     keychain-access-groups is a restricted entitlement: it needs the embedded Developer ID provisioning profile
+	     ("EveryAI Developer ID", App ID 2MGLZ5685D.dev.alidirect.everyai), or the app won't launch.
+	     Release builds use the data-protection keychain (token_store.dart, gateway_key.dart). -->
+	<key>com.apple.application-identifier</key>
+	<string>2MGLZ5685D.dev.alidirect.everyai</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>2MGLZ5685D</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>2MGLZ5685D.dev.alidirect.everyai</string>
+	</array>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

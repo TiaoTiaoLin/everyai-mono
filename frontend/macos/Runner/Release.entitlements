@@ -9,8 +9,7 @@
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
-	<!-- Unsigned dev builds (0.1.0-dev-nonsigned): no keychain-access-groups, which needs a team.
-	     Add <key>keychain-access-groups</key> with $(AppIdentifierPrefix)dev.alidirect.everyai back for the signed
-	     release (TODO.md: macOS signing). Keys still go to the login keychain, as in Debug. -->
+	<!-- Unsigned/ad-hoc builds (scripts/launch.sh). The signed release re-signs with DeveloperID.entitlements,
+	     which adds keychain-access-groups (that needs the team's provisioning profile). -->
 </dict>
 </plist>

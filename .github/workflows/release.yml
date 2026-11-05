@@ -1,0 +1,128 @@
+# Signed release builds. Push a v* tag (or run by hand) →
+#   macOS: Developer ID signed, notarized, stapled DMG (frontend/macos/scripts/release_macos.sh)
+#   Windows: the Store MSIX (the Store re-signs it; upload to Partner Center)
+# Both land in a draft GitHub Release for the tag. Linux goes through Flathub (its own repo).
+#
+# Secrets (gh secret set …): MACOS_CERT_P12 (base64 .p12 with the Developer ID key), MACOS_CERT_PASSWORD,
+# MACOS_PROVISION_PROFILE (base64 Developer ID profile), ASC_KEY_P8 (base64 AuthKey_*.p8), ASC_KEY_ID, ASC_ISSUER_ID;
+# MSSTORE_TENANT_ID, MSSTORE_CLIENT_ID, MSSTORE_CLIENT_SECRET, MSSTORE_SELLER_ID, MSSTORE_PRODUCT_ID.
+name: Release (signed)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      api:
+        description: Backend the builds talk to
+        default: https://everyai.136-108-68-64.sslip.io:8443
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: 3.47.9
+  EVERYAI_API: ${{ inputs.api || 'https://everyai.136-108-68-64.sslip.io:8443' }}
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Signing keychain
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_PROVISION_PROFILE: ${{ secrets.MACOS_PROVISION_PROFILE }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"; KC_PASS="$(openssl rand -hex 16)"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 7200 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "$MACOS_PROVISION_PROFILE" | base64 --decode > "$RUNNER_TEMP/everyai.provisionprofile"
+          echo "$ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+      - name: Build, sign, notarize
+        env:
+          PROVISION_PROFILE: ${{ runner.temp }}/everyai.provisionprofile
+          ASC_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: frontend/macos/scripts/release_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: everyai-macos
+          path: frontend/build/dist/*
+          if-no-files-found: error
+      - name: Clean up
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/everyai.provisionprofile"
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: frontend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Defines
+        run: |
+          printf '{"API_BASE_URL":"%s","DEV_SKIP_AUTH":true,"SSE_ENABLED":true,"GOOGLE_SERVER_CLIENT_ID":""}\n' \
+            "$EVERYAI_API" > "$RUNNER_TEMP/defines.json"
+      - run: flutter pub get
+      - run: flutter build windows --release --dart-define-from-file="$RUNNER_TEMP/defines.json"
+      - name: Store MSIX
+        run: |
+          # The Store wants a.b.c.0: take a.b.c from pubspec, build number from the run.
+          V="$(grep -m1 '^version:' pubspec.yaml | sed 's/version: *//; s/[-+].*//')"
+          dart run msix:create --store --build-windows false --version "$V.0" \
+            --output-path build/dist --output-name "EveryAI-$V"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: everyai-windows-store
+          path: frontend/build/dist/*.msix
+          if-no-files-found: error
+      # Uploads the MSIX into a draft submission (--noCommit): review and submit it in Partner Center. The first
+      # submission (listing, age rating, privacy policy) has to be filled in there by hand anyway.
+      - uses: microsoft/setup-msstore-cli@v1
+      - name: Upload to Partner Center (draft)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          msstore reconfigure --tenantId "${{ secrets.MSSTORE_TENANT_ID }}" --sellerId "${{ secrets.MSSTORE_SELLER_ID }}" \
+            --clientId "${{ secrets.MSSTORE_CLIENT_ID }}" --clientSecret "${{ secrets.MSSTORE_CLIENT_SECRET }}"
+          msstore publish "$(ls build/dist/*.msix | head -1)" --appId "${{ secrets.MSSTORE_PRODUCT_ID }}" --noCommit
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "EveryAI $GITHUB_REF_NAME" \
+            --notes "macOS: signed and notarized DMG. Windows: install from the Microsoft Store (the .msix here is the Store upload)." \
+            dist/*.dmg dist/*.sha256
