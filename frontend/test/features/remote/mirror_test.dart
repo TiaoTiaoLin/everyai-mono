@@ -390,6 +390,21 @@ void main() {
     void act(int channel, String kind, [Map<String, Object?> args = const {}]) =>
         mirror.receive(channel, {'t': Tunnel.act, 'id': ++nextId, 's': info.id, 'kind': kind, 'args': args});
 
+    test('the followed set tracks open, close and a dropped channel (the sidebar\'s devices icon)', () async {
+      Set<String> followed() => container.read(remoteFollowedProvider);
+      mirror
+        ..receive(1, {'t': Tunnel.open, 's': info.id})
+        ..receive(2, {'t': Tunnel.open, 's': info.id});
+      await Future<void>.delayed(Duration.zero);
+      expect(followed(), {info.id});
+      mirror.receive(1, {'t': Tunnel.close, 's': info.id});
+      await Future<void>.delayed(Duration.zero);
+      expect(followed(), {info.id});
+      mirror.channelClosed(2);
+      await Future<void>.delayed(Duration.zero);
+      expect(followed(), isEmpty);
+    });
+
     test('devices list the sessions, follow one and drive it on the host', () async {
       mirror.receive(1, {'t': Tunnel.list});
       final listed = devices[1]!.lists.single;

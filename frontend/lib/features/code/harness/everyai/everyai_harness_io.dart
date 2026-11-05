@@ -107,7 +107,14 @@ const maxStepsPerRun = 400;
 /// One conversation: its history (OpenAI-style messages), its events, and the
 /// loop that calls the model and runs tools.
 final class EveryAISession
-    implements HarnessSession, AsksAside, HasBackgroundShells, CompactsInPlace, RetriesModelCalls, PerCallApprovals {
+    implements
+        HarnessSession,
+        AsksAside,
+        HasBackgroundShells,
+        CompactsInPlace,
+        RetriesModelCalls,
+        PerCallApprovals,
+        HasContextParts {
   EveryAISession._(this.id, this._spec, this._dir, http.Client? client)
     : _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey, client: client),
       _shell = SessionShell(root: _spec.workingDir, sessionTag: _spec.sessionTag, scratchDir: '${_dir.path}/shell') {
@@ -493,21 +500,47 @@ final class EveryAISession
   Future<String> _systemPrompt() async {
     final spec = _spec;
     final suffix = spec.promptSuffix == null ? '' : forHeldClientTools(spec.promptSuffix!);
+    const prompt = ContextKind.systemPrompt;
     final parts = [
-      harnessRules,
-      ?familyRules(family),
-      ?spec.persona,
-      if (suffix.isNotEmpty) suffix,
-      if (spec.subagent) subagentRules,
-      ?spec.rolePrompt,
-      if (spec.skills.isNotEmpty) _skillsBlock(spec.skills),
+      const ContextPart(prompt, harnessRules),
+      if (familyRules(family) case final rules?) ContextPart(prompt, rules),
+      if (spec.persona case final persona?) ContextPart(prompt, persona),
+      if (suffix.isNotEmpty) ContextPart(prompt, suffix),
+      if (spec.subagent) const ContextPart(prompt, subagentRules),
+      if (spec.rolePrompt case final role?) ContextPart(prompt, role),
+      if (spec.skills.isNotEmpty) ContextPart(ContextKind.skills, _skillsBlock(spec.skills)),
       if (_mcp.failures.isNotEmpty)
-        '<MCP>\nThese MCP servers could not start, so their tools are missing: '
-            '${_mcp.failures.entries.map((e) => '${e.key} (${e.value})').join('; ')}. Tell the user if the task needs them.\n</MCP>',
-      if (await projectNotesBlock(spec.workingDir) case final notes when notes.isNotEmpty) notes,
-      await environmentBlock(spec.workingDir),
+        ContextPart(
+          ContextKind.mcpInstructions,
+          '<MCP>\nThese MCP servers could not start, so their tools are missing: '
+          '${_mcp.failures.entries.map((e) => '${e.key} (${e.value})').join('; ')}. Tell the user if the task needs them.\n</MCP>',
+        ),
+      if (await projectNotesBlock(spec.workingDir) case final notes when notes.isNotEmpty)
+        ContextPart(ContextKind.memoryFiles, notes),
+      ContextPart(prompt, await environmentBlock(spec.workingDir)),
     ];
-    return parts.join('\n\n');
+    _promptParts = parts;
+    return parts.map((p) => p.text).join('\n\n');
+  }
+
+  /// The system message's parts as [_systemPrompt] last built them (empty for a reopened session).
+  List<ContextPart> _promptParts = const [];
+
+  @override
+  List<ContextPart> get contextParts {
+    final mcp = _mcp.names.toSet();
+    return [
+      if (_promptParts.isNotEmpty)
+        ..._promptParts
+      // Reopened: the message as it was sent, in one piece.
+      else if (_messages.firstOrNull case {'role': 'system', 'content': final String system})
+        ContextPart(ContextKind.systemPrompt, system),
+      for (final t in _toolSpecs)
+        if ((t['function'] as Map<String, Object?>?)?['name'] case final String name)
+          mcp.contains(name)
+              ? ContextPart(ContextKind.mcpTools, jsonEncode(t), name: _mcp.serverOf(name) ?? name)
+              : ContextPart(ContextKind.tools, jsonEncode(t), name: name),
+    ];
   }
 
   static String _skillsBlock(List<Map<String, Object?>> skills) {

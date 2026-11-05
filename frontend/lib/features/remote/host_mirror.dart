@@ -15,6 +15,16 @@ import '../code/domain/transcript.dart';
 import '../code/harness/events.dart';
 import 'domain/remote_protocol.dart';
 
+/// The sessions a paired device is following right now (the sidebar's devices icon).
+final remoteFollowedProvider = NotifierProvider<RemoteFollowed, Set<String>>(RemoteFollowed.new);
+
+final class RemoteFollowed extends Notifier<Set<String>> {
+  @override
+  Set<String> build() => const {};
+
+  void set(Set<String> ids) => state = ids;
+}
+
 /// Sends one message to the device on a channel; false when it isn't connected.
 typedef MirrorSend = bool Function(int channel, Map<String, Object?> message);
 
@@ -89,6 +99,7 @@ final class HostMirror {
         _open(channel, s);
       case Tunnel.close when s is String:
         _watches[channel]?.remove(s)?.close();
+        _publishFollowed();
       case Tunnel.act:
         unawaited(_act(channel, m));
     }
@@ -102,6 +113,7 @@ final class HostMirror {
       w.close();
     }
     if (_listeners.isEmpty) _unwatchList();
+    _publishFollowed();
   }
 
   void dispose() {
@@ -109,6 +121,14 @@ final class HostMirror {
       channelClosed(channel);
     }
     _unwatchList();
+  }
+
+  void _publishFollowed() {
+    final ids = {for (final w in _watches.values) ...w.keys};
+    // Disposing the host's provider closes channels too; that tear-down can't write to another provider.
+    Future.microtask(() {
+      if (_ref.mounted) _ref.read(remoteFollowedProvider.notifier).set(ids);
+    });
   }
 
   // ---------------------------------------------------------------- session list
@@ -179,6 +199,7 @@ final class HostMirror {
     w.sendLog(controller.mirrorEvents);
     w.tap = controller.mirrorTap.listen((e) => e == null ? w.sendLog(controller.mirrorEvents) : w.add(e));
     w.sendState(_state(id));
+    _publishFollowed();
   }
 
   Map<String, Object?> _state(String id) {

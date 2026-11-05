@@ -381,6 +381,58 @@ void main() {
     expect(session.steered, isEmpty);
   });
 
+  group('saving from Files', () {
+    String file() {
+      final f = File('${tmp.path}/a.txt')..writeAsStringSync('one\n');
+      return f.path;
+    }
+
+    test('writes when the agent is idle; a file changed on disk asks first', () async {
+      final controller = await open(AgentMode.ask);
+      final path = file();
+      expect((await controller.saveFile(path, 'two\n', expected: 'one\n')).kind, SaveKind.saved);
+      expect(File(path).readAsStringSync(), 'two\n');
+      // Opened when it said "one": someone wrote "two" since.
+      expect((await controller.saveFile(path, 'three\n', expected: 'one\n')).kind, SaveKind.changedOnDisk);
+      expect(File(path).readAsStringSync(), 'two\n');
+      expect((await controller.saveFile(path, 'three\n', expected: 'one\n', overwrite: true)).kind, SaveKind.saved);
+      expect(File(path).readAsStringSync(), 'three\n');
+    });
+
+    test("a path outside the session's folder is refused", () async {
+      final controller = await open(AgentMode.ask);
+      final outside = await Directory.systemTemp.createTemp('files-outside');
+      addTearDown(() => outside.delete(recursive: true));
+      final f = File('${outside.path}/x.txt')..writeAsStringSync('x');
+      final out = await controller.saveFile(f.path, 'y', expected: 'x');
+      expect(out.kind, SaveKind.refused);
+      expect(f.readAsStringSync(), 'x');
+      // Nor through a link inside it.
+      Link('${tmp.path}/link.txt').createSync(f.path);
+      expect((await controller.saveFile('${tmp.path}/link.txt', 'y', expected: 'x')).kind, SaveKind.refused);
+      expect(f.readAsStringSync(), 'x');
+    });
+
+    test('refused while the agent works, waits on an approval, or has a message queued', () async {
+      final controller = await open(AgentMode.ask);
+      final path = file();
+      Future<SaveOutcome> save() => controller.saveFile(path, 'two\n', expected: 'one\n');
+
+      session.add(stateEvent('s-run', ExecutionStatus.running));
+      await _when(container, codeSessionProvider('s1').select((s) => s.transcript.running), (bool r) => r);
+      final running = await save();
+      expect((running.kind, running.reason), (SaveKind.refused, CodeSessionController.agentWorking));
+
+      session.ask('Bash', 'TerminalAction', {'command': 'npm install'});
+      await pending();
+      expect((await save()).kind, SaveKind.refused);
+      await controller.send('and then the tests');
+      expect(container.read(codeSessionProvider('s1')).queued, hasLength(1));
+      expect((await save()).kind, SaveKind.refused);
+      expect(File(path).readAsStringSync(), 'one\n');
+    });
+  });
+
   group('rewind on an outside lead with a worktree', () {
     Future<String> git(String dir, List<String> args) async {
       final r = await Process.run('git', ['-C', dir, ...args]);
@@ -497,6 +549,36 @@ void main() {
       expect(text, contains('<everyai-rewind>'));
       expect(text, endsWith('try again'));
       expect(File('${w.path}/new.txt').existsSync(), isFalse);
+    });
+
+    test('a save while the files go back is refused, and Files is read-only until they are', () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      final readme = '${w.path}/README.md';
+      final rewinding = controller.rewind(2);
+      expect(container.read(codeSessionProvider('s1')).filesLocked, isTrue);
+      final out = await controller.saveFile(readme, '# Edited\n', expected: '# App\n');
+      expect((out.kind, out.reason), (SaveKind.refused, CodeSessionController.agentWorking));
+      await rewinding;
+      expect(container.read(codeSessionProvider('s1')).filesLocked, isFalse);
+      expect(File(readme).readAsStringSync(), '# App\n');
+    });
+
+    test("a save from Files lands in the next turn's checkpoint: rewinding to that turn keeps it", () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      final readme = '${w.path}/README.md';
+      final saved = await controller.saveFile(readme, '# Edited\n', expected: '# App\n');
+      expect(saved.kind, SaveKind.saved);
+      expect(File(readme).readAsStringSync(), '# Edited\n');
+      await turn(controller, 'm2', 'Add a decrement method');
+      File('${w.path}/new.txt').writeAsStringSync('made in turn 2');
+      expect((await controller.rewind(2)).files, isTrue);
+      expect(File('${w.path}/new.txt').existsSync(), isFalse);
+      expect(File(readme).readAsStringSync(), '# Edited\n');
+      expect((await controller.rewind(1)).files, isTrue);
+      expect(File(readme).readAsStringSync(), '# App\n');
     });
 
     test('a driver with its own rewind takes the conversation back too', () async {

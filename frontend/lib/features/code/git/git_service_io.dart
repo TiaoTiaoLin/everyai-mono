@@ -208,12 +208,50 @@ Future<String> remoteUrl(SessionWorktree w) async {
   return res.exitCode == 0 ? '${res.stdout}'.trim() : '';
 }
 
+Future<bool> isDirty(SessionWorktree w) async => (await _out(w.path, ['status', '--porcelain'])).isNotEmpty;
+
+Future<String> headCommit(SessionWorktree w) => _out(w.path, ['rev-parse', 'HEAD']);
+
+Future<BranchPr?> prFor(SessionWorktree w) async {
+  try {
+    final res = await Process.run('gh', [
+      'pr',
+      'view',
+      w.branch,
+      '--json',
+      'number,url,state,headRefOid',
+    ], workingDirectory: w.path);
+    // Non-zero: no pull request for the branch, no remote, or gh isn't signed in.
+    return res.exitCode == 0 ? parsePrView('${res.stdout}') : null;
+  } on ProcessException {
+    return null;
+  }
+}
+
 Future<bool> ghReady(String dir) async {
   try {
     final res = await Process.run('gh', ['auth', 'status'], workingDirectory: dir);
     return res.exitCode == 0;
   } on ProcessException {
     return false;
+  }
+}
+
+Future<Set<String>> ignoredAmong(String dir, List<String> paths) async {
+  if (paths.isEmpty) return const {};
+  try {
+    final p = await Process.start('git', ['-C', dir, 'check-ignore', '--stdin', '-z']);
+    p.stdin.write('${paths.join('\x00')}\x00');
+    await p.stdin.close();
+    final (out, _, code) = await (p.stdout.transform(utf8.decoder).join(), p.stderr.drain<void>(), p.exitCode).wait;
+    // 1: none ignored; 128: not a repository.
+    if (code != 0) return const {};
+    return {
+      for (final path in out.split('\x00'))
+        if (path.isNotEmpty) path,
+    };
+  } on Object {
+    return const {};
   }
 }
 

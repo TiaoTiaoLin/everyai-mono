@@ -67,6 +67,19 @@ abstract final class GitService {
   /// The `origin` remote's URL, or '' without one.
   static Future<String> remoteUrl(SessionWorktree w) => impl.remoteUrl(w);
 
+  /// Whether anything isn't committed yet (untracked files included); cheaper than [uncommittedDiff].
+  static Future<bool> isDirty(SessionWorktree w) => impl.isDirty(w);
+
+  /// The commit the session branch is at.
+  static Future<String> headCommit(SessionWorktree w) => impl.headCommit(w);
+
+  /// The session branch's latest pull request (`gh pr view`), open, merged or closed; null without one or gh.
+  static Future<BranchPr?> prFor(SessionWorktree w) => impl.prFor(w);
+
+  /// Which of [paths] (relative to [dir]; a folder ends in `/`) git ignores (`git check-ignore`), as given; empty
+  /// outside git.
+  static Future<Set<String>> ignoredAmong(String dir, List<String> paths) => impl.ignoredAmong(dir, paths);
+
   /// Whether the GitHub CLI is installed and signed in.
   static Future<bool> ghReady(String dir) => impl.ghReady(dir);
 

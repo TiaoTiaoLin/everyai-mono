@@ -342,6 +342,41 @@ final class NativeCommand {
   String toString() => '/$name';
 }
 
+/// What one piece of the context is, in Session info's breakdown.
+enum ContextKind {
+  systemPrompt('System prompt'),
+  skills('Skills'),
+  memoryFiles('Memory files'),
+  mcpInstructions('MCP instructions'),
+  briefing('EveryAI briefing'),
+  tools('System tools'),
+  mcpTools('MCP tools');
+
+  const ContextKind(this.label);
+  final String label;
+
+  /// Text in the system message (the rest are tool schemas).
+  bool get inPrompt => this != tools && this != mcpTools;
+}
+
+/// One piece of what a session sends the model on every call, as it was sent: a part of the system message or one
+/// tool's JSON schema. Only its length is known here, so its size is always an estimate.
+final class ContextPart {
+  const ContextPart(this.kind, this.text, {this.name});
+
+  final ContextKind kind;
+  final String text;
+
+  /// The tool or MCP server it belongs to, for the expandable rows.
+  final String? name;
+}
+
+/// A session that knows the parts of its own prompt and tools (the EveryAI harness): the system message's parts in
+/// order (joined with a blank line they are the message), then the tool schemas.
+abstract interface class HasContextParts {
+  List<ContextPart> get contextParts;
+}
+
 /// A session led by an outside CLI that has `/` commands of its own. The `/`
 /// menu shows these instead of EveryAI's; sessions without it have none.
 abstract interface class HasNativeCommands {

@@ -33,6 +33,7 @@ dependencies:
   drift_flutter: ^0.3.1
   sqlite3: ^3.8.0 # already under drift; reads OpenCode's session DB read-only (resume)
   path_provider: ^2.1.6
+  path: ^1.9.1 # already under the SDK; joins and splits file paths the same way on every desktop
   uuid: ^4.6.0
 
   # Networking: per-platform HTTP clients (HTTP/2 + HTTP/3 where the OS stack supports it)
