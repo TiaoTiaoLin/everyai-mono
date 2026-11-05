@@ -548,6 +548,9 @@ Handoff buildHandoff(
     recent: renderSessionRecord(
       handoffRecord(scope.events),
       maxChars: scope.kind == HandoffKind.delta ? handoffDeltaMaxChars : handoffRecentChars,
+      // Results hold whatever the old lead read (files, pages, command output); the user's own messages stay plain,
+      // since the new lead must still follow them.
+      wrapResult: (tool, text) => untrusted(text, source: 'result of $tool'),
     ),
     cut: cutTurn(events),
     transcript: transcript,
@@ -918,7 +921,7 @@ String handoffMessage(Handoff h, {String? fromName}) {
     'Questions put to the user that are not answered yet:',
     stripHidden([for (final q in h.openQuestions) '- $q'].join('\n')),
   );
-  if (h.git case final g?) _block(b, 'git', 'The repository now:', _gitText(g));
+  if (h.git case final g?) _block(b, 'git', 'The repository now:', stripHidden(_gitText(g)));
   _block(
     b,
     'files',
@@ -929,7 +932,7 @@ String handoffMessage(Handoff h, {String? fromName}) {
             ? '(diff not shown: the file may hold secrets)'
             : f.diff.isEmpty
             ? '(no diff available)'
-            : f.diff}\n</file>',
+            : untrusted(f.diff, source: f.path)}\n</file>',
     ].join('\n'),
   );
   _block(
@@ -939,9 +942,7 @@ String handoffMessage(Handoff h, {String? fromName}) {
         'working directory). Read it when the facts here are not enough, and summarise it for yourself as you need:',
     h.transcript,
   );
-  if (h.recent.trim().isNotEmpty) {
-    _block(b, 'recent-turns', 'The latest turns:', untrusted(h.recent.trim(), source: 'earlier turns'));
-  }
+  _block(b, 'recent-turns', 'The latest turns:', stripHidden(h.recent));
   if (cut != null) {
     _block(b, 'cut-turn', _cutLead, _cutText(cut, transcript: h.transcript.isNotEmpty));
   } else {

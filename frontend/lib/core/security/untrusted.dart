@@ -79,18 +79,19 @@ String untrusted(String text, {required String source, String? nonce}) {
   return '<untrusted-content $attrs>\n$clean\n</untrusted-content>';
 }
 
-/// The text inside one [untrusted] block, or [text] unchanged when it isn't one (for parsers that read back what
-/// we sent, such as the transcript's report cards).
-String unwrapUntrusted(String text) {
-  final m = RegExp(r'^\s*<untrusted-content\b[^>]*>\n?([\s\S]*?)\n?</untrusted-content>\s*$').firstMatch(text);
-  return m == null ? text : m.group(1)!;
-}
+/// [text] with every [untrusted] block replaced by the text inside it (for parsers that read back what we sent,
+/// such as the transcript's report cards); text with no block passes through unchanged.
+String unwrapUntrusted(String text) =>
+    text.replaceAllMapped(RegExp(r'<untrusted-content\b[^>]*>\n?([\s\S]*?)\n?</untrusted-content>'), (m) => m[1]!);
 
 /// Why [text] reads like instructions smuggled to a model, or null. A cheap
 /// heuristic for stores that carry text into later sessions (memory, notes):
 /// overriding the rules, a new role or system prompt, forged tags, hiding
-/// something from the user, or sending secrets or the conversation somewhere.
-/// Notes addressed to "the agent" are fine; the wrapper is the real backstop.
+/// something from the user, or sending secrets or the conversation to an
+/// address. The patterns stay narrow so ordinary project conventions pass
+/// ("never show stack traces to the user", "`Vec<Instruction>`"); rewording
+/// gets past them. The defence is the [untrusted] wrapper and [untrustedRule],
+/// not this check.
 String? smugglingProblem(String text) {
   final t = stripHidden(text).replaceAll(RegExp(r'\s+'), ' ');
   for (final (pattern, why) in _smuggling) {
@@ -101,29 +102,42 @@ String? smugglingProblem(String text) {
 
 RegExp _ci(String p) => RegExp(p, caseSensitive: false);
 
+/// A verb with its usual endings ("send" → sends, sended is harmless).
+String _verbs(List<String> stems) => '(${stems.join('|')})(s|d|ed|es|ing)?';
+
 final _smuggling = [
   (
+    // A qualifier is needed: "ignore the rules in vendor/" is an ordinary lint note.
     _ci(
-      r'\b(ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+|your\s+)?(previous\s+|prior\s+|above\s+|'
-      r'earlier\s+|system\s+|safety\s+)?(instructions|rules|guidelines|prompts?)\b',
+      '\\b(${_verbs(['ignor', 'ignore', 'disregard', 'forget', 'forgot', 'overrid', 'override'])})\\s+'
+      r'((all|any|your)\s+(of\s+)?(the\s+|your\s+)?((previous|prior|above|earlier|system|safety)\s+)?|'
+      r'(the\s+)?(previous|prior|above|earlier|system|safety)\s+)(instructions|rules|guidelines|prompts?)\b',
     ),
     'asks to ignore the rules',
   ),
   (_ci(r'\byou\s+are\s+now\b|\bnew\s+system\s+prompt\b'), 'gives the model a new role'),
-  (_ci(r'</?\s*(system|instructions?|memory|untrusted-content|everyai-[\w-]+)\b'), 'holds a forged tag'),
   (
+    // A tag on its own (not `Vec<Instruction>`), closed or with an attribute.
+    _ci(r'(?<![\w<])<\s*/?\s*(system|instructions?|memory|untrusted-content|everyai-[\w-]+)\s*(>|\s+[\w-]+\s*=)'),
+    'holds a forged tag',
+  ),
+  (
+    // Secrecy about what the model does, not what the program shows ("never show stack traces to the user").
     _ci(
-      r"\b(do\s+not|don'?t|never)\s+(tell|show|mention|reveal|inform)\b[^.\n]{0,40}\buser\b|"
-      r'\bwithout\s+(telling|informing)\s+the\s+user\b|\bwithout\s+the\s+user\s+(knowing|noticing)\b|'
-      r'\bhide\s+\w+\s+from\s+the\s+user\b',
+      r"\b(do\s+not|don'?t|never)\s+(tell|inform|notify|mention\s+to)\s+the\s+user\b|"
+      r'\bwithout\s+(telling|informing|notifying)\s+the\s+user\b|\bwithout\s+the\s+user\s+(knowing|noticing)\b|'
+      r'\b(hide|hides|hiding|keep)\s+(this|these|it|that|them|what\s+you\s+(did|do|changed))\s+'
+      r'(secret\s+|hidden\s+)?from\s+the\s+user\b',
     ),
     'asks to hide something from the user',
   ),
   (
+    // Secrets or the conversation sent to an address; "never send passwords in plain text" names none.
     _ci(
-      r'\b(send|post|upload|forward|leak|exfiltrate|transmit)\b[^\n]{0,80}(\.env\b|\b(secrets?|api[ _-]?keys?|'
-      r'(api|access|auth|secret)\s+tokens?|passwords?|credentials|conversation|chat\s+history|'
-      r'environment\s+variables)\b)',
+      '\\b(${_verbs(['send', 'sent', 'post', 'upload', 'forward', 'leak', 'exfiltrate', 'transmit', 'email'])})\\b'
+      r'[^\n]{0,80}(\.env\b|\b(secrets?|api[ _-]?keys?|(api|access|auth|secret)\s+tokens?|passwords?|credentials|'
+      r'conversation|chat\s+history|environment\s+variables)\b)'
+      r'[^\n]{0,80}(https?://|\bwww\.|[\w.+-]+@[\w-]+\.\w|\bto\s+(me|us|(the|a)\s+webhook|(the|this|that|my|our)\s+(address|url|link|email)|[\w-]+(\.[\w-]+)+))',
     ),
     'asks to send secrets or the conversation somewhere',
   ),

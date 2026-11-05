@@ -304,13 +304,14 @@ final _block = RegExp(r'<subagent_report id="([^"]*)" status="([^"]*)">\n([\s\S]
 String _blocks(Map<String, SubagentReport> reports) => [
   for (final e in reports.entries)
     '$_open${e.key}" status="${e.value.status.wire}">\n'
-        '${_reportText(e.key, e.value).replaceAll('</subagent_report>', '</subagent-report>')}\n</subagent_report>',
+        '${e.value.text.replaceAll('</subagent_report>', '</subagent-report>')}\n</subagent_report>',
 ].join('\n\n');
 
-/// A report's text as the parent reads it: the fork's own words (which can relay whatever it read) marked as data
-/// from `fork:<id>`; our own "started in the background" text stays plain.
-String _reportText(String id, SubagentReport r) =>
-    r.status == SubagentStatus.background ? r.text : untrusted(_cut(r.text), source: 'fork:$id');
+/// [report] as its parent reads it: the fork's own words (which can relay whatever it read) cut short and marked as
+/// data from `fork:<childId>`. Called where a fork's report comes in, before the app adds its own notes (merge,
+/// fallback) beside it, so those stay ours and a fork can't forge them.
+SubagentReport forkReport(String childId, SubagentReport report) =>
+    SubagentReport(report.status, untrusted(_cut(report.text), source: 'fork:$childId'));
 
 String _cut(String s) =>
     s.length <= _maxReport ? s : '${s.substring(0, _maxReport)}\n[… report cut at $_maxReport characters]';
@@ -395,7 +396,7 @@ const sharedFolderNote =
 /// A background subagent's report, sent to its parent when it ends.
 String taskNotification(String childId, String title, SubagentReport report) =>
     '<task-notification>\n<task-id>$childId</task-id>\n<description>$title</description>\n'
-    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(_reportText(childId, report))}\n</result>\n'
+    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(report.text)}\n</result>\n'
     '</task-notification>';
 
 final _notification = RegExp(
@@ -471,7 +472,9 @@ String forkQuestionsText(List<({String question, List<String> options, bool mult
 ].join('\n');
 
 String _forkQuestionBlock(String childId, String title, String questions) =>
-    '<fork-question fork_id="$childId" task="${title.replaceAll('"', "'")}">\n$questions\n</fork-question>\n'
+    '<fork-question fork_id="$childId" task="${title.replaceAll('"', "'")}">\n'
+    '${untrusted(questions, source: 'fork:$childId').replaceAll('</fork-question', '<_fork-question')}\n'
+    '</fork-question>\n'
     'Answer it with answer_fork (fork_id "$childId"). If the user should decide, ask them with ask_user_question '
     'first and pass their answer on. Don\'t do the fork\'s work yourself meanwhile; its report arrives as a '
     '<task-notification>.';

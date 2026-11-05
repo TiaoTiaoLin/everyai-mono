@@ -4303,8 +4303,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// A subagent ended with [report]. A fork in its own worktree is merged
   /// into this session's folder first (when it completed) and the report says
   /// what came over; a stopped or failed one is kept under a ref unmerged.
-  void _finishChild(String callId, SubagentReport report) {
+  void _finishChild(String callId, SubagentReport fork) {
     final childId = _childOf[callId];
+    final report = forkReport(childId ?? callId, fork);
     final sessions = ref.read(codeSessionsProvider.notifier);
     final info = childId == null ? null : sessions.byId(childId);
     final copy = info?.forkCopy;
