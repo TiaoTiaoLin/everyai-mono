@@ -384,10 +384,14 @@ class _QuestionTab extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (done) ...[AdaptiveIcon(EveryIcon.check, size: 11, color: theme.accent), const SizedBox(width: 4)],
-                Text(
-                  label,
-                  style: (current ? theme.type.caption.semibold : theme.type.caption.medium).tint(
-                    current ? theme.accent : theme.text,
+                Flexible(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: (current ? theme.type.caption.semibold : theme.type.caption.medium).tint(
+                      current ? theme.accent : theme.text,
+                    ),
                   ),
                 ),
               ],
@@ -538,8 +542,12 @@ class _OtherRow extends StatelessWidget {
         borderRadius: BorderRadius.circular(9),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ChoiceMark(multiple: multiple, selected: active),
+          Padding(
+            padding: const EdgeInsets.only(top: 9),
+            child: ChoiceMark(multiple: multiple, selected: active),
+          ),
           const SizedBox(width: 10),
           Expanded(
             child: IgnorePointer(
@@ -549,6 +557,11 @@ class _OtherRow extends StatelessWidget {
                 focusNode: focusNode,
                 placeholder: 'Other: type your own answer',
                 borderless: true,
+                // Wraps and grows with a long answer; Enter still moves on (no newlines).
+                minLines: 1,
+                maxLines: 6,
+                keyboardType: TextInputType.text,
+                textInputAction: TextInputAction.done,
                 onChanged: onChanged,
                 onSubmitted: (_) => onSubmitted(),
               ),
@@ -660,7 +673,8 @@ class _Answered extends StatelessWidget {
                             children: [
                               AdaptiveIcon(EveryIcon.check, size: 11, color: theme.accent),
                               const SizedBox(width: 4),
-                              Text(label, style: theme.type.callout.medium.tint(theme.text)),
+                              // A long typed answer wraps inside the chip instead of running off the card.
+                              Flexible(child: Text(label, style: theme.type.callout.medium.tint(theme.text))),
                             ],
                           ),
                         ),
