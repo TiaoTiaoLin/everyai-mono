@@ -297,7 +297,7 @@ final class ApiClient {
   }
 
   /// `{"message", "code"}` (backend-exp), problem documents (`detail`/`title`),
-  /// `{"error": {"message"}}` (OpenAI style) and `{"detail"}` (FastAPI).
+  /// `{"error": {"message"}}` (OpenAI style) and a bare `{"detail"}`.
   static ({String message, String? code})? _detail(Uint8List bytes) {
     try {
       final decoded = jsonDecode(utf8.decode(bytes));
