@@ -424,12 +424,19 @@ void main() {
       (List<WorkflowRun> r) => r.isNotEmpty && r.last.status == WorkflowStatus.running && r.last.agents.isEmpty,
     );
     final again = bridge.agent('Fix', {'harness': 'fake2'});
+    // Reopening briefs it again (files on disk) before it is told to carry on.
+    await whenValue(container, codeSessionProvider(first.id).select((s) => s.connected), (bool c) => c);
     bool carriedOn(FakeLeadSession? s) => [...?s?.sent, ...?s?.steered].any((m) => m.contains(workflowCarryOn));
     for (var i = 0; i < 50 && !carriedOn(drivers['fake2']!.latest); i++) {
       await pumpEventQueue();
     }
     final s = drivers['fake2']!.latest;
     expect([...s!.sent, ...s.steered].where((m) => m.contains(workflowCarryOn)), hasLength(1));
+    // Its old token died with the app: it reopens with a fresh one, for the proof tools only.
+    final reopened = drivers['fake2']!.reopened.single;
+    expect(host.live[first.id], contains(reopened.mcpToken));
+    expect(host.only[first.id], workflowHostTools);
+    expect(reopened.sessionSkill, isNot(contains('## Workflows')));
     answer(s, 'Fixed');
     expect(await again, 'Fixed');
     expect(drivers['fake2']!.specs, hasLength(1));
@@ -500,6 +507,8 @@ void main() {
       final info = await child();
       expect(info.isWorkflowAgent, isTrue);
       expect(host.only[info.id], workflowHostTools);
+      // The memory is in its instructions; the lead decides what is kept.
+      expect(workflowHostTools, isNot(contains('memory')));
       expect(host.only[c.sessionId], isNull);
       final text = drivers['fake2']!.specs.single.briefing!.sessionSkill!;
       final tools = text.substring(text.indexOf('## everyai tools'), text.indexOf('## Rules'));
@@ -510,27 +519,6 @@ void main() {
       expect(text, isNot(contains('## Workflows')));
       expect(text, isNot(contains('run_workflow')));
       expect(await (host.tools[info.id]! as HostPrompts).workflowPrompts(), isEmpty);
-    });
-
-    test("a workflow agent's memory call is refused; the lead's still writes", () async {
-      final c = await open();
-      await c.runWorkflow('demo', 'source');
-      unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
-      final info = await child();
-      HostCall memory(String text) => HostCall(
-        id: 'm-$text',
-        sessionId: '',
-        name: 'memory',
-        args: {'action': 'add', 'text': text},
-        ended: Completer<HostEnd>().future,
-      );
-      final refused = await container.read(codeSessionProvider(info.id).notifier).call(memory('- child note'));
-      expect(refused, (text: workflowMemoryRefusal, isError: true));
-      final kept = await c.call(memory('- run make'));
-      expect(kept.isError, isFalse);
-      final file = File('${project.path}/.everyai/memory.md').readAsStringSync();
-      expect(file, contains('- run make'));
-      expect(file, isNot(contains('child note')));
     });
 
     test("a workflow agent's read-only proof tools run, its commands ask", () async {
@@ -553,12 +541,16 @@ void main() {
     test("bug_check's record comes from the child's state file, seeded before its first turn", () async {
       final c = await open();
       await c.runWorkflow('demo', 'source');
+      File('${project.path}/test/repro_test.dart')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('// repro');
       final seed = {
         'available': true,
         'state': 'verified',
         'command': 'dart test test/repro_test.dart',
         'expect': 'Expected: 3',
-        'files': {'test/repro_test.dart': 'abc'},
+        // A git-excluded script stayed in the fixer's checkout: its absence here isn't a change to the repro.
+        'files': {'test/repro_test.dart': 'abc', '.everyai/scratch/repro.sh': 'def'},
       };
       final reply = bridge.agent('Refix', {'harness': 'fake2', 'schema': fixSchema, 'bugCheck': seed});
       final info = await child();
@@ -610,6 +602,40 @@ void main() {
       expect(record['available'], isFalse);
       expect(record['why'], contains('no port'));
     });
+
+    test('an agent reopened after a restart without a host says so in its record', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      addTearDown(() => CodeSessionController.liveAfter = const Duration(milliseconds: 1500));
+      final c = await open();
+      final id = c.sessionId;
+      await c.runWorkflow('demo', 'source');
+      final call = {'harness': 'fake2', 'schema': fixSchema, 'bugCheck': true};
+      unawaited(bridge.agent('Fix', call).catchError((Object _) => null));
+      final first = await child();
+      // It reproduced the bug, then the app quit mid-turn.
+      File('${tmp.path}/data/driver-sessions/${first.id}/bug_check.json')
+        ..createSync(recursive: true)
+        ..writeAsStringSync(jsonEncode({'command': 'make repro', 'expect': '', 'files': <String, Object?>{}}));
+      drivers['fake2']!.latest!.add(stateEvent('w-r', ExecutionStatus.running));
+      await pumpEventQueue();
+      container.dispose();
+      bridge = FakeBridge();
+      host.mintFails = StateError('no port');
+      container = makeContainer();
+      container.listen(codeSessionProvider(id), (_, _) {});
+      await whenValue(
+        container,
+        workflowRunsProvider(id),
+        (List<WorkflowRun> r) => r.isNotEmpty && r.last.status == WorkflowStatus.running && r.last.agents.isEmpty,
+      );
+      final again = bridge.agent('Fix', call);
+      await whenValue(container, codeSessionProvider(first.id).select((s) => s.connected), (bool c) => c);
+      expect(drivers['fake2']!.reopened, isEmpty);
+      answer(drivers['fake2']!.latest!, '```json\n{"cause": "x"}\n```');
+      final record = (await again as Map)['bug_check'] as Map;
+      expect(record['available'], isFalse);
+      expect(record['why'], allOf(contains('restarted'), contains('no port')));
+    });
   });
 
   group('a thin bug report', () {
@@ -655,6 +681,60 @@ void main() {
       expect(startedArgs!['bug'], contains('Expected: It saves'));
       expect(card(c).answers, answers);
       expect(api.where((p) => p.endsWith('/aux/decide')), isEmpty);
+    });
+
+    test('a reply in chat instead of the card is the report, and the card no longer holds runs back', () async {
+      final c = await open();
+      await c.call(bugfix('fix it'));
+      lead.add(userMessageEvent('u-chat', 'Saving a note crashes with a TypeError'));
+      for (var i = 0; i < 50 && startedArgs == null; i++) {
+        await pumpEventQueue();
+      }
+      expect(card(c).answers, isEmpty);
+      expect(startedArgs!['bug'], 'fix it\nWhat goes wrong: Saving a note crashes with a TypeError');
+      final next = await c.call(bugfix('Saving crashes'));
+      expect(next.text, isNot(contains('waiting for the user')));
+      expect(next.text, contains('already running'));
+    });
+
+    test('a card open when the app quits: after the restart the lead hears Bug fix never started', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      addTearDown(() => CodeSessionController.liveAfter = const Duration(milliseconds: 1500));
+      final c = await open();
+      final id = c.sessionId;
+      await c.call(bugfix('fix it'));
+      final saved = File('${tmp.path}/data/workflows/$id/bugask.jsonl');
+      expect(saved.existsSync(), isTrue);
+      container.dispose();
+      container = makeContainer();
+      container.listen(codeSessionProvider(id), (_, _) {});
+      bool told() => lead.sent.any((m) => m.contains('state="failed"'));
+      for (var i = 0; i < 100 && !told(); i++) {
+        await pumpEventQueue();
+      }
+      expect(lead.sent.lastWhere((m) => m.contains('state="failed"')), contains('closed before the user answered'));
+      expect(saved.existsSync(), isFalse);
+    });
+
+    test('an answered card leaves nothing for a restart to report', () async {
+      final c = await open();
+      await c.call(bugfix('fix it'));
+      await c.answer(card(c), answers);
+      await pumpEventQueue();
+      expect(File('${tmp.path}/data/workflows/${c.sessionId}/bugask.jsonl').existsSync(), isFalse);
+    });
+
+    test('a start note taken out of the queue takes its waiting card with it', () async {
+      final entry = (await loadBundledWorkflows()).firstWhere((w) => w.id == 'bugfix');
+      final c = await open();
+      lead.add(stateEvent('busy', ExecutionStatus.running));
+      await whenValue(container, codeSessionProvider(c.sessionId).select((s) => s.transcript.running), (bool b) => b);
+      c.pickWorkflow(WorkflowPick.script(entry));
+      await c.sendTyped('fix it');
+      expect(container.read(codeSessionProvider(c.sessionId)).queued, hasLength(1));
+      expect((await c.call(bugfix('Saving crashes'))).text, contains('waiting for the user'));
+      c.unqueue(0);
+      expect((await c.call(bugfix('Saving a note crashes'))).text, startsWith('Started Bug fix'));
     });
 
     test('a concrete report on an outside lead starts at once', () async {

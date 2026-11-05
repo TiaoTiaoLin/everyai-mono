@@ -779,8 +779,9 @@ for line in sys.stdin:
     final names = [
       for (final t in gateway.requests.first['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
     ];
-    expect(names, containsAll(['everyai__bug_check', 'everyai__check', 'everyai__diff_stats', 'everyai__memory']));
-    expect(names, isNot(contains('memory')));
+    expect(names, containsAll(['everyai__bug_check', 'everyai__check', 'everyai__diff_stats']));
+    // No memory of its own or the host's: it reads it in its prompt, and the lead decides what is kept.
+    expect(names.where((n) => '$n'.contains('memory')), isEmpty);
     expect(names.where((n) => '$n'.contains('fork') || '$n'.contains('run_workflow')), isEmpty);
     final call = events.whereType<ActionCall>().single;
     expect(call.actionKind, 'MCPToolAction');
@@ -791,6 +792,70 @@ for line in sys.stdin:
     final spec = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
     expect(spec, isNot(contains(token.token)));
     await session.close();
+  });
+
+  test('a workflow agent reopened after a restart gets its new host, and never its own memory', () async {
+    final host = createHostServer();
+    addTearDown(host.stop);
+    final tools = _HostCalls();
+    final old = await host.mint('child', tools, only: workflowHostTools);
+    gateway.reply(text: 'Reproduced.');
+    final session = await harness.start(
+      SessionSpec(
+        workingDir: work,
+        model: 'anthropic/claude-sonnet-5.5',
+        mode: AgentMode.fullAuto,
+        llmBaseUrl: gateway.baseUrl,
+        llmApiKey: 'sk-test',
+        sessionTag: 'tag-1',
+        initialMessage: 'fix the bug',
+        subagent: true,
+        briefing: DriverBriefing(mcpUrl: '${old.url}', mcpToken: old.token),
+      ),
+    );
+    await drive(session);
+    await session.close();
+    await host.revoke(old.token);
+    List<Object?> toolNames() => [
+      for (final t in gateway.requests.last['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+    EveryAIHarness app() => EveryAIHarness(dataDir: () async => '${tmp.path}/data', gatewayKey: () async => 'sk-test');
+
+    // With a fresh token: the host's tools again.
+    final fresh = await host.mint('child', tools, only: workflowHostTools);
+    gateway
+      ..reply(calls: [('everyai__diff_stats', <String, Object?>{})])
+      ..reply(text: 'Verified.');
+    final reopened = await app().attachBriefed(
+      session.id,
+      DriverBriefing(mcpUrl: '${fresh.url}', mcpToken: fresh.token),
+    );
+    // Not drive: the replayed history ends finished already.
+    Future<void> carryOn(HarnessSession s, String last) async {
+      final approve = s.events.listen((e) {
+        if (e is StateChange && e.executionStatus == ExecutionStatus.waitingForConfirmation) {
+          unawaited(s.respond(accept: true));
+        }
+      });
+      final said = s.events.firstWhere((e) => e is ChatMessage && !e.fromUser && e.text == last);
+      await s.send('Carry on');
+      await said.timeout(const Duration(seconds: 20));
+      await approve.cancel();
+    }
+
+    await carryOn(reopened, 'Verified.');
+    expect(toolNames(), contains('everyai__diff_stats'));
+    expect(toolNames(), isNot(contains('memory')));
+    expect(tools.names, ['diff_stats']);
+    await reopened.close();
+
+    // Without one (no host could be made): still no memory tool of its own.
+    gateway.reply(text: 'Done.');
+    final bare = await app().attach(session.id);
+    await carryOn(bare, 'Done.');
+    expect(toolNames(), isNot(contains('memory')));
+    expect(toolNames().where((n) => '$n'.startsWith('everyai__')), isEmpty);
+    await bare.close();
   });
 
   test('without a briefing a session keeps its own memory and has no everyai tools', () async {

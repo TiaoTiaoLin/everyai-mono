@@ -91,9 +91,9 @@ HostServer createHostServer({
 List<Map<String, Object?>> get hostToolSpecs => impl.hostToolSpecs;
 
 /// What a workflow agent's token sees: the proof tools and nothing that
-/// forks, starts a workflow or asks the user (the lead does that). Memory is
-/// there so its refusal can say where the memory is.
-const workflowHostTools = {bugCheckTool, checkTool, diffStatsTool, 'memory', reportIssueTool};
+/// forks, starts a workflow or asks the user (the lead does that). No memory:
+/// they read it in their instructions, and the lead decides what is kept.
+const workflowHostTools = {bugCheckTool, checkTool, diffStatsTool, reportIssueTool};
 
 /// The calls that wait for the user, so they get [createHostServer]'s
 /// `heldLimit`.

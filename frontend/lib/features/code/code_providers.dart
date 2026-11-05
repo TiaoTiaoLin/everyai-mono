@@ -984,7 +984,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   /// Reopens [info]'s conversation on its harness. An outside agent gets a
   /// fresh briefing (the old token died with the app) when its driver can
   /// take one; otherwise it reopens without EveryAI's tools. A child session
-  /// (subagent, review, fork) started without a briefing, so it reopens without one.
+  /// (subagent, review, fork) started without a briefing, so it reopens without one;
+  /// a workflow agent gets its restricted host again ([_attachWorkflowAgent]).
   /// With [keepCurrent] (a lead switch) the session's current token stays.
   Future<HarnessSession> attachSession(CodeSessionInfo info, {bool keepCurrent = false}) async {
     final harness = await harnessFor(ref, info.workingDir, harness: info.harness);
@@ -995,6 +996,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       if (!noLocalFolder(project?.path ?? info.workingDir))
         ...ref.read(codeMcpServersProvider).mcpConfigFor(project?.id),
     }..remove(everyaiServerName);
+    if (info.isWorkflowAgent) return _attachWorkflowAgent(info, harness, project?.path ?? info.workingDir, mcp);
     if (harness is! HarnessDriver || info.parentId != null || !isOutsideLead(info.harness, info.workingDir)) {
       // A child session has no briefing, but an ACP agent still gets the user's servers back.
       if (harness is AcpDriver && info.parentId != null) return harness.attachWithMcp(info.conversationId, mcp);
@@ -1017,6 +1019,56 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     } on Object {
       ref.read(_hostTokensProvider).remove(info.id);
       await ref.read(hostServerProvider).revoke(briefing.mcpToken);
+      rethrow;
+    }
+  }
+
+  /// Reopens workflow agent [info] (the app restarted mid-run) with a fresh
+  /// restricted host, as at its start: the old token died with the app. When
+  /// none can be made it reopens without one, and its bug_check record says
+  /// why instead of claiming proof it can no longer get.
+  Future<HarnessSession> _attachWorkflowAgent(
+    CodeSessionInfo info,
+    Harness harness,
+    String projectDir,
+    Map<String, Object?> mcp,
+  ) async {
+    DriverBriefing? briefing;
+    // Its token is still live in this run of the app: the session kept its host.
+    if (!ref.read(_hostTokensProvider).containsKey(info.id)) {
+      try {
+        if (harness is! AttachesBriefed) throw const HarnessError("this harness can't reach EveryAI's tools");
+        briefing = harness is HarnessDriver && isOutsideLead(info.harness, info.workingDir)
+            ? await _brief(
+                info.id,
+                projectDir: projectDir,
+                workingDir: info.workingDir,
+                driver: harness,
+                model: info.model,
+                hostOnly: workflowHostTools,
+              )
+            : await _restrictedHost(
+                info.id,
+                info.harness,
+                info.workingDir,
+                projectDir,
+                workflowHostTools,
+                Future<void>.value(),
+              );
+        ref.read(_hostlessProvider).remove(info.id);
+      } on Object catch (e) {
+        ref.read(_hostlessProvider)[info.id] =
+            "the app restarted and couldn't give it EveryAI's tools again (${e is HarnessError ? e.message : e})";
+      }
+    }
+    if (briefing == null) {
+      if (harness is AcpDriver) return harness.attachWithMcp(info.conversationId, mcp);
+      return harness.attach(info.conversationId);
+    }
+    try {
+      return await (harness as AttachesBriefed).attachBriefed(info.conversationId, briefing, mcpConfig: mcp);
+    } on Object {
+      await _unbrief(info.id);
       rethrow;
     }
   }
@@ -1231,7 +1283,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       if (hostOnly == null) rethrow;
       ref.read(_hostlessProvider)[id] = e is HarnessError ? e.message : '$e';
     }
-    if (bugCheckSeed != null && bugCheckSeed.isNotEmpty) await _seedBugCheck(id, bugCheckSeed);
+    if (bugCheckSeed != null && bugCheckSeed.isNotEmpty) await _seedBugCheck(id, bugCheckSeed, workingDir);
     Future<HarnessSession> begin(SessionSpec spec) async {
       try {
         return await ((fork ? forkSession(runner, parent.conversationId, spec) : null) ?? runner.start(spec));
@@ -1312,10 +1364,10 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   }
 
   /// Writes [seed] (an earlier agent's bug_check record) as session [id]'s
-  /// bug_check state, so its verify reruns that repro.
-  Future<void> _seedBugCheck(String id, Map<String, Object?> seed) async {
+  /// bug_check state in [workingDir], so its verify reruns that repro.
+  Future<void> _seedBugCheck(String id, Map<String, Object?> seed, String workingDir) async {
     try {
-      await writeBugCheckState(await _driverDir(id), seed);
+      await writeBugCheckState(await _driverDir(id), seed, workingDir: workingDir);
     } on Object {
       // Unwritten, the agent reproduces afresh.
     }
@@ -1830,8 +1882,6 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         _bindHostWaits();
         _childHostWait();
         return wait.done.future;
-      case 'memory' when ref.read(codeSessionsProvider.notifier).byId(sessionId)?.isWorkflowAgent ?? false:
-        return (text: workflowMemoryRefusal, isError: true);
       case 'memory':
         return hostMemory(dir, call.args);
       case savedPlansTool:
@@ -2246,7 +2296,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (!_mirror.isClosed) _mirror.add(event);
     final transcript = _builder.snapshot;
     state = state.copyWith(transcript: transcript);
-    if (_bugAsk != null) _showBugAsk();
+    if (_bugAsk != null) _watchBugAsk();
     if (_hostWaits.isNotEmpty) {
       _bindHostWaits();
       _childHostWait();
@@ -2305,7 +2355,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (state.queued.isEmpty) return;
     final [next, ...rest] = state.queued;
     state = state.copyWith(queued: rest);
-    if (_withinBudget()) unawaited(_checkpoint().then((_) => _sendNow(next)));
+    if (_withinBudget()) {
+      unawaited(_checkpoint().then((_) => _sendNow(next)));
+    } else {
+      _droppedNote(next);
+    }
   }
 
   /// [event] with a result over the output limits cut to a preview; the whole
@@ -3662,10 +3716,18 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     _doom.reset();
     _doomOpen = false;
     if (!_mirror.isClosed) _mirror.add(null);
+    final dropped = state.queued;
     state = state.copyWith(transcript: _builder.snapshot, queued: const []);
+    dropped.forEach(_droppedNote);
+    // A Bug fix card it dropped can't be answered now.
+    _watchBugAsk();
   }
 
-  void unqueue(int index) => state = state.copyWith(queued: [...state.queued]..removeAt(index));
+  void unqueue(int index) {
+    final dropped = state.queued[index];
+    state = state.copyWith(queued: [...state.queued]..removeAt(index));
+    _droppedNote(dropped);
+  }
 
   @override
   int _asideIds = 0;
@@ -3850,10 +3912,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   Future<void> stop() async {
     _doomOpen = false;
     // A Bug fix card still waiting for its start note won't show now.
-    if (_bugAsk case final ask? when !ask.shown) {
-      _bugAsk = null;
-      _activeRuns.remove(_askingBug);
-    }
+    if (_bugAsk case final ask? when !ask.shown) _endBugAsk();
     _pauseGoal('Stopped by you. Set the goal again to carry on.');
     state = state.copyWith(queued: const []);
     for (final w in [..._hostWaits]) {
@@ -4222,6 +4281,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     try {
       for (final path in await listJournalFiles(await _workflowDir())) {
         final runId = path.split('/').last.replaceFirst(RegExp(r'\.jsonl$'), '');
+        if (runId == _askingBug) {
+          await _bugAskLost(path);
+          continue;
+        }
         if (!ref.mounted || _workflows.containsKey(runId)) continue;
         final journal = WorkflowJournal.parse(await readJournalFile(path), (line) => appendJournalFile(path, line));
         final start = journal.start;
@@ -4283,6 +4346,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     _bugAsk = _BugAsk('bugask-${const Uuid().v7()}', entry, args, ctx, fromCall: fromCall, turnsBefore: turnsBefore);
     _showBugAsk();
+    await _bugAskFile;
     return true;
   }
 
@@ -4318,6 +4382,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// Shows the pending Bug fix card, once the start note it follows is in
   /// the transcript (a card before it would close as answered in chat).
+  /// While open it is kept on disk, so a restart can tell the lead.
   void _showBugAsk() {
     final ask = _bugAsk;
     if (ask == null || ask.shown) return;
@@ -4331,23 +4396,97 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       bugQuestions,
     );
     state = state.copyWith(transcript: _builder.snapshot);
+    final saved = jsonEncode({'id': ask.entry.id, 'title': ask.entry.title, 'from_call': ask.fromCall});
+    _bugAskFile = _bugAskFile.then((_) async {
+      try {
+        await appendJournalFile(await _bugAskPath(), saved);
+      } on Object {
+        // No data folder (the web): a restart just loses the card.
+      }
+    });
   }
 
-  /// The user's report for the pending Bug fix: the run starts with it, or
-  /// doesn't when every answer is empty (the lead is told then).
+  /// The pending card's file writes, in order (a quick answer must not
+  /// leave the file behind).
+  Future<void> _bugAskFile = Future<void>.value();
+
+  Future<String> _bugAskPath() async => '${await _workflowDir()}/$_askingBug.jsonl';
+
+  /// Shows the pending card when it may, and ends the ask when its card
+  /// closed without its answers: a reply in chat is the report then, and a
+  /// card a rewind dropped tells the lead the run didn't start.
+  void _watchBugAsk() {
+    final ask = _bugAsk;
+    if (ask == null) return;
+    if (!ask.shown) return _showBugAsk();
+    final items = state.transcript.items;
+    final at = items.indexWhere((i) => i is QuestionItem && i.call.id == ask.card);
+    if (at >= 0 && (items[at] as QuestionItem).answers == null) return;
+    if (at < 0) {
+      unawaited(
+        _startBugAsk(ask, const [], problem: 'the conversation was rewound before the user answered its card.'),
+      );
+      return;
+    }
+    final reply = items.skip(at + 1).whereType<UserTurn>().where((t) => t.workflow.isEmpty).firstOrNull?.text ?? '';
+    unawaited(_startBugAsk(ask, [QuestionAnswer(other: reply)]));
+  }
+
+  /// [dropped] left the queue unsent: when it was the start note a Bug fix
+  /// card waits for, the card won't show, and nothing started.
+  void _droppedNote(Outgoing dropped) {
+    final ask = _bugAsk;
+    if (ask == null || ask.shown) return;
+    if (dropped.text == workflowStartNote(ask.entry, '${ask.args['bug'] ?? ''}')) _endBugAsk();
+  }
+
+  /// Bug fix no longer waits for the user: runs may start again.
+  void _endBugAsk() {
+    _bugAsk = null;
+    _activeRuns.remove(_askingBug);
+    _bugAskFile = _bugAskFile.then((_) async {
+      try {
+        await retireJournalFile(await _bugAskPath());
+      } on Object {
+        // Nothing was saved.
+      }
+    });
+  }
+
+  /// A Bug fix card open when the app quit (saved at [path]): the run never
+  /// started, and the lead, told it would, hears that it didn't.
+  Future<void> _bugAskLost(String path) async {
+    final saved = const LineSplitter().convert(await readJournalFile(path)).lastOrNull;
+    await retireJournalFile(path);
+    if (saved == null || !ref.mounted) return;
+    final j = jsonDecode(saved) as Map<String, Object?>;
+    // Once the history is in, so it goes after the lead's last turn, not into one that only seems idle.
+    await _historyIn.future;
+    if (!ref.mounted) return;
+    _toLead(workflowFailedNote('${j['id']}', '${j['title']}', 'the app closed before the user answered its card.'));
+  }
+
+  /// The user's report for the pending Bug fix (the card's answers): the
+  /// run starts with it.
   Future<void> _answerBugAsk(QuestionItem item, List<QuestionAnswer> answers) async {
     _builder.settleLocal(item.call.id, answers);
     state = state.copyWith(transcript: _builder.snapshot);
     final ask = _bugAsk;
     if (ask == null || ask.card != item.call.id) return;
-    _bugAsk = null;
-    _activeRuns.remove(_askingBug);
+    await _startBugAsk(ask, answers);
+  }
+
+  /// Ends [ask] and starts Bug fix with [answers], or doesn't when they are
+  /// all empty or there is a [problem] (the lead is told then).
+  Future<void> _startBugAsk(_BugAsk ask, List<QuestionAnswer> answers, {String? problem}) async {
+    _endBugAsk();
+    await _bugAskFile;
     final entry = ask.entry;
     final original = ask.args['bug'] is String ? ask.args['bug'] as String : '';
-    String? problem;
-    if (answers.every((a) => a.isEmpty)) {
+    if (problem == null && answers.every((a) => a.isEmpty)) {
       problem = original.trim().isEmpty ? 'no bug was given.' : 'the bug report was too thin, and no details came.';
-    } else {
+    }
+    if (problem == null) {
       try {
         await runWorkflow(
           entry.title,
@@ -5778,12 +5917,6 @@ const bugAskedResult =
     'Not started yet: the bug report is too thin, so the app asked the user what goes wrong, how to make it happen '
     'and what should happen instead. Bug fix starts with their answers, and its result comes as a <workflow-result> '
     "message. Tell the user to answer the card in the app; don't ask them yourself.";
-
-/// A workflow agent's memory call: it may read the memory (it is in its
-/// instructions) but not change it; the lead decides what is kept.
-const workflowMemoryRefusal =
-    "Not saved: workflow agents don't change the project memory. It is already in your instructions (and in "
-    '.everyai/memory.md). Put anything worth keeping in your answer; the lead decides what goes in.';
 
 /// Sent to a workflow agent whose turn the app's restart cut off.
 const workflowCarryOn =

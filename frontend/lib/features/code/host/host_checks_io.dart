@@ -108,15 +108,20 @@ Future<Map<String, Object?>?> readBugCheckState(String stateDir) async {
 }
 
 /// Starts [stateDir]'s bug_check from an earlier agent's [record] (see [bugCheckRecord]): the same repro, not
-/// verified yet.
-Future<void> writeBugCheckState(String stateDir, Map<String, Object?> record) async {
+/// verified yet. Only the repro files [workingDir] has count: a git-excluded one (a `.everyai/scratch/` script)
+/// stayed in the checkout it was written in, and its absence there isn't a change.
+Future<void> writeBugCheckState(String stateDir, Map<String, Object?> record, {required String workingDir}) async {
   final file = File('$stateDir/bug_check.json');
   await file.parent.create(recursive: true);
+  final files = record['files'] is Map ? (record['files']! as Map).cast<String, Object?>() : const <String, Object?>{};
   await file.writeAsString(
     jsonEncode({
       'command': record['command'] ?? '',
       'expect': record['expect'] ?? '',
-      'files': record['files'] is Map ? record['files'] : const <String, Object?>{},
+      'files': {
+        for (final e in files.entries)
+          if (File('$workingDir/${e.key}').existsSync()) e.key: e.value,
+      },
       'verified': false,
     }),
   );

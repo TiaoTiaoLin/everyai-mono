@@ -307,6 +307,8 @@ void main() {
       for (final step in ['bug_check', '"reproduced"', '"verify"', 'grep', 'glob', 'Never guess a path', 'check']) {
         expect(fixer.prompt, contains(step));
       }
+      // The review and refix rerun the repro in other checkouts, which have no git-ignored scratch files.
+      expect(fixer.prompt, contains('not depend on files git ignores'));
       final review = agents.byLabel('review');
       expect(review.worktree, isFalse);
       expect(review.bugCheck, isNull);
@@ -355,6 +357,24 @@ void main() {
       expect(result['proof_note'], contains("this harness can't reach EveryAI's tools"));
       expect(result.containsKey('bug_check'), isFalse);
       expect(agents.byLabel('review').prompt, contains('dart test test/a_test.dart'));
+    }, skip: skip);
+
+    test("a refix that commits nothing keeps the fixer's proof; one that commits brings its own", () async {
+      Map<String, Object?> unchanged(String label) => {...fix(label), 'commits': <String>[]};
+      final reproduced = {'available': true, 'state': 'reproduced', 'command': 'dart test test/a_test.dart'};
+      for (final (answer, verified) in [(unchanged, true), (fix, false)]) {
+        final agents = _Agents(
+          {
+            'fix': (c) => fix(c.label),
+            'review': (_) => _review('fix-then-ship', const [_finding]),
+            'refix': (c) => answer(c.label),
+          },
+          bugChecks: {'refix': reproduced},
+        );
+        final result = (await run('bugfix', {'bug': 'Crash on save'}, agents)).result! as Map;
+        expect(result['verified'], verified);
+        expect((result['bug_check'] as Map)['state'], verified ? 'verified' : 'reproduced');
+      }
     }, skip: skip);
 
     test('a ship verdict skips the refix', () async {
