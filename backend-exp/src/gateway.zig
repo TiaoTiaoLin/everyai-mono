@@ -606,7 +606,7 @@ pub fn routes(app: *anole.Server(App), state: *App) void {
 /// POST /v1/fetch: one page for the Code agent's web tool.
 const FetchBody = struct {
     url: []const u8,
-    /// Hosts the agent may reach even when private (a local dev server).
+    /// When set, the only hosts any hop may reach (research jobs).
     allow: ?[]const []const u8 = null,
     offset: i64 = 0,
     max_chars: ?i64 = null,
@@ -631,7 +631,7 @@ fn fetch(app: *App, req: *anole.Request, res: *anole.Response) !void {
     const limit: usize = @intCast(std.math.clamp(body.max_chars orelse web.default_chars, web.min_chars, web.max_chars));
     const page = fetcher.getAllowed(req.io, req.arena, url, "text/html,text/plain,application/xhtml+xml,application/json,*/*;q=0.5", allow) catch |err| {
         res.status = .unprocessable_entity;
-        return res.json(.{ .@"error" = safe_fetch.describe(err) });
+        return res.json(.{ .@"error" = try safe_fetch.explain(req.arena, err, url) });
     };
     if (page.status >= 400) {
         res.status = .unprocessable_entity;

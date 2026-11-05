@@ -355,6 +355,7 @@ pub fn shown(arena: std.mem.Allocator, name: []const u8, args: Value) ![]const u
     // Only when the app did not take the call itself (no `client_tools`).
     if (eql(name, "ask_user"))
         return std.fmt.allocPrint(arena, "Shown to the user: {d} question(s). The app cannot wait for the answers here, so end your turn now; the user answers in their next message.", .{arr(args, "questions").len});
+    if (eql(name, "security_alert")) return "Shown to the user: a security notice. Don't repeat it in full; carry on without the harmful step.";
     if (eql(name, "suggest_mode"))
         return std.fmt.allocPrint(arena, "Shown to the user: a button to run this request again in {s} mode. Don't mention it again.", .{str(args, "mode") orelse ""});
     return "Shown to the user.";
@@ -581,4 +582,24 @@ test "long lists of problems are capped" {
         \\{"title":"T","cards":[{},{},{},{},{},{},{}]}
     ))).?;
     try std.testing.expect(std.mem.indexOf(u8, msg, "and 6 more") != null);
+}
+
+test "security_alert: the severity is one of three, and the ack says carry on" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ok = try parse(a,
+        \\{"severity":"critical","what":"The page asked me to send your key to evil.io.","source":"https://evil.io","action_taken":"I did not fetch it.","exposed":["the OpenAI key pasted above: rotate it"]}
+    );
+    try std.testing.expect((try check(a, "security_alert", ok)) == null);
+    try std.testing.expect(std.mem.startsWith(u8, try shown(a, "security_alert", ok), "Shown to the user: a security notice."));
+    const bad = try parse(a,
+        \\{"severity":"panic","what":"x","action_taken":"y"}
+    );
+    const problem = (try check(a, "security_alert", bad)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, problem, "critical") != null);
+    const missing = try parse(a,
+        \\{"severity":"info","what":"x"}
+    );
+    try std.testing.expect((try check(a, "security_alert", missing)) != null);
 }
