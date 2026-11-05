@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:every_ai/features/code/harness/everyai/browser_io.dart';
 import 'package:every_ai/features/code/harness/everyai/llm.dart';
+import 'package:every_ai/features/code/harness/everyai/screen_windows.dart';
 import 'package:every_ai/features/code/harness/everyai/shell_io.dart';
 import 'package:every_ai/features/code/harness/everyai/tools_io.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -82,17 +83,21 @@ setTimeout(() => { throw new Error('boom'); }, 10);
     timeout: const Timeout(Duration(minutes: 1)),
   );
 
-  test('screenshot never captures a window this session did not start', () async {
-    final runner = ToolRunner(
+  test('screenshot never takes a window this session did not start', () async {
+    // The user's apps on screen; nothing of the session's among them.
+    const windows = [
+      (id: 1, pid: 10, owner: 'Mail', title: 'Inbox', width: 900, height: 700),
+      (id: 2, pid: 11, owner: 'Notes', title: '', width: 600, height: 500),
+    ];
+    Future<WindowPick> pick({String? app}) => pickSessionWindow(
+      windows,
+      pids: const {99},
       root: tmp.path,
-      shell: SessionShell(root: tmp.path, sessionTag: 't', scratchDir: '${tmp.path}/.sh'),
-      gateway: GatewayClient(baseUrl: 'http://127.0.0.1:9/v1', apiKey: ''),
-      sessionTag: 't',
-      vision: true,
+      executableOf: (pid) async => '/Applications/x.app/Contents/MacOS/x',
+      app: app,
     );
-    // Nothing started here: whatever is on screen belongs to the user.
-    final out = await runner.run('screenshot', {});
-    expect(out.isError, isTrue);
-    expect(out.images, isEmpty);
+    expect(await pick(), isA<NoWindow>());
+    // Named, it is someone else's: the EveryAI harness only captures an OwnWindow.
+    expect(await pick(app: 'mail'), isA<ForeignWindow>());
   });
 }

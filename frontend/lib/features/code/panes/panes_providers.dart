@@ -192,10 +192,12 @@ final sessionProcessesProvider = StreamProvider.autoDispose.family<List<SessionP
       return;
     }
     final shell = ref.read(sessionTerminalProvider(id));
+    final app = ref.exists(codeSessionProvider(id)) ? ref.read(codeSessionProvider(id).notifier).appRunPid : null;
     yield await listSessionProcesses(
       tag: info.id,
       workingDir: info.workingDir,
       ownsDir: info.worktree != null,
+      agentRoots: {?app},
       terminalShells: {if (shell.running) shell.pid!},
     );
     await Future<void>.delayed(const Duration(seconds: 2));

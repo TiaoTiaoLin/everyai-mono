@@ -3,8 +3,9 @@
 import 'dart:convert';
 import 'dart:io';
 
-/// A window on screen (macOS), front to back as CoreGraphics lists them.
-typedef ScreenWindow = ({int id, int pid, String owner, String title, int width, int height});
+import 'screen_windows.dart';
+
+export 'screen_windows.dart';
 
 /// The windows on screen, frontmost first; empty off macOS or on failure.
 Future<List<ScreenWindow>> listWindows() async {
@@ -45,26 +46,6 @@ Future<String> executableOf(int pid) async {
   } on Object {
     return '';
   }
-}
-
-/// The windows of apps this session started: their process is one of
-/// [sessionPids], or it runs from inside [root] (an app built there and
-/// opened with `open`). Other apps' windows are the user's and are never
-/// captured. [app] narrows by app or window name.
-Future<List<ScreenWindow>> sessionWindows({required Set<int> sessionPids, required String root, String? app}) async {
-  final out = <ScreenWindow>[];
-  final exe = <int, String>{};
-  for (final w in await listWindows()) {
-    if (w.width < 40 || w.height < 40) continue;
-    final own = sessionPids.contains(w.pid) || (exe[w.pid] ??= await executableOf(w.pid)).startsWith('$root/');
-    if (!own) continue;
-    if (app != null && app.trim().isNotEmpty) {
-      final q = app.trim().toLowerCase();
-      if (!w.owner.toLowerCase().contains(q) && !w.title.toLowerCase().contains(q)) continue;
-    }
-    out.add(w);
-  }
-  return out;
 }
 
 /// Captures window [id] to [path] as PNG (no shadow, no sound). Null when it

@@ -438,6 +438,14 @@ void main() {
       expect(policy.decide(mcp('bug_check', {'command': 'dart test'}), AgentMode.ask).verdict, Verdict.ask);
     });
 
+    test('the screen tools are ours and gate themselves, so they run without asking', () {
+      for (final t in ['screenshot', 'browser', 'app_run']) {
+        expect(hostToolOf(mcp(t)), t);
+        expect(trustedHostTools, contains(t));
+        expect(policy.decide(mcp(t), AgentMode.ask).verdict, Verdict.allow, reason: t);
+      }
+    });
+
     test("bug_check's command meets the floor", () {
       final d = policy.decide(mcp('bug_check', {'action': 'reproduced', 'command': 'rm -rf ~'}), AgentMode.fullAuto);
       expect((d.verdict, d.source), (Verdict.deny, DecisionSource.floor));

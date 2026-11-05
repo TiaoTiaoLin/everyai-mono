@@ -6,6 +6,7 @@ import '../domain/agent_mode.dart' show askUserQuestionTool, presentPlanTool;
 import '../domain/phases.dart' show bugCheckTool;
 import 'host_checks.dart' show checkTool, diffStatsTool;
 import 'host_report.dart' show reportIssueTool;
+import 'host_screen.dart' show screenshotTool;
 import 'host_server_stub.dart' if (dart.library.io) 'host_server_io.dart' as impl;
 
 // EveryAI as an MCP server for the agents it drives (Claude Code, Codex, …):
@@ -31,7 +32,14 @@ final class HostCall {
 
   /// Completes only when the call is abandoned.
   final Future<HostEnd> ended;
+
+  /// Pictures for the agent (a screenshot): the tool adds them and the
+  /// server sends them after the result's text.
+  final images = <HostImage>[];
 }
+
+/// A picture in a tool result: its MIME type and base64 data.
+typedef HostImage = ({String mime, String data});
 
 /// A tool's answer: text for the model, and whether it is an error.
 typedef HostResult = ({String text, bool isError});
@@ -96,8 +104,8 @@ List<Map<String, Object?>> get hostToolSpecs => impl.hostToolSpecs;
 const workflowHostTools = {bugCheckTool, checkTool, diffStatsTool, reportIssueTool};
 
 /// The calls that wait for the user, so they get [createHostServer]'s
-/// `heldLimit`.
-const heldHostTools = {askUserQuestionTool, presentPlanTool};
+/// `heldLimit` (a screenshot of another app's window asks first).
+const heldHostTools = {askUserQuestionTool, presentPlanTool, screenshotTool};
 
 /// Lists the plans approved in earlier sessions, or returns one.
 const savedPlansTool = 'saved_plans';
