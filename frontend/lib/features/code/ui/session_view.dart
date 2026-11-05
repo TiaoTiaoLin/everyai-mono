@@ -36,7 +36,8 @@ import 'transcript/files_card.dart';
 import 'code_top_bar.dart';
 import 'console/console_header.dart';
 import 'console/console_state.dart';
-import 'panes/session_panes.dart';
+import 'console/bottom_drawer.dart';
+import 'console/console_layout.dart';
 import 'transcript/approval_card.dart';
 import 'transcript/aside_card.dart';
 import 'transcript/goal_card.dart';
@@ -174,170 +175,178 @@ class CodeSessionScreen extends ConsumerWidget {
               onPressed: () => context.go(Routes.code),
             ),
           ],
-          body: SessionPanes(
-            session: info,
-            child: Column(
-              children: [
-                Expanded(
-                  child: TranscriptScope(
-                    root: info.workingDir,
-                    openDiff: info.diffTarget != null
-                        ? ref.read(consolePanelProvider(sessionId).notifier).showDiff
-                        : null,
-                    child: TranscriptList(
-                      onRewind: (turn) => _rewind(context, ref, turn),
-                      transcript: t,
-                      onAnswer: controller.answer,
-                      mode: state.mode,
-                      onApprovePlan: controller.startBuilding,
-                      onRevisePlan: controller.send,
-                      onRetry: controller.retry,
-                      sessionId: sessionId,
-                      workingDir: info.workingDir,
-                      offer: pick?.change ?? true ? null : offer,
-                      trailing: [
-                        WorkflowRunsView(key: const ValueKey('workflow-runs'), sessionId: sessionId),
-                        if (pick?.change ?? false) offer!,
-                      ],
-                      onChangeHandoff: controller.changeHandoff,
-                      showLeads: info.leads.isNotEmpty,
-                    ),
-                  ),
-                ),
-                if (state.error case final error?)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: NoticeView(item: NoticeItem('error', error, error: true)),
-                  )
-                else if (!state.connected && t.items.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: NoticeView(item: const NoticeItem('reconnecting', 'Reconnecting to the agent server…')),
-                  )
-                else if (t.retry case final retry?)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: RetryRow(retry: retry, onRetryNow: controller.retryNow, onStop: controller.stop),
-                  ),
-                SafeArea(
-                  top: false,
-                  child: Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: _maxWidth),
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            if (t.pending.isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: ApprovalCard(
-                                  key: ValueKey(t.pending.map((c) => c.id).join()),
-                                  pending: t.pending,
-                                  mode: state.mode,
-                                  onAllow: controller.approve,
-                                  onDeny: controller.deny,
-                                  onMode: controller.setMode,
-                                  remember: controller.rememberable(),
-                                  // None for the demo (its commands never run) or an outside lead (no EveryAI spend).
-                                  workingDir: riskLabelDir(info),
-                                  session: info.billingTag,
-                                  decided: state.decided,
-                                  rememberBy: controller.rememberBy(),
-                                  onAllowCall: controller.perCall
-                                      ? (id, scope) => controller.approve(scope, [id])
-                                      : null,
-                                  onDenyCall: controller.perCall ? (id) => controller.deny(null, [id]) : null,
-                                  flags: approvalFlags(controller.policy, t.pending, state.mode),
-                                ),
-                              )
-                            else if (t.plan.isNotEmpty && t.running)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: PlanView(tasks: t.plan, compact: true),
-                              ),
-                            if (showStartBuilding)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: StartBuildingBar(onStart: controller.startBuilding),
-                              ),
-                            if (ref.watch(morningBriefProvider) case final brief?)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: AsideCard(
-                                  key: ValueKey(brief.id),
-                                  aside: brief,
-                                  onDismiss: ref.read(morningBriefProvider.notifier).dismiss,
-                                ),
-                              ),
-                            if (state.goal case final goal?)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: GoalCard(goal: goal, onClear: controller.clearGoal),
-                              ),
-                            for (final aside in state.asides)
-                              Padding(
-                                padding: const EdgeInsets.only(bottom: 8),
-                                child: AsideCard(
-                                  key: ValueKey(aside.id),
-                                  aside: aside,
-                                  onDismiss: () => controller.dismissAside(aside.id),
-                                  usage: ref.watch(codeUsageProvider(sessionId)).value ?? UsageTotals.zero,
-                                  contextWindow:
-                                      ref.watch(modelCatalogProvider)[ModelId(info.model)]?.contextLength ?? 0,
-                                  modelName: ref.watch(modelCatalogProvider)[ModelId(info.model)]?.name,
-                                  onSendToAgent: () => controller.sendReview(aside.id),
-                                  onOpenSession: (id) => context.go(Routes.codeSession(id)),
-                                  onCommit: (message) =>
-                                      _gitAction(context, () => controller.commitDraft(aside.id, message)),
-                                  onCreatePr: (title, body) => _gitAction(
-                                    context,
-                                    () async => 'Opened ${await controller.openPr(aside.id, title: title, body: body)}',
-                                  ),
-                                ),
-                              ),
-                            CodeComposer(
-                              slashHost: codeSlashHost(context, ref, sessionId, busy: busy),
-                              project: ref
-                                  .watch(codeProjectsProvider)
-                                  .where((p) => p.id == info.projectId)
-                                  .firstOrNull
-                                  ?.path,
-                              busy: busy,
-                              mode: state.mode,
-                              onModeChanged: controller.setMode,
-                              onSend: (text, files) => controller.sendTyped(text, files: files),
-                              onSteer: (text, files) => controller.steer(text, files: files),
-                              onStop: controller.stop,
-                              queued: [for (final q in state.queued) q.text],
-                              onUnqueue: controller.unqueue,
-                              placeholder: t.openQuestion != null
-                                  ? 'Answer the questions above, or reply in your own words'
-                                  : 'Ask for a change, or reply to the agent',
-                              trailing: agentMenu(),
-                              model: ref.watch(modelCatalogProvider)[ModelId(info.model)],
-                              meter: SessionMeter(sessionId: sessionId, model: info.model),
-                              // An outside lead's own commands (empty until listed, never ours); null: EveryAI's.
-                              commands: ref.watch(nativeSlashMenuProvider(sessionId)),
-                              onUnlistedCommand: controller.runTypedCommand,
-                              // Ours while no native mode carries the session's (Plan on Codex).
-                              nativeModes: state.inNativeMode ? state.nativeModes : null,
-                              nativeMode: state.nativeMode,
-                              harnessLabel: driver?.info.label ?? '',
-                              onNativeModeChanged: (id) async {
-                                final why = await controller.setNativeMode(id);
-                                if (why != null && context.mounted) showAdaptiveToast(context, why);
-                              },
-                            ),
+          body: LayoutBuilder(
+            builder: (context, body) => ConsoleLayout(
+              session: info,
+              tier: ConsoleTier.forWidth(body.maxWidth),
+              child: BottomDrawer(
+                session: info,
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: TranscriptScope(
+                        root: info.workingDir,
+                        openDiff: info.diffTarget != null
+                            ? ref.read(consolePanelProvider(sessionId).notifier).showDiff
+                            : null,
+                        child: TranscriptList(
+                          onRewind: (turn) => _rewind(context, ref, turn),
+                          transcript: t,
+                          onAnswer: controller.answer,
+                          mode: state.mode,
+                          onApprovePlan: controller.startBuilding,
+                          onRevisePlan: controller.send,
+                          onRetry: controller.retry,
+                          sessionId: sessionId,
+                          workingDir: info.workingDir,
+                          offer: pick?.change ?? true ? null : offer,
+                          trailing: [
+                            WorkflowRunsView(key: const ValueKey('workflow-runs'), sessionId: sessionId),
+                            if (pick?.change ?? false) offer!,
                           ],
+                          onChangeHandoff: controller.changeHandoff,
+                          showLeads: info.leads.isNotEmpty,
                         ),
                       ),
                     ),
-                  ),
+                    if (state.error case final error?)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: NoticeView(item: NoticeItem('error', error, error: true)),
+                      )
+                    else if (!state.connected && t.items.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: NoticeView(item: const NoticeItem('reconnecting', 'Reconnecting to the agent server…')),
+                      )
+                    else if (t.retry case final retry?)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: RetryRow(retry: retry, onRetryNow: controller.retryNow, onStop: controller.stop),
+                      ),
+                    SafeArea(
+                      top: false,
+                      child: Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: _maxWidth),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                if (t.pending.isNotEmpty)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: ApprovalCard(
+                                      key: ValueKey(t.pending.map((c) => c.id).join()),
+                                      pending: t.pending,
+                                      mode: state.mode,
+                                      onAllow: controller.approve,
+                                      onDeny: controller.deny,
+                                      onMode: controller.setMode,
+                                      remember: controller.rememberable(),
+                                      // None for the demo (its commands never run) or an outside lead (no EveryAI spend).
+                                      workingDir: riskLabelDir(info),
+                                      session: info.billingTag,
+                                      decided: state.decided,
+                                      rememberBy: controller.rememberBy(),
+                                      onAllowCall: controller.perCall
+                                          ? (id, scope) => controller.approve(scope, [id])
+                                          : null,
+                                      onDenyCall: controller.perCall ? (id) => controller.deny(null, [id]) : null,
+                                      flags: approvalFlags(controller.policy, t.pending, state.mode),
+                                    ),
+                                  )
+                                else if (t.plan.isNotEmpty && t.running)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: PlanView(tasks: t.plan, compact: true),
+                                  ),
+                                if (showStartBuilding)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: StartBuildingBar(onStart: controller.startBuilding),
+                                  ),
+                                if (ref.watch(morningBriefProvider) case final brief?)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: AsideCard(
+                                      key: ValueKey(brief.id),
+                                      aside: brief,
+                                      onDismiss: ref.read(morningBriefProvider.notifier).dismiss,
+                                    ),
+                                  ),
+                                if (state.goal case final goal?)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: GoalCard(goal: goal, onClear: controller.clearGoal),
+                                  ),
+                                for (final aside in state.asides)
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 8),
+                                    child: AsideCard(
+                                      key: ValueKey(aside.id),
+                                      aside: aside,
+                                      onDismiss: () => controller.dismissAside(aside.id),
+                                      usage: ref.watch(codeUsageProvider(sessionId)).value ?? UsageTotals.zero,
+                                      contextWindow:
+                                          ref.watch(modelCatalogProvider)[ModelId(info.model)]?.contextLength ?? 0,
+                                      modelName: ref.watch(modelCatalogProvider)[ModelId(info.model)]?.name,
+                                      onSendToAgent: () => controller.sendReview(aside.id),
+                                      onOpenSession: (id) => context.go(Routes.codeSession(id)),
+                                      onCommit: (message) =>
+                                          _gitAction(context, () => controller.commitDraft(aside.id, message)),
+                                      onCreatePr: (title, body) => _gitAction(
+                                        context,
+                                        () async =>
+                                            'Opened ${await controller.openPr(aside.id, title: title, body: body)}',
+                                      ),
+                                    ),
+                                  ),
+                                CodeComposer(
+                                  sessionId: sessionId,
+                                  slashHost: codeSlashHost(context, ref, sessionId, busy: busy),
+                                  project: ref
+                                      .watch(codeProjectsProvider)
+                                      .where((p) => p.id == info.projectId)
+                                      .firstOrNull
+                                      ?.path,
+                                  busy: busy,
+                                  mode: state.mode,
+                                  onModeChanged: controller.setMode,
+                                  onSend: (text, files) => controller.sendTyped(text, files: files),
+                                  onSteer: (text, files) => controller.steer(text, files: files),
+                                  onStop: controller.stop,
+                                  queued: [for (final q in state.queued) q.text],
+                                  onUnqueue: controller.unqueue,
+                                  placeholder: t.openQuestion != null
+                                      ? 'Answer the questions above, or reply in your own words'
+                                      : 'Ask for a change, or reply to the agent',
+                                  trailing: agentMenu(),
+                                  model: ref.watch(modelCatalogProvider)[ModelId(info.model)],
+                                  meter: SessionMeter(sessionId: sessionId, model: info.model),
+                                  // An outside lead's own commands (empty until listed, never ours); null: EveryAI's.
+                                  commands: ref.watch(nativeSlashMenuProvider(sessionId)),
+                                  onUnlistedCommand: controller.runTypedCommand,
+                                  // Ours while no native mode carries the session's (Plan on Codex).
+                                  nativeModes: state.inNativeMode ? state.nativeModes : null,
+                                  nativeMode: state.nativeMode,
+                                  harnessLabel: driver?.info.label ?? '',
+                                  onNativeModeChanged: (id) async {
+                                    final why = await controller.setNativeMode(id);
+                                    if (why != null && context.mounted) showAdaptiveToast(context, why);
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         );

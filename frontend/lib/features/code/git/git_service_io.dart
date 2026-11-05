@@ -237,6 +237,24 @@ Future<bool> ghReady(String dir) async {
   }
 }
 
+Future<Set<String>> ignoredAmong(String dir, List<String> paths) async {
+  if (paths.isEmpty) return const {};
+  try {
+    final p = await Process.start('git', ['-C', dir, 'check-ignore', '--stdin', '-z']);
+    p.stdin.write('${paths.join('\x00')}\x00');
+    await p.stdin.close();
+    final (out, _, code) = await (p.stdout.transform(utf8.decoder).join(), p.stderr.drain<void>(), p.exitCode).wait;
+    // 1: none ignored; 128: not a repository.
+    if (code != 0) return const {};
+    return {
+      for (final path in out.split('\x00'))
+        if (path.isNotEmpty) path,
+    };
+  } on Object {
+    return const {};
+  }
+}
+
 Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) async {
   final p = await Process.start('git', ['-C', w.path, 'apply', '-R', '--whitespace=nowarn', '-']);
   p.stdin.write(file.patchFor(hunk));

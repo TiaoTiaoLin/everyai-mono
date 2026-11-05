@@ -75,6 +75,7 @@ import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
 import 'mcp_providers.dart';
+import 'panes/file_tree.dart' as fs;
 import 'permissions_providers.dart';
 import 'settings/context_files.dart';
 import 'settings/script_caps.dart';
@@ -3385,6 +3386,31 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     return LeadSwitchOutcome.switched(handoff.kind, path: path, why: why);
   }
 
+  /// Saves the user's edit of [path] from the Files view. Refused while the agent works (a turn, an approval or a
+  /// queued message), or outside the session's folder; [changedOnDisk] when the file no longer holds [expected] (what
+  /// was read at open) unless [overwrite]. No checkpoint of its own: the next message's checkpoint takes the edit in,
+  /// so rewinding to before that message keeps it and rewinding further drops it.
+  Future<SaveOutcome> saveFile(String path, String text, {required String? expected, bool overwrite = false}) async {
+    final t = state.transcript;
+    if (t.running || t.pending.isNotEmpty || state.queued.isNotEmpty) return const SaveOutcome.refused(agentWorking);
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || noLocalFolder(info.workingDir) || !await fs.insideRoot(info.workingDir, path)) {
+      return const SaveOutcome.refused("Only files in this session's folder can be saved here.");
+    }
+    if (!overwrite && await fs.readText(path) != expected) return const SaveOutcome.changedOnDisk();
+    try {
+      await fs.writeText(path, text);
+    } on Object catch (e) {
+      return SaveOutcome.refused("Couldn't save: $e");
+    }
+    if (ref.mounted && ref.exists(codeGitProvider(sessionId))) {
+      await ref.read(codeGitProvider(sessionId).notifier).refresh();
+    }
+    return const SaveOutcome.saved();
+  }
+
+  static const agentWorking = 'The agent is working: save when it stops.';
+
   /// Takes the session back to just before user turn [turn] (1-based): the
   /// agent's conversation moves its head to before that message, so it
   /// forgets it and everything after (the server keeps the old branch), and
@@ -4830,6 +4856,37 @@ bool editsFiles(String toolName) =>
 
 /// Prefs key prefix of what outside drivers reported per session (see [CodeUsage]).
 const codeUsageReportsPrefix = 'code.usage_reports.';
+
+/// What [CodeSessionController.saveFile] did.
+@immutable
+final class SaveOutcome {
+  const SaveOutcome.saved() : kind = SaveKind.saved, reason = null;
+  const SaveOutcome.refused(String this.reason) : kind = SaveKind.refused;
+  const SaveOutcome.changedOnDisk() : kind = SaveKind.changedOnDisk, reason = null;
+
+  final SaveKind kind;
+
+  /// Why it was refused, for the user.
+  final String? reason;
+}
+
+enum SaveKind { saved, refused, changedOnDisk }
+
+/// Text another part of the session screen puts into its composer at the caret (Files' "Mention in composer"); [seq]
+/// changes on every request, so the same text twice lands twice.
+final composerInsertProvider = NotifierProvider.family<ComposerInsert, ({String text, int seq})?, String>(
+  ComposerInsert.new,
+);
+
+final class ComposerInsert extends Notifier<({String text, int seq})?> {
+  ComposerInsert(this.sessionId);
+  final String sessionId;
+
+  @override
+  ({String text, int seq})? build() => null;
+
+  void insert(String text) => state = (text: text, seq: (state?.seq ?? 0) + 1);
+}
 
 /// Preferences key prefix of each session's console layout (the right panel's view and width), by session id.
 const codeLayoutPrefix = 'code.layout.';

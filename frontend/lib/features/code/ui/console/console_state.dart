@@ -1,10 +1,8 @@
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/preferences.dart';
-import '../../code_providers.dart' show codeLayoutPrefix;
+import '../../panes/panes_providers.dart' show readCodeLayout, writeCodeLayout;
 
 /// What the session console's right panel shows.
 enum ConsoleView {
@@ -78,30 +76,22 @@ final class ConsolePanel {
 final consolePanelProvider = NotifierProvider.family<ConsolePanels, ConsolePanel, String>(ConsolePanels.new);
 
 /// A session's right panel. Stored in Preferences `code.layout.<id>` as `{"panel": "info"|"diff"|"files"|null,
-/// "panel_width": 520}`; a session opened for the first time shows Session info, and one the user closed stays
+/// "panel_width": 520}` next to the bottom drawer's keys ([readCodeLayout]); a session opened for the first time shows Session info, and one the user closed stays
 /// closed.
 final class ConsolePanels extends Notifier<ConsolePanel> {
   ConsolePanels(this.sessionId);
   final String sessionId;
 
-  String get _key => '$codeLayoutPrefix$sessionId';
-
   @override
   ConsolePanel build() {
-    final raw = ref.read(preferencesProvider)[_key];
-    if (raw == null) return const ConsolePanel(view: ConsoleView.info);
-    try {
-      final j = jsonDecode(raw) as Map<String, Object?>;
-      return ConsolePanel(
-        view: ConsoleView.values.asNameMap()[j['panel']],
-        width: (j['panel_width'] as num?)?.toDouble(),
-      );
-    } on Object {
-      return const ConsolePanel(view: ConsoleView.info);
-    }
+    final j = readCodeLayout(ref.read(preferencesProvider), sessionId);
+    if (!j.containsKey('panel')) return ConsolePanel(view: ConsoleView.info, width: _width(j));
+    return ConsolePanel(view: ConsoleView.values.asNameMap()[j['panel']], width: _width(j));
   }
 
-  void _save() => ref.read(preferencesProvider)[_key] = jsonEncode({
+  static double? _width(Map<String, Object?> j) => (j['panel_width'] as num?)?.toDouble();
+
+  void _save() => writeCodeLayout(ref.read(preferencesProvider), sessionId, {
     'panel': state.view?.name,
     'panel_width': state.width?.round(),
   });

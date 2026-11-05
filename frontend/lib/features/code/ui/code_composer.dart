@@ -16,6 +16,7 @@ import '../../slash/native_commands.dart';
 import '../../slash/slash_command.dart';
 import '../../slash/slash_registry.dart';
 import '../../slash/ui/slash_menu.dart';
+import '../code_providers.dart' show composerInsertProvider;
 import '../domain/agent_mode.dart';
 import '../harness/harness.dart' show NativeCommand, NativeMode, nativeModeOf;
 import '../uploads/uploads.dart';
@@ -50,6 +51,7 @@ class CodeComposer extends ConsumerStatefulWidget {
     this.nativeMode,
     this.onNativeModeChanged,
     this.harnessLabel = '',
+    this.sessionId,
   });
 
   final bool busy;
@@ -105,6 +107,9 @@ class CodeComposer extends ConsumerStatefulWidget {
   /// The harness's name, the native picker's header.
   final String harnessLabel;
 
+  /// The open session: text other views send its way ([composerInsertProvider]) lands at the caret.
+  final String? sessionId;
+
   @override
   ConsumerState<CodeComposer> createState() => _CodeComposerState();
 }
@@ -158,6 +163,20 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
           stop: widget.busy ? widget.onStop : null,
         ),
   );
+
+  /// Puts [text] at the caret (after the draft when the field never had focus), with a space before it when the
+  /// draft runs into it.
+  void _insert(String text) {
+    final v = _controller.value;
+    final at = v.selection.isValid ? v.selection : TextSelection.collapsed(offset: v.text.length);
+    final before = v.text.substring(0, at.start);
+    final piece = before.isEmpty || RegExp(r'\s$').hasMatch(before) ? text : ' $text';
+    _controller.value = TextEditingValue(
+      text: v.text.replaceRange(at.start, at.end, piece),
+      selection: TextSelection.collapsed(offset: at.start + piece.length),
+    );
+    _focus.requestFocus();
+  }
 
   void _pickSlash(SlashCommand command) {
     runSlash(command, '', _slashContext);
@@ -247,6 +266,11 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final radius = theme.design == DesignLanguage.fluent ? 8.0 : EveryTheme.cardRadius;
+    if (widget.sessionId case final id?) {
+      ref.listen(composerInsertProvider(id), (_, next) {
+        if (next != null) _insert(next.text);
+      });
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,

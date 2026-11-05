@@ -8,7 +8,9 @@ import '../../../artifacts/ui/panel_split.dart';
 import '../../code_providers.dart';
 import '../../domain/code_session.dart';
 import '../panes/diff_pane.dart';
+import 'console_header.dart' show consoleViewsFor;
 import 'console_state.dart';
+import 'files_view.dart';
 import 'running_work.dart';
 import 'session_info_view.dart';
 
@@ -108,11 +110,9 @@ class ConsolePanelView extends ConsumerWidget {
     // Not the width: a drag of the divider shouldn't rebuild the Diff or Session info.
     final (shown, childId) = ref.watch(consolePanelProvider(session.id).select((p) => (p.view, p.child)));
     final notifier = ref.read(consolePanelProvider(session.id).notifier);
-    // A view this session has no content for (a Diff outside git) shows Session info.
-    final view = switch (shown) {
-      ConsoleView.diff when session.diffTarget == null => ConsoleView.info,
-      final v => v ?? ConsoleView.info,
-    };
+    // A view this session has no content for (a Diff outside git, Files without a folder) shows Session info.
+    final views = consoleViewsFor(session);
+    final view = shown != null && views.contains(shown) ? shown : ConsoleView.info;
     final Widget body;
     if (childId case final child?) {
       body = ChildChatView(key: ValueKey('console.child.$child'), parentId: session.id, childId: child);
@@ -134,10 +134,7 @@ class ConsolePanelView extends ConsumerWidget {
           ),
           Expanded(
             child: switch (view) {
-              // Files is the next view to land; until then a stored choice of it shows this.
-              ConsoleView.files => Center(
-                child: Text('Files is coming soon.', style: theme.type.callout.tint(theme.textMuted)),
-              ),
+              ConsoleView.files => FilesView(session: session),
               _ => SessionInfoView(session: session),
             },
           ),

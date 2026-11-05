@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../../app/router.dart';
+import '../../../../core/platform/platform_kind.dart';
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/anchored_popover.dart';
@@ -18,16 +19,17 @@ import '../../host/host_notes.dart' show hostSavedPlans;
 import '../../panes/panes_providers.dart';
 import '../../settings/code_settings.dart' show crossedBudget;
 import '../code_top_bar.dart' show SessionSettingsList;
-import '../panes/session_panes.dart' show panesFor;
+import 'bottom_drawer.dart';
 import 'console_state.dart';
 import 'git_button.dart';
 import 'session_actions.dart';
 
-/// The views the header's icons switch for [info]: Session info always, the Diff in a git repository. Files joins
-/// once its view is built.
+/// The views the header's icons switch for [info]: Session info always, the Diff in a git repository, Files for a
+/// real folder on a desktop.
 List<ConsoleView> consoleViewsFor(CodeSessionInfo info) => [
   ConsoleView.info,
   if (info.diffTarget != null) ConsoleView.diff,
+  if (Host.isDesktop && !noLocalFolder(info.workingDir)) ConsoleView.files,
 ];
 
 EveryIcon _iconOf(ConsoleView view) => switch (view) {
@@ -146,6 +148,7 @@ class ConsoleActions extends ConsumerWidget {
     });
     final active = ref.watch(consolePanelProvider(id).select((p) => p.view));
     final panel = ref.read(consolePanelProvider(id).notifier);
+    final drawerOpen = ref.watch(codePaneProvider(id).select((d) => d.open != null));
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -158,6 +161,14 @@ class ConsoleActions extends ConsumerWidget {
               active: active == view,
               onPressed: () => panel.toggle(view),
             ),
+        if (drawerPanesFor(info).isNotEmpty)
+          ViewIcon(
+            key: const ValueKey('console.icon.drawer'),
+            icon: EveryIcon.command,
+            tooltip: drawerOpen ? 'Hide terminal (⌃`)' : 'Terminal, processes and preview (⌃`)',
+            active: drawerOpen,
+            onPressed: ref.read(codePaneProvider(id).notifier).toggleDrawer,
+          ),
         ConsoleMoreMenu(info: info, foldViews: tier == ConsoleTier.narrow),
         GitButton(sessionId: id),
       ],
@@ -290,16 +301,6 @@ class _ConsoleMoreMenuState extends ConsumerState<ConsoleMoreMenu> {
                     subtitle: 'Permissions, MCP, skills, prompt',
                     onTap: () => page(_MorePage.settings),
                   ),
-                  // Until the bottom drawer: the old side pane, for these three only.
-                  if (panesFor(info).contains(CodePane.terminal))
-                    PopoverRow(
-                      key: const ValueKey('console.more.panes'),
-                      title: 'Terminal, processes and preview',
-                      onTap: () {
-                        close();
-                        ref.read(codePaneProvider(info.id).notifier).toggleLast();
-                      },
-                    ),
                 ],
               ],
             ),
