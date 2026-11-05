@@ -2,7 +2,9 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../../../core/security/untrusted.dart';
 import '../../chat/domain/message.dart' show ToolCallPart;
+import 'hidden_instructions.dart';
 import 'skill_catalog.dart';
 
 /// The chat tools that bring the user's skills into a conversation. Both run
@@ -158,7 +160,7 @@ final class SkillChatTools {
     }
     final out = StringBuffer()
       ..writeln('<skill_content name="${skill.name}">')
-      ..writeln(_cap(skill.body.trim()))
+      ..writeln(_cap(stripHidden(skill.body).trim()))
       ..write('</skill_content>');
     if (skill.files.isNotEmpty) {
       out
@@ -197,7 +199,14 @@ final class SkillChatTools {
     } on FormatException {
       return (text: 'Error: "$path" is not a text file, so it cannot be read in a chat.', isError: true);
     }
-    return (text: '<skill_file skill="${skill.name}" path="$path">\n${_cap(text)}\n</skill_file>', isError: false);
+    // Hidden characters never reach the model; the note says they were there.
+    final note = hiddenRemovedNote(text);
+    return (
+      text:
+          '<skill_file skill="${skill.name}" path="$path">\n${_cap(stripHidden(text))}\n</skill_file>'
+          '${note == null ? '' : '\n$note'}',
+      isError: false,
+    );
   }
 }
 

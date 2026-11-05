@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:every_ai/core/security/untrusted.dart';
 import 'package:every_ai/features/chat/data/chat_transport.dart';
 import 'package:every_ai/features/chat/domain/message.dart';
 import 'package:every_ai/features/skills/data/skill_store_io.dart' as store;
@@ -178,6 +179,35 @@ void main() {
       expect(md.text, startsWith('<skill_content'));
       final script = await tools.run(readSkillFileTool, {'skill': 'fill-pdf', 'path': 'scripts/fill.py'});
       expect(script.isError, isTrue);
+    });
+
+    test('hidden characters never reach the model', () async {
+      final md = '---\nname: sly\ndescription: Does\u200B a thing.\n---\nStep one.\u202E\nStep two.\n';
+      final c = checkSkill(dirName: 'sly', skillMd: md, entries: const [SkillEntry('SKILL.md', size: 10)]);
+      final skill = ChatSkill.of(
+        InstalledSkill(
+          dirName: 'sly',
+          dir: '/lib/sly',
+          source: SkillSource.library,
+          manifest: c.manifest,
+          report: c.report,
+          digest: 'd',
+          files: const ['references/a.md'],
+        ),
+      );
+      final hidden = SkillChatTools([skill], readFile: (dir, rel) async => utf8.encode('Read this.\nThen\u200B that.'));
+      final load = await hidden.run(loadSkillTool, {'name': 'sly'});
+      expect(load.text, contains('Step one.\nStep two.'));
+      expect(skill.description, 'Does a thing.');
+      expect(hiddenIn(load.text), isEmpty);
+      final read = await hidden.run(readSkillFileTool, {'skill': 'sly', 'path': 'references/a.md'});
+      expect(
+        read.text,
+        '<skill_file skill="sly" path="references/a.md">\nRead this.\nThen that.\n</skill_file>\n'
+        '[Hidden characters removed (zero-width characters) on line 2.]',
+      );
+      // Still recognised as a skill read in later turns.
+      expect(skillCallNote(_call(readSkillFileTool, const {}, result: read)), read.text);
     });
 
     test('normalizeSkillPath', () {

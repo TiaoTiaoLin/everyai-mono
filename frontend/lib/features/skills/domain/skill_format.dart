@@ -1,5 +1,8 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../core/security/untrusted.dart';
+import 'hidden_instructions.dart';
+
 /// The Agent Skills format (agentskills.io): a folder with a `SKILL.md` whose
 /// front matter names and describes the skill, plus optional `scripts/`,
 /// `references/` and `assets/`.
@@ -188,10 +191,19 @@ String _blockScalar(List<String> block, {required bool folded, required String c
 /// on); [warnings] are shown.
 @immutable
 final class SkillReport {
-  const SkillReport({this.errors = const [], this.warnings = const [], this.hasScripts = false});
+  const SkillReport({
+    this.errors = const [],
+    this.warnings = const [],
+    this.hasScripts = false,
+    this.findings = const [],
+  });
 
   final List<String> errors;
   final List<String> warnings;
+
+  /// Hidden or suspicious text in `SKILL.md` (advice for the trust review; also summed up in [warnings]). Bundled
+  /// files are scanned on import and at review time, not here.
+  final List<InstructionFinding> findings;
 
   /// It ships `scripts/` or script files: only Code can run them.
   final bool hasScripts;
@@ -268,6 +280,7 @@ SkillCheck checkSkill({
   if (total > SkillRules.maxTotalBytes) errors.add('Larger than ${_mib(SkillRules.maxTotalBytes)} in all.');
 
   SkillManifest? manifest;
+  var findings = const <InstructionFinding>[];
   if (skillMd == null) {
     errors.add('There is no SKILL.md.');
   } else if (skillMd.length > SkillRules.maxSkillMdBytes) {
@@ -279,8 +292,13 @@ SkillCheck checkSkill({
     } on FormatException catch (e) {
       errors.add(e.message);
     }
+    findings = scanInstructions(skillMd, file: 'SKILL.md');
+    if (findingsWarning(findings) case final w?) warnings.add(w);
   }
-  return (manifest: manifest, report: SkillReport(errors: errors, warnings: warnings, hasScripts: scripts));
+  return (
+    manifest: manifest,
+    report: SkillReport(errors: errors, warnings: warnings, hasScripts: scripts, findings: findings),
+  );
 }
 
 SkillManifest? _manifest(
@@ -316,7 +334,13 @@ SkillManifest? _manifest(
     }
     if (name != dirName) lenient('The folder is called "$dirName" but the skill is "$name"; they must match.');
   }
-  final description = str('description');
+  // What the agent gets: hidden characters removed from every field but the name, which refuses them (the digest
+  // stays over the raw file).
+  String? clean(String key) => switch (str(key)) {
+    final v? => stripHidden(v),
+    null => null,
+  };
+  final description = clean('description');
   if (description == null || description.isEmpty) {
     errors.add('The front matter needs a description.');
   } else {
@@ -327,15 +351,15 @@ SkillManifest? _manifest(
       errors.add('The description may not contain XML or HTML tags.');
     }
   }
-  final compatibility = str('compatibility');
+  final compatibility = clean('compatibility');
   if (compatibility != null && compatibility.length > SkillRules.maxCompatibility) {
     errors.add('"compatibility" is longer than ${SkillRules.maxCompatibility} characters.');
   }
-  final license = str('license');
-  final allowedTools = str('allowed-tools');
+  final license = clean('license');
+  final allowedTools = clean('allowed-tools');
   final metadata = switch (f['metadata']) {
     null => const <String, String>{},
-    final Map<String, String> m => m,
+    final Map<String, String> m => {for (final e in m.entries) stripHidden(e.key): stripHidden(e.value)},
     '' => const <String, String>{},
     _ => () {
       errors.add('"metadata" must be a mapping of keys to text.');
@@ -356,7 +380,7 @@ SkillManifest? _manifest(
   return SkillManifest(
     name: name,
     description: description,
-    body: fm.body,
+    body: stripHidden(fm.body),
     license: license,
     compatibility: compatibility,
     allowedTools: allowedTools,

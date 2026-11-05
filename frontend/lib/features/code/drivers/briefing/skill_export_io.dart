@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../../../core/security/untrusted.dart';
 import '../../../skills/data/skill_store_io.dart' show digestOfBytes;
 import '../../../skills/domain/skill_catalog.dart';
 import '../../../skills/domain/skill_format.dart';
@@ -65,7 +66,7 @@ Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills
       final base = 'skills/${m.name}';
       want['$base/SKILL.md'] = _Want(utf8.encode(renderSkillMd(m)));
       for (final e in copies.entries) {
-        want['$base/${e.key}'] = e.value;
+        want['$base/${e.key}'] = _withoutHidden(e.value);
       }
     }
   }
@@ -81,6 +82,20 @@ Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills
       if (k.startsWith('skills/')) k.substring(7),
   });
   return (skillDir: skillDir, names: names..sort(), written: written, skipped: skipped);
+}
+
+/// [w] with hidden characters removed when it is UTF-8 text, as the skill's SKILL.md is: the CLI's own read tool
+/// would hand them to the model as they are. Binary files (a NUL byte, or not UTF-8) are copied unchanged.
+_Want _withoutHidden(_Want w) {
+  if (w.bytes.contains(0)) return w;
+  final String text;
+  try {
+    text = utf8.decode(w.bytes);
+  } on FormatException {
+    return w;
+  }
+  final clean = stripHidden(text);
+  return clean == text ? w : _Want(utf8.encode(clean), exec: w.exec);
 }
 
 Future<String> sessionNoticeNonce(String sessionDir, String Function() make) async {

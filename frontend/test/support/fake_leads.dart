@@ -4,6 +4,7 @@
 import 'dart:async';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/mcp_tool_check.dart' show McpToolsReport;
 import 'package:every_ai/features/code/drivers/driver.dart';
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
@@ -30,7 +31,8 @@ Future<T> whenValue<T>(ProviderContainer c, ProviderListenable<T> p, bool Functi
 /// An outside agent's session: the test plays its events and reads what it
 /// was sent and answered. With [replays], a new listener gets every event
 /// played so far first, as a reopened conversation does.
-final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeCommands, NativeModes, TakesSkillOverrides {
+final class FakeLeadSession
+    implements HarnessSession, SteersRuns, HasNativeCommands, NativeModes, TakesSkillOverrides, ReportsMcpTools {
   FakeLeadSession({this.id = 'c1', this.replays = false, List<HarnessEvent> history = const []}) {
     _history.addAll(history);
   }
@@ -43,6 +45,11 @@ final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeComm
   final answers = <({bool accept, String? reason})>[];
   final sent = <String>[];
   var skillsOff = <String>{};
+
+  /// What vetting found about its MCP tools; the test completes it.
+  final mcpReported = Completer<Map<String, McpToolsReport>>();
+  @override
+  Future<Map<String, McpToolsReport>> get mcpReport => mcpReported.future;
 
   @override
   void setSkillsOff(Set<String> off) => skillsOff = off;
@@ -151,7 +158,7 @@ final class FakeLeadSession implements HarnessSession, SteersRuns, HasNativeComm
 /// A driver over fake sessions. Given [session], every start and attach
 /// returns it; otherwise each start makes a new one (`<id>-c1`, `<id>-c2`, …)
 /// and attach reopens it, replaying what it played ([attachFails] refuses).
-final class FakeLeadDriver implements HarnessDriver, AttachesBriefed, ChecksResume {
+final class FakeLeadDriver implements HarnessDriver, AttachesBriefed, AttachesWithMcp, ChecksResume {
   FakeLeadDriver(
     this.id, {
     this.session,
@@ -221,6 +228,15 @@ final class FakeLeadDriver implements HarnessDriver, AttachesBriefed, ChecksResu
 
   @override
   Future<HarnessSession> attach(String conversationId) => _attach(conversationId);
+
+  /// The MCP config each [attachWithMcp] reopen was given.
+  final reopenedWithMcp = <Map<String, Object?>>[];
+  @override
+  Future<HarnessSession> attachWithMcp(String conversationId, Map<String, Object?> mcpConfig) {
+    reopenedWithMcp.add(mcpConfig);
+    return _attach(conversationId);
+  }
+
   @override
   Future<HarnessSession> attachBriefed(
     String conversationId,

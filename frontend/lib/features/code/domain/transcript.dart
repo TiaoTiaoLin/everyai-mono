@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'phases.dart';
 import '../drivers/driver_policy.dart' show hostToolOf;
 import '../drivers/usage_limit.dart';
+import '../git/repo_check.dart' show splitRepoCheck;
 import '../harness/events.dart';
 import '../settings/context_files.dart' show splitContextNotes;
 import '../workflows/workflow_notes.dart' show splitWorkflowNotes;
@@ -252,6 +253,9 @@ const planRevisionLead = 'Not an error: the user wants changes to this plan befo
 /// The title of the row that holds the text an outside agent was briefed with.
 const briefingNotice = 'EveryAI briefing';
 
+/// The row for the repo-check block on a session's first message.
+const repoCheckNotice = 'This repository can run code by itself';
+
 /// The kind of a note the app adds on a lead switch (see [leadNoticeEvent]).
 const leadNoticeKind = 'EveryAILeadNotice';
 
@@ -478,7 +482,9 @@ final class TranscriptBuilder {
         if (briefed != null) _items.add(NoticeItem('${e.id}-briefing', briefingNotice, detail: briefed));
         if (briefed != null && raw.isEmpty) return;
         final (mode, noted) = splitModeNote(raw);
-        final (_, afterContext) = splitContextNotes(noted);
+        final (repoCheck, checked) = splitRepoCheck(noted);
+        if (repoCheck != null) _items.add(NoticeItem('${e.id}-repo', repoCheckNotice, detail: repoCheck));
+        final (_, afterContext) = splitContextNotes(checked);
         final (flows, afterFlows) = splitWorkflowNotes(afterContext);
         var text = splitRewindNote(afterFlows);
         final changed = mode != null && mode != _notedMode;

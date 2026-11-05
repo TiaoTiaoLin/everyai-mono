@@ -723,6 +723,46 @@ void main() {
     expect(drivers['test']!.reopenedMcp.single.keys, ['charts']);
   });
 
+  test("a session's MCP report reaches Settings: pins and the tools to review", () async {
+    final mcp = container.read(codeMcpServersProvider.notifier);
+    mcp.put(const McpServer(name: 'dict', transport: McpTransport.http, url: 'https://dict.example/mcp'));
+    final info = await start();
+    await open(info.id);
+    session.mcpReported.complete({
+      'dict': const McpToolsReport(
+        pin: {'lookup': 'd1'},
+        pending: [
+          McpToolReview(name: 'define', digest: 'e1', isNew: true, reasons: ['x']),
+        ],
+      ),
+    });
+    await pumpEventQueue();
+    final dict = container.read(codeMcpServersProvider).global.single;
+    expect(dict.pinned, {'lookup': 'd1'});
+    expect([for (final p in dict.pending) p.name], ['define']);
+  });
+
+  test('a reopened EveryAI session gets the MCP servers and pins as they are now', () async {
+    final info = await start();
+    final mcp = container.read(codeMcpServersProvider.notifier);
+    mcp.put(
+      const McpServer(
+        name: 'dict',
+        transport: McpTransport.http,
+        url: 'https://dict.example/mcp',
+        pinned: {'lookup': 'd1'},
+        pending: [McpToolReview(name: 'define', digest: 'e1')],
+      ),
+    );
+    await container
+        .read(codeSessionsProvider.notifier)
+        .attachSession(CodeSessionInfo.fromJson({...info.toJson(), 'harness': everyaiHarnessName}));
+    final reopened = drivers[everyaiHarnessName]!.reopenedWithMcp.single;
+    // Its own harness vets per tool, so a server with tools to review still comes, with its pins.
+    expect(reopened.keys, ['dict']);
+    expect((reopened['dict']! as Map)['pinned'], {'lookup': 'd1'});
+  });
+
   test('a reopened child of an outside session gets no briefing, as it started', () async {
     final parent = await start();
     final child = await container
