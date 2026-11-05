@@ -16,6 +16,7 @@ import '../../settings/settings_registry.dart' show SettingsSection;
 import '../../settings/ui/settings_modal.dart' show showSettings;
 import '../../skills/domain/skill_catalog.dart' show sessionSkills;
 import '../../skills/skills_providers.dart' show installedSkillsProvider, skillSettingsProvider;
+import '../../slash/code_commands.dart' show withEveryLeadCommands;
 import '../../slash/native_commands.dart';
 import '../../slash/slash_command.dart';
 import '../../slash/slash_registry.dart';
@@ -149,7 +150,10 @@ class _CodeComposerState extends ConsumerState<CodeComposer> {
     });
   }
 
-  List<SlashCommand> get _commands => widget.commands ?? ref.read(slashCommandsProvider);
+  List<SlashCommand> get _commands => switch (widget.commands) {
+    final native? => withEveryLeadCommands(native),
+    null => ref.read(slashCommandsProvider),
+  };
 
   @override
   void didUpdateWidget(CodeComposer old) {

@@ -377,6 +377,15 @@ abstract interface class HasContextParts {
   List<ContextPart> get contextParts;
 }
 
+/// A session led by an outside CLI that can answer a side question (`/btw`)
+/// in a throwaway fork of its conversation: the session itself is neither
+/// interrupted nor told, and the fork isn't kept. It runs on the user's own
+/// account for that CLI (EveryAI spends nothing).
+abstract interface class AnswersSideQuestion {
+  /// The answer to [question], or a [HarnessError] saying why there is none.
+  Future<String> sideAnswer(String question);
+}
+
 /// A session led by an outside CLI that has `/` commands of its own. The `/`
 /// menu shows these instead of EveryAI's; sessions without it have none.
 abstract interface class HasNativeCommands {

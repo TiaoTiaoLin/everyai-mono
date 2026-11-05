@@ -424,7 +424,8 @@ typedef _Held = ({String requestId, bool hook, String name, Map<String, Object?>
 
 /// One Claude Code conversation. Refusing a call doesn't stop the run (the
 /// model is told and carries on); [resume] runs a stopped or failed turn on.
-final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes {
+final class ClaudeSession
+    implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes, AnswersSideQuestion {
   ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal)
     : _commands = NativeCommandList(_meta.commands),
       _modes = NativeModeFeed((modes: claudeModes(autoMode: _meta.autoMode), current: _meta.permissionMode));
@@ -682,6 +683,40 @@ final class ClaudeSession implements HarnessSession, PerCallApprovals, HasNative
     _respawn = false;
     await _sub?.cancel();
     await c?.close();
+  }
+
+  /// `/btw`: a second CLI process on a fork of this conversation that isn't
+  /// saved ([claudeAsideArgs]), so the running turn goes on untouched.
+  @override
+  Future<String> sideAnswer(String question) async {
+    final c = await _driver._spawn(
+      claudeAsideArgs(sessionId: id, resume: _meta.sent, model: _meta.model, effort: _meta.effort),
+      cwd: _meta.cwd,
+      env: const {},
+      sessionTag: _meta.sessionTag,
+      logPath: '$_dir/$id-aside.log',
+    );
+    try {
+      final result = c.lines
+          .map(_json)
+          .firstWhere((j) => j?['type'] == 'result', orElse: () => null)
+          .timeout(const Duration(minutes: 3));
+      c.send(jsonEncode(userLine(asideMessage(question))));
+      final r = await result;
+      final text = switch (r?['result']) {
+        final String t => t.trim(),
+        _ => '',
+      };
+      if (r == null) throw const HarnessError('Claude Code stopped before it answered.');
+      if (r['is_error'] == true || text.isEmpty) {
+        throw HarnessError(text.isEmpty ? 'Claude Code gave no answer.' : text);
+      }
+      return text;
+    } on TimeoutException {
+      throw const HarnessError('Claude Code took too long to answer.');
+    } finally {
+      await c.close();
+    }
   }
 
   /// The CLI's process, started when missing: a new conversation under our

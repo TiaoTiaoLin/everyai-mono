@@ -243,6 +243,7 @@ void main() {
         commit: (a) => calls.add('commit|$a'),
         pr: (a) => calls.add('pr|$a'),
         cost: () => calls.add('cost'),
+        btw: (q) => calls.add('btw|$q'),
         morning: () => calls.add('morning'),
       );
       setUp(() {
@@ -250,30 +251,54 @@ void main() {
         calls.clear();
       });
 
-      desktop("the menu lists only the harness's commands; one runs natively, an unlisted one is a message", (
-        tester,
-      ) async {
-        await tester.pumpWidget(host(native: native, slashHost: slashHost));
-        await type(tester, '/');
-        expect(row('review'), findsOneWidget);
-        expect(row('web'), findsOneWidget);
-        for (final n in ['compact', 'plan', 'stop', 'pdf-tools']) {
-          expect(row(n), findsNothing);
-        }
-        expect(find.text('Commands'), findsOneWidget);
-        expect(find.text('Built-in'), findsNothing);
+      desktop(
+        "the menu lists the harness's commands plus /usage and /btw; one runs natively, an unlisted one is a message",
+        (tester) async {
+          await tester.pumpWidget(host(native: native, slashHost: slashHost));
+          await type(tester, '/');
+          expect(row('review'), findsOneWidget);
+          expect(row('web'), findsOneWidget);
+          for (final n in ['compact', 'plan', 'stop', 'pdf-tools']) {
+            expect(row(n), findsNothing);
+          }
+          expect(find.text('Commands'), findsOneWidget);
+          // EveryAI's two that work on every lead; the CLI's headless mode has neither.
+          expect(row('usage'), findsOneWidget);
+          expect(row('btw'), findsOneWidget);
+          expect(find.text('Built-in'), findsOneWidget);
 
-        await type(tester, '/review x');
-        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-        await tester.pump();
-        expect(nativeRan, ['review|x']);
-        expect(sent, isEmpty);
+          await type(tester, '/review x');
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          expect(nativeRan, ['review|x']);
+          expect(sent, isEmpty);
 
-        await type(tester, '/plan now');
-        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-        await tester.pump();
-        expect(sent, ['/plan now']);
-        expect(ran, isEmpty);
+          await type(tester, '/plan now');
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          expect(sent, ['/plan now']);
+          expect(ran, isEmpty);
+
+          await type(tester, '/usage');
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          await type(tester, '/btw what is it testing?');
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          expect(calls, ['cost', 'btw|what is it testing?']);
+          expect(nativeRan, ['review|x']);
+        },
+      );
+
+      test("EveryAI's /usage and /btw replace a harness's own of the same name", () {
+        final merged = withEveryLeadCommands(
+          nativeSlashCommands(const [NativeCommand(name: 'btw'), NativeCommand(name: 'web')], (_, _) async => null),
+        );
+        expect(merged.map((c) => (c.name, c.group)), [
+          ('usage', SlashGroup.builtIn),
+          ('btw', SlashGroup.builtIn),
+          ('web', SlashGroup.native),
+        ]);
       });
 
       desktop('before the harness lists its commands, a typed /name still goes to it as a command', (tester) async {

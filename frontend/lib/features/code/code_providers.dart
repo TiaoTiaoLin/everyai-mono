@@ -717,7 +717,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
         : {...ref.read(codeMcpServersProvider).mcpConfigFor(projectId)};
     if (outside) mcpConfig.remove(everyaiServerName);
     // Skills likewise: the app's enabled ones, and project skills only once trusted.
-    final skills = !local ? const <Map<String, Object?>>[] : await codeSkillsFor(ref, projectId);
+    // The Max skill too in a main session: the Max note asks the lead to load it.
+    final skills = !local ? const <Map<String, Object?>>[] : await codeSkillsFor(ref, projectId, max: !subagent);
     return SessionSpec(
       workingDir: workingDir,
       model: model,
@@ -845,7 +846,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       // Volatile, so last; the memory is text earlier sessions wrote.
       if (notes.isNotEmpty) defuseInlineCommands(notes),
     ].join('\n');
-    final export = await exportSkills(await _driverDir(id), await _skillsFor(projectId), sessionText: text);
+    final export = await exportSkills(
+      await _driverDir(id),
+      await _skillsFor(projectId, max: !asFork),
+      sessionText: text,
+    );
     return (skillDir: export.skillDir, text: text);
   }
 
@@ -931,9 +936,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     }
   }
 
-  Future<List<InstalledSkill>> _skillsFor(String? projectId) async {
+  Future<List<InstalledSkill>> _skillsFor(String? projectId, {bool max = false}) async {
     try {
-      return await codeInstalledSkillsFor(ref, projectId);
+      return await codeInstalledSkillsFor(ref, projectId, max: max);
     } on Object {
       // Unreadable skill folders only lose the skills.
       return const [];
@@ -3600,14 +3605,31 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// picked in the composer), reading the session so far (`/btw`). The agent
   /// is neither interrupted nor told: the call is separate, and the answer
   /// shows as an aside card. Billed to the session (or the model's key).
-  /// Off on an outside lead, where EveryAI spends nothing.
+  /// An outside lead answers in a throwaway fork of its own conversation
+  /// ([AnswersSideQuestion], on the user's account for that CLI); one that can't is
+  /// refused, since EveryAI spends nothing there.
   /// [summarizer] replaces the gateway call (tests).
   Future<void> askAside(String question, {Summarizer? summarizer}) async {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     final aside = Aside(id: ++_asideIds, kind: AsideKind.btw, question: question.trim(), busy: true);
     _putAside(aside);
     if (info != null && isOutsideLead(info.harness, info.workingDir)) {
-      _putAside(aside.failed(btwOff(_leadLabel(info.harness))));
+      final session = _session;
+      if (session is! AnswersSideQuestion) {
+        _putAside(
+          aside.failed(
+            session == null ? 'The agent is still starting. Ask again in a moment.' : btwOff(_leadLabel(info.harness)),
+          ),
+        );
+        return;
+      }
+      try {
+        final answer = await (session as AnswersSideQuestion).sideAnswer(question);
+        if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.done(answer));
+      } on Object catch (e) {
+        final why = e is HarnessError ? e.message : '$e';
+        if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.failed(why));
+      }
       return;
     }
     if (info == null || (summarizer == null && isDemoPath(info.workingDir))) {

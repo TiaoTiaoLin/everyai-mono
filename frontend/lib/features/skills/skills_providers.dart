@@ -99,7 +99,8 @@ base class NoInstalledSkills extends InstalledSkills {
 
 /// The skills a new Code session in [projectId] gets, read from disk now
 /// so a project skill changed since it was trusted stays out. The Max skill
-/// comes only with [max] (the session's workflow is Max).
+/// comes only with [max]: every main session gets it (Max can be turned on
+/// mid-session, after the skill list is fixed), forks don't (they can't fork).
 Future<List<InstalledSkill>> codeInstalledSkillsFor(Ref ref, String? projectId, {bool max = false}) async {
   final projects = [
     for (final p in ref.read(codeProjectsProvider))
@@ -110,8 +111,8 @@ Future<List<InstalledSkill>> codeInstalledSkillsFor(Ref ref, String? projectId, 
 }
 
 /// [codeInstalledSkillsFor] as `agent_context.skills`.
-Future<List<Map<String, Object?>>> codeSkillsFor(Ref ref, String? projectId) async => [
-  for (final s in await codeInstalledSkillsFor(ref, projectId)) openHandsSkill(s),
+Future<List<Map<String, Object?>>> codeSkillsFor(Ref ref, String? projectId, {bool max = false}) async => [
+  for (final s in await codeInstalledSkillsFor(ref, projectId, max: max)) openHandsSkill(s),
 ];
 
 /// The skills Chat offers (library and shared, active, sorted), from the

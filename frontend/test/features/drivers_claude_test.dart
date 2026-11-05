@@ -876,6 +876,57 @@ void main() {
       await one.close();
     });
 
+    test(
+      '/btw: a fork of the conversation that isn\'t kept, with read-only tools; the session isn\'t touched',
+      () async {
+        final first = ReplayChannel(_fixture('init_image_turn.jsonl'));
+        String line(String dir, Object msg) => jsonEncode({'dir': dir, 'msg': msg});
+        final aside = ReplayChannel(
+          [
+            line('out', userLine(asideMessage('What is it testing?'))),
+            line('in', {'type': 'result', 'subtype': 'success', 'is_error': false, 'result': ' The widget tests. '}),
+          ].join('\n'),
+        );
+        final s = _Spawner([first, aside]);
+        final session = await driver(s).start(_spec());
+        _record(session);
+        await session.send('What colour is this pixel? Reply in one word.', images: ['data:image/png;base64,$_pixel']);
+        await _played(first);
+
+        final answer = await (session as AnswersSideQuestion).sideAnswer('What is it testing?');
+        expect(answer, 'The widget tests.');
+        final args = s.calls.last.args;
+        expect(args, containsAllInOrder(['--resume', session.id, '--fork-session']));
+        expect(args, containsAll(['--no-session-persistence', '--strict-mcp-config']));
+        expect(args, containsAllInOrder(['--tools', 'Read,Grep,Glob']));
+        expect(args, isNot(contains('--permission-prompt-tool')));
+        expect(s.calls.last.cwd, '/work/repo');
+        // The main conversation got nothing.
+        expect(first.sent.where((m) => m['type'] == 'user'), hasLength(1));
+        await session.close();
+      },
+    );
+
+    test('/btw before the first message ran asks a fresh, unsaved process', () async {
+      final aside = ReplayChannel(
+        [
+          jsonEncode({'dir': 'out', 'msg': userLine(asideMessage('hi'))}),
+          jsonEncode({
+            'dir': 'in',
+            'msg': {'type': 'result', 'subtype': 'error_during_execution', 'is_error': true, 'result': 'Not signed in'},
+          }),
+        ].join('\n'),
+      );
+      final s = _Spawner([aside]);
+      final session = await driver(s).start(_spec());
+      await expectLater(
+        (session as AnswersSideQuestion).sideAnswer('hi'),
+        throwsA(isA<HarnessError>().having((e) => e.message, 'message', 'Not signed in')),
+      );
+      expect(s.calls.single.args, isNot(contains('--resume')));
+      await session.close();
+    });
+
     test('a session without a record says so', () async {
       await expectLater(
         driver(_Spawner([])).attach('gone'),

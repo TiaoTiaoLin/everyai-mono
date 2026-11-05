@@ -1,6 +1,6 @@
 ---
 name: everyai-max
-description: How to take on a large or unclear coding task. Research it, ask the user what only they can decide, present a plan, build it in parallel forks, then verify. Use when the user picks Max.
+description: How to take on a large or unclear coding task. Research it, ask the user what only they can decide, present a plan, build it in parallel forks, then verify. Load it only when an everyai-workflow note says the user turned Max on.
 license: Apache-2.0
 compatibility: Code sessions only (a shell, git and the EveryAI coding tools).
 ---

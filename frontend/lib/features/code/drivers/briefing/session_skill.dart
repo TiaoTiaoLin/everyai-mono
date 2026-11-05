@@ -106,6 +106,8 @@ String sessionBriefing(SessionSkillInput input) {
     ..writeln('- Ask the user when a decision is theirs (scope, design, trade-offs) and the code cannot answer it.')
     ..writeln('  Otherwise decide and go on.')
     ..writeln('- Say what you changed and what you did not check when you finish.')
+    ..writeln('- In the shell, use absolute paths: the working directory carries over between commands. Never delete')
+    ..writeln('  the directory the shell is in or one above it.')
     ..writeln()
     ..writeln('## Prefer EveryAI\'s tools')
     ..writeln()

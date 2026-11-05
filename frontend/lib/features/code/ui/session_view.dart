@@ -23,6 +23,8 @@ import '../domain/code_session.dart';
 import '../domain/floor_advice.dart';
 import '../domain/questions.dart';
 import '../domain/rewind.dart';
+import '../domain/session_commands.dart' show AsideKind;
+import 'console/session_info_view.dart' show usageLines;
 import '../domain/transcript.dart';
 import '../code_settings_providers.dart' show codeSettingsProvider;
 import '../drivers/driver_policy.dart' show fidelityNote;
@@ -303,6 +305,18 @@ class CodeSessionScreen extends ConsumerWidget {
                                         contextWindow:
                                             ref.watch(modelCatalogProvider)[ModelId(info.model)]?.contextLength ?? 0,
                                         modelName: ref.watch(modelCatalogProvider)[ModelId(info.model)]?.name,
+                                        // The cap and plan limit lines; the calls line is the breakdown above.
+                                        limitLines: aside.kind != AsideKind.cost
+                                            ? const []
+                                            : usageLines(
+                                                totals:
+                                                    ref.watch(codeUsageProvider(sessionId)).value ?? UsageTotals.zero,
+                                                budget: ref.watch(codeSettingsProvider).budgets[sessionId],
+                                                limit: controller.limitPick?.limit,
+                                                outsideLabel: isOutsideLead(info.harness, info.workingDir)
+                                                    ? (driver?.info.label ?? info.harness)
+                                                    : null,
+                                              ).skip(1).toList(),
                                         onSendToAgent: () => controller.sendReview(aside.id),
                                         onOpenSession: (id) => context.go(Routes.codeSession(id)),
                                         onCommit: (message) =>

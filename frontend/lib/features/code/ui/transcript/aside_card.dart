@@ -20,6 +20,7 @@ class AsideCard extends StatelessWidget {
     this.usage = UsageTotals.zero,
     this.contextWindow = 0,
     this.modelName,
+    this.limitLines = const [],
     this.onSendToAgent,
     this.onOpenSession,
     this.onCommit,
@@ -33,6 +34,9 @@ class AsideCard extends StatelessWidget {
   final UsageTotals usage;
   final int contextWindow;
   final String? modelName;
+
+  /// For a usage card: the cap and plan limit lines Session info shows.
+  final List<String> limitLines;
 
   /// A review: hands the findings to the agent.
   final VoidCallback? onSendToAgent;
@@ -50,7 +54,7 @@ class AsideCard extends StatelessWidget {
     final q = aside.question;
     return switch (aside.kind) {
       AsideKind.btw => 'By the way: $q',
-      AsideKind.cost => 'Session usage',
+      AsideKind.cost => 'Usage and limits',
       AsideKind.review => q.isEmpty ? 'Review' : 'Review: $q',
       AsideKind.commit => 'Commit',
       AsideKind.pr => 'Pull request',
@@ -73,10 +77,21 @@ class AsideCard extends StatelessWidget {
     final theme = EveryTheme.of(context);
     final childId = aside.childId;
     final Widget body = switch (aside) {
-      Aside(kind: AsideKind.cost) =>
-        usage.isEmpty
-            ? Text('No model calls yet.', style: theme.type.callout.tint(theme.textMuted))
-            : UsageBreakdown(totals: usage, contextWindow: contextWindow, modelName: modelName),
+      Aside(kind: AsideKind.cost) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (usage.isEmpty)
+            Text('No model calls yet.', style: theme.type.callout.tint(theme.textMuted))
+          else
+            UsageBreakdown(totals: usage, contextWindow: contextWindow, modelName: modelName),
+          for (final line in limitLines)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(line, style: theme.type.callout.tint(theme.textMuted)),
+            ),
+        ],
+      ),
       Aside(busy: true) => Row(
         children: [
           const EveryMarkActivity(activity: MarkActivity.thinking, size: 14),

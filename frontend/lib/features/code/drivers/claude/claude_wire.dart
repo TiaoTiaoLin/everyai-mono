@@ -181,6 +181,40 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
   );
 }
 
+/// A `/btw` side question's process: a fork of conversation [sessionId] (a
+/// fresh one before its first message ran) that isn't saved, with only the
+/// read-only tools and none of the user's MCP servers.
+List<String> claudeAsideArgs({required String sessionId, required bool resume, String model = '', String? effort}) {
+  final m = claudeModelArg(model);
+  return [
+    '-p',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--strict-mcp-config',
+    '--no-session-persistence',
+    ..._userSettingsOnly,
+    if (resume) ...['--resume', sessionId, '--fork-session'],
+    '--tools',
+    'Read,Grep,Glob',
+    '--permission-mode',
+    'default',
+    if (m != null) ...['--model', m],
+    if (effort != null && effort.isNotEmpty) ...['--effort', effort],
+    '--settings',
+    _noSkillShell,
+  ];
+}
+
+/// The `/btw` message the side process gets.
+/// Prompt reason: the fork must answer, not carry on with the session's task.
+String asideMessage(String question) =>
+    '<side-question>The user asks this off to the side while you work. Your main conversation never sees this reply, '
+    'so answer only the question, briefly, from what you know of the session (you may read files). Don\'t carry on '
+    'with the task or change anything.</side-question>\n\n${question.trim()}';
+
 /// The process `models()` asks once: no session saved, none of the user's
 /// MCP servers started, no model call.
 const claudeProbeArgs = [
