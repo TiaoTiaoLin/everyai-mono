@@ -2,12 +2,15 @@
 #   macOS: Developer ID signed, notarized, stapled DMG (frontend/macos/scripts/release_macos.sh)
 #   Windows: the Store MSIX (the Store re-signs it; uploaded to Partner Center as a draft submission)
 #   Linux: AppImage + .deb with GPG signatures and SHA256SUMS (packaging/linux/package.sh)
+#   In-app updates: appcast.xml (Sparkle) and SHA256SUMS.sig (AppImage), signed with UPDATE_ED25519_KEY
+#   (packaging/updates.py). Bump the pubspec build number (+N) every release: Sparkle compares it.
 # The DMG and the Linux files land in a draft GitHub Release for the tag.
 #
 # Secrets (gh secret set …): MACOS_CERT_P12 (base64 .p12 with the Developer ID key), MACOS_CERT_PASSWORD,
 # MACOS_PROVISION_PROFILE (base64 Developer ID profile), ASC_KEY_P8 (base64 AuthKey_*.p8), ASC_KEY_ID, ASC_ISSUER_ID;
 # MSSTORE_TENANT_ID, MSSTORE_CLIENT_ID, MSSTORE_CLIENT_SECRET, MSSTORE_SELLER_ID, MSSTORE_PRODUCT_ID;
-# LINUX_GPG_KEY (armored secret key), LINUX_GPG_PASSPHRASE, LINUX_GPG_KEY_ID (fingerprint).
+# LINUX_GPG_KEY (armored secret key), LINUX_GPG_PASSPHRASE, LINUX_GPG_KEY_ID (fingerprint);
+# UPDATE_ED25519_KEY (base64 Ed25519 seed; public key in Info.plist SUPublicEDKey and updates/update_key.dart).
 name: Release (signed)
 
 on:
@@ -61,6 +64,17 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: frontend/macos/scripts/release_macos.sh
+      # The in-app updater (Sparkle) reads this release's appcast: the DMG's EdDSA signature and build number.
+      - name: Sparkle appcast
+        env:
+          UPDATE_ED25519_KEY: ${{ secrets.UPDATE_ED25519_KEY }}
+        run: |
+          python3 -m pip install --quiet --break-system-packages cryptography 2>/dev/null || python3 -m pip install --quiet cryptography
+          V="$(grep -m1 '^version:' frontend/pubspec.yaml | sed 's/version: *//; s/+.*//')"
+          B="$(grep -m1 '^version:' frontend/pubspec.yaml | sed 's/.*+//')"
+          TAG="${GITHUB_REF_NAME}"; [[ "$TAG" == v* ]] || TAG="v$V"
+          python3 packaging/updates.py appcast frontend/build/dist/EveryAI-$V.dmg "$V" "$B" "$TAG" "$GITHUB_REPOSITORY" \
+            > frontend/build/dist/appcast.xml
       - uses: actions/upload-artifact@v4
         with:
           name: everyai-macos
@@ -142,6 +156,7 @@ jobs:
           LINUX_GPG_KEY: ${{ secrets.LINUX_GPG_KEY }}
           LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
           GPG_KEY_ID: ${{ secrets.LINUX_GPG_KEY_ID }}
+          UPDATE_KEY: ${{ secrets.UPDATE_ED25519_KEY }}
         run: |
           export GNUPGHOME="$RUNNER_TEMP/gnupg"; mkdir -m 700 "$GNUPGHOME"
           printf '%s' "$LINUX_GPG_PASSPHRASE" > "$RUNNER_TEMP/gpg.pass"
@@ -149,6 +164,10 @@ jobs:
           printf '%s' "$LINUX_GPG_KEY" | gpg --batch --pinentry-mode loopback --passphrase-file "$GPG_PASSPHRASE_FILE" --import
           V="$(grep -m1 '^version:' frontend/pubspec.yaml | sed 's/version: *//; s/+.*//')"
           packaging/linux/package.sh frontend/build/linux/x64/release/bundle "$V" frontend/build/dist
+          # The AppImage updater checks this Ed25519 signature of SHA256SUMS before swapping itself.
+          python3 -m pip install --quiet cryptography
+          UPDATE_ED25519_KEY="$UPDATE_KEY" python3 packaging/updates.py sign frontend/build/dist/SHA256SUMS \
+            > frontend/build/dist/SHA256SUMS.sig
           gpg --batch --verify frontend/build/dist/SHA256SUMS.asc frontend/build/dist/SHA256SUMS
           rm -rf "$GNUPGHOME" "$GPG_PASSPHRASE_FILE"
       - uses: actions/upload-artifact@v4
@@ -172,4 +191,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "EveryAI $GITHUB_REF_NAME" \
             --notes "macOS: signed and notarized DMG. Windows: install from the Microsoft Store. Linux: AppImage or .deb; verify with the key in packaging/linux/everyai-release-key.asc (gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS)." \
-            dist/*.dmg dist/*.dmg.sha256 dist/*.AppImage dist/*.deb dist/SHA256SUMS dist/*.asc
+            dist/*.dmg dist/*.dmg.sha256 dist/appcast.xml dist/*.AppImage dist/*.deb dist/SHA256SUMS dist/SHA256SUMS.sig dist/*.asc

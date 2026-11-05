@@ -14,6 +14,7 @@ import '../core/platform/platform_kind.dart';
 import '../core/net/api_client.dart' show ServerStatus;
 import '../core/preferences.dart';
 import '../core/providers.dart' show apiClientProvider, serverStatusProvider;
+import '../features/updates/update_providers.dart' show updateProvider;
 import '../core/theme/every_theme.dart';
 import '../core/ui/adaptive.dart' show AdaptiveButton, AdaptiveProgress, GlassSurface, GlassLevel, showAdaptiveToast;
 import '../features/code/code_providers.dart' show driverShutdownProvider;
@@ -92,6 +93,8 @@ class _AppShellState extends ConsumerState<AppShell> {
       // Which coding CLIs are installed: the last check at once, a new one in
       // the background, and again when the app comes back after a while.
       if (mounted && Host.isDesktop) ref.read(driverStatusesProvider);
+      // Updates: one check per launch (the controller waits a moment, and does nothing on dev or store installs).
+      if (mounted && Host.isDesktop) ref.read(updateProvider);
     });
     if (Host.isDesktop) {
       _lifecycle = AppLifecycleListener(

@@ -28,5 +28,17 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/xuckless/everyai-mono/releases/latest/download/appcast.xml  </string>
+	<key>SUPublicEDKey</key>
+	<string>cZ6H/Jhi7RyDULxBkpQv6GXNPPcpiGxGAXgdV2s1uc4=  </string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>

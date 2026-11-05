@@ -55,7 +55,10 @@ while IFS= read -r f; do
   [[ "$f" == "$APP/Contents/MacOS/EveryAI" || "$f" == "$APP/Contents/Resources/deno" ]] && continue
   if file -b "$f" | grep -q 'Mach-O'; then sign "$f"; fi
 done < <(find "$APP/Contents" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) | awk '{print length, $0}' | sort -rn | cut -d' ' -f2-)
-while IFS= read -r b; do sign "$b"; done < <(
+# Sparkle's XPC services keep their own entitlements.
+while IFS= read -r b; do
+  if [[ "$b" == *.xpc ]]; then sign --preserve-metadata=entitlements "$b"; else sign "$b"; fi
+done < <(
   find "$APP/Contents" -depth \( -name '*.framework' -o -name '*.xpc' -o -name '*.appex' -o -name '*.bundle' -o -name '*.app' \) -type d)
 # V8 compiles at run time: Deno keeps its JIT entitlements.
 if [[ -f "$APP/Contents/Resources/deno" ]]; then

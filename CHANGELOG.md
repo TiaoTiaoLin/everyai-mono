@@ -3,6 +3,13 @@
 EveryAI is in alpha. Signed releases start at `0.1.0-alpha.1`; the earlier unsigned dev build was
 `0.1.0-dev-nonsigned`. Earlier changes are listed by date and pull request.
 
+## Unreleased
+
+- **Updates without reinstalling.** Each launch checks GitHub Releases (Settings → About: Check now, and "Get
+  pre-releases"). The macOS release downloads the update quietly through Sparkle and shows "Restart to update" in the
+  sidebar. A Linux AppImage downloads the new AppImage, checks it against the signed `SHA256SUMS` and replaces itself.
+  The .deb offers the download. Microsoft Store installs keep updating through the Store.
+
 ## 0.1.0-alpha.1 (2026-11-05): the first signed release
 
 - **macOS:** a Developer ID signed, notarized and stapled DMG on

@@ -19,6 +19,7 @@ import '../../code/domain/code_session.dart';
 import '../../code/ui/code_home.dart';
 import '../../remote/ui/remote_code.dart' show RemoteSessionList;
 import '../../settings/ui/account_menu.dart';
+import '../../updates/ui/update_banner.dart';
 
 /// Width of the collapsed rail. macOS needs room for the traffic lights above it.
 double sidebarRailWidth(DesignLanguage design) => Host.hasTrafficLights ? 92 : 60;
@@ -277,6 +278,7 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 ? CodeSessionList(location: loc, query: _codeQuery, onNavigate: widget.onNavigate)
                 : _Recents(location: loc, matches: _matches, onNavigate: widget.onNavigate),
           ),
+          UpdateBanner(collapsed: collapsed),
           Container(height: 1, color: theme.border),
           AccountRow(collapsed: collapsed),
         ],

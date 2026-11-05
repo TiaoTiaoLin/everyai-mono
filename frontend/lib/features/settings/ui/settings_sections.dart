@@ -29,6 +29,8 @@ import '../appearance.dart';
 import '../dev_upstream.dart';
 import '../reply_language.dart';
 import '../settings_registry.dart';
+import '../../updates/ui/update_banner.dart';
+import '../../../core/config/version.dart';
 import 'account_menu.dart';
 import 'api_keys_section.dart';
 import 'notices_screen.dart';
@@ -327,7 +329,8 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
     return ListView(
       padding: _listPadding,
       children: [
-        AdaptiveListTile(title: const Text('Version'), subtitle: const Text('0.1.0')),
+        AdaptiveListTile(title: const Text('Version'), subtitle: const Text(appVersion)),
+        const UpdateSettingsTiles(),
         AdaptiveListTile(title: const Text('Server'), subtitle: Text(config.apiBaseUrl.toString())),
         AdaptiveListTile(
           title: const Text('Platform'),

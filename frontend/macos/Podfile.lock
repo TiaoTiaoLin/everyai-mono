@@ -6,15 +6,18 @@ PODS:
     - FlutterMacOS
   - FlutterMacOS (1.0.0)
   - OrderedSet (6.0.3)
+  - Sparkle (2.9.6)
 
 DEPENDENCIES:
   - flutter_inappwebview_macos (from `Flutter/ephemeral/.symlinks/plugins/flutter_inappwebview_macos/macos`)
   - flutter_pty (from `Flutter/ephemeral/.symlinks/plugins/flutter_pty/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
+  - Sparkle (~> 2.6)
 
 SPEC REPOS:
   trunk:
     - OrderedSet
+    - Sparkle
 
 EXTERNAL SOURCES:
   flutter_inappwebview_macos:
@@ -29,7 +32,8 @@ SPEC CHECKSUMS:
   flutter_pty: 1e360feaf8b1a213d2d50da3c076005b8eef1eee
   FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   OrderedSet: e539b66b644ff081c73a262d24ad552a69be3a94
+  Sparkle: b8c9cf4ced217ffc708a1ca5f988a7ba877658db
 
-PODFILE CHECKSUM: 1e95c36afbfd1cb6423ceca4de7a8e1b256fb6ac
+PODFILE CHECKSUM: 9df4b890dcd406a6e4209597bb0e89b044b38d78
 
 COCOAPODS: 1.16.2

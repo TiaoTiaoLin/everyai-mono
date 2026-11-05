@@ -686,6 +686,21 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
   `appVersion`, the terms, README (downloads → latest GitHub Release, the Microsoft Store listing 9PHCKCV3J9S9, the
   Homebrew tap `xuckless/homebrew-tap`), CHANGELOG. Tag `v0.1.0-alpha.1` runs `release.yml`. Dev builds stay unsigned
   (`0.1.0-alpha.1-unsigned`). Next versions: bump pubspec + `appVersion` together, tag `v<version>`.
+- **In-app updates (2026-11-05).** `features/updates/`: each launch (`shell.dart`) and Settings → About ("Check now",
+  "Get pre-releases", pref `updates.prereleases`) ask the GitHub releases API (`/releases/latest`, or the list with
+  pre-releases on). By install (`data/install*.dart`): the signed macOS release → Sparkle 2.9 (`UpdaterBridge` in
+  `macos/Runner/MainFlutterWindow.swift`, channel `everyai/updater`; only when signed by team 2MGLZ5685D; Dart passes
+  that release's `appcast.xml`, Sparkle downloads quietly, holds the install; the sidebar's `UpdateBanner` "Restart to
+  update" runs it, else it installs on quit). Linux AppImage → downloads beside `$APPIMAGE`, checks `SHA256SUMS.sig`
+  (Ed25519) and the SHA-256, renames over itself, restarts. .deb → a download button. Store/dev builds → nothing.
+  One Ed25519 key signs both: private `UPDATE_ED25519_KEY` (repo secret; owner copy
+  `~/.applesigning/everyai/update_ed25519.key`), public in Info.plist `SUPublicEDKey` and `updates/update_key.dart`;
+  `packaging/updates.py` (keygen/sign/appcast). `release.yml` adds `appcast.xml` and `SHA256SUMS.sig`.
+  **Bump the pubspec build number (+N) every release**: Sparkle compares it. `EVERYAI_UPDATES_API` points the
+  updater at another releases endpoint (testing). Verified on macOS with two locally signed builds (2 → 3): quiet
+  download, install on quit, signature intact. The AppImage path is unit-tested only. Homebrew cask should say
+  `auto_updates true`. Linux repos next: own signed apt/dnf repos on GitHub Pages, maybe COPR (the owner allows an
+  `Assisted-by:` line there as a one-time exception), AUR pushed by the owner.
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
