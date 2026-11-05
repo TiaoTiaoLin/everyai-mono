@@ -2,6 +2,7 @@
 
 import 'package:http/http.dart' as http;
 
+import '../../../core/security/untrusted.dart';
 import '../harness/everyai/llm.dart';
 import '../harness/everyai/script_io.dart';
 import '../harness/everyai/shell_io.dart';
@@ -54,10 +55,7 @@ Future<HostResult> hostRunScript(
     timeout: Duration(seconds: seconds),
     cancel: cancel,
   );
-  final head = r.timedOut
-      ? '[The script timed out and was stopped.]\n'
-      : r.exitCode != 0
-      ? '[The script failed (exit ${r.exitCode}).]\n'
-      : '';
-  return (text: '$head${r.output.isEmpty ? '(The script printed nothing.)' : r.output}', isError: r.exitCode != 0);
+  // Printed text is data the program read: an untrusted block, the status line outside it. The host spills long
+  // results itself.
+  return (text: '${scriptHead(r)}${untrusted(scriptBody(r), source: 'run_script output')}', isError: r.exitCode != 0);
 }
