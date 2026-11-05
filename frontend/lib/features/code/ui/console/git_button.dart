@@ -17,36 +17,45 @@ typedef GitAction = ({GitActionKind kind, String label, bool enabled, String? ur
 
 /// The one next step for a session's work, in the order a source control panel offers it: commit what isn't
 /// committed, then look at the open pull request, else open one when the branch has a remote, else merge it locally.
-/// Nothing left to do is a Commit that can't run. Null (no button) without a worktree: an in-place session commits
-/// in the user's own checkout, which EveryAI leaves to them.
+/// A merged or closed pull request still shows while the branch has nothing newer ([head] is where it was): its
+/// commits stay "ahead" after a squash merge, and another PR for them would be a duplicate. Nothing left to do is a
+/// Commit that can't run. Null (no button) without a worktree: an in-place session commits in the user's own
+/// checkout, which EveryAI leaves to them.
 GitAction? gitActionFor({
   required bool worktree,
   required bool dirty,
   required int ahead,
   required bool hasRemote,
-  OpenPr? pr,
+  BranchPr? pr,
+  String head = '',
 }) {
   if (!worktree) return null;
   if (dirty) return (kind: GitActionKind.commit, label: 'Commit', enabled: true, url: null);
-  if (pr != null) return (kind: GitActionKind.viewPr, label: 'View PR #${pr.number}', enabled: true, url: pr.url);
+  if (pr != null && (pr.open || pr.head == head)) {
+    return (kind: GitActionKind.viewPr, label: 'View PR #${pr.number}', enabled: true, url: pr.url);
+  }
   if (ahead > 0 && hasRemote) return (kind: GitActionKind.createPr, label: 'Create PR', enabled: true, url: null);
   if (ahead > 0) return (kind: GitActionKind.mergeLocally, label: 'Merge locally', enabled: true, url: null);
   return (kind: GitActionKind.commit, label: 'Commit', enabled: false, url: null);
 }
 
-/// [gitActionFor] for a session, worked out again whenever its diff refreshes (turn ends, commits, the Refresh
-/// button). Asks gh for a pull request only when the branch has a remote.
+/// [gitActionFor] for a session, worked out again whenever its diff refreshes (edits, turn ends, commits, the Refresh
+/// button). A dirty tree is Commit at once (`git status`, no remote or gh): while the agent edits, that is every
+/// refresh. gh is asked about a pull request only on a clean tree with a remote.
 final gitButtonProvider = FutureProvider.autoDispose.family<GitAction?, String>((ref, sessionId) async {
   final w = ref.watch(codeSessionsProvider.select((all) => all.where((s) => s.id == sessionId).firstOrNull?.worktree));
   if (w == null) return null;
   final snapshot = await ref.watch(codeGitProvider(sessionId).future);
-  final (uncommitted, remote) = await (GitService.uncommittedDiff(w), GitService.remoteUrl(w)).wait;
+  if (await GitService.isDirty(w)) return gitActionFor(worktree: true, dirty: true, ahead: 0, hasRemote: false);
+  final remote = await GitService.remoteUrl(w);
+  final (pr, head) = remote.isEmpty ? (null, '') : await (GitService.prFor(w), GitService.headCommit(w)).wait;
   return gitActionFor(
     worktree: true,
-    dirty: uncommitted.isNotEmpty,
+    dirty: false,
     ahead: snapshot.ahead,
     hasRemote: remote.isNotEmpty,
-    pr: remote.isEmpty ? null : await GitService.prFor(w),
+    pr: pr,
+    head: head,
   );
 });
 

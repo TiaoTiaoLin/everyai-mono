@@ -98,7 +98,9 @@ class ConsoleTitle extends ConsumerWidget {
                 destructive: true,
                 leading: AdaptiveIcon(EveryIcon.delete, size: 14, color: theme.danger),
                 onTap: () => run(() async {
-                  if (await deleteSession(context, ref, info) && context.mounted) context.go(Routes.code);
+                  // Taken now: a worktree session leaves the list before its worktree is gone, and this title with it.
+                  final router = GoRouter.of(context);
+                  if (await deleteSession(context, ref, info)) router.go(Routes.code);
                 }),
               ),
             ],

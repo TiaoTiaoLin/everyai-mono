@@ -2270,9 +2270,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   void _refreshGitSoon() {
     if (_gitTimer?.isActive ?? false) return;
     _gitTimer = Timer(const Duration(milliseconds: 400), () {
-      if (ref.mounted && ref.exists(codeGitProvider(sessionId))) {
-        unawaited(ref.read(codeGitProvider(sessionId).notifier).refresh());
-      }
+      if (ref.mounted && ref.exists(codeGitProvider(sessionId))) ref.read(codeGitProvider(sessionId).notifier).edited();
     });
   }
 
@@ -5000,15 +4998,39 @@ final class GitSnapshot {
 final codeGitProvider = AsyncNotifierProvider.family<CodeGit, GitSnapshot, String>(CodeGit.new);
 
 /// The session's worktree: its diff, and what the user can do with it.
-final class CodeGit extends AsyncNotifier<GitSnapshot> {
+base class CodeGit extends AsyncNotifier<GitSnapshot> {
   CodeGit(this.sessionId);
   final String sessionId;
 
   CodeSessionInfo? get _info => ref.read(codeSessionsProvider.notifier).byId(sessionId);
   SessionWorktree get _w => _info?.worktree ?? (throw const GitError('This session has no git worktree.'));
 
+  /// Whether anything shows this diff now (the Diff, Session info, the git button); a session working in the
+  /// background diffs again only when it is looked at.
+  bool _watched = true;
+  bool _stale = false;
+
   @override
-  Future<GitSnapshot> build() => _load();
+  Future<GitSnapshot> build() {
+    ref.onCancel(() => _watched = false);
+    ref.onResume(() {
+      _watched = true;
+      if (_stale) {
+        _stale = false;
+        unawaited(refresh());
+      }
+    });
+    return _load();
+  }
+
+  /// The agent edited files: diffs again now if this is shown, else when it next is.
+  void edited() {
+    if (_watched) {
+      unawaited(refresh());
+    } else {
+      _stale = true;
+    }
+  }
 
   Future<GitSnapshot> _load() async {
     final info = _info;
@@ -5099,7 +5121,9 @@ final codeContextPartsProvider = Provider.autoDispose.family<List<ContextPart>, 
   return [
     if (ref.read(_briefingTextsProvider)[sessionId] case final text? when text.isNotEmpty)
       ContextPart(ContextKind.briefing, text),
-    for (final t in hostToolSpecs) ContextPart(ContextKind.mcpTools, jsonEncode(t), name: 'everyai'),
+    // A terminal CLI is only pasted into: it never gets the host's MCP server.
+    if (ref.read(driverRegistryProvider).resolve(info.harness) is! TerminalDriver)
+      for (final t in hostToolSpecs) ContextPart(ContextKind.mcpTools, jsonEncode(t), name: 'everyai'),
   ];
 });
 

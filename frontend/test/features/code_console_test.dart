@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:drift/native.dart';
@@ -9,6 +10,7 @@ import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/session_commands.dart';
 import 'package:every_ai/features/code/drivers/usage_limit.dart';
 import 'package:every_ai/features/code/git/git_service.dart';
 import 'package:every_ai/features/code/harness/harness.dart';
@@ -23,9 +25,25 @@ import 'package:every_ai/features/models/models_providers.dart';
 import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart' as m;
+
+/// A worktree removal that takes a while: the session leaves the list first, the rest waits on [gate].
+final class _SlowDiscard extends CodeGit {
+  _SlowDiscard(this.gate, super.sessionId);
+  final Completer<void> gate;
+
+  @override
+  Future<GitSnapshot> build() async => const GitSnapshot();
+
+  @override
+  Future<void> discard() async {
+    await ref.read(codeSessionsProvider.notifier).remove(sessionId);
+    await gate.future;
+  }
+}
 
 class _FixedCatalog extends CatalogController {
   @override
@@ -119,9 +137,16 @@ void main() {
   });
 
   test('the git button follows the work: commit, the open PR, create one, merge locally', () {
-    GitAction? at({bool worktree = true, bool dirty = false, int ahead = 0, bool remote = false, OpenPr? pr}) =>
-        gitActionFor(worktree: worktree, dirty: dirty, ahead: ahead, hasRemote: remote, pr: pr);
-    const pr = (number: 12, url: 'https://github.com/o/r/pull/12');
+    GitAction? at({
+      bool worktree = true,
+      bool dirty = false,
+      int ahead = 0,
+      bool remote = false,
+      BranchPr? pr,
+      String head = 'h1',
+    }) => gitActionFor(worktree: worktree, dirty: dirty, ahead: ahead, hasRemote: remote, pr: pr, head: head);
+    const pr = (number: 12, url: 'https://github.com/o/r/pull/12', open: true, head: 'h0');
+    const merged = (number: 12, url: 'https://github.com/o/r/pull/12', open: false, head: 'h1');
 
     expect(at(worktree: false, dirty: true), isNull);
     expect(at(dirty: true, ahead: 2, remote: true, pr: pr)!.label, 'Commit');
@@ -132,14 +157,18 @@ void main() {
       url: pr.url,
     ));
     expect(at(ahead: 2, remote: true)!.kind, GitActionKind.createPr);
+    // Squash-merged on GitHub: the commits still count as ahead, but another PR for them would be a duplicate.
+    expect(at(ahead: 2, remote: true, pr: merged)!.label, 'View PR #12');
+    expect(at(ahead: 3, remote: true, pr: merged, head: 'h2')!.kind, GitActionKind.createPr);
     expect(at(ahead: 2)!.kind, GitActionKind.mergeLocally);
     expect(at()!, (kind: GitActionKind.commit, label: 'Commit', enabled: false, url: null));
   });
 
-  test('gh pr view: only an open pull request counts', () {
-    expect(parsePrView('{"number":7,"url":"https://x/pull/7","state":"OPEN"}'), (number: 7, url: 'https://x/pull/7'));
-    expect(parsePrView('{"number":7,"url":"https://x/pull/7","state":"MERGED"}'), isNull);
-    expect(parsePrView('{"number":7,"url":"https://x/pull/7","state":"CLOSED"}'), isNull);
+  test('gh pr view: the latest pull request, open or not, with its head', () {
+    String json(String state) => '{"number":7,"url":"https://x/pull/7","state":"$state","headRefOid":"abc"}';
+    expect(parsePrView(json('OPEN')), (number: 7, url: 'https://x/pull/7', open: true, head: 'abc'));
+    expect(parsePrView(json('MERGED'))?.open, isFalse);
+    expect(parsePrView(json('CLOSED'))?.open, isFalse);
     expect(parsePrView('no pull requests found for branch "x"'), isNull);
     expect(parsePrView('[]'), isNull);
   });
@@ -254,6 +283,7 @@ void main() {
       Widget child, {
       List<CodeSessionInfo> sessions = const [],
       Size? size,
+      List<Override> extra = const [],
     }) async {
       prefs['code.sessions'] = jsonEncode([for (final s in sessions) s.toJson()]);
       container = ProviderContainer(
@@ -264,6 +294,7 @@ void main() {
           codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
           gitButtonProvider.overrideWith((ref, id) async => null),
           sessionRemoteLineProvider.overrideWithValue('Off'),
+          ...extra,
         ],
       );
       if (size != null) {
@@ -274,6 +305,7 @@ void main() {
       final router = GoRouter(
         routes: [
           GoRoute(path: '/', builder: (_, _) => child),
+          GoRoute(path: '/code', builder: (_, _) => const Text('code home')),
           GoRoute(path: '/code/s/:id', builder: (_, s) => Text('full ${s.pathParameters['id']}')),
         ],
       );
@@ -376,6 +408,123 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('console.child.open')));
       await tester.pumpAndSettle();
       expect(find.text('full c'), findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets("a terminal CLI's context lists no host MCP tools: it never gets them", (tester) async {
+      final cli = _session('t', workingDir: '/repo').copyWith(harness: 'terminal:vim');
+      final oc = _session('o', workingDir: '/repo').copyWith(harness: 'opencode');
+      await pump(tester, const SizedBox(), sessions: [cli, oc]);
+      bool mcp(String id) => container.read(codeContextPartsProvider(id)).any((p) => p.kind == ContextKind.mcpTools);
+      expect(mcp('t'), isFalse);
+      expect(mcp('o'), isTrue);
+      await unmount(tester);
+    });
+
+    testWidgets('the transcript side keeps its state when the panel opens, closes or changes tier', (tester) async {
+      final s = _session('s', workingDir: '/wt/fix', worktree: _worktree);
+      final wide = ValueNotifier(true);
+      addTearDown(wide.dispose);
+      await pump(
+        tester,
+        ValueListenableBuilder(
+          valueListenable: wide,
+          builder: (_, isWide, _) => ConsoleLayout(
+            session: s,
+            tier: isWide ? ConsoleTier.wide : ConsoleTier.medium,
+            child: const m.TextField(key: ValueKey('draft')),
+          ),
+        ),
+        sessions: [s],
+        size: const Size(1200, 800),
+      );
+      await tester.enterText(find.byKey(const ValueKey('draft')), 'my draft');
+      final panel = container.read(consolePanelProvider('s').notifier);
+      panel.close();
+      await tester.pump();
+      expect(find.text('my draft'), findsOneWidget);
+      panel.show(ConsoleView.info);
+      await tester.pump();
+      expect(find.text('my draft'), findsOneWidget);
+      wide.value = false;
+      await tester.pump();
+      expect(find.byKey(const ValueKey('console.overlay')), findsOneWidget);
+      expect(find.text('my draft'), findsOneWidget);
+      await unmount(tester);
+    });
+
+    testWidgets('over the transcript, the panel steps aside for a draft card or a question', (tester) async {
+      final s = _session('s');
+      await pump(
+        tester,
+        ConsoleLayout(session: s, tier: ConsoleTier.medium, child: const Text('transcript')),
+        sessions: [s],
+        size: const Size(850, 800),
+      );
+      expect(container.read(consolePanelProvider('s')).open, isTrue);
+      final controller = container.read(codeSessionProvider('s').notifier);
+      controller.state = controller.state.copyWith(
+        asides: [
+          ...controller.state.asides,
+          const Aside(id: 1, kind: AsideKind.commit),
+        ],
+      );
+      await tester.pump();
+      expect(container.read(consolePanelProvider('s')).open, isFalse);
+      await unmount(tester);
+    });
+
+    testWidgets('Background tasks scrolls to Running work when Session info opens for it', (tester) async {
+      final parent = _session('p');
+      final child = _session('c', parentId: 'p', title: 'Research the tests');
+      await pump(
+        tester,
+        ConsoleLayout(session: parent, tier: ConsoleTier.wide, child: const Text('transcript')),
+        sessions: [parent, child],
+        size: const Size(1200, 260),
+      );
+      final panel = container.read(consolePanelProvider('p').notifier);
+      panel.close();
+      await tester.pump();
+      panel.showRunningWork();
+      await tester.pumpAndSettle();
+      final top = tester.getTopLeft(find.text('Running work')).dy;
+      expect(top, inInclusiveRange(0, 260));
+      await unmount(tester);
+      // The session list polls statuses while Running work shows it; stop that with the test.
+      container.dispose();
+    });
+
+    testWidgets('Delete in the title menu goes back to Code even when the screen goes first', (tester) async {
+      final s = _session('s', workingDir: '/wt/fix', worktree: _worktree);
+      final gate = Completer<void>();
+      await pump(
+        tester,
+        Consumer(
+          builder: (_, ref, _) {
+            final info = ref.watch(codeSessionsProvider).firstOrNull;
+            if (info == null) return const Text('gone');
+            return Align(
+              alignment: Alignment.topLeft,
+              child: ConsoleTitle(info: info),
+            );
+          },
+        ),
+        sessions: [s],
+        size: const Size(1000, 900),
+        extra: [codeGitProvider.overrideWith2((id) => _SlowDiscard(gate, id))],
+      );
+      await tester.tap(find.text('Fix the counter'));
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('console.title.delete')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete').last);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('gone'), findsOneWidget);
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('code home'), findsOneWidget);
       await unmount(tester);
     });
 

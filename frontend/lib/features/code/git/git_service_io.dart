@@ -208,14 +208,18 @@ Future<String> remoteUrl(SessionWorktree w) async {
   return res.exitCode == 0 ? '${res.stdout}'.trim() : '';
 }
 
-Future<OpenPr?> prFor(SessionWorktree w) async {
+Future<bool> isDirty(SessionWorktree w) async => (await _out(w.path, ['status', '--porcelain'])).isNotEmpty;
+
+Future<String> headCommit(SessionWorktree w) => _out(w.path, ['rev-parse', 'HEAD']);
+
+Future<BranchPr?> prFor(SessionWorktree w) async {
   try {
     final res = await Process.run('gh', [
       'pr',
       'view',
       w.branch,
       '--json',
-      'number,url,state',
+      'number,url,state,headRefOid',
     ], workingDirectory: w.path);
     // Non-zero: no pull request for the branch, no remote, or gh isn't signed in.
     return res.exitCode == 0 ? parsePrView('${res.stdout}') : null;

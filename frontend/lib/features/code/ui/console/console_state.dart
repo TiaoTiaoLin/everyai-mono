@@ -125,6 +125,17 @@ final class ConsolePanels extends Notifier<ConsolePanel> {
     _save();
   }
 
+  /// The [ConsolePanel.runningSeq] Session info last scrolled for; kept here, since the view is often built fresh
+  /// by the very request.
+  int _ranTo = 0;
+
+  /// Whether Session info still owes a scroll to Running work; true once per [showRunningWork].
+  bool takeRunningJump() {
+    if (state.runningSeq == _ranTo) return false;
+    _ranTo = state.runningSeq;
+    return true;
+  }
+
   /// Opens Session info at Running work.
   void showRunningWork() {
     state = state._with(view: ConsoleView.info, runningSeq: state.runningSeq + 1);

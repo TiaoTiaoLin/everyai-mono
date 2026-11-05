@@ -20,6 +20,7 @@ import '../../drivers/driver_registry.dart';
 import '../../drivers/usage_limit.dart';
 import '../../settings/code_settings.dart' show SettingsScope, budgetFill;
 import '../code_top_bar.dart' show harnessUsageLine;
+import '../../domain/transcript.dart' show NoticeItem;
 import '../transcript/transcript_items.dart' show displayPath;
 import 'console_state.dart';
 import 'context_breakdown.dart';
@@ -104,14 +105,33 @@ class _SessionInfoViewState extends ConsumerState<SessionInfoView> {
   Widget build(BuildContext context) {
     final info = widget.session;
     final id = info.id;
-    ref.listen(consolePanelProvider(id).select((p) => p.runningSeq), (_, _) {
+    // The ⋯ menu's Background tasks, whether this view was showing or opens for it.
+    ref.watch(consolePanelProvider(id).select((p) => p.runningSeq));
+    if (ref.read(consolePanelProvider(id).notifier).takeRunningJump()) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final target = _running.currentContext;
         if (target != null) Scrollable.ensureVisible(target, duration: const Duration(milliseconds: 200));
       });
-    });
-    final state = ref.watch(codeSessionProvider(id));
+    }
     final controller = ref.read(codeSessionProvider(id).notifier);
+    // Only what Session info shows, not every streamed delta; the limit's inputs so [CodeSessionController.limitPick]
+    // stays current.
+    final (mode, inNativeMode, _, _, _, _, _) = ref.watch(
+      codeSessionProvider(id).select(
+        (s) => (
+          s.mode,
+          s.inNativeMode,
+          s.changing,
+          s.waited,
+          s.switching,
+          s.transcript.running,
+          switch (s.transcript.items.lastOrNull) {
+            NoticeItem(:final limit?) => limit,
+            _ => null,
+          },
+        ),
+      ),
+    );
     final outside = isOutsideLead(info.harness, info.workingDir);
     final driver = ref.read(driverRegistryProvider).resolve(info.harness);
     final label = driver?.info.label ?? info.harness;
@@ -120,69 +140,73 @@ class _SessionInfoViewState extends ConsumerState<SessionInfoView> {
     final project = ref.watch(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull?.path;
     final settings = ref.watch(codeSettingsProvider);
 
-    return ListView(
+    // Not a lazy list: Background tasks scrolls to Running work, which must be built for that.
+    return SingleChildScrollView(
       key: const ValueKey('console.info'),
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-      children: [
-        InfoSection(
-          title: 'Environment',
-          child: InfoRows(
-            rows: environmentRows(
-              harness: label,
-              model: spec?.name ?? (info.model.isEmpty ? 'Default model' : info.model),
-              fidelity: driver == null || state.inNativeMode ? null : fidelityNote(driver, state.mode),
-              project: noLocalFolder(info.workingDir)
-                  ? 'Demo'
-                  : displayPath(project ?? info.workingDir, '', home: io.homeDir()),
-              info: info,
-              remote: ref.watch(sessionRemoteLineProvider),
-            ),
-          ),
-        ),
-        InfoSection(
-          title: 'Context',
-          child: ContextView(
-            breakdown: contextRows(
-              used: totals.contextTokens,
-              limit: spec?.contextLength ?? 0,
-              parts: ref.watch(codeContextPartsProvider(id)),
-              outside: outside,
-              autoCompactPercent: outside ? 0 : settings.autoCompactPercent,
-            ),
-          ),
-        ),
-        InfoSection(
-          title: 'Usage and limits',
-          trailing: AdaptiveButton(
-            label: 'Edit cap',
-            emphasis: ButtonEmphasis.plain,
-            onPressed: () => showSettings(
-              context,
-              section: SettingsSection.code,
-              anchor: 'budget',
-              args: {'scope': SettingsScope.session.name, 'session': id},
-            ),
-          ),
-          child: InfoLines(
-            lines: usageLines(
-              totals: totals,
-              budget: settings.budgets[id],
-              limit: controller.limitPick?.limit,
-              outsideLabel: outside ? label : null,
-            ),
-          ),
-        ),
-        InfoSection(
-          key: _running,
-          title: 'Running work',
-          child: RunningWork(session: info),
-        ),
-        if (info.diffTarget != null)
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
           InfoSection(
-            title: 'Changes',
-            child: _Changes(session: info),
+            title: 'Environment',
+            child: InfoRows(
+              rows: environmentRows(
+                harness: label,
+                model: spec?.name ?? (info.model.isEmpty ? 'Default model' : info.model),
+                fidelity: driver == null || inNativeMode ? null : fidelityNote(driver, mode),
+                project: noLocalFolder(info.workingDir)
+                    ? 'Demo'
+                    : displayPath(project ?? info.workingDir, '', home: io.homeDir()),
+                info: info,
+                remote: ref.watch(sessionRemoteLineProvider),
+              ),
+            ),
           ),
-      ],
+          InfoSection(
+            title: 'Context',
+            child: ContextView(
+              breakdown: contextRows(
+                used: totals.contextTokens,
+                limit: spec?.contextLength ?? 0,
+                parts: ref.watch(codeContextPartsProvider(id)),
+                outside: outside,
+                autoCompactPercent: outside ? 0 : settings.autoCompactPercent,
+              ),
+            ),
+          ),
+          InfoSection(
+            title: 'Usage and limits',
+            trailing: AdaptiveButton(
+              label: 'Edit cap',
+              emphasis: ButtonEmphasis.plain,
+              onPressed: () => showSettings(
+                context,
+                section: SettingsSection.code,
+                anchor: 'budget',
+                args: {'scope': SettingsScope.session.name, 'session': id},
+              ),
+            ),
+            child: InfoLines(
+              lines: usageLines(
+                totals: totals,
+                budget: settings.budgets[id],
+                limit: controller.limitPick?.limit,
+                outsideLabel: outside ? label : null,
+              ),
+            ),
+          ),
+          InfoSection(
+            key: _running,
+            title: 'Running work',
+            child: RunningWork(session: info),
+          ),
+          if (info.diffTarget != null)
+            InfoSection(
+              title: 'Changes',
+              child: _Changes(session: info),
+            ),
+        ],
+      ),
     );
   }
 }
