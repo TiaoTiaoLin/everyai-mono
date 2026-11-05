@@ -1,6 +1,7 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
 import '../domain/spill.dart';
+import '../harness/everyai/untrusted_tools.dart' show stripHiddenNoted;
 import '../spill/spill.dart';
 import 'host.dart' show HostResult;
 
@@ -9,11 +10,14 @@ import 'host.dart' show HostResult;
 // names the file. An outside agent's own tools can't be spilled this way:
 // its model already read their whole output.
 
-/// [r], or its preview with the whole text saved as [name] under
-/// [workingDir] when it is over the spill limits.
+/// [r] without hidden characters (named in a note when there were any), or
+/// its preview with the whole text saved as [name] under [workingDir] when it
+/// is over the spill limits.
 HostResult hostFit(String workingDir, String name, HostResult r) {
-  final spill = spillText(r.text);
-  if (spill == null) return r;
+  final text = stripHiddenNoted(r.text);
+  final clean = (text: text, isError: r.isError);
+  final spill = spillText(text);
+  if (spill == null) return clean;
   final path = saveSpill(workingDir, Spill.fileName(name), spill.text);
-  return path == null ? r : (text: spillPreview(spill, path), isError: r.isError);
+  return path == null ? clean : (text: spillPreview(spill, path), isError: r.isError);
 }

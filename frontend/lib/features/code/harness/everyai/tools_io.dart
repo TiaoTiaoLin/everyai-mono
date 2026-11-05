@@ -8,6 +8,7 @@ import 'dart:typed_data';
 
 import 'package:image/image.dart' as img;
 
+import '../../../../core/security/untrusted.dart';
 import 'apply_patch.dart';
 import 'browser_io.dart';
 import 'llm.dart';
@@ -15,6 +16,7 @@ import 'shell_io.dart';
 import 'screen_tools_io.dart';
 import 'window_capture_io.dart';
 import 'scrub.dart';
+import 'untrusted_tools.dart';
 
 // The tool set and its behaviour follow opencode's (MIT; see
 // THIRD_PARTY_NOTICES.md) and the conventions of other coding harnesses;
@@ -701,7 +703,7 @@ final class ToolRunner {
       timeout: Duration(milliseconds: ms),
       cancel: cancel,
     );
-    final out = r.output.trimRight();
+    final out = _commandOutput(command, r.output.trimRight());
     final note = r.timedOut
         ? '\n[Killed after ${ms ~/ 1000} s. Run long commands in the background with run_in_background.]'
         : r.cancelled
@@ -713,6 +715,15 @@ final class ToolRunner {
       isError: r.exitCode != 0,
       observation: {'exit_code': r.exitCode, 'cwd': shell.cwd},
     );
+  }
+
+  /// [output] of [command] as the model gets it: in an untrusted block when
+  /// the command prints text from outside (see [untrustedCommand]), else
+  /// without hidden characters (named in a note when there were any).
+  String _commandOutput(String command, String output) {
+    if (output.isEmpty) return output;
+    if (untrustedCommand(command) case final source?) return untrusted(output, source: source);
+    return stripHiddenNoted(output);
   }
 
   BackgroundShell? _bg(Map<String, Object?> args) => shell.backgroundShell(args['shell_id'] as String? ?? '');
@@ -727,7 +738,8 @@ final class ToolRunner {
       final re = RegExp(f);
       text = text.split('\n').where(re.hasMatch).join('\n');
     }
-    return ToolOutput(_fit('[${b.id}: ${_status(b)}]\n${text.isEmpty ? '(no new output)' : text}', 'bg-${b.id}'));
+    final shown = text.isEmpty ? '(no new output)' : _commandOutput(b.command, text);
+    return ToolOutput(_fit('[${b.id}: ${_status(b)}]\n$shown', 'bg-${b.id}'));
   }
 
   Future<ToolOutput> _killShell(Map<String, Object?> args) async {
@@ -770,11 +782,12 @@ final class ToolRunner {
     final fresh = b.output.substring(from.clamp(0, b.output.length));
     b.readTo = b.output.length;
     final why = matched != null
-        ? 'Matched: $matched'
+        ? 'Matched: ${stripHidden(matched!)}'
         : !b.running
         ? '${b.id} exited with code ${b.exitCode}.'
         : 'Still running after ${ms ~/ 1000} s with no match.';
-    return ToolOutput(_fit('$why\n--- output while waiting ---\n${fresh.isEmpty ? '(none)' : fresh}', 'bg-${b.id}'));
+    final shown = fresh.isEmpty ? '(none)' : _commandOutput(b.command, fresh);
+    return ToolOutput(_fit('$why\n--- output while waiting ---\n$shown', 'bg-${b.id}'));
   }
 
   ToolOutput _readFile(Map<String, Object?> args) {
@@ -810,10 +823,37 @@ final class ToolRunner {
     _read[path] = file.lastModifiedSync();
     if (lines.isEmpty) return ToolOutput('(empty file)', observation: {'path': path});
     final end = (offset - 1 + limit).clamp(0, lines.length);
-    final out = StringBuffer();
+    final outside = outsideProject(root, path);
+    final body = StringBuffer();
+    // The user's own file: hidden characters come out of what the model sees (edits still match, see applyEdit).
+    final hidden = <HiddenKind>{};
+    final hiddenLines = <int>[];
     for (var i = offset - 1; i < end; i++) {
-      final l = lines[i];
-      out.writeln('${'${i + 1}'.padLeft(6)}\t${l.length > 2000 ? '${l.substring(0, 2000)}…' : l}');
+      var l = lines[i];
+      if (!outside) {
+        final kinds = hiddenIn(l);
+        if (kinds.isNotEmpty) {
+          hidden.addAll(kinds);
+          hiddenLines.add(i + 1);
+          l = stripHidden(l);
+        }
+      }
+      body.writeln('${'${i + 1}'.padLeft(6)}\t${l.length > 2000 ? '${l.substring(0, 2000)}…' : l}');
+    }
+    final out = StringBuffer();
+    if (outside) {
+      // Not the user's: a dependency, another tool's output, a file elsewhere on the machine.
+      out.writeln(untrusted(body.toString().trimRight(), source: path));
+    } else {
+      if (hiddenLines.isNotEmpty) {
+        final shown = hiddenLines.take(10).join(', ');
+        final more = hiddenLines.length > 10 ? ' and ${hiddenLines.length - 10} more' : '';
+        out.writeln(
+          '[Hidden characters removed (${hiddenLabels({for (final k in HiddenKind.values)
+            if (hidden.contains(k)) k})}) on line${hiddenLines.length == 1 ? '' : 's'} $shown$more. The file still has them; edits work as usual.]',
+        );
+      }
+      out.write(body);
     }
     if (end < lines.length) out.writeln('\n[${lines.length - end} more lines; read on with offset ${end + 1}.]');
     return ToolOutput(
@@ -1049,7 +1089,14 @@ final class ToolRunner {
     if (out.isEmpty) return const ToolOutput('No matches.');
     final lines = out.split('\n');
     final shown = lines.length > 250 ? [...lines.take(250), '[${lines.length - 250} more not shown]'] : lines;
-    return ToolOutput(_fit(shown.map(_relative).join('\n'), 'grep-${DateTime.now().millisecondsSinceEpoch}'));
+    // Matching lines are file text: hidden characters out, as read does (paths are left alone; scripts parse them).
+    final text = shown.map(_relative).join('\n');
+    return ToolOutput(
+      _fit(
+        mode == 'content' ? stripHiddenNoted(text, what: 'the matching lines') : text,
+        'grep-${DateTime.now().millisecondsSinceEpoch}',
+      ),
+    );
   }
 
   String _relative(String line) => line.startsWith('$root/') ? line.substring(root.length + 1) : line;
@@ -1107,11 +1154,16 @@ final class ToolRunner {
         maxChars: limit,
       );
       final more = page.nextOffset == null ? '' : '\n[More follows; fetch again with offset ${page.nextOffset}.]';
-      return ToolOutput('${page.text}$more');
+      return ToolOutput('${untrusted(_unfenced(page.text), source: page.url)}$more');
     } on LlmError catch (e) {
       return ToolOutput('Error: $e ($url)', isError: true);
     }
   }
+
+  /// [text] without the backend's own `<untrusted_tool_result>` fence (the app wraps pages in its own block).
+  static String _unfenced(String text) => _backendFence.firstMatch(text)?.group(1) ?? text;
+
+  static final _backendFence = RegExp(r'^<untrusted_tool_result source="[^"]*">\n([\s\S]*)\n</untrusted_tool_result>$');
 
   Future<ToolOutput> _webSearch(Map<String, Object?> args) async {
     final query = (args['query'] as String? ?? '').trim();
@@ -1121,7 +1173,7 @@ final class ToolRunner {
     }
     final sites = researchSites;
     final (reply, repeated) = await _searchOnce(query);
-    final out = StringBuffer('<search_results query="$query"${repeated ? ' repeated="true"' : ''}>\n');
+    final out = StringBuffer();
     var n = 0;
     final seen = <String>{};
     final annotations = switch (reply['choices']) {
@@ -1148,8 +1200,8 @@ final class ToolRunner {
             : 'No results on the research sites. Try naming GitHub, Hugging Face or Stack Overflow in the query.',
       );
     }
-    out.write('</search_results>');
-    return ToolOutput(out.toString());
+    final results = untrusted(out.toString().trimRight(), source: 'web search: $query');
+    return ToolOutput(repeated ? '(Same results as an earlier search.)\n$results' : results);
   }
 
   /// Runs [query] once per session: a repeat (a parallel researcher asking
@@ -1217,15 +1269,16 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
       'old_string matches $exact places. Add surrounding lines to make it unique, or set replace_all.',
     );
   }
-  // Line-trimmed match: the same lines, whitespace at either end ignored.
+  // Line-trimmed match: the same lines, whitespace at either end and hidden characters (which read leaves out)
+  // ignored.
   final lines = content.split('\n');
-  final want = oldStr.split('\n').map((l) => l.trim()).toList();
+  final want = oldStr.split('\n').map((l) => stripHidden(l).trim()).toList();
   if (want.isNotEmpty && want.last.isEmpty) want.removeLast();
   final hits = <int>[];
   for (var i = 0; i + want.length <= lines.length; i++) {
     var ok = true;
     for (var j = 0; j < want.length; j++) {
-      if (lines[i + j].trim() != want[j]) {
+      if (stripHidden(lines[i + j]).trim() != want[j]) {
         ok = false;
         break;
       }
@@ -1233,6 +1286,12 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
     if (ok) hits.add(i);
   }
   if (hits.isEmpty) {
+    if (_hiddenLineIn(lines, oldStr) case final n?) {
+      return EditResult.failed(
+        'old_string was not found as written: line $n has hidden characters (read leaves them out), so include '
+        'whole lines in old_string.',
+      );
+    }
     return const EditResult.failed(
       'old_string was not found in the file. Read the file again and copy the lines exactly.',
     );
@@ -1242,9 +1301,26 @@ EditResult applyEdit(String content, String oldStr, String newStr, {bool replace
   }
   final replacement = newStr.endsWith('\n') ? newStr.substring(0, newStr.length - 1) : newStr;
   for (final i in hits.reversed) {
-    lines.replaceRange(i, i + want.length, replacement.split('\n'));
+    lines.replaceRange(i, i + want.length, keepHidden(lines.sublist(i, i + want.length), replacement.split('\n')));
   }
   return EditResult.ok(lines.join('\n'), hits.length);
+}
+
+/// The line (1-based) with hidden characters where [oldStr] would match
+/// part of the text once they are left out, or null.
+int? _hiddenLineIn(List<String> lines, String oldStr) {
+  final stripped = lines.map(stripHidden).toList();
+  final joined = stripped.join('\n');
+  final want = stripHidden(oldStr);
+  final at = joined.indexOf(want);
+  if (at < 0) return null;
+  // Hidden characters are never line breaks, so line numbers are the same in both.
+  final first = '\n'.allMatches(joined.substring(0, at)).length;
+  final last = first + '\n'.allMatches(want).length;
+  for (var i = first; i <= last && i < lines.length; i++) {
+    if (stripped[i] != lines[i]) return i + 1;
+  }
+  return null;
 }
 
 int _count(String s, String sub) {

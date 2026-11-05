@@ -596,7 +596,7 @@ void main() {
     ]);
     expect(calls, 1);
     expect(both.map((o) => o.text), everyElement(contains('developer.mozilla.org/a')));
-    expect(both.where((o) => o.text.contains('repeated="true"')), hasLength(1));
+    expect(both.where((o) => o.text.startsWith('(Same results as an earlier search.)')), hasLength(1));
     // Another session pays for its own.
     await runner('search-2').run('web_search', {'query': 'webgl game loop'});
     expect(calls, 2);

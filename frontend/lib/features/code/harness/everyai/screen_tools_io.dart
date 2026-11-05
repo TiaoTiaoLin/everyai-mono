@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 
+import '../../../../core/security/untrusted.dart';
 import 'browser_io.dart';
 import 'tools_io.dart' show ToolOutput, imageDataUrl;
 import 'window_capture_io.dart';
@@ -73,11 +74,7 @@ Future<ToolOutput> runBrowser(
       default:
         return ToolOutput('Error: unknown browser action "$action".', isError: true);
     }
-    final log = b.takeLog();
-    final text = [
-      did,
-      if (log.isNotEmpty) 'Page log:\n${log.join('\n')}' else if (action == 'console') '(nothing logged)',
-    ].join('\n');
+    final text = browserResultText(action, did, b.takeLog());
     if (!shot) return ToolOutput(text);
     final png = await b.screenshot(fullPage: args['full_page'] == true);
     final dir = Directory('$root/.everyai/scratch/screenshots')..createSync(recursive: true);
@@ -90,8 +87,27 @@ Future<ToolOutput> runBrowser(
     return ToolOutput('$text\nScreenshot: $path', images: [(label: path, dataUrl: url)]);
   } on BrowserError catch (e) {
     final log = b.takeLog();
-    return ToolOutput('Error: ${e.message}${log.isEmpty ? '' : '\nPage log:\n${log.join('\n')}'}', isError: true);
+    return ToolOutput(
+      'Error: ${stripHidden(e.message)}${log.isEmpty ? '' : '\n${untrusted('Page log:\n${log.join('\n')}', source: _page)}'}',
+      isError: true,
+    );
   }
+}
+
+/// Actions whose result carries text the page controls (its title, an eval result, the console, a hit's class names).
+const _pageTextActions = {'open', 'eval', 'screenshot', 'console', 'click'};
+
+const _page = 'browser page';
+
+/// A browser action's result text: what was done ([did]) and the page's log
+/// since the last call, in an untrusted block when any of it comes from the
+/// page.
+String browserResultText(String action, String did, List<String> log) {
+  final text = [
+    did,
+    if (log.isNotEmpty) 'Page log:\n${log.join('\n')}' else if (action == 'console') '(nothing logged)',
+  ].join('\n');
+  return log.isEmpty && !_pageTextActions.contains(action) ? text : untrusted(text, source: _page);
 }
 
 /// Captures window [w] to `.everyai/scratch/screenshots/` under [root] and

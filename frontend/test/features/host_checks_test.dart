@@ -71,6 +71,14 @@ void main() {
       expect(File('$dir/$spillDir/host-1-check.txt').readAsStringSync(), lines.join('\n'));
     });
 
+    test('hidden characters in a result are removed and named', () {
+      final r = hostFit(dir, 'x', (text: 'FAIL\u200B: ok\u202E', isError: true));
+      expect(r, (
+        text: '[Hidden characters removed from the output: zero-width characters, text-direction controls.]\nFAIL: ok',
+        isError: true,
+      ));
+    });
+
     test('a short result is unchanged', () {
       const r = (text: 'all good', isError: false);
       expect(hostFit(dir, 'x', r), r);

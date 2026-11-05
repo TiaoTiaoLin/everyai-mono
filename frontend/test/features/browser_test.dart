@@ -71,7 +71,8 @@ setTimeout(() => { throw new Error('boom'); }, 10);
         browser: browser,
       );
       final opened = await runner.run('browser', {'action': 'open', 'url': '${tmp.path}/index.html'});
-      expect(opened.text, startsWith('Opened Desk'));
+      // The page's title is the page's text: marked untrusted.
+      expect(opened.text, startsWith('<untrusted-content source="browser page">\nOpened Desk'));
       final clicked = await runner.run('browser', {'action': 'click', 'selector': '#go', 'screenshot': true});
       expect(clicked.text, contains('console.error: broken handler'));
       expect(clicked.images.single.dataUrl, startsWith('data:image/png;base64,'));
