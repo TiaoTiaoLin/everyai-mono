@@ -520,6 +520,39 @@ void main() {
     await s.close();
   });
 
+  test('rate limits (recorded): the update says how much is used; each window of the merged snapshot counts', () async {
+    final channel = _fixture('turn');
+    final s = await _driver(data, [channel]).start(_spec(work));
+    final events = _listen(s);
+    await s.send('reply OK');
+    await channel.finished;
+    await pumpEventQueue();
+    final limits = events.whereType<PlanLimits>().single;
+    final w = limits.windows.single;
+    expect((w.name, w.used, w.minutes, limits.warning), ('codex/primary', 0.0, 43200, false));
+    expect(w.resetsAt, DateTime.fromMillisecondsSinceEpoch(1796376587 * 1000, isUtc: true));
+    await s.close();
+
+    final byLimit = {
+      'codex': <String, Object?>{
+        'primary': {'usedPercent': 80, 'windowDurationMins': 300, 'resetsAt': 1793800000},
+        'secondary': {'usedPercent': 42, 'windowDurationMins': 10080},
+      },
+    };
+    final merged = codexPlanLimits(byLimit, id: 'x')!;
+    expect(
+      [for (final w in merged.windows) (w.name, w.used, w.minutes)],
+      [('codex/primary', 0.8, 300), ('codex/secondary', 0.42, 10080)],
+    );
+    expect(merged.warning, isTrue);
+    expect(
+      codexPlanLimits({
+        'codex': {'primary': null},
+      }, id: 'y'),
+      isNull,
+    );
+  });
+
   test('a steer mid-turn (recorded): sent with the turn id; Codex finishes the answer, then takes it', () async {
     final channel = _fixture('steer');
     final s = await _driver(data, [channel]).start(_spec(work));

@@ -651,6 +651,7 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
               if (e.value != null) e.key: e.value,
           };
           _lastLimit = id;
+          if (codexPlanLimits(_rateLimits, id: _newId()) case final limits?) _emit(limits);
         }
       case 'error':
         // Retries (willRetry: true, "Reconnecting... n/5") aren't shown.

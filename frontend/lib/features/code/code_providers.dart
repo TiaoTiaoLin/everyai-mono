@@ -74,6 +74,7 @@ import 'host/host_output.dart';
 import 'host/host_prompts.dart';
 import 'host/host_providers.dart';
 import 'code_settings_providers.dart' show codeSettingsProvider, withSystemPrompts;
+import 'limit_providers.dart';
 import 'mcp_providers.dart';
 import 'permissions_providers.dart';
 import 'settings/context_files.dart';
@@ -1317,6 +1318,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
+      ref.read(preferencesProvider)['$codeLimitBannerPrefix$g'] = null;
     }
     state = [
       for (final s in state)
@@ -2118,6 +2120,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     // A state change refreshes the meter; the cost lives in our ledger, or an outside driver reports it.
     if (event is StateChange) ref.read(codeUsageProvider(sessionId).notifier).refreshSoon();
     if (event is UsageReport) ref.read(codeUsageProvider(sessionId).notifier).report(event);
+    if (event is PlanLimits) ref.read(codePlanLimitsProvider(sessionId).notifier).set(event);
     final wasRunning = state.transcript.running;
     _trackContext(event);
     _builder.add(event);
