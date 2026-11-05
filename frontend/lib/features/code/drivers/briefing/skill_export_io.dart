@@ -83,7 +83,23 @@ Future<ExportResult> exportSkills(String sessionDir, List<InstalledSkill> skills
   return (skillDir: skillDir, names: names..sort(), written: written, skipped: skipped);
 }
 
+Future<String> sessionNoticeNonce(String sessionDir, String Function() make) async {
+  final file = File('$sessionDir/notice-nonce');
+  try {
+    final old = (await file.readAsString()).trim();
+    if (RegExp(r'^[0-9a-f]{32}$').hasMatch(old)) return old;
+  } on FileSystemException {
+    // Not written yet.
+  }
+  final nonce = make();
+  await Directory(sessionDir).create(recursive: true);
+  await file.writeAsString(nonce);
+  return nonce;
+}
+
 Future<void> removeBriefing(String sessionDir) async {
+  final nonce = File('$sessionDir/notice-nonce');
+  if (nonce.existsSync()) await nonce.delete();
   final root = '$sessionDir/briefing';
   switch (FileSystemEntity.typeSync(root, followLinks: false)) {
     case FileSystemEntityType.link:

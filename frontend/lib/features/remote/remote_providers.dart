@@ -549,8 +549,10 @@ final class RemoteSessionState {
     this.session = const CodeSessionState(),
     this.remember,
     this.flags = const {},
+    this.reasons = const {},
     this.rememberBy = const {},
     this.perCall = false,
+    this.forks = false,
     this.link = RemoteLinkStatus.connecting,
     this.loaded = false,
     this.gone,
@@ -565,11 +567,17 @@ final class RemoteSessionState {
   /// Pending calls the host's rules call dangerous, with why.
   final Map<String, String> flags;
 
+  /// Why each pending call asks (the rule or the mode), from the host.
+  final Map<String, String> reasons;
+
   /// Per pending call, the rule "for this session / always" would store.
   final Map<String, String> rememberBy;
 
   /// The host's session takes one answer per call.
   final bool perCall;
+
+  /// A fork's or subagent's: "for this session" covers all the session's forks.
+  final bool forks;
   final RemoteLinkStatus link;
 
   /// The host sent the session at least once.
@@ -583,8 +591,10 @@ final class RemoteSessionState {
     List<String>? remember,
     bool clearRemember = false,
     Map<String, String>? flags,
+    Map<String, String>? reasons,
     Map<String, String>? rememberBy,
     bool? perCall,
+    bool? forks,
     RemoteLinkStatus? link,
     bool? loaded,
     String? gone,
@@ -592,8 +602,10 @@ final class RemoteSessionState {
     session: session ?? this.session,
     remember: clearRemember ? null : remember ?? this.remember,
     flags: flags ?? this.flags,
+    reasons: reasons ?? this.reasons,
     rememberBy: rememberBy ?? this.rememberBy,
     perCall: perCall ?? this.perCall,
+    forks: forks ?? this.forks,
     link: link ?? this.link,
     loaded: loaded ?? this.loaded,
     gone: gone ?? this.gone,
@@ -736,6 +748,7 @@ final class MirrorFold {
               if (e.value case final String rule) e.key: rule,
           },
           perCall: m['per_call'] == true,
+          forks: m['forks'] == true,
           remember: [
             for (final p in m['remember'] as List<Object?>? ?? const [])
               if (p is String) p,
@@ -743,6 +756,10 @@ final class MirrorFold {
           clearRemember: m['remember'] == null,
           flags: {
             for (final e in (m['flags'] as Map<String, Object?>? ?? const {}).entries)
+              if (e.value case final String why) e.key: why,
+          },
+          reasons: {
+            for (final e in (m['reasons'] as Map<String, Object?>? ?? const {}).entries)
               if (e.value case final String why) e.key: why,
           },
           loaded: true,

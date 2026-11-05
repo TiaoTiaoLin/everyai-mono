@@ -12,6 +12,7 @@ import 'apply_patch.dart';
 import 'browser_io.dart';
 import 'llm.dart';
 import 'shell_io.dart';
+import 'screen_tools_io.dart';
 import 'window_capture_io.dart';
 import 'scrub.dart';
 
@@ -565,7 +566,7 @@ final class ToolRunner {
 
   /// [args] with the parent's folders swapped for this session's copies,
   /// longest first, so a fork's inherited paths land in its own worktree.
-  Map<String, Object?> _mapped(Map<String, Object?> args) {
+  Map<String, Object?> mapped(Map<String, Object?> args) {
     if (pathMap.isEmpty) return args;
     final froms = pathMap.keys.toList()..sort((a, b) => b.length - a.length);
     String map(String s) {
@@ -602,10 +603,10 @@ final class ToolRunner {
 
   /// Why a research job may not make this call at all, before it is shown
   /// for approval: such a call is never run, so no one should be asked.
-  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) => _researchRefusal(tool, _mapped(raw));
+  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) => _researchRefusal(tool, mapped(raw));
 
   Future<ToolOutput> run(String tool, Map<String, Object?> raw, {Future<void>? cancel}) async {
-    final args = _mapped(raw);
+    final args = mapped(raw);
     if (_researchRefusal(tool, args) case final refusal?) return ToolOutput(refusal, isError: true);
     try {
       return switch (tool) {
@@ -636,77 +637,7 @@ final class ToolRunner {
   Future<ToolOutput> _browse(Map<String, Object?> args) async {
     final b = browser;
     if (b == null) return const ToolOutput('Error: no browser in this session.', isError: true);
-    final action = args['action'] as String? ?? '';
-    String? str(String k) => (args[k] as String?)?.trim().isEmpty ?? true ? null : (args[k] as String).trim();
-    double? at(String k) => (args[k] as num?)?.toDouble();
-    var shot = args['screenshot'] == true;
-    try {
-      final String did;
-      switch (action) {
-        case 'open':
-          final url = str('url');
-          if (url == null) return const ToolOutput('Error: open needs a url.', isError: true);
-          // A bare path or localhost:port is what agents often pass.
-          final target = url.startsWith('/')
-              ? Uri.file(url).toString()
-              : RegExp(r'^[a-z][a-z0-9+.-]*:', caseSensitive: false).hasMatch(url) && !url.startsWith('localhost:')
-              ? url
-              : 'http://$url';
-          did = 'Opened ${await b.open(target)}';
-        case 'click':
-          final sel = str('selector');
-          if (sel == null && (at('x') == null || at('y') == null)) {
-            return const ToolOutput('Error: click needs a selector, or x and y.', isError: true);
-          }
-          did = await b.click(selector: sel, x: at('x'), y: at('y'), count: (args['count'] as num?)?.toInt() ?? 1);
-        case 'type':
-          final text = args['text'] as String?;
-          if (text == null) return const ToolOutput('Error: type needs text.', isError: true);
-          did = await b.type(text, selector: str('selector'), submit: args['submit'] == true);
-        case 'press':
-          did = await b.press(str('key') ?? 'Enter');
-        case 'scroll':
-          did = await b.scroll(at('dy') ?? 600, x: at('x'), y: at('y'));
-        case 'wait':
-          did = await b.wait(selector: str('selector'), ms: (args['ms'] as num?)?.toInt() ?? 5000);
-        case 'eval':
-          final script = args['script'] as String?;
-          if (script == null || script.trim().isEmpty) {
-            return const ToolOutput('Error: eval needs a script.', isError: true);
-          }
-          did = 'Result: ${_fit(const JsonEncoder.withIndent('  ').convert(await b.evaluate(script)), 'browser-eval')}';
-        case 'screenshot':
-          shot = true;
-          did = 'Screenshot of ${await b.describe()}';
-        case 'console':
-          did = 'Console since the last read:';
-        case 'resize':
-          did = await b.resize((args['width'] as num?)?.toInt() ?? 1280, (args['height'] as num?)?.toInt() ?? 800);
-        case 'close':
-          await b.close();
-          return const ToolOutput('Closed the browser.');
-        default:
-          return ToolOutput('Error: unknown browser action "$action".', isError: true);
-      }
-      final log = b.takeLog();
-      final text = [
-        did,
-        if (log.isNotEmpty) 'Page log:\n${log.join('\n')}' else if (action == 'console') '(nothing logged)',
-      ].join('\n');
-      if (!shot) return ToolOutput(text);
-      final png = await b.screenshot(fullPage: args['full_page'] == true);
-      final dir = Directory('$root/.everyai/scratch/screenshots')..createSync(recursive: true);
-      final path = '${dir.path}/browser-${DateTime.now().millisecondsSinceEpoch}.png';
-      File(path).writeAsBytesSync(png);
-      final url = imageDataUrl(png, 'png');
-      if (!vision || url == null) {
-        return ToolOutput('$text\nSaved the screenshot to $path (this model can\'t view images).');
-      }
-      return ToolOutput('$text\nScreenshot: $path', images: [(label: path, dataUrl: url)]);
-    } on BrowserError catch (e) {
-      final log = b.takeLog();
-      return ToolOutput('Error: ${e.message}${log.isEmpty ? '' : '\nPage log:\n${log.join('\n')}'}', isError: true);
-    }
+    return runBrowser(b, args, root: root, vision: vision, fit: _fit);
   }
 
   Future<ToolOutput> _screenshot(Map<String, Object?> args) async {
@@ -717,28 +648,23 @@ final class ToolRunner {
       );
     }
     final app = (args['app'] as String?)?.trim();
-    final windows = await sessionWindows(sessionPids: await shell.processes(), root: root, app: app);
-    if (windows.isEmpty) {
-      return ToolOutput(
-        'Error: no window of an app this session started${app == null || app.isEmpty ? '' : ' matching "$app"'}. Start '
-        'the app from this session (bash with run_in_background) or open one built in this folder, wait for its '
-        'window, then try again. Other apps\' windows are the user\'s and are not captured. For web pages use browser.',
-        isError: true,
-      );
+    final pick = await pickSessionWindow(
+      await listWindows(),
+      pids: await shell.processes(),
+      root: root,
+      executableOf: executableOf,
+      app: app,
+    );
+    // Another app's window is the user's: never captured here.
+    if (pick case OwnWindow(:final window, :final others)) {
+      return captureFor(window, root: root, vision: vision, others: others);
     }
-    final w = windows.first;
-    final dir = Directory('$root/.everyai/scratch/screenshots')..createSync(recursive: true);
-    final path = '${dir.path}/window-${DateTime.now().millisecondsSinceEpoch}.png';
-    if (await captureWindow(w.id, path) case final problem?) return ToolOutput('Error: $problem', isError: true);
-    final label = '${w.owner}${w.title.isEmpty ? '' : ' — ${w.title}'} (${w.width}x${w.height})';
-    final others = windows.length > 1
-        ? ' ${windows.length - 1} other window(s) of this session\'s apps; pick with app.'
-        : '';
-    final url = imageDataUrl(File(path).readAsBytesSync(), 'png');
-    if (!vision || url == null) {
-      return ToolOutput('Saved a screenshot of $label to $path (this model can\'t view images).$others');
-    }
-    return ToolOutput('Screenshot of $label: $path.$others', images: [(label: path, dataUrl: url)]);
+    return ToolOutput(
+      'Error: no window of an app this session started${app == null || app.isEmpty ? '' : ' matching "$app"'}. Start '
+      'the app from this session (bash with run_in_background) or open one built in this folder, wait for its '
+      'window, then try again. Other apps\' windows are the user\'s and are not captured. For web pages use browser.',
+      isError: true,
+    );
   }
 
   /// [text] cut to [maxToolText], the whole of it saved under `.everyai/spill/`.

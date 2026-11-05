@@ -52,7 +52,7 @@ Widget settingsSectionBody(SettingsSection section, Map<String, String> args) =>
   ),
   SettingsSection.permissions => const PermissionsSection(),
   SettingsSection.mcp => McpSettingsBody(projectId: args['project']),
-  SettingsSection.skills => const SkillsSettingsBody(),
+  SettingsSection.skills => SkillsSettingsBody(projectId: args['project']),
   SettingsSection.agents => const AgentsSettingsBody(),
   SettingsSection.commands => const CustomCommandsBody(),
   SettingsSection.remote => const RemoteSettingsBody(),

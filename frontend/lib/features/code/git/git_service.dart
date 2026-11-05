@@ -85,8 +85,24 @@ abstract final class GitService {
 
   static Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) => impl.revertHunk(w, file, hunk);
 
-  /// Commits everything; false when there was nothing to commit.
-  static Future<bool> commitAll(SessionWorktree w, String message) => impl.commitAll(w, message);
+  /// Commits [paths] (everything when null); false when there was nothing to commit.
+  static Future<bool> commitAll(SessionWorktree w, String message, {List<String>? paths}) =>
+      impl.commitAll(w, message, paths: paths);
+
+  /// Switches to new branch [branch] with the changes and commits [paths] there (everything when null); returns
+  /// the commit, or null when there was nothing to commit. Refuses a name git rejects or a branch that exists
+  /// before touching anything, and undoes the switch when the commit fails.
+  static Future<String?> commitOnNewBranch(SessionWorktree w, String branch, String message, {List<String>? paths}) =>
+      impl.commitOnNewBranch(w, branch, message, paths: paths);
+
+  /// The tree of everything in the folder now; [changedSince] compares a later state with it.
+  static Future<String> snapshotTree(SessionWorktree w) => impl.snapshotTree(w);
+
+  /// The paths that differ between snapshot [tree] and the folder now.
+  static Future<List<String>> changedSince(SessionWorktree w, String tree) => impl.changedSince(w, tree);
+
+  /// Whether any of [paths] has uncommitted changes.
+  static Future<bool> isDirtyAmong(SessionWorktree w, List<String> paths) => impl.isDirtyAmong(w, paths);
 
   /// Snapshots the working tree under `refs/everyai/<slug>/turn-<turn>`.
   static Future<String> checkpoint(SessionWorktree w, int turn) => impl.checkpoint(w, turn);

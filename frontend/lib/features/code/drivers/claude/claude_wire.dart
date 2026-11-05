@@ -1,7 +1,5 @@
 // Copyright 2026 xuckless and Syed Ali. Licensed under FSL-1.1-ALv2; see LICENCE.md and NOTICE.
 
-import 'dart:convert';
-
 import '../../domain/agent_mode.dart';
 import '../../harness/events.dart';
 import '../../harness/harness.dart' show NativeMode;
@@ -110,15 +108,15 @@ String? claudeModelArg(String model) {
 
 /// The briefing as Claude takes it ([claudeCode]); without a skill folder
 /// only the MCP server and the settings apply.
-Delivery claudeDelivery(DriverBriefing b, {String sessionText = ''}) {
+Delivery claudeDelivery(DriverBriefing b, {String sessionText = '', Set<String> skillsOff = const {}}) {
   final input = (
     mcpUrl: Uri.parse(b.mcpUrl),
     mcpToken: b.mcpToken,
     skillDir: b.skillDir ?? '',
     sessionText: sessionText,
   );
-  if (b.skillDir != null) return claudeCode(input);
-  final all = claudeCode(input, grantSkillAccess: false);
+  if (b.skillDir != null) return claudeCode(input, skillsOff: skillsOff);
+  final all = claudeCode(input, grantSkillAccess: false, skillsOff: skillsOff);
   return (
     args: [
       for (var i = 0; i + 1 < all.args.length; i += 2)
@@ -137,10 +135,6 @@ Delivery claudeDelivery(DriverBriefing b, {String sessionText = ''}) {
 /// trust prompt), so a cloned repo could run code just by being opened.
 const _userSettingsOnly = ['--setting-sources', 'user'];
 
-/// Skill bodies' inline `!` shell lines never run (the briefing's recipe
-/// sets the same; without a briefing the driver does).
-final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
-
 /// How to start one session's process. [resume] continues the conversation
 /// [sessionId] (it has had a message); otherwise it starts under that id.
 /// Never `--dangerously-skip-permissions`: every call comes to our hook.
@@ -152,6 +146,7 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
   String model = '',
   String? effort,
   Delivery? briefing,
+  Set<String> skillsOff = const {},
 }) {
   final m = claudeModelArg(model);
   return (
@@ -175,7 +170,7 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
       // Briefed sessions ask the user through our question cards.
       if (briefing != null) ...['--disallowedTools', 'AskUserQuestion'],
       ...?briefing?.args,
-      if (briefing == null) ...['--settings', _noSkillShell],
+      if (briefing == null) ...['--settings', claudeSettingsJson(skillsOff: skillsOff)],
     ],
     env: {...?briefing?.env, 'MCP_TOOL_TIMEOUT': _mcpTimeoutMs, 'CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT': _mcpTimeoutMs},
   );
@@ -184,7 +179,13 @@ final _noSkillShell = jsonEncode({'disableSkillShellExecution': true});
 /// A `/btw` side question's process: a fork of conversation [sessionId] (a
 /// fresh one before its first message ran) that isn't saved, with only the
 /// read-only tools and none of the user's MCP servers.
-List<String> claudeAsideArgs({required String sessionId, required bool resume, String model = '', String? effort}) {
+List<String> claudeAsideArgs({
+  required String sessionId,
+  required bool resume,
+  String model = '',
+  String? effort,
+  Set<String> skillsOff = const {},
+}) {
   final m = claudeModelArg(model);
   return [
     '-p',
@@ -204,7 +205,7 @@ List<String> claudeAsideArgs({required String sessionId, required bool resume, S
     if (m != null) ...['--model', m],
     if (effort != null && effort.isNotEmpty) ...['--effort', effort],
     '--settings',
-    _noSkillShell,
+    claudeSettingsJson(skillsOff: skillsOff),
   ];
 }
 

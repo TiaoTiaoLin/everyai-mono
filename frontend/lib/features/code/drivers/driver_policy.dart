@@ -8,6 +8,7 @@ import '../harness/harness.dart';
 import '../host/host.dart' show savedPlansTool;
 import '../host/host_prompts.dart' show runWorkflowTool;
 import '../host/host_report.dart' show reportIssueTool;
+import '../host/host_screen.dart' show screenHostTools;
 import '../host/host_max_tools.dart' show maxHostTools;
 import 'briefing/briefing_types.dart' show everyaiServerName;
 import 'driver.dart';
@@ -90,12 +91,15 @@ const hostToolNames = {
   'diff_stats',
   'goal_check',
   'run_script',
+  ...screenHostTools,
 };
 
 /// The host tools the policy lets run without asking: they only show the
 /// user a card, read and write the project's notes, or read the session
 /// (diff_stats, goal_check, run_script's sandboxed reads). bug_check and
-/// check run a command, so they go through the mode like any other.
+/// check run a command, so they go through the mode like any other. The
+/// screen tools gate themselves: another app's window asks, and app_run's
+/// command is confirmed on a card and meets the floor.
 const trustedHostTools = {
   askUserQuestionTool,
   presentPlanTool,
@@ -106,6 +110,7 @@ const trustedHostTools = {
   'diff_stats',
   'goal_check',
   'run_script',
+  ...screenHostTools,
 };
 
 /// The host tools that run a command in the app: an outside agent's own

@@ -23,14 +23,23 @@ void main() {
     required void Function(String) onDenyCall,
     void Function(ApprovalScope)? onAllow,
     Map<String, bool> decided = const {},
+    List<ActionCall>? pending,
+    Map<String, String> reasons = const {},
+    Map<String, String> flags = const {},
+    List<String>? remember,
+    bool forks = false,
   }) => m.MaterialApp(
     home: m.Material(
       child: EveryThemeScope(
         theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
         child: SingleChildScrollView(
           child: ApprovalCard(
-            pending: calls,
+            pending: pending ?? calls,
             mode: AgentMode.ask,
+            reasons: reasons,
+            flags: flags,
+            remember: remember,
+            forks: forks,
             onAllow: onAllow ?? (_) {},
             onDeny: (_) {},
             onMode: (_) {},
@@ -69,5 +78,36 @@ void main() {
     expect(find.text('Allowed'), findsOneWidget);
     expect(find.text('1 of 2 actions still to answer'), findsOneWidget);
     expect(find.text('Allow'), findsOneWidget);
+  });
+
+  testWidgets('a call says why it asks; a dangerous one keeps its warning instead', (tester) async {
+    await tester.pumpWidget(
+      host(
+        onAllowCall: (_, _) {},
+        onDenyCall: (_) {},
+        reasons: const {'a': 'Ask mode asks before every edit and command.', 'b': 'This deletes files recursively.'},
+        flags: const {'b': 'deletes files recursively'},
+      ),
+    );
+    expect(find.text('Asks because: Ask mode asks before every edit and command.'), findsOneWidget);
+    expect(find.textContaining('Asks because: This deletes'), findsNothing);
+    expect(find.text('Needs a look: this deletes files recursively'), findsOneWidget);
+  });
+
+  testWidgets("a fork's card offers to allow for all forks of the session", (tester) async {
+    ApprovalScope? scope;
+    await tester.pumpWidget(
+      host(
+        onAllowCall: (_, _) {},
+        onDenyCall: (_) {},
+        onAllow: (s) => scope = s,
+        pending: [calls.first],
+        remember: const ['npm test *'],
+        forks: true,
+      ),
+    );
+    expect(find.text('Allow for session'), findsNothing);
+    await tester.tap(find.text('Allow for all forks of this session'));
+    expect(scope, ApprovalScope.session);
   });
 }

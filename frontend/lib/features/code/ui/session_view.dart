@@ -299,6 +299,8 @@ class CodeSessionScreen extends ConsumerWidget {
                                                       ? (id) => controller.deny(null, [id])
                                                       : null,
                                                   flags: approvalFlags(controller.policy, t.pending, state.mode),
+                                                  reasons: controller.askReasons(t.pending),
+                                                  forks: info.sharesApprovals,
                                                 ),
                                               )
                                             else if (t.plan.isNotEmpty && t.running)

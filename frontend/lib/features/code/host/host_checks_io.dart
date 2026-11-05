@@ -98,6 +98,35 @@ Map<String, String> _digests(String dir, Iterable<String> paths) => {
     if (File('$dir/$p').existsSync()) p: '${sha256.convert(File('$dir/$p').readAsBytesSync())}',
 };
 
+/// The bug_check state in [stateDir], or null when there is none (nothing reproduced yet).
+Future<Map<String, Object?>?> readBugCheckState(String stateDir) async {
+  try {
+    return jsonDecode(await File('$stateDir/bug_check.json').readAsString()) as Map<String, Object?>;
+  } on Object {
+    return null;
+  }
+}
+
+/// Starts [stateDir]'s bug_check from an earlier agent's [record] (see [bugCheckRecord]): the same repro, not
+/// verified yet. Only the repro files [workingDir] has count: a git-excluded one (a `.everyai/scratch/` script)
+/// stayed in the checkout it was written in, and its absence there isn't a change.
+Future<void> writeBugCheckState(String stateDir, Map<String, Object?> record, {required String workingDir}) async {
+  final file = File('$stateDir/bug_check.json');
+  await file.parent.create(recursive: true);
+  final files = record['files'] is Map ? (record['files']! as Map).cast<String, Object?>() : const <String, Object?>{};
+  await file.writeAsString(
+    jsonEncode({
+      'command': record['command'] ?? '',
+      'expect': record['expect'] ?? '',
+      'files': {
+        for (final e in files.entries)
+          if (File('$workingDir/${e.key}').existsSync()) e.key: e.value,
+      },
+      'verified': false,
+    }),
+  );
+}
+
 Future<HostResult> hostBugCheck(HostCheckContext c, Map<String, Object?> args, Future<void> cancel) async {
   final file = File('${c.stateDir}/bug_check.json');
   Map<String, Object?> state;
