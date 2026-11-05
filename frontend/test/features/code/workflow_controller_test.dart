@@ -11,7 +11,7 @@ import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/code_settings_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
-import 'package:every_ai/features/code/domain/permissions.dart' show Verdict;
+import 'package:every_ai/features/code/domain/permissions.dart' show ApprovalScope, Verdict;
 import 'package:every_ai/features/code/domain/questions.dart';
 import 'package:every_ai/features/code/domain/transcript.dart' show NoticeItem, QuestionItem;
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent, userMessageEvent;
@@ -19,6 +19,7 @@ import 'package:every_ai/features/code/drivers/driver_events.dart';
 import 'package:every_ai/features/code/drivers/driver_registry.dart';
 import 'package:every_ai/features/code/gateway_key.dart';
 import 'package:every_ai/features/code/harness/events.dart';
+import 'package:every_ai/features/code/harness/harness.dart' show NativeMode;
 import 'package:every_ai/features/code/host/host.dart';
 import 'package:every_ai/features/code/host/host_prompts.dart';
 import 'package:every_ai/features/code/host/host_providers.dart';
@@ -147,6 +148,13 @@ void main() {
     return container.read(codeSessionProvider(info.id).notifier);
   }
 
+  /// The nonce the lead's briefing names, and a workflow result as the lead is sent it.
+  String leadNonce() =>
+      RegExp('Notice nonce: `([0-9a-f]{32})`').firstMatch(drivers['test']!.specs.first.briefing!.sessionSkill!)![1]!;
+
+  String signed(String runId, String body) =>
+      '<everyai-notice kind="workflow-result" id="$runId" nonce="${leadNonce()}">\n$body';
+
   Future<CodeSessionInfo> child() => whenValue(
     container,
     codeSessionsProvider,
@@ -180,7 +188,8 @@ void main() {
     );
     expect(runs.single.agents.single.harness, 'fake2');
     await pumpEventQueue();
-    expect(lead.sent.last, startsWith('<workflow-result name="demo" status="done">'));
+    expect(lead.sent.last, startsWith(signed(runId, '<workflow-result name="demo" status="done">')));
+    expect(lead.sent.last, endsWith('\n</everyai-notice>'));
     expect(lead.sent.last, contains('"fixed":true'));
     // An ended run's journal is kept aside, so opening the session doesn't read it again.
     final dir = '${tmp.path}/data/workflows/${c.sessionId}';
@@ -242,7 +251,10 @@ void main() {
       await pumpEventQueue();
     }
     expect(lead.sent.where((m) => m.contains('<workflow-result')), hasLength(1));
-    expect(lead.sent.last, startsWith('<workflow-result name="Security review" status="done">'));
+    expect(
+      lead.sent.last,
+      startsWith(signed(ctx['runId']! as String, '<workflow-result name="Security review" status="done">')),
+    );
     // The run ended, so another may start.
     r = await c.call(
       runCall({
@@ -259,6 +271,179 @@ void main() {
     await c.runWorkflow('demo', 'source');
     unawaited(bridge.agent('Review', {'harness': 'fake2', 'readOnly': true}).catchError((Object _) => null));
     expect((await child()).mode, AgentMode.ask);
+  });
+
+  test('agents start in the lead\'s mode, and allowing a call for all forks settles the waiting siblings', () async {
+    final c = await open();
+    await c.setMode(AgentMode.ask);
+    await c.runWorkflow('demo', 'source');
+    unawaited(bridge.agent('One', {'harness': 'fake2'}).catchError((Object _) => null));
+    unawaited(bridge.agent('Two', {'harness': 'fake2'}).catchError((Object _) => null));
+    final kids = await whenValue(
+      container,
+      codeSessionsProvider,
+      (List<CodeSessionInfo> all) => all.where((s) => s.parentCallId.startsWith('wf-')).length == 2,
+    ).then((all) => all.where((s) => s.parentCallId.startsWith('wf-')).toList());
+    expect(kids.map((k) => k.mode), everyElement(AgentMode.ask));
+    final sessions = drivers['fake2']!.conversations.values.toList();
+    expect(sessions, hasLength(2));
+    for (final k in kids) {
+      container.listen(codeSessionProvider(k.id), (_, _) {});
+    }
+    // Both ask to run the same command.
+    for (final (i, s) in sessions.indexed) {
+      s
+        ..add(actionEvent(id: 'a$i', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'npm test'}))
+        ..add(stateEvent('w$i', ExecutionStatus.waitingForConfirmation));
+    }
+    for (final k in kids) {
+      await whenValue(
+        container,
+        codeSessionProvider(k.id).select((s) => s.transcript.pending.length),
+        (int n) => n == 1,
+      );
+    }
+    expect(sessions.map((s) => s.answers), everyElement(isEmpty));
+    final first = container.read(codeSessionProvider(kids.first.id).notifier);
+    expect(first.askReasons().values.single, 'Ask mode asks before every edit and command.');
+    // Which kid owns which conversation: the one the first controller answers.
+    await first.approve(ApprovalScope.session);
+    await pumpEventQueue();
+    expect(sessions.map((s) => s.answers.map((a) => a.accept).toList()), everyElement([true]));
+    // Remembered in the lead's session scope, so the lead's own call runs too.
+    expect(c.policy.session, contains('npm test *'));
+  });
+
+  test("a read-only agent neither uses nor adds to the lead's session approvals", () async {
+    final c = await open();
+    await c.setMode(AgentMode.ask);
+    lead
+      ..add(actionEvent(id: 'l1', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'npm test'}))
+      ..add(stateEvent('lw', ExecutionStatus.waitingForConfirmation));
+    await whenValue(
+      container,
+      codeSessionProvider(c.sessionId).select((s) => s.transcript.pending.length),
+      (int n) => n == 1,
+    );
+    await c.approve(ApprovalScope.session);
+    expect(c.policy.session, contains('npm test *'));
+    await c.runWorkflow('demo', 'source');
+    unawaited(bridge.agent('Review', {'harness': 'fake2', 'readOnly': true}).catchError((Object _) => null));
+    final kid = await child();
+    expect(kid.ownApprovals, isTrue);
+    expect(kid.sharesApprovals, isFalse);
+    container.listen(codeSessionProvider(kid.id), (_, _) {});
+    final reviewer = container.read(codeSessionProvider(kid.id).notifier);
+    expect(reviewer.policy.session, isNot(contains('npm test *')));
+    final s = drivers['fake2']!.conversations.values.single;
+    s
+      ..add(actionEvent(id: 'r1', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'npm test'}))
+      ..add(stateEvent('rw', ExecutionStatus.waitingForConfirmation));
+    await whenValue(
+      container,
+      codeSessionProvider(kid.id).select((s) => s.transcript.pending.length),
+      (int n) => n == 1,
+    );
+    expect(s.answers, isEmpty);
+    // Its own "for this session" stays its own.
+    s
+      ..add(actionEvent(id: 'r2', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'make lint'}))
+      ..add(stateEvent('rw2', ExecutionStatus.waitingForConfirmation));
+    await reviewer.approve(ApprovalScope.session);
+    expect(reviewer.policy.session, isNotEmpty);
+    expect(c.policy.session, isNot(contains('make lint *')));
+  });
+
+  test("a user's no tells the agent why the app asked", () async {
+    final c = await open();
+    await c.setMode(AgentMode.ask);
+    lead
+      ..add(actionEvent(id: 'x1', toolName: 'bash', kind: 'TerminalAction', args: {'command': 'npm test'}))
+      ..add(stateEvent('xw', ExecutionStatus.waitingForConfirmation));
+    await whenValue(
+      container,
+      codeSessionProvider(c.sessionId).select((s) => s.transcript.pending.length),
+      (int n) => n == 1,
+    );
+    await c.deny('use yarn');
+    final reason = lead.answers.last.reason!;
+    expect(reason, contains("It needed the user's OK because: Ask mode asks before every edit and command."));
+    expect(reason, endsWith('use yarn'));
+  });
+
+  group('native modes', () {
+    const ask = NativeMode(id: 'default', label: 'Default', policy: AgentMode.ask);
+    const edits = NativeMode(id: 'acceptEdits', label: 'Accept edits', policy: AgentMode.autoEdit);
+    const auto = NativeMode(id: 'auto', label: 'Auto', policy: AgentMode.fullAuto);
+
+    Future<CodeSessionController> openOn(String harness, AgentMode mode) async {
+      final info = await container
+          .read(codeSessionsProvider.notifier)
+          .start(
+            project: container.read(codeProjectsProvider).single,
+            prompt: 'Lead the work',
+            model: '',
+            mode: mode,
+            harness: harness,
+          );
+      container.listen(codeSessionProvider(info.id), (_, _) {});
+      await whenValue(container, codeSessionProvider(info.id).select((s) => s.connected), (bool c) => c);
+      // The mode feed's listener is on before the test sets modes.
+      await pumpEventQueue();
+      return container.read(codeSessionProvider(info.id).notifier);
+    }
+
+    test('a Full auto session whose first list lacks auto moves there once a later list has it', () async {
+      final c = await openOn('fake2', AgentMode.fullAuto);
+      final s = drivers['fake2']!.latest!;
+      s.modeFeed.set(modes: [ask, edits], current: 'default');
+      await pumpEventQueue();
+      expect(s.picked, ['acceptEdits']);
+      s.modeFeed.set(modes: [ask, edits, auto]);
+      await pumpEventQueue();
+      expect(s.picked, ['acceptEdits', 'auto']);
+      expect(container.read(codeSessionProvider(c.sessionId)).mode, AgentMode.fullAuto);
+      // Once there, nothing more moves it.
+      s.modeFeed.set(modes: [ask, edits, auto]);
+      await pumpEventQueue();
+      expect(s.picked, hasLength(2));
+    });
+
+    test('a mode the user picks meanwhile wins over the one the session started in', () async {
+      final c = await openOn('fake2', AgentMode.fullAuto);
+      final s = drivers['fake2']!.latest!;
+      s.modeFeed.set(modes: [ask, edits], current: 'default');
+      await pumpEventQueue();
+      await c.setNativeMode('default');
+      s.modeFeed.set(modes: [ask, edits, auto]);
+      await pumpEventQueue();
+      expect(s.picked, ['acceptEdits', 'default']);
+    });
+
+    test("an agent in the lead's mode gets its native mode too; a read-only one doesn't", () async {
+      final c = await openOn('fake2', AgentMode.fullAuto);
+      final s = drivers['fake2']!.latest!;
+      s.modeFeed.set(modes: [ask, edits, auto], current: 'default');
+      await pumpEventQueue();
+      expect(container.read(codeSessionsProvider.notifier).byId(c.sessionId)!.nativeMode, 'auto');
+      await c.runWorkflow('demo', 'source');
+      unawaited(bridge.agent('Review', {'harness': 'fake2', 'readOnly': true}).catchError((Object _) => null));
+      final reviewer = await child();
+      expect((reviewer.mode, reviewer.nativeMode), (AgentMode.ask, ''));
+      container.listen(codeSessionProvider(reviewer.id), (_, _) {});
+      await pumpEventQueue();
+      final rs = drivers['fake2']!.latest!;
+      rs.modeFeed.set(modes: [ask, edits, auto], current: 'default');
+      await pumpEventQueue();
+      expect(rs.picked, isEmpty);
+      unawaited(bridge.agent('Fix', {'harness': 'fake2'}).catchError((Object _) => null));
+      final fixer = await whenValue(
+        container,
+        codeSessionsProvider,
+        (List<CodeSessionInfo> all) => all.any((k) => k.title == 'Fix' || (k.parentId != null && k.id != reviewer.id)),
+      ).then((all) => all.firstWhere((k) => k.parentId != null && k.id != reviewer.id));
+      expect((fixer.mode, fixer.nativeMode), (AgentMode.fullAuto, 'auto'));
+    });
   });
 
   test("an agent can list the workflow prompts before its session's start returns", () async {

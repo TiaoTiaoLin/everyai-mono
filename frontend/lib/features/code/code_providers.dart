@@ -26,6 +26,7 @@ import '../slash/skills/learn_sources.dart';
 import '../slash/skills/skill_draft.dart' show skillDrafterProvider;
 import '../usage/usage_totals.dart';
 import 'domain/agent_mode.dart';
+import 'domain/approval_reason.dart';
 import 'domain/code_session.dart';
 import 'domain/compaction.dart';
 import 'domain/floor_advice.dart';
@@ -38,7 +39,9 @@ import 'domain/review.dart';
 import 'domain/rewind.dart';
 import 'domain/spill.dart';
 import 'domain/fork_files.dart';
+import 'domain/notice.dart';
 import 'domain/subagents.dart';
+import 'domain/temp_dirs.dart';
 import 'domain/questions.dart';
 import 'domain/session_commands.dart';
 import 'domain/transcript.dart';
@@ -61,6 +64,7 @@ import 'drivers/driver.dart';
 import 'drivers/driver_policy.dart';
 import 'drivers/driver_process.dart' show DriverProcess, closeAllDriverProcesses;
 import 'drivers/driver_registry.dart';
+import 'drivers/lead_skills.dart';
 import 'drivers/terminal/terminal_driver.dart';
 import 'harness/everyai/everyai.dart';
 import 'harness/events.dart';
@@ -183,6 +187,9 @@ final _hostlessProvider = Provider<Map<String, String>>((ref) => {});
 
 /// The briefing text each outside session's agent was last sent (the transcript's "EveryAI briefing" row).
 final _briefingTextsProvider = Provider<Map<String, String>>((ref) => {});
+
+/// Each outside session's notice nonce (see [wrapNotice]), kept with its briefing folder; empty when none.
+final _noticeNoncesProvider = Provider<Map<String, String>>((ref) => {});
 
 /// What the session text tells an outside agent about each host tool it is
 /// offered, in `hostToolSpecs` order.
@@ -783,6 +790,9 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       script: !demo && !outside ? scriptCapsFor(tier, model, level: ref.read(codeSettingsProvider).scripts) : null,
       pathMap: pathMap,
       briefing: briefing,
+      skillsOff: !outside
+          ? const {}
+          : leadSkillsOff(ref.read(preferencesProvider), projectId, harness ?? byId(sessionId)?.harness ?? ''),
     );
   }
 
@@ -866,12 +876,16 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   }) async {
     final projectId = ref.read(codeProjectsProvider).where((p) => p.path == projectDir).firstOrNull?.id;
     final notes = await hostProjectNotes(workingDir);
+    // A fork gets no notices; the others keep one nonce for the session's whole life.
+    final nonce = asFork ? '' : await sessionNoticeNonce(await _driverDir(id), newNoticeNonce);
+    ref.read(_noticeNoncesProvider)[id] = nonce;
     final text = [
       sessionBriefing(
         SessionSkillInput(
           worktree: workingDir,
           projectRoot: projectDir,
           lead: (name: driver.info.label, model: model.isEmpty ? 'its default model' : model),
+          noticeNonce: nonce,
           hostTools: hostOnly != null
               ? [
                   for (final t in _hostToolInfos)
@@ -996,6 +1010,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   Future<void> _unbrief(String id) async {
     ref.read(_hostTokensProvider).remove(id);
     ref.read(_briefingTextsProvider).remove(id);
+    ref.read(_noticeNoncesProvider).remove(id);
     try {
       await ref.read(hostServerProvider).revokeSession(id);
       await removeBriefing(await _driverDir(id));
@@ -1262,6 +1277,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     String? rolePrompt,
     String? workingDir,
     bool ownTag = false,
+    bool ownApprovals = false,
     List<Map<String, Object?>>? clientTools,
     bool fork = false,
     ForkCopy? forkCopy,
@@ -1357,8 +1373,11 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       parentId: parent.id,
       parentCallId: callId,
       ownTag: ownTag,
+      ownApprovals: ownApprovals,
       forkCopy: forkCopy,
       tier: parent.tier,
+      // The parent's own mode (Claude's `auto` over Accept edits) when the child runs as it does.
+      nativeMode: mode == parent.mode && harness == parent.harness ? parent.nativeMode : '',
     );
     state = [...state, info];
     _save();
@@ -1777,6 +1796,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// The lead has said which of its own modes it is in since [_watchModes].
   var _modesSeen = false;
+
+  /// The mode the session started in when the lead didn't list it yet (see
+  /// [retargetFor]); null once it moved there or the user picked a mode.
+  AgentMode? _wantedMode;
   @override
   var _builder = TranscriptBuilder();
 
@@ -2034,6 +2057,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       ref.onDispose(alerts.dispose);
       listenSelf((prev, next) => alerts.onChange(prev?.status, next.status));
     }
+    // A switch in Settings → Skills reaches the lead's next process.
+    ref.listen(leadSkillsProvider, (_, _) => _applySkillsOff());
     // The budget holds whether or not the session is on screen: every new
     // reading (and a lowered budget) is checked here.
     if (info != null) {
@@ -2124,6 +2149,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       live[sessionId] = session;
       // After attaching: a reopen briefs the agent then, and that is the text to show.
       _showBriefing();
+      _applySkillsOff();
       await _openContext(info);
       // Closed meanwhile: nothing would cancel a subscription made now.
       if (!ref.mounted) return;
@@ -2275,17 +2301,62 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   /// What decides this session's actions: stored rules (global, project),
-  /// then `settings.json` rules, plus approvals remembered for the session.
+  /// then `settings.json` rules, plus approvals remembered for the session
+  /// (a fork's or subagent's include its parent's, shared by all its forks,
+  /// unless it is a stricter child that keeps its own: see
+  /// [CodeSessionInfo.ownApprovals]).
   @override
   PermissionPolicy get policy {
     final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
     return PermissionPolicy(
       rules: ref.read(codePermissionsProvider).rulesFor(info?.projectId) + _settingsRules,
-      session: {..._sessionAllowed},
+      session: {..._sessionAllowed, ...?(info?.ownApprovals ?? false ? null : _parentController?._sessionAllowed)},
       workingDir: info == null || isDemoPath(info.workingDir) ? null : info.workingDir,
       // A workflow agent on the EveryAI harness reaches the host too (its proof tools).
       hostTools: info != null && (info.isWorkflowAgent || isOutsideLead(info.harness, info.workingDir)),
+      tempDirs: systemTempDirs(),
+      isLink: isSymlink,
     );
+  }
+
+  /// The live controller of the session that started this one, if any.
+  /// Through the container: the parent listens to this session.
+  CodeSessionController? get _parentController {
+    final parent = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.parentId;
+    if (parent == null || !ref.container.exists(codeSessionProvider(parent))) return null;
+    return ref.container.read(codeSessionProvider(parent).notifier);
+  }
+
+  /// Why each of [calls] (default: the pending ones) waits for the user, by
+  /// call id (see [askReason]).
+  Map<String, String> askReasons([List<ActionCall>? calls]) {
+    final outside = _driver.info.id == everyaiHarnessName ? null : _driver.info.label;
+    return approvalReasons(
+      policy,
+      calls ?? state.transcript.pending,
+      state.mode,
+      outsideKind: outside == null ? null : (c) => autoDecidable(c) ? null : outside,
+    );
+  }
+
+  /// Remembers [patterns] "for this session": a fork's or subagent's go to
+  /// its parent, so they cover every fork of the session. The other live
+  /// children (and the parent) then settle what they wait on that now runs.
+  /// A child that keeps its own approvals keeps these too.
+  void _allowForSession(List<String> patterns) {
+    final own = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.ownApprovals ?? false;
+    final root = (own ? null : _parentController) ?? this;
+    root._sessionAllowed.addAll(patterns);
+    final sessions = ref.read(codeSessionsProvider);
+    for (final id in [
+      root.sessionId,
+      for (final s in sessions)
+        if (s.parentId == root.sessionId) s.id,
+    ]) {
+      if (id == sessionId || !ref.container.exists(codeSessionProvider(id))) continue;
+      final c = ref.container.read(codeSessionProvider(id).notifier);
+      c._autoRespond(c.state.transcript);
+    }
   }
 
   void _onEvent(HarnessEvent event) {
@@ -2382,7 +2453,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
     // A workflow's result first: the app made it, so Stop and the user's queue don't touch it.
     if (_workflowResults.isNotEmpty && _session != null) {
-      unawaited(_session!.send(_workflowResults.removeAt(0)).catchError((Object _) {}));
+      final r = _workflowResults.removeAt(0);
+      final text = _onOutsideLead ? _notice('workflow-result', r.id, r.text) : r.text;
+      unawaited(_session!.send(text).catchError((Object _) {}));
       return;
     }
     if (state.queued.isEmpty) return;
@@ -3031,6 +3104,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(old.close());
       ref.read(_liveProvider)[sessionId] = live;
       _session = live;
+      _applySkillsOff();
       _events.clear();
       if (!_mirror.isClosed) _mirror.add(null);
       _carried = _builder.snapshot.items;
@@ -3966,7 +4040,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     if (pending.isNotEmpty || state.transcript.held.any(isTaskCall)) {
       _answered = [...pending, ...state.transcript.held].map((c) => c.id).join(',');
-      await _session?.respond(accept: false, reason: denialMessage(DenialKind.cancelled));
+      final asked = askedLine(askReasons(pending).values);
+      await _session?.respond(accept: false, reason: denialMessage(DenialKind.cancelled, asked: asked));
     }
     // Ctrl-C reaches only the terminal's foreground command; background jobs,
     // servers and commands left running after a timeout are ended here. A
@@ -4172,7 +4247,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       );
       _forksReported.add((childId: bg.childId, title: bg.title, status: report.status));
       // While the agent works this joins its next step; when idle it wakes it.
-      _notifyLead(taskNotification(bg.childId, bg.title, report));
+      _notifyLead(taskNotification(bg.childId, bg.title, report), id: bg.childId);
       return;
     }
     _reports[callId] = report;
@@ -4193,7 +4268,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   final _activeRuns = <String>{};
 
   /// Ended runs' results the agent hasn't been sent yet (see [_toLead]).
-  final _workflowResults = <String>[];
+  final _workflowResults = <({String id, String text})>[];
 
   /// The folder's tree when each run started, by run id.
   final _startTrees = <String, String>{};
@@ -4367,8 +4442,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Kept apart from the user's queue, which Stop and a reset clear (and a
   /// spent budget skips): the run's journal is retired by now, so this is
   /// the only copy.
-  void _toLead(String text) {
-    _workflowResults.add(text);
+  void _toLead(String text, {String? runId}) {
+    _workflowResults.add((id: runId ?? 'workflow', text: text));
     _sendQueued();
   }
 
@@ -4674,7 +4749,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       asksLanding: asks,
       save: dir == null || noLocalFolder(dir) ? null : (json) => saveSpill(dir, 'workflow-$runId.json', json),
     );
-    _toLead(message);
+    _toLead(message, runId: runId);
   }
 
   // ------------------------------------------------------ orchestrating forks
@@ -4704,7 +4779,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         ),
     ]);
     if (_background.containsKey(callId)) {
-      _notifyLead(forkQuestionMessage(childId, title, text));
+      _notifyLead(forkQuestionMessage(childId, title, text), kind: 'fork-question', id: childId);
       return;
     }
     for (final MapEntry<String, String>(key: id, value: kid) in [..._childOf.entries]) {
@@ -4721,7 +4796,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// Background fork reports and questions for an outside lead that was busy
   /// (an ACP prompt sent mid-turn can fail), sent together once it is idle.
-  final _forkNotices = <String>[];
+  final _forkNotices = <({String kind, String id, String text})>[];
 
   /// Whether the session is led by an outside harness now.
   bool get _onOutsideLead {
@@ -4732,13 +4807,28 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends [text] (a background fork's report or question) to this agent: at
   /// once on the EveryAI harness, which takes it into its next step; an
   /// outside lead gets it when its turn ends.
-  void _notifyLead(String text) {
+  void _notifyLead(String text, {String kind = 'fork-report', String id = 'fork'}) {
     if (!_onOutsideLead) {
       unawaited(_session?.send(text).catchError((Object _) {}));
       return;
     }
-    _forkNotices.add(text);
+    _forkNotices.add((kind: kind, id: id, text: text));
     _sendForkNotices();
+  }
+
+  /// Tells an outside lead which of its skills are off in this project.
+  void _applySkillsOff() {
+    final info = ref.read(codeSessionsProvider.notifier).byId(sessionId);
+    if (info == null || _session is! TakesSkillOverrides) return;
+    (_session as TakesSkillOverrides).setSkillsOff(
+      leadSkillsOff(ref.read(preferencesProvider), info.projectId, info.harness),
+    );
+  }
+
+  /// [body] as a signed notice for an outside lead ([wrapNotice]); as it is when the session has no nonce.
+  String _notice(String kind, String id, String body) {
+    final nonce = ref.read(_noticeNoncesProvider)[sessionId] ?? '';
+    return nonce.isEmpty ? body : wrapNotice(kind: kind, id: id, nonce: nonce, body: body);
   }
 
   /// Not through [send]: that would close the lead's own open cards. A
@@ -4749,7 +4839,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_forkNotices.isEmpty || session == null || t.running || t.pending.isNotEmpty || state.queued.isNotEmpty) {
       return;
     }
-    final text = _forkNotices.join('\n\n');
+    // Wrapped now, for the lead that gets them.
+    final text = [for (final n in _forkNotices) _notice(n.kind, n.id, n.text)].join('\n\n');
     _forkNotices.clear();
     unawaited(session.send(text).catchError((Object _) {}));
   }
@@ -4911,7 +5002,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     switch (name) {
       case checkForksTool:
         // Reports and questions held for the end of an outside lead's turn come with the answer instead.
-        final held = [..._forkNotices];
+        // A tool result, not a user message: no notice wrapper (the briefing names this result as EveryAI's own).
+        final held = [for (final n in _forkNotices) n.text];
         _forkNotices.clear();
         return [
           if (_activeForks.isEmpty)
@@ -5089,7 +5181,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (scope != ApprovalScope.once) {
       final patterns = rememberable(targets) ?? const <String>[];
       if (scope == ApprovalScope.session) {
-        _sessionAllowed.addAll(patterns);
+        _allowForSession(patterns);
       } else {
         final projectId = ref.read(codeSessionsProvider.notifier).byId(sessionId)?.projectId;
         final store = ref.read(codePermissionsProvider.notifier);
@@ -5111,6 +5203,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// denial text with [reason] word for word.
   Future<void> deny([String? reason, List<String>? callIds]) async {
     final pending = state.transcript.pending;
+    final asked = askReasons();
+    final refused = [
+      for (final c in pending)
+        if (callIds == null ? !_decided.containsKey(c.id) : callIds.contains(c.id)) ?asked[c.id],
+    ];
     if (!perCall || callIds == null) _answered = pending.map((c) => c.id).join(',');
     if (perCall) {
       _markDecided([
@@ -5120,7 +5217,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
     await _session?.respond(
       accept: false,
-      reason: denialMessage(DenialKind.denied, reason: reason),
+      reason: denialMessage(DenialKind.denied, reason: reason, asked: askedLine(refused)),
       callIds: perCall ? callIds : null,
     );
   }
@@ -5157,6 +5254,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   }
 
   Future<void> setMode(AgentMode mode) async {
+    _wantedMode = null;
     // A lead with its own modes moves to the one that maps to [mode] (`/plan`, Start building, a handoff).
     if (_session is NativeModes && state.nativeModes.isNotEmpty) {
       final to = nativeModeFor(state.nativeModes, mode);
@@ -5182,6 +5280,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// mode's, kept with the session. Null once moved, else why not (the mode
   /// is greyed, or the harness refused; nothing changes then).
   Future<String?> setNativeMode(String id) async {
+    _wantedMode = null;
     final session = _session;
     if (session is! NativeModes) return 'This agent has no modes of its own.';
     final m = nativeModeOf(state.nativeModes, id);
@@ -5211,6 +5310,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     unawaited(_modesSub?.cancel());
     _modesSub = null;
     _modesSeen = false;
+    _wantedMode = null;
     if (session is! NativeModes) {
       state = state.copyWith(nativeModes: const [], clearNativeMode: true);
       return;
@@ -5243,7 +5343,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
           ? now
           : nativeModeFor(set.modes, state.mode);
       if (target == null) return;
-      if (target.policy != state.mode && saved == null) {
+      final wanted = target.policy != state.mode && saved == null ? state.mode : null;
+      if (wanted != null) {
         _builder.addNotice(
           NoticeItem(
             'mode-${_events.length}-${target.id}',
@@ -5254,12 +5355,22 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       }
       if (target.id != set.current) {
         unawaited(setNativeMode(target.id));
+      } else {
+        // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
+        state = state.copyWith(mode: target.policy);
+        if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
+      }
+      // After setNativeMode, which clears it: a later list may offer the mode wanted.
+      _wantedMode = wanted;
+      return;
+    }
+    // The mode the session started in is listed now (Claude's `auto` once the model's modes are known).
+    if ((_wantedMode == null ? null : retargetFor(_wantedMode!, set.modes)) case final to?) {
+      _wantedMode = null;
+      if (to.id != set.current) {
+        unawaited(setNativeMode(to.id));
         return;
       }
-      // Already in it: the policy is that mode's, kept so a reopen knows before the list loads.
-      state = state.copyWith(mode: target.policy);
-      if (info != null) sessions.update(info.copyWith(mode: target.policy, nativeMode: target.id));
-      return;
     }
     final now = nativeModeOf(set.modes, set.current);
     if (now == null || now.blocked != null || set.current == before) return;
@@ -5852,6 +5963,8 @@ final class _WorkflowLauncher implements AgentLauncher {
       ownTag: harness == everyaiHarnessName,
       hostOnly: workflowHostTools,
       bugCheckSeed: call.bugCheck,
+      // The lead's "for this session" approvals don't loosen a read-only agent.
+      ownApprovals: call.readOnly,
     );
     return (childId: info.id, harness: harness, model: model, note: note);
   }

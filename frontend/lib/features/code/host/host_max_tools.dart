@@ -32,8 +32,8 @@ const forkSpec = <String, Object?>{
       'Start a fork: a new agent on your harness (or `harness`) that works on `task` in the background and reports '
       'when done. It sees nothing of this conversation, so the task must stand alone: the goal, the files, the '
       'conventions to keep and how to check the work. Returns at once with the fork\'s id. Its report arrives later '
-      'as a <task-notification> message, and a question from it as a <fork-question>; don\'t sleep or poll for '
-      'them. At most 4 run at once, and forks can\'t start forks. It runs on the user\'s own plan for that harness.',
+      'as an <everyai-notice> holding a <task-notification>, and a question from it as a <fork-question> in one; '
+      'don\'t sleep or poll for them. At most 4 run at once, and forks can\'t start forks. It runs on the user\'s own plan for that harness.',
   'parameters': {
     'type': 'object',
     'properties': {
@@ -60,7 +60,7 @@ const maxHostToolInfos = <HostToolInfo>[
     name: forkHostTool,
     when:
         'a step of the plan stands on its own: a fork does it in the background (in its own worktree when asked) '
-        'and its report comes as a <task-notification>.',
+        'and its report comes as an <everyai-notice> holding a <task-notification>.',
   ),
   (name: checkForksTool, when: 'you want to see how your forks are doing.'),
   (name: answerForkTool, when: 'a <fork-question> reached you.'),

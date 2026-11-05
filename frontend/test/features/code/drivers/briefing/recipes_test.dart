@@ -33,6 +33,16 @@ void main() {
     expect(claudeCode(i, grantSkillAccess: false).args, isNot(contains('--add-dir')));
   });
 
+  test('claude code: skills turned off join the one --settings JSON, sorted', () {
+    final d = claudeCode(i, skillsOff: {'pdf', 'docx'});
+    expect(d.args.where((a) => a == '--settings'), hasLength(1));
+    expect(jsonDecode(d.args[d.args.indexOf('--settings') + 1]), {
+      'disableSkillShellExecution': true,
+      'skillOverrides': {'docx': 'off', 'pdf': 'off'},
+    });
+    expect(d.args[d.args.indexOf('--settings') + 1], claudeSettingsJson(skillsOff: {'docx', 'pdf'}));
+  });
+
   test('codex: -c overrides, skill root by app-server request, the session text as instructions', () {
     final d = codex(i);
     expect(d.args, [

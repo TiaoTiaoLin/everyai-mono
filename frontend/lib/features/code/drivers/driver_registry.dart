@@ -13,6 +13,7 @@ import 'acp/acp_driver.dart';
 import 'claude/claude_driver.dart';
 import 'codex/codex_driver.dart';
 import 'driver.dart';
+import 'lead_skills.dart';
 import 'driver_process.dart' show loadShellEnv, noAnswerProblem, reloadShellEnv;
 import 'everyai_driver.dart';
 import 'opencode/opencode_driver.dart';
@@ -86,7 +87,9 @@ final class DriverRegistry {
 final driverRegistryProvider = Provider<DriverRegistry>((ref) {
   final registry = DriverRegistry({
     everyaiHarnessName: EveryAIDriver(ref.read(everyaiHarnessProvider)),
-    'claude-code': ClaudeDriver(),
+    'claude-code': ClaudeDriver(
+      onSkills: (names) => ref.read(leadSkillsProvider.notifier).sawSkills('claude-code', names),
+    ),
     'codex': CodexDriver(),
     'opencode': OpenCodeDriver(),
     // ACP agents, by their ACP registry ids (cdn.agentclientprotocol.com
