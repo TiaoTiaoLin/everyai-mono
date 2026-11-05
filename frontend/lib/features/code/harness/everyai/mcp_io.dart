@@ -387,20 +387,33 @@ final class McpTools {
       tools.report[c.name] = vetted.report;
       if (vetted.report.pending.isNotEmpty) tools.leftOut[c.name] = [for (final p in vetted.report.pending) p.name];
     }
+    // A name two servers offer (left out or not) is prefixed for both: neither takes the plain name, which
+    // Mcp(…) rules and the model may already mean for the other one.
+    final offered = <String, int>{};
+    for (final MapEntry(key: c, value: names) in namesOf.entries) {
+      if (prefixed.contains(c.name)) continue;
+      for (final n in names) {
+        offered[n] = (offered[n] ?? 0) + 1;
+      }
+    }
     final taken = {...reserved};
     for (final c in tools.connections) {
       for (final t in c.tools) {
         final own = t['name'] as String? ?? '';
         if (own.isEmpty) continue;
-        // Keeps the server's names (permission rules match them) unless two clash.
-        var name = taken.contains(own) || prefixed.contains(c.name) ? '${c.name}__$own' : own;
-        name = name.replaceAll(RegExp('[^A-Za-z0-9_-]'), '_');
-        if (name.length > 64) name = name.substring(0, 64);
+        // Keeps the server's names (permission rules match them) unless they clash.
+        final clash = taken.contains(own) || (offered[own] ?? 0) > 1 || prefixed.contains(c.name);
+        final name = _modelName(clash ? '${c.name}__$own' : own);
         taken.add(name);
         tools._byName[name] = (c, own);
       }
     }
     return tools;
+  }
+
+  static String _modelName(String name) {
+    final n = name.replaceAll(RegExp('[^A-Za-z0-9_-]'), '_');
+    return n.length > 64 ? n.substring(0, 64) : n;
   }
 
   static final empty = McpTools._(const [], const {});
@@ -435,7 +448,19 @@ final class McpTools {
 
   Future<ToolOutput> call(String name, Map<String, Object?> args) async {
     final target = _byName[name];
-    if (target == null) return ToolOutput('Error: no MCP tool named $name.', isError: true);
+    if (target == null) {
+      // A reopened session's history may call a tool that is left out now; its prompt can't say so (it is reused).
+      for (final MapEntry(key: server, value: own) in leftOut.entries) {
+        if (own.any((o) => _modelName(o) == name || _modelName('${server}__$o') == name)) {
+          return ToolOutput(
+            'Error: $name (MCP server $server) is left out of this session because it changed or looks unsafe, '
+            'until the user reviews it in Settings → MCP servers. Tell the user if the task needs it.',
+            isError: true,
+          );
+        }
+      }
+      return ToolOutput('Error: no MCP tool named $name.', isError: true);
+    }
     return target.$1.call(target.$2, args, wrap: !_trusted.contains(target.$1.name));
   }
 

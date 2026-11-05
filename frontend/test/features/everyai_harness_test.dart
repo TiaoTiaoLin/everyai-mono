@@ -895,6 +895,43 @@ for line in sys.stdin:
       expect(saved, isNot(contains('dict_mcp.py')));
       await reopened.close();
     });
+
+    test('a workflow agent reopened with a new host also takes the servers as they are now', () async {
+      gateway.reply(text: 'Reproduced.');
+      final session = await harness.start(
+        SessionSpec(
+          workingDir: work,
+          model: 'anthropic/claude-sonnet-5.5',
+          mode: AgentMode.fullAuto,
+          llmBaseUrl: gateway.baseUrl,
+          llmApiKey: 'sk-test',
+          sessionTag: 'tag-1',
+          initialMessage: 'fix the bug',
+          subagent: true,
+          mcpConfig: dict(),
+        ),
+      );
+      await drive(session);
+      expect(toolNames(gateway.requests.last), contains('lookup'));
+      await session.close();
+
+      // The user turned the server off since; the old host token died with the app.
+      gateway.reply(text: 'Verified.');
+      final fresh = EveryAIHarness(dataDir: () async => '${tmp.path}/data', gatewayKey: () async => 'sk-test');
+      final reopened = await fresh.attachBriefed(
+        session.id,
+        const DriverBriefing(mcpUrl: 'http://127.0.0.1:1/mcp', mcpToken: 'fresh'),
+        mcpConfig: const {},
+      );
+      final said = reopened.events.firstWhere((e) => e is ChatMessage && !e.fromUser && e.text == 'Verified.');
+      await reopened.send('Carry on');
+      await said.timeout(const Duration(seconds: 20));
+      expect(toolNames(gateway.requests.last), isNot(contains('lookup')));
+      final saved = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
+      expect(saved, isNot(contains('dict_mcp.py')));
+      expect(saved, isNot(contains('fresh')));
+      await reopened.close();
+    });
   });
 
   test("a briefed session reaches the app's host as everyai__ tools, in place of its own memory", () async {

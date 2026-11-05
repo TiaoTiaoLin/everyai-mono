@@ -256,7 +256,10 @@ final class StoredMcpServers {
   ///
   /// For an [outside] agent (ACP, which connects to whole servers itself and
   /// can't be given some of a server's tools), a server with tools waiting
-  /// for the user's review is left out entirely.
+  /// for the user's review is left out entirely, all its tools with it.
+  /// Known gap: only EveryAI sessions see a server's tools, so a server never
+  /// used in one has no pins or reviews and goes to ACP agents unchecked, and
+  /// a change shows only after an EveryAI session connects to it again.
   Map<String, Object?> mcpConfigFor(String? projectId, {bool outside = false}) {
     final active = serversFor(projectId).where((s) => s.active && !(outside && s.pending.isNotEmpty)).toList()
       ..sort((a, b) => a.name.compareTo(b.name));
@@ -267,13 +270,23 @@ final class StoredMcpServers {
   /// pins added, its pending list replaced (so every session reporting the
   /// same thing changes nothing). The entry is the one the session used: the
   /// project's, else the global one.
+  ///
+  /// A pin already stored wins over a first-use one (two sessions that both
+  /// started before either reported): a tool that changed between them is
+  /// then held as changed at the next session, never re-pinned unseen. A
+  /// server that offered no tools yet (a missing token, toolsets off) stays
+  /// unpinned, so its tools are still trusted on first use once it has some.
   StoredMcpServers withReports(String? projectId, Map<String, McpToolsReport> reports) {
     var next = this;
     for (final MapEntry(key: name, value: r) in reports.entries) {
       final scope = projectId != null && (projects[projectId]?.any((s) => s.name == name) ?? false) ? projectId : null;
       next = next.withList(scope, [
         for (final s in next.listFor(scope))
-          s.name == name ? s.copyWith(pinned: () => {...?s.pinned, ...r.pin}, pending: r.pending) : s,
+          s.name != name
+              ? s
+              : s.pinned == null && r.pin.isEmpty && r.pending.isEmpty
+              ? s.copyWith(pending: const [])
+              : s.copyWith(pinned: () => {...r.pin, ...?s.pinned}, pending: r.pending),
       ]);
     }
     return next;
@@ -697,7 +710,8 @@ String mcpConsentMessage(McpServer s, {required String scope, List<McpFlag>? fla
 
 /// What the "Review tools" dialog says about [s]'s [McpServer.pending]
 /// tools: a [message], and a [detail] with each tool's name, why it was left
-/// out and what it tells the agent (shown in full).
+/// out and what it tells the agent: its description and parameters, in
+/// full, since Allow pins all of it.
 ({String message, String detail}) mcpToolsReviewMessage(McpServer s) {
   final b = StringBuffer();
   for (final t in s.pending) {
@@ -707,12 +721,17 @@ String mcpConsentMessage(McpServer s, {required String scope, List<McpFlag>? fla
       b.writeln('• $r');
     }
     b.writeln(t.description.isEmpty ? '(no description)' : t.description);
+    if (t.parameters.isNotEmpty) {
+      b
+        ..writeln('Parameters:')
+        ..writeln(t.parameters);
+    }
   }
   return (
     message:
-        'Code sessions leave these tools of ${s.name} out until you allow them. Read what each one tells the agent '
-        "and allow them only if you trust the server: a tool's description can carry instructions you don't see in "
-        'the chat.',
+        'Code sessions leave these tools of ${s.name} out until you allow them. Read what each one tells the agent, '
+        "parameters included, and allow them only if you trust the server: a tool's description or parameters can "
+        "carry instructions you don't see in the chat.",
     detail: b.toString().trimRight(),
   );
 }

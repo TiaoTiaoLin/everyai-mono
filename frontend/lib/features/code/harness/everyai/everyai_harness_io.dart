@@ -107,8 +107,9 @@ final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed, A
   }
 
   /// [attach] for a workflow agent reopened with a fresh host ([briefing]):
-  /// the old token died with the app. One still open keeps the host it has;
-  /// the user's MCP servers come from its saved spec, not [mcpConfig].
+  /// the old token died with the app. One still open keeps the host and the
+  /// servers it has; a reopened one connects to [mcpConfig] (the user's
+  /// servers and pins as they are now), as with [attachWithMcp].
   @override
   Future<HarnessSession> attachBriefed(
     String conversationId,
@@ -119,8 +120,10 @@ final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed, A
     final session = (await attach(conversationId)) as EveryAISession;
     if (open == null) {
       session
-        .._spec = session._withSpec(briefing: briefing)
-        .._hosted = true;
+        .._spec = session._withSpec(briefing: briefing, mcpConfig: mcpConfig)
+        .._hosted = true
+        // The briefing (a live token) isn't saved; the servers are.
+        .._writeSpec();
     }
     return session;
   }

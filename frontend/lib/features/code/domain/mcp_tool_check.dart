@@ -28,6 +28,7 @@ final class McpToolReview {
     required this.name,
     required this.digest,
     this.description = '',
+    this.parameters = '',
     this.reasons = const [],
     this.isNew = false,
   });
@@ -38,8 +39,13 @@ final class McpToolReview {
   /// [mcpToolDigest] of the tool as it was seen; Allow pins this one.
   final String digest;
 
-  /// What the tool tells the model, hidden characters removed, shortened.
+  /// What the tool tells the model, hidden characters removed.
   final String description;
+
+  /// Its input schema as the model sees it (indented JSON, hidden characters
+  /// removed): parameter names and descriptions carry instructions too, and
+  /// Allow pins them with the rest. Empty when it takes no parameters.
+  final String parameters;
 
   /// Why it needs a look, in plain words.
   final List<String> reasons;
@@ -62,6 +68,7 @@ final class McpToolReview {
       name: name,
       digest: digest,
       description: json['description'] as String? ?? '',
+      parameters: json['parameters'] as String? ?? '',
       reasons: [
         if (reasons is List<Object?>)
           for (final r in reasons)
@@ -75,6 +82,7 @@ final class McpToolReview {
     'name': name,
     'digest': digest,
     if (description.isNotEmpty) 'description': description,
+    if (parameters.isNotEmpty) 'parameters': parameters,
     if (reasons.isNotEmpty) 'reasons': reasons,
     if (isNew) 'new': true,
   };
@@ -165,7 +173,9 @@ bool _names(String text, String name) {
 
 /// Why [tool] looks unsafe to show the model, in plain words (empty: clean).
 /// [otherTools] are other servers' tool names, [builtIns] the harness's own;
-/// [ownTools] (this server's) may be named freely.
+/// [ownTools] (this server's) may be named freely, unless another server
+/// offers the same name: then a mention is ambiguous, and taking another
+/// server's name is flagged itself.
 List<String> scanMcpTool(
   Map<String, Object?> tool, {
   Set<String> otherTools = const {},
@@ -214,7 +224,9 @@ List<String> scanMcpTool(
   for (final p in params) {
     if (_secretParam.hasMatch(p)) add('Has a parameter that asks for secrets or the conversation: ${stripHidden(p)}.');
   }
-  final own = {...ownTools, name};
+  if (otherTools.contains(name)) add("Has the same name as another server's tool: $name.");
+  // A name another server offers too stays in the check: mentioning it may steer the model to either.
+  final own = {...ownTools, name}.difference(otherTools);
   for (final other in (otherTools.difference(own).toList()..sort())) {
     if (_names(text, other)) add("Mentions another server's tool: $other.");
   }
@@ -260,13 +272,18 @@ List<String> scanMcpTool(
       continue;
     }
     final changed = pinned != null && pinned.containsKey(name);
-    var description = stripHidden(t['description'] as String? ?? '').trim();
-    if (description.length > 1500) description = '${description.substring(0, 1500)}…';
+    final schema = _stripped(t)['inputSchema'];
+    final props = schema is Map ? schema['properties'] : null;
+    final takesNothing =
+        schema is! Map ||
+        ({...schema.keys}.difference({'type', 'properties'}).isEmpty && (props is! Map || props.isEmpty));
     pending.add(
       McpToolReview(
         name: name,
         digest: digest,
-        description: description,
+        // In full: what Allow pins is all of it.
+        description: stripHidden(t['description'] as String? ?? '').trim(),
+        parameters: takesNothing ? '' : const JsonEncoder.withIndent('  ').convert(schema),
         reasons: [if (changed) McpToolReview.changedReason, ...reasons],
         isNew: !changed,
       ),

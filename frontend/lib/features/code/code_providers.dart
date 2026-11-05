@@ -1107,7 +1107,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       }
     }
     if (briefing == null) {
-      if (harness is AcpDriver) return harness.attachWithMcp(info.conversationId, mcp);
+      if (harness is AttachesWithMcp) return (harness as AttachesWithMcp).attachWithMcp(info.conversationId, mcp);
       return harness.attach(info.conversationId);
     }
     try {
