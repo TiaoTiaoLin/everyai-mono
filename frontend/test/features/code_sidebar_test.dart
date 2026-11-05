@@ -178,6 +178,17 @@ void main() {
       expect(find.text('Pinned'), findsNothing);
     });
 
+    desktopTest('sessions of a removed project are in no list, pinned or not', (tester) async {
+      await show(tester, [_s('a', project: 'gone', pinned: true), _s('b', project: 'gone')]);
+      expect(find.text('Pinned'), findsNothing);
+      expect(find.text('Session a'), findsNothing);
+    });
+
+    desktopTest('a search matching only a removed project\'s sessions says so', (tester) async {
+      await show(tester, [_s('a', project: 'gone', title: 'zebra')], query: 'zebra');
+      expect(find.text('No matching sessions.'), findsOneWidget);
+    });
+
     desktopTest('status marks differ per state; idle and done show none', (tester) async {
       await show(
         tester,

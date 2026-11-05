@@ -137,8 +137,8 @@ class _SidebarState extends ConsumerState<Sidebar> {
                 onTap: _searching ? _closeSearch : _openSearch,
                 glyph: 'search',
               ),
-              // The project picker lives on the Code home page.
-              _Destination(EveryIcon.projects, 'Projects', false, Routes.code, glyph: 'projects'),
+              // Projects: the picker lives on the Code home page, which New session already opens. A row of its
+              // own waits for a target of its own.
             ],
             if (collapsed) _Destination(EveryIcon.chat, 'Chat', false, Routes.newChat, glyph: 'chat'),
             _Destination(EveryIcon.models, 'Models', loc == Routes.models, Routes.models, glyph: 'models'),
@@ -386,7 +386,12 @@ class CodeSessionList extends ConsumerWidget {
     final theme = EveryTheme.of(context);
     final projects = ref.watch(codeProjectsProvider);
     final names = {for (final p in projects) p.id: p.name};
-    final groups = groupCodeSessions(filterSessions(ref.watch(codeSessionsProvider), query, projectNames: names));
+    // Sessions of a removed project are in no list, so Pinned, Recents and the empty-search check agree.
+    final known = [
+      for (final s in ref.watch(codeSessionsProvider))
+        if (names.containsKey(s.projectId)) s,
+    ];
+    final groups = groupCodeSessions(filterSessions(known, query, projectNames: names));
     final searching = query.trim().isNotEmpty;
     final active = location.startsWith('/code/s/') ? location.substring('/code/s/'.length) : null;
     if (projects.isEmpty) {
