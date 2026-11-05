@@ -70,13 +70,16 @@ String stripHidden(String text) {
 /// the block early. [nonce], when given, is the session's secret: a block quoting a fake one is visibly not ours.
 String untrusted(String text, {required String source, String? nonce}) {
   final hidden = hiddenIn(text);
-  final clean = stripHidden(text)
-      .replaceAll(RegExp('</?untrusted-content', caseSensitive: false), '<_untrusted-content');
+  final clean = stripHidden(text).replaceAll(_tagOpen, '<_untrusted-content');
   final attrs = StringBuffer('source="${_attr(source)}"');
   if (nonce != null && nonce.isNotEmpty) attrs.write(' nonce="${_attr(nonce)}"');
   if (hidden.isNotEmpty) attrs.write(' removed="${hidden.map((k) => k.label).join(', ')}"');
   return '<untrusted-content $attrs>\n$clean\n</untrusted-content>';
 }
+
+/// A `<` that opens or closes our tag as a model may read it: any case, `_` for `-`, spaces or a slash before the
+/// name (`</ untrusted-content>`, `</UNTRUSTED_content>`, `< /untrusted-content`).
+final _tagOpen = RegExp(r'<[\s/]*untrusted[-_]content', caseSensitive: false);
 
 String _attr(String s) => s.replaceAll('"', "'").replaceAll(RegExp(r'[\r\n]+'), ' ');
 
