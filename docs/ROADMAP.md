@@ -121,7 +121,7 @@ These horizons are rough and assume one developer with agent help.
 ### Q1 2027: ship to real users
 - Stripe live keys, Google sign-in, macOS signing and notarization, and a license choice.
 - A real deployment of `backend-exp`, with PostgreSQL and more than one instance. The relay state is in-process
-  today, so it needs a shared store or sticky routing first. Then delete the frozen FastAPI backend.
+  today, so it needs a shared store or sticky routing first.
 - Windows and Linux: bundle the agent-server and set up CI runners.
 - Track 2 and 3 backend gaps (skipped this pass by owner decision):
   - link resvg for server-side SVG validation and rasterizing
@@ -173,4 +173,4 @@ From TODO.md "Owner input required":
 
 Also open, not yet raised with the owner:
 - Whether caching savings go to users (lower bills) or stay as margin.
-- Where `backend-exp` is hosted, and when the frozen FastAPI backend is deleted.
+- Where `backend-exp` is hosted.

@@ -1,8 +1,7 @@
 # backend-exp
 
 The experimental EveryAI backend, written in Zig 0.17 on
-[Anole](https://github.com/xuckless/anole). It replaces `backend/` (FastAPI)
-with a `/v1` API: auth, an SSE chat gateway with a server-side tool loop, an
+[Anole](https://github.com/xuckless/anole). It serves a `/v1` API: auth, an SSE chat gateway with a server-side tool loop, an
 OpenAI-compatible LLM gateway for coding agents (OpenHands), the model shop,
 image generation, and usage billing (plans + prepaid wallet, upstream cost × 1.15).
 All model traffic goes through OpenRouter.

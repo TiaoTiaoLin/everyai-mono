@@ -209,7 +209,6 @@ flowchart LR
 | [`frontend/`](frontend) | The app: chat, Code workspace, artifacts, model shop, billing | ![Flutter](https://img.shields.io/badge/-Flutter-02569B?logo=flutter&logoColor=white&style=flat-square) ![Riverpod](https://img.shields.io/badge/-Riverpod-00A0C6?style=flat-square) ![Drift](https://img.shields.io/badge/-Drift-003B57?style=flat-square) |
 | [`frontend/packages/everyai_markdown`](frontend/packages/everyai_markdown) | Streaming Markdown renderer: math, highlighting, citations | ![Dart](https://img.shields.io/badge/-Dart-0175C2?logo=dart&logoColor=white&style=flat-square) |
 | [`backend-exp/`](backend-exp) | The `/v1` API: auth, chat tool loop, gateway, images, billing | ![Zig](https://img.shields.io/badge/-Zig%200.17-F7A41D?logo=zig&logoColor=white&style=flat-square) ![Anole](https://img.shields.io/badge/-Anole-9C85FC?style=flat-square) |
-| [`backend/`](backend) | Legacy FastAPI service, frozen and being replaced | ![Python](https://img.shields.io/badge/-Python-3776AB?logo=python&logoColor=white&style=flat-square) |
 | [`docs/`](docs) | [`ROADMAP.md`](docs/ROADMAP.md), [`CODE_ROADMAP.md`](docs/CODE_ROADMAP.md), [benchmarks](docs/benchmarks/browseros/README.md) | ![Markdown](https://img.shields.io/badge/-Markdown-000000?logo=markdown&logoColor=white&style=flat-square) |
 | [`scripts/`](scripts) | `dev.sh` (local backend + app) and `launch.sh` (app against the dev server) | ![Shell](https://img.shields.io/badge/-zsh-4EAA25?logo=gnubash&logoColor=white&style=flat-square) |
 
