@@ -13,6 +13,7 @@ import '../../skills/domain/chat_skills.dart';
 import '../domain/ask_user.dart';
 import '../domain/image_refs.dart';
 import '../domain/message.dart';
+import '../domain/security_alert.dart';
 
 /// What the client sends for one assistant turn.
 @immutable
@@ -399,6 +400,10 @@ Map<String, String> toolOutputsByMessage(List<Message> history) {
     for (final call in m.parts.whereType<ToolCallPart>()) {
       if (call.toolName == askUserTool) {
         notes.add(askUserNote(call));
+        continue;
+      }
+      if (call.toolName == securityAlertTool) {
+        notes.add(SecurityAlert.of(call).note);
         continue;
       }
       if (call.toolName == 'memory') {

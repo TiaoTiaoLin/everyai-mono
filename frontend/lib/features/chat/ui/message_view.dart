@@ -23,9 +23,11 @@ import '../../models/ui/model_avatar.dart';
 import '../chat_providers.dart';
 import '../domain/ask_user.dart';
 import '../domain/message.dart';
+import '../domain/security_alert.dart';
 import '../domain/suggest_mode.dart';
 import 'ask_user_card.dart';
 import 'chat_markdown.dart';
+import 'security_alert_card.dart';
 import 'tool_steps.dart';
 
 /// One message. User turns are right-aligned bubbles with edit and copy on
@@ -738,6 +740,7 @@ class _PartView extends StatelessWidget {
         conversationId: conversationId,
         isLatest: isLatest,
       ),
+      final ToolCallPart call when call.toolName == securityAlertTool => SecurityAlertCard(part: call),
       final ToolCallPart call when allLocalChatTools.contains(call.toolName) => LocalToolChip(part: call),
       final ToolCallPart call => InlineVisual(part: call, conversationId: conversationId),
       ArtifactPart(:final title) => Text(title, style: theme.type.body.tint(theme.accent)),
