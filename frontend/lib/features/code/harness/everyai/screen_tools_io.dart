@@ -6,6 +6,7 @@ import 'dart:isolate';
 
 import '../../../../core/security/untrusted.dart';
 import 'browser_io.dart';
+import 'exfil.dart';
 import 'tools_io.dart' show ToolOutput, imageDataUrl;
 import 'window_capture_io.dart';
 
@@ -38,6 +39,7 @@ Future<ToolOutput> runBrowser(
             : RegExp(r'^[a-z][a-z0-9+.-]*:', caseSensitive: false).hasMatch(url) && !url.startsWith('localhost:')
             ? url
             : 'http://$url';
+        if (_openRefusal(target) case final refusal?) return ToolOutput(refusal, isError: true);
         did = 'Opened ${await b.open(target)}';
       case 'click':
         final sel = str('selector');
@@ -88,6 +90,27 @@ Future<ToolOutput> runBrowser(
   } on BrowserError catch (e) {
     return ToolOutput(browserErrorText(action, e.message, b.takeLog()), isError: true);
   }
+}
+
+/// Why the browser may not open [target]: a file in one of the user's credential stores (the browser would show
+/// it), or a site that takes uploads. Checked here, so the outside leads' host browser has the same guard.
+String? _openRefusal(String target) {
+  final uri = Uri.tryParse(target);
+  if (uri == null) return null;
+  if (uri.isScheme('file')) {
+    var path = uri.toFilePath();
+    try {
+      if (FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound) {
+        path = File(path).resolveSymbolicLinksSync();
+      }
+    } on FileSystemException {
+      // Checked as written.
+    }
+    final what = credentialPath(path, home: Platform.environment['HOME'] ?? '');
+    return what == null ? null : guardRefusal('the file holds $what');
+  }
+  final site = exfilHost(uri.host);
+  return site == null ? null : guardRefusal('$site is a site that takes uploads');
 }
 
 /// Actions whose result carries text the page controls (its title, an eval result, the console, a hit's class names).

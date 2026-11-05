@@ -7,6 +7,7 @@ import 'dart:io';
 import '../harness.dart' show ScriptCaps;
 import 'llm.dart';
 import 'research_sites.dart' show secretPath;
+import 'exfil.dart';
 import 'tools_io.dart';
 
 // run_script: the model writes a TypeScript program that calls the harness's
@@ -411,7 +412,9 @@ final class ScriptRunner {
     }
 
     if (!roots.any(under)) throw Exception('$raw is outside the project; scripts read project files only');
-    if (secretPath(full)) throw Exception('$raw looks like a secret; scripts may not read it');
+    if (secretPath(full) || credentialPath(full, home: Platform.environment['HOME'] ?? '') != null) {
+      throw Exception('$raw looks like a secret; scripts may not read it');
+    }
     return full;
   }
 

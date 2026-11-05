@@ -12,6 +12,7 @@ import '../../../../core/security/untrusted.dart';
 import '../../domain/permissions.dart' show commandPaths;
 import 'apply_patch.dart';
 import 'browser_io.dart';
+import 'exfil.dart';
 import 'llm.dart';
 import 'shell_io.dart';
 import 'screen_tools_io.dart';
@@ -527,6 +528,8 @@ final class ToolRunner {
     this.browser,
     this.ownFolders = const [],
     Scrubber? scrubber,
+    this.pushTargets,
+    this.loadLoginEnv = false,
   }) : scrubber = scrubber ?? Scrubber.forProject(root, extra: [gateway.apiKey]);
 
   final String root;
@@ -542,11 +545,111 @@ final class ToolRunner {
   final List<String>? researchSites;
   bool get research => researchSites != null && !bypass;
 
-  /// The session runs in Bypass permissions: no EveryAI refusals (the research sandbox, secrets in URLs or queries).
+  /// The session runs in Bypass permissions: the research sandbox is off. The tools' own guardrails (see [_guard])
+  /// stay on.
   bool bypass = false;
 
-  /// Stops secrets leaving in fetched URLs and search queries.
+  /// Stops secrets leaving in fetched URLs and search queries, and hides them in tool output (see
+  /// [EveryAiSession]).
   final Scrubber scrubber;
+
+  /// The repository's remotes (names and URLs) when the session started: git push goes to these only. With
+  /// [loadLoginEnv], loaded by [ready] when not given; null skips the check.
+  Set<String>? pushTargets;
+
+  /// Whether [ready] adds the login shell's secrets to [scrubber] and loads [pushTargets]. Off for tests and the
+  /// host's offline script runner, which shouldn't start a login shell.
+  final bool loadLoginEnv;
+
+  Future<void>? _prepared;
+
+  /// Done once before the first call (and awaited by the session before it checks a call): the login shell's
+  /// secrets into [scrubber] (keys exported in `.zshrc` aren't in the app's environment), and the remotes git may
+  /// push to.
+  Future<void> ready() => _prepared ??= loadLoginEnv ? _prepare() : Future.value();
+
+  Future<void> _prepare() async {
+    scrubber.addEnv((await ShellEnv.load()).env);
+    if (pushTargets == null) {
+      final targets = <String>{};
+      try {
+        final r = await Process.run('git', ['remote', '-v'], workingDirectory: root);
+        if (r.exitCode == 0) {
+          for (final line in const LineSplitter().convert(r.stdout as String)) {
+            targets.addAll(line.split(RegExp(r'\s+')).take(2).where((w) => w.isNotEmpty));
+          }
+        }
+      } on Object {
+        // Not a repository, or no git: only a plain `git push` goes.
+      }
+      pushTargets ??= targets;
+    }
+  }
+
+  static String get _home => Platform.environment['HOME'] ?? '';
+
+  /// [path] with symlinks resolved, so a link can't dress a credential store up as a project file.
+  static String _real(String path) {
+    try {
+      if (FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound) {
+        return File(path).resolveSymbolicLinksSync();
+      }
+    } on FileSystemException {
+      // Checked as written.
+    }
+    return path;
+  }
+
+  /// Why [tool] with [args] is refused by the tools' own guardrails, in every mode (Bypass too) and with no
+  /// approval: reading a credential store, a command that prints or ships out secrets, a URL or query carrying one,
+  /// and writing the mark [Scrubber.redact] leaves in place of a secret.
+  String? _guard(String tool, Map<String, Object?> args) {
+    String? why;
+    switch (tool) {
+      case ToolNames.read || ToolNames.grep || ToolNames.glob:
+        final path = resolvePath(root, (args['file_path'] ?? args['path'] ?? '') as String);
+        final h = _home;
+        if (credentialPath(_real(path), home: h) ?? credentialPath(path, home: h) case final what?) {
+          why = 'the path holds $what';
+        } else if (tool == ToolNames.grep) {
+          if (credentialsUnder(_real(path), home: h) case final what?) {
+            why = 'the folder holds $what; search a project folder';
+          }
+        }
+      case ToolNames.bash:
+        final command = args['command'] as String? ?? '';
+        if (command.contains(Scrubber.hiddenMark)) return _hiddenMarkRefusal;
+        why =
+            secretSourceReason(command, home: _home, cwd: shell.cwd) ??
+            exfilReason(command, scrubber: scrubber, pushTargets: pushTargets);
+      case ToolNames.webFetch:
+        final url = (args['url'] as String? ?? '').trim();
+        if (scrubber.leak(url) case final what?) {
+          why = 'the URL contains $what';
+        } else if (exfilHost(Uri.tryParse(url)?.host ?? '') case final site?) {
+          why = '$site is a site that takes uploads';
+        }
+      case ToolNames.webSearch:
+        if (scrubber.leak((args['query'] as String? ?? '').trim()) case final what?) why = 'the query contains $what';
+      case ToolNames.browser:
+        // open's URL, and the free text of eval (page JavaScript, which can send requests) and type.
+        final text = '${args['url'] ?? ''} ${args['script'] ?? ''} ${args['text'] ?? ''}'.trim();
+        if (scrubber.leak(text) case final what?) {
+          why = 'the browser would get $what';
+        } else if (args['action'] != 'open') {
+          if (dropSiteIn(text) case final site?) why = '$site is a site that takes uploads';
+        }
+      case ToolNames.write || ToolNames.edit || ToolNames.applyPatch:
+        final text = '${args['content'] ?? ''}${args['new_string'] ?? ''}${args['patch'] ?? ''}';
+        if (text.contains(Scrubber.hiddenMark)) return _hiddenMarkRefusal;
+    }
+    return why == null ? null : guardRefusal(why);
+  }
+
+  static const _hiddenMarkRefusal =
+      'Error: the text contains ${Scrubber.hiddenMark} …], a value EveryAI hid from you (a secret). Writing it would '
+      "replace the user's real secret. Change the file around that line with edit, or ask the user to change the "
+      'secret.';
 
   /// Where a research job may write: its notes.
   String get researchDir => '$root/.everyai/scratch/research';
@@ -614,11 +717,18 @@ final class ToolRunner {
 
   /// Why a research job may not make this call at all, before it is shown
   /// for approval: such a call is never run, so no one should be asked.
-  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) => _researchRefusal(tool, mapped(raw));
+  /// The same for a call the tools' guardrails refuse.
+  String? refusalBeforeApproval(String tool, Map<String, Object?> raw) {
+    final args = mapped(raw);
+    return _researchRefusal(tool, args) ?? _guard(tool, args);
+  }
 
   Future<ToolOutput> run(String tool, Map<String, Object?> raw, {Future<void>? cancel}) async {
+    await ready();
     final args = mapped(raw);
-    if (_researchRefusal(tool, args) case final refusal?) return ToolOutput(refusal, isError: true);
+    if (_researchRefusal(tool, args) ?? _guard(tool, args) case final refusal?) {
+      return ToolOutput(refusal, isError: true);
+    }
     try {
       return switch (tool) {
         ToolNames.bash => await _bash(args, cancel),
@@ -856,7 +966,10 @@ final class ToolRunner {
       );
     }
     if (bytes.take(8000).contains(0)) return ToolOutput('$path is a binary file (${bytes.length} bytes).');
-    final lines = const LineSplitter().convert(utf8.decode(bytes, allowMalformed: true));
+    final text = utf8.decode(bytes, allowMalformed: true);
+    // A secret file in the project (.env.local, a key): its values may not leave later, and are hidden from now on.
+    if (secretPath(path)) scrubber.remember(Scrubber.dotEnvLines(text));
+    final lines = const LineSplitter().convert(text);
     final offset = ((args['offset'] as num?)?.toInt() ?? 1).clamp(1, lines.length + 1);
     final limit = ((args['limit'] as num?)?.toInt() ?? 2000).clamp(1, 2000);
     _read[path] = file.lastModifiedSync();
@@ -1182,9 +1295,6 @@ final class ToolRunner {
     if (url == null || !(url.isScheme('http') || url.isScheme('https'))) {
       return const ToolOutput('Error: give an http(s) URL.', isError: true);
     }
-    if ((bypass ? null : scrubber.leak(raw)) case final what?) {
-      return ToolOutput('Error: refused: the URL contains $what. Never put secrets in URLs.', isError: true);
-    }
     final sites = researchSites;
     if (sites != null && !hostAllowed(url.host, sites)) {
       return ToolOutput(
@@ -1218,9 +1328,6 @@ final class ToolRunner {
   Future<ToolOutput> _webSearch(Map<String, Object?> args) async {
     final query = (args['query'] as String? ?? '').trim();
     if (query.isEmpty) return const ToolOutput('Error: query is empty.', isError: true);
-    if ((bypass ? null : scrubber.leak(query)) case final what?) {
-      return ToolOutput('Error: refused: the query contains $what. Never put secrets in searches.', isError: true);
-    }
     final sites = researchSites;
     final (reply, repeated) = await _searchOnce(query);
     final out = StringBuffer();

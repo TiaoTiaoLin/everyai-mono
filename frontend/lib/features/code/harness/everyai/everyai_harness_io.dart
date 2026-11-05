@@ -149,6 +149,7 @@ final class EveryAISession
       researchSites: _spec.researchSites,
       browser: _browser,
       ownFolders: skillFolders(_spec.skills),
+      loadLoginEnv: true,
     )..bypass = _spec.mode == AgentMode.bypass;
   }
 
@@ -272,13 +273,21 @@ final class EveryAISession
       _loadedSkills
         ..clear()
         ..addAll((j['skills'] as List<Object?>? ?? const []).whereType<String>());
+      if (j['push_targets'] case final List<Object?> targets) _tools.pushTargets = {...targets.whereType<String>()};
     } on Object {
       // A broken file only loses what compaction would re-inject.
     }
   }
 
   void _saveState() => _stateFile.writeAsStringSync(
-    jsonEncode({'approved_plan': _approvedPlan, 'todos': _todos, 'touched': _touched, 'skills': _loadedSkills}),
+    jsonEncode({
+      'approved_plan': _approvedPlan,
+      'todos': _todos,
+      'touched': _touched,
+      'skills': _loadedSkills,
+      // The remotes when the session started, so a reopened session doesn't take ones the agent added.
+      if (_tools.pushTargets case final t?) 'push_targets': [...t],
+    }),
   );
 
   /// Notes what a finished call means for compaction: the todo list, the
@@ -818,6 +827,9 @@ final class EveryAISession
       vision: spec.vision,
     );
     _gateway = GatewayClient(baseUrl: _spec.llmBaseUrl, apiKey: _spec.llmApiKey);
+    // The new runner keeps what the old one learnt: values hidden from secret files the agent read, and the remotes
+    // the session started with (not ones the agent added since).
+    final old = _tools;
     _tools = ToolRunner(
       root: _spec.workingDir,
       shell: _shell,
@@ -828,6 +840,9 @@ final class EveryAISession
       researchSites: _spec.researchSites,
       browser: _browser,
       ownFolders: skillFolders(_spec.skills),
+      scrubber: old.scrubber..remember([_gateway.apiKey]),
+      pushTargets: old.pushTargets,
+      loadLoginEnv: true,
     )..bypass = _spec.mode == AgentMode.bypass;
     _writeSpec();
   }
@@ -957,6 +972,11 @@ final class EveryAISession
     _pauseRequested = false;
     // A reopened session reconnects its servers before the first call.
     await _ensureMcp();
+    // The tools' guardrails need the login shell's secrets and the start-of-session remotes before any call is
+    // checked (refusalBeforeApproval is synchronous); the first time, the remotes are saved with the state.
+    final fresh = _tools.pushTargets == null;
+    await _tools.ready();
+    if (fresh && _tools.pushTargets != null) _saveState();
     var steps = 0;
     try {
       while (true) {
@@ -1517,7 +1537,7 @@ final class EveryAISession
         final r = await run(command);
         final shown = expect.isNotEmpty ? r.out.contains(expect) : r.exit != 0;
         // Any failure counts without `expect`: the decider checks it is this bug, not another one.
-        final match = shown && expect.isEmpty ? await _reproMatch(command, r.out) : 'bug';
+        final match = shown && expect.isEmpty ? await _reproMatch(command, _tools.scrubber.redact(r.out)) : 'bug';
         if (match == 'other') {
           return ToolOutput(
             'Not reproduced: the command fails, but its output reads as a different failure than the bug described '
@@ -1605,7 +1625,10 @@ final class EveryAISession
         // as another failure; the agent is told what still fails.
         final marked = f.reproExpect.isNotEmpty;
         final clean = marked ? !r.out.contains(f.reproExpect) : r.exit == 0;
-        final other = !clean && !marked && await _reproMatch(f.reproCommand, r.out, afterFix: true) == 'other';
+        final other =
+            !clean &&
+            !marked &&
+            await _reproMatch(f.reproCommand, _tools.scrubber.redact(r.out), afterFix: true) == 'other';
         final gone = clean || other;
         if (gone) {
           f.reviews = 0;
@@ -1842,7 +1865,16 @@ final class EveryAISession
         p: sha256.convert(f.readAsBytesSync()).toString().substring(0, 24),
   };
 
-  void _result(LlmToolCall call, String actionId, ToolOutput out) {
+  /// [out] as the call's result, to the model and the event stream alike. Secrets in its text are hidden here (see
+  /// [Scrubber.redact]): this is where every tool's output passes. Only the text: the observation (a write's old and
+  /// new contents, for the diff the user sees) goes to the journal and paired devices as it is.
+  void _result(LlmToolCall call, String actionId, ToolOutput rawOut) {
+    final out = ToolOutput(
+      _tools.scrubber.redact(rawOut.text),
+      isError: rawOut.isError,
+      observation: rawOut.observation,
+      images: rawOut.images,
+    );
     _emit({
       'kind': 'ObservationEvent',
       'id': _newId(),
