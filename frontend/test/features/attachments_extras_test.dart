@@ -91,6 +91,21 @@ void main() {
       expect(jpg.single.name, 'Pasted image.jpg');
     });
 
+    test('a Windows clipboard BMP becomes an opaque png', () async {
+      // XRGB like the Windows clipboard: 32 bits with the fourth byte 0.
+      final bmp = img.Image(width: 3, height: 2, numChannels: 4)..clear(img.ColorRgba8(200, 30, 40, 0));
+      final files = await clipboardFiles(
+        readFiles: () async => [],
+        readImage: () async => img.encodeBmp(bmp),
+        readText: () async => null,
+      );
+      expect((files.single.name, files.single.mimeType), ('Pasted image.png', 'image/png'));
+      final back = img.decodePng(await files.single.readAsBytes())!;
+      expect((back.width, back.height), (3, 2));
+      final p = back.getPixel(1, 1);
+      expect((p.r, p.g, p.b, p.a), (200, 30, 40, 255));
+    });
+
     test('text-only or failing clipboards give nothing', () async {
       Future<String?> none() async => null;
       expect(await clipboardFiles(readFiles: () async => [], readImage: () async => null, readText: none), isEmpty);

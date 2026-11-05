@@ -3,6 +3,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:image/image.dart' as img;
 import 'package:pasteboard/pasteboard.dart';
 import 'package:uuid/uuid.dart';
 
@@ -97,8 +98,12 @@ Future<List<XFile>> clipboardFiles({
     if (real.isNotEmpty) return [for (final p in real) XFile(p)];
     final text = await (readText ?? _clipboardText)();
     if (text != null && text.trim().isNotEmpty) return const [];
-    final image = await (readImage ?? (() => Pasteboard.image))();
-    if (image == null || image.isEmpty) return const [];
+    final raw = await (readImage ?? (() => Pasteboard.image))();
+    if (raw == null || raw.isEmpty) return const [];
+    // Windows: the plugin saves the clipboard bitmap as a BMP, which models don't take; re-encode it as PNG.
+    final bmp = raw.length > 2 && raw[0] == 0x42 && raw[1] == 0x4D;
+    final image = bmp ? await compute<Uint8List, Uint8List?>(bmpToPng, raw) : raw;
+    if (image == null) return const [];
     final png = image.length > 4 && image[0] == 0x89 && image[1] == 0x50;
     final jpeg = image.length > 3 && image[0] == 0xFF && image[1] == 0xD8;
     final (ext, mime) = png ? ('png', 'image/png') : (jpeg ? ('jpg', 'image/jpeg') : ('tiff', 'image/tiff'));
@@ -108,6 +113,15 @@ Future<List<XFile>> clipboardFiles({
   } catch (_) {
     return const [];
   }
+}
+
+/// A BMP as PNG, or null when it doesn't decode. The Windows clipboard bitmap is XRGB (its fourth byte is not
+/// alpha and often 0), so the result keeps only the colour channels, or the picture would come out transparent.
+@visibleForTesting
+Uint8List? bmpToPng(Uint8List bmp) {
+  final decoded = img.decodeBmp(bmp);
+  if (decoded == null) return null;
+  return img.encodePng(decoded.numChannels == 3 ? decoded : decoded.convert(numChannels: 3));
 }
 
 Future<String?> _clipboardText() async => (await Clipboard.getData(Clipboard.kTextPlain))?.text;
