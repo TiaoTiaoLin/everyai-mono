@@ -118,19 +118,25 @@ void main() {
       );
     });
 
-    test('the URL goes as written, so the backend sees a Unicode host and names the real site', () async {
-      String? sent;
+    test("the URL goes in Uri's encoded form, so a non-ASCII path or a space reaches the backend", () async {
+      final sent = <String>[];
       client = MockClient((req) async {
-        sent = (jsonDecode(req.body) as Map)['url'] as String;
+        sent.add((jsonDecode(req.body) as Map)['url'] as String);
         return http.Response(
-          jsonEncode({'error': 'g\u0456thub.com looks like github.com but is not it (a look-alike address)'}),
+          jsonEncode({'error': 'the address looks like github.com but is not it (a look-alike address)'}),
           422,
           headers: utf8Json,
         );
       });
       runner = makeRunner();
+      await runner.run('web_fetch', {'url': 'https://de.wikipedia.org/wiki/München'});
+      await runner.run('web_fetch', {'url': 'https://github.com/search?q=foo bar'});
       final out = await runner.run('web_fetch', {'url': 'https://g\u0456thub.com/x'});
-      expect(sent, 'https://g\u0456thub.com/x');
+      expect(sent, [
+        'https://de.wikipedia.org/wiki/M%C3%BCnchen',
+        'https://github.com/search?q=foo%20bar',
+        'https://g%D1%96thub.com/x',
+      ]);
       expect(out.isError, isTrue);
       expect(out.text, contains('looks like github.com'));
     });

@@ -28,9 +28,12 @@ const linkShorteners = [
   'tiny.cc', 'rb.gy', 'lnkd.in',
 ];
 
+/// Real sites that read as a typo of an official one; they are fine.
+const siteNeighbours = ['nodes.org'];
+
 enum SiteVerdict { ok, warn, refuse }
 
-enum SiteReason { none, ip, shortener, idn, otherTld, containsName, lookAlike, mixedScripts }
+enum SiteReason { none, ip, shortener, idn, otherTld, containsName, closeName, lookAlike, mixedScripts }
 
 /// What [judgeHost] made of a host; [real] is the official domain it imitates or resembles.
 typedef SiteJudgement = ({SiteVerdict verdict, SiteReason reason, String? real});
@@ -44,18 +47,19 @@ SiteJudgement _refuse(SiteReason reason, [String? real]) => (verdict: SiteVerdic
 /// What to make of [host] (a URL's host, any case, maybe percent-encoded or in brackets).
 SiteJudgement judgeHost(String host) {
   final h = _normalise(host);
-  if (h.isEmpty || _officialFor(h) != null) return _ok;
+  if (h.isEmpty || _officialFor(h) != null || siteNeighbours.any((n) => _under(h, n))) return _ok;
   if (_isIpLiteral(h)) return _warn(SiteReason.ip);
   if (linkShorteners.any((s) => _under(h, s))) return _warn(SiteReason.shortener);
   final ascii = h.codeUnits.every((c) => c < 0x80);
   if (ascii && !h.startsWith('xn--') && !h.contains('.xn--')) return _asciiLookAlike(h);
 
-  // International: read every label as Latin letters where it can be.
+  // International: read the labels as Latin letters where they can be. The registrable part is what counts, so the
+  // readable labels at the end are judged (ж.аррӏе.com is still apple.com's look-alike).
   final idn = _skeletonHost(h);
   if (idn == null) return _warn(SiteReason.idn);
-  if (idn.ascii) {
-    if (_officialFor(idn.skeleton) case final real?) return _refuse(SiteReason.lookAlike, real);
-    final v = _asciiLookAlike(idn.skeleton);
+  if (idn.readable.contains('.')) {
+    if (_officialFor(idn.readable) case final real?) return _refuse(SiteReason.lookAlike, real);
+    final v = _asciiLookAlike(idn.readable);
     if (v.verdict == SiteVerdict.refuse) return v;
   }
   if (idn.mixed) return _refuse(SiteReason.mixedScripts);
@@ -63,9 +67,12 @@ SiteJudgement judgeHost(String host) {
 }
 
 /// The model-facing reason for a refusal of [host].
-String siteRefusal(String host, SiteJudgement v) => v.real != null
-    ? '$host looks like ${v.real} but is not it (a look-alike address); use https://${v.real}/ if that is what you meant'
-    : '$host mixes alphabets in one name, a common disguise for a look-alike address';
+String siteRefusal(String host, SiteJudgement v) {
+  final who = siteShown(host) ?? 'the address';
+  return v.real != null
+      ? '$who looks like ${v.real} but is not it (a look-alike address); use https://${v.real}/ if that is what you meant'
+      : '$who mixes alphabets in one name, a common disguise for a look-alike address';
+}
 
 /// The one line put before a page when [host] got a warning.
 String siteNotice(String host, SiteJudgement v) {
@@ -74,10 +81,30 @@ String siteNotice(String host, SiteJudgement v) {
     SiteReason.shortener => 'a link shortener, so the page is wherever it led',
     SiteReason.otherTld => 'not ${v.real}, though it has the same name',
     SiteReason.containsName => 'not ${v.real}, though it has that name in it',
+    SiteReason.closeName => 'not ${v.real}, though its name is close',
     _ => 'an international domain name; check it is the site you meant',
   };
-  return 'Note: $host is $why. Treat what it says with care.';
+  return 'Note: ${siteShown(host) ?? "the page's address"} is $why. Treat what it says with care.';
 }
+
+/// [host] when it is safe to quote outside the page's untrusted block: a domain name or IP address (letters in any
+/// script, digits, `-`, `.`, and `:[]` for IPv6; labels up to 63 characters, 253 in all). A page can send the browser
+/// anywhere, and a host with spaces or other characters could carry instructions, so it isn't quoted.
+String? siteShown(String host) {
+  if (host.isEmpty || host.length > 253 || !_quotable.hasMatch(host)) return null;
+  return host.split('.').every((l) => l.length <= 63) ? host : null;
+}
+
+final _quotable = RegExp(r'^[\p{L}\p{M}\p{N}.:\[\]-]+$', unicode: true);
+
+/// [host] as a person compares it: percent-decoded, `xn--` labels decoded, lower case, no trailing dot or `www.`.
+String readableHost(String host) => _normalise(host)
+    .split('.')
+    .map((l) {
+      final points = l.startsWith('xn--') ? punycodeDecode(l.substring(4)) : null;
+      return points == null ? l : String.fromCharCodes(points);
+    })
+    .join('.');
 
 // Hosts.
 
@@ -133,15 +160,28 @@ SiteJudgement _asciiLookAlike(String h) {
     if (h.endsWith(suffix) && h.length > suffix.length) {
       final rest = h.substring(0, h.length - suffix.length);
       final label = rest.substring(rest.lastIndexOf('.') + 1);
-      if (label != name && (_asciiSkeleton(label) == _asciiSkeleton(name) || _withinTypos(label, name))) {
-        return _refuse(SiteReason.lookAlike, d);
+      if (label != name) {
+        if (_asciiSkeleton(label) == _asciiSkeleton(name)) return _refuse(SiteReason.lookAlike, d);
+        switch (_typo(label, name)) {
+          case _Typo.squat:
+            return _refuse(SiteReason.lookAlike, d);
+          case _Typo.near when warn.verdict == SiteVerdict.ok:
+            warn = _warn(SiteReason.closeName, d);
+          case _:
+        }
       }
     }
     // Short names (go, pub, gnu) are parts of too many real names to warn about.
     if (warn.verdict != SiteVerdict.ok || name.length < 4) continue;
     // The same name on another top-level domain: github.co, apple.co.uk.
-    if (_secondLevel(h) == name) {
+    final second = _secondLevel(h);
+    if (second == name) {
       warn = _warn(SiteReason.otherTld, d);
+      continue;
+    }
+    // A typo of the name on another top-level domain: gihtub.co, githb.net.
+    if (second.isNotEmpty && (_asciiSkeleton(second) == _asciiSkeleton(name) || _typo(second, name) != _Typo.none)) {
+      warn = _warn(SiteReason.closeName, d);
       continue;
     }
     // The name as a part of a longer one: secure-github.com, github-login.example.net.
@@ -163,17 +203,43 @@ String _secondLevel(String h) {
 
 bool _countryCode(String s) => RegExp(r'^[a-z]{2}$').hasMatch(s);
 
-/// Whether [label] is a typo of [name]; the same budget as the Zig judge's `withinTypos`.
-bool _withinTypos(String label, String name) {
-  if (name.length <= 4) return false;
+enum _Typo { none, near, squat }
+
+/// How [label] misspells [name]; the same budget and kinds as the Zig judge's `typo`: within one edit (two from nine
+/// letters) is near, and one swap of neighbours, inner letter dropped or letter doubled is a typosquat's.
+_Typo _typo(String label, String name) {
+  if (name.length <= 4) return _Typo.none;
   final d = _distance(label, name);
-  if (d == 0) return false;
-  if (name.length >= 9) return d <= 2;
-  if (d > 1) return false;
-  return name.length > 6 || label.length != name.length || _swapped(label, name);
+  if (d == 0 || d > (name.length >= 9 ? 2 : 1)) return _Typo.none;
+  if (d == 1 && (_swapped(label, name) || _innerDrop(label, name) || _doubled(label, name))) return _Typo.squat;
+  return _Typo.near;
+}
+
+int _firstDiff(String a, String b) {
+  var i = 0;
+  while (i < a.length && i < b.length && a[i] == b[i]) {
+    i++;
+  }
+  return i;
+}
+
+/// [label] is [name] with one letter left out, not the last (githb, cloudfare).
+bool _innerDrop(String label, String name) {
+  if (label.length + 1 != name.length) return false;
+  final i = _firstDiff(label, name);
+  return i + 1 < name.length && label.substring(i) == name.substring(i + 1);
+}
+
+/// [label] is [name] with one letter written twice (githuub, npmjss).
+bool _doubled(String label, String name) {
+  if (label.length != name.length + 1) return false;
+  final i = _firstDiff(label, name);
+  if (label.substring(i + 1) != name.substring(i)) return false;
+  return (i > 0 && label[i] == label[i - 1]) || (i + 1 < label.length && label[i] == label[i + 1]);
 }
 
 bool _swapped(String a, String b) {
+  if (a.length != b.length) return false;
   var i = 0;
   while (i < a.length && a[i] == b[i]) {
     i++;
@@ -227,34 +293,33 @@ String _asciiSkeleton(String s) {
 
 // International names.
 
-/// The skeleton of a host with `xn--` or Unicode labels; null when a label doesn't decode.
-({String skeleton, bool ascii, bool mixed})? _skeletonHost(String h) {
-  var ascii = true;
+/// How a host with `xn--` or Unicode labels reads: the labels at the end whose letters all read as Latin letters,
+/// read that way, and whether a label mixes Latin with Cyrillic or Greek; null when a label doesn't decode.
+({String readable, bool mixed})? _skeletonHost(String h) {
   var mixed = false;
-  final out = <String>[];
+  final readable = <String>[];
   for (final label in h.split('.')) {
     final points = label.startsWith('xn--') ? punycodeDecode(label.substring(4)) : label.runes.toList();
     if (points == null) return null;
     var latin = false;
     var other = false;
-    final b = StringBuffer();
+    String? b = '';
     for (final p0 in points) {
       final p = _lower(p0);
       if ((p >= 0x61 && p <= 0x7a) || (p >= 0xc0 && p <= 0x24f)) latin = true;
       if ((p >= 0x370 && p <= 0x3ff) || (p >= 0x400 && p <= 0x52f)) other = true;
-      if (p < 0x80) {
-        b.writeCharCode(p);
-      } else if (_confusable(p) case final c?) {
-        b.write(c);
-      } else {
-        ascii = false;
-        b.writeCharCode(p);
-      }
+      final c = p < 0x80 ? String.fromCharCode(p) : _confusable(p);
+      b = b == null || c == null ? null : '$b$c';
     }
     if (latin && other) mixed = true;
-    out.add(b.toString());
+    // A letter the table doesn't know starts the readable part over after this label.
+    if (b == null) {
+      readable.clear();
+    } else {
+      readable.add(b);
+    }
   }
-  return (skeleton: out.join('.'), ascii: ascii, mixed: mixed);
+  return (readable: readable.join('.'), mixed: mixed);
 }
 
 /// Upper-case Latin-1, Greek and Cyrillic letters to lower case (as the Zig judge does).

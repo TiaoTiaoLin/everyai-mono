@@ -31,6 +31,24 @@ Future<ToolOutput> runBrowser(
   // Our own line about the site (a bare IP, a shortener, ...), kept outside the page's untrusted block.
   String? note;
   try {
+    // A link, a script or a form may have taken the page to another site since the last action: judge it before
+    // acting on it.
+    if (action != 'open' && action != 'close' && b.running) {
+      final here = await b.evaluate('location.href');
+      if (here is String) {
+        final now = browserLanded(_judged[b] ?? 'about:blank', here);
+        _judged[b] = here;
+        if (now.refusal case final refusal?) {
+          await b.open('about:blank');
+          _judged[b] = 'about:blank';
+          return ToolOutput(
+            'The page went to another site, so the browser went back to a blank page.\n$refusal',
+            isError: true,
+          );
+        }
+        note = now.notice;
+      }
+    }
     final String did;
     switch (action) {
       case 'open':
@@ -49,8 +67,10 @@ Future<ToolOutput> runBrowser(
         // Chrome follows redirects itself: judge where it landed too.
         final landed = await b.evaluate('location.href');
         final after = landed is String ? browserLanded(target, landed) : _clear;
+        _judged[b] = landed is String ? landed : target;
         if (after.refusal case final refusal?) {
           await b.open('about:blank');
+          _judged[b] = 'about:blank';
           final where = 'The page redirected to another site, so the browser went back to a blank page.';
           return ToolOutput('$where\n$refusal', isError: true);
         }
@@ -87,6 +107,7 @@ Future<ToolOutput> runBrowser(
         did = await b.resize((args['width'] as num?)?.toInt() ?? 1280, (args['height'] as num?)?.toInt() ?? 800);
       case 'close':
         await b.close();
+        _judged[b] = null;
         return const ToolOutput('Closed the browser.');
       default:
         return ToolOutput('Error: unknown browser action "$action".', isError: true);
@@ -131,12 +152,15 @@ String? _openRefusal(String target) {
 
 const _clear = (refusal: null, notice: null);
 
+/// The address each browser's page was last judged at, so a later action notices when it moved.
+final _judged = Expando<String>('browser page judged');
+
 /// What the browser tool makes of [target] (before opening it, and again where a redirect landed): the refusal
 /// for a look-alike of an official site, a one-line note for a host with a reason for doubt (a bare IP address, a
 /// link shortener, `github.co`), or neither. The agent's own apps are never judged: files, localhost, private
 /// addresses and `.local` names. Checked here, so the outside leads' host browser has the same guard.
 ({String? refusal, String? notice}) browserTarget(String target) {
-  final uri = Uri.tryParse(target);
+  final uri = Uri.tryParse(_unwrapped(target));
   if (uri == null || !(uri.isScheme('http') || uri.isScheme('https')) || _localHost(uri.host)) return _clear;
   final v = judgeHost(uri.host);
   final shown = _shownHost(uri.host);
@@ -147,9 +171,17 @@ const _clear = (refusal: null, notice: null);
   };
 }
 
-/// [browserTarget] for the page Chrome [landed] on after opening [target], when a redirect took it to another host.
+/// [browserTarget] for the page Chrome [landed] on after opening [target] (or after an earlier action at [target]),
+/// when it is now on another host. Hosts are compared as a person reads them, so a site gets no second note for
+/// being written another way (Chrome writes `xn--` where Dart's Uri percent-encodes; `www.` is dropped).
 ({String? refusal, String? notice}) browserLanded(String target, String landed) =>
-    Uri.tryParse(landed)?.host == Uri.tryParse(target)?.host ? _clear : browserTarget(landed);
+    readableHost(_hostOf(target)) == readableHost(_hostOf(landed)) ? _clear : browserTarget(landed);
+
+/// What `view-source:` shows is the page under it.
+String _unwrapped(String url) =>
+    url.toLowerCase().startsWith('view-source:') ? _unwrapped(url.substring('view-source:'.length)) : url;
+
+String _hostOf(String url) => Uri.tryParse(_unwrapped(url))?.host ?? '';
 
 /// [host] as a person reads it (Dart's Uri percent-encodes non-ASCII hosts).
 String _shownHost(String host) {

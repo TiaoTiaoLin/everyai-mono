@@ -4,7 +4,8 @@
 # registrable name (one label before the top-level domain): the look-alike check
 # compares that label. Read by official_sites.zig (backend fetches) and copied
 # into frontend/lib/core/security/official_sites.dart (the browser tool); a test
-# fails when the two differ.
+# fails when the two differ. `neighbours` are real sites that read as a typo of
+# an official one; they are fine.
 # official
 npmjs.com
 npmjs.org
@@ -80,3 +81,5 @@ shorturl.at
 tiny.cc
 rb.gy
 lnkd.in
+# neighbours
+nodes.org

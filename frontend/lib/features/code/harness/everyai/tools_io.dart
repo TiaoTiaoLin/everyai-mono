@@ -1306,13 +1306,20 @@ final class ToolRunner {
     final limit = ((args['limit'] as num?)?.toInt() ?? 20000).clamp(1000, 40000);
     try {
       // Through the backend's safe fetcher: no local or private addresses, no look-alikes of official sites,
-      // every redirect checked. The URL as written: Uri would percent-encode a Unicode host.
-      final page = await gateway.fetchPage(raw, sessionTag: sessionTag, allow: sites, offset: offset, maxChars: limit);
+      // every redirect checked. Uri's form: anole's client takes no spaces or non-ASCII in a path or query, and the
+      // judge reads a percent-encoded host as the letters it stands for.
+      final page = await gateway.fetchPage(
+        url.toString(),
+        sessionTag: sessionTag,
+        allow: sites,
+        offset: offset,
+        maxChars: limit,
+      );
       final more = page.nextOffset == null ? '' : '\n[More follows; fetch again with offset ${page.nextOffset}.]';
       final note = page.notice == null ? '' : '${page.notice}\n';
       return ToolOutput('$note${untrusted(_unfenced(page.text), source: page.url)}$more');
     } on LlmError catch (e) {
-      return ToolOutput('Error: $e ($raw)', isError: true);
+      return ToolOutput('Error: $e ($url)', isError: true);
     }
   }
 
