@@ -20,6 +20,7 @@ Future<List<FileDiff>> uncommittedDiff(SessionWorktree w) async => const [];
 Future<List<String>> commitSubjects(SessionWorktree w) async => const [];
 Future<String> remoteUrl(SessionWorktree w) async => '';
 Future<bool> ghReady(String dir) async => false;
+Future<OpenPr?> prFor(SessionWorktree w) async => null;
 Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) async => _unsupported();
 Future<bool> commitAll(SessionWorktree w, String message) async => _unsupported();
 Future<String> checkpoint(SessionWorktree w, int turn) async => _unsupported();

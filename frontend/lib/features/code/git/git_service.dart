@@ -67,6 +67,9 @@ abstract final class GitService {
   /// The `origin` remote's URL, or '' without one.
   static Future<String> remoteUrl(SessionWorktree w) => impl.remoteUrl(w);
 
+  /// The session branch's open pull request (`gh pr view`), or null: none, a merged or closed one, or no gh.
+  static Future<OpenPr?> prFor(SessionWorktree w) => impl.prFor(w);
+
   /// Whether the GitHub CLI is installed and signed in.
   static Future<bool> ghReady(String dir) => impl.ghReady(dir);
 

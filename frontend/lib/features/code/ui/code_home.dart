@@ -1,10 +1,7 @@
 import '../../../core/preferences.dart';
 import '../../../core/ui/brand.dart';
 
-import 'dart:convert';
-import 'dart:typed_data';
-
-import 'package:file_selector/file_selector.dart';
+import 'package:file_selector/file_selector.dart' show getDirectoryPath;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -31,6 +28,7 @@ import 'code_composer.dart';
 import 'transcript/aside_card.dart';
 import 'session_view.dart';
 import 'code_top_bar.dart' show CodeDraftBar;
+import 'console/session_actions.dart';
 import '../code_settings_providers.dart';
 import '../drivers/driver_registry.dart' show driverRegistryProvider;
 import '../harness/events.dart' show HarnessEvent;
@@ -593,60 +591,13 @@ class _SessionTileState extends ConsumerState<SessionTile> {
     );
   }
 
-  /// Saves the session as Markdown (to compare runs, or keep a record).
-  Future<void> _export() async {
-    final markdown = await ref.read(codeSessionProvider(widget.info.id).notifier).exportMarkdown();
-    if (markdown.isEmpty) return;
-    final name = '${widget.info.title}-${widget.info.harness}'
-        .replaceAll(RegExp(r'[^\w\- ]+'), '')
-        .trim()
-        .replaceAll(RegExp(r'\s+'), '-');
-    final location = await getSaveLocation(suggestedName: '$name.md');
-    if (location == null) return;
-    try {
-      await XFile.fromData(Uint8List.fromList(utf8.encode(markdown)), mimeType: 'text/markdown').saveTo(location.path);
-      if (mounted) showAdaptiveToast(context, 'Saved');
-    } on Object catch (e) {
-      if (mounted) showAdaptiveToast(context, "Couldn't save: $e");
-    }
-  }
+  Future<void> _export() => exportSession(context, ref, widget.info);
 
-  Future<void> _rename() async {
-    final title = await showAdaptivePrompt(
-      context,
-      title: 'Rename session',
-      initialValue: widget.info.title,
-      confirmLabel: 'Rename',
-    );
-    if (title == null || title.trim().isEmpty) return;
-    ref.read(codeSessionsProvider.notifier).update(widget.info.copyWith(title: title.trim()));
-  }
+  Future<void> _rename() => renameSession(context, ref, widget.info);
 
   Future<void> _delete() async {
-    final w = widget.info.worktree;
-    final ok = await showAdaptiveConfirm(
-      context,
-      title: 'Delete session?',
-      message: w == null
-          ? '"${widget.info.title}" will be removed from your sessions.'
-          : '"${widget.info.title}" will be removed with its worktree, branch ${w.branch} and checkpoints. '
-                'Work already merged stays merged.',
-      confirmLabel: 'Delete',
-      destructive: true,
-    );
-    if (!ok || !mounted) return;
     final selected = widget.selected;
-    try {
-      if (w == null) {
-        await ref.read(codeSessionsProvider.notifier).remove(widget.info.id);
-      } else {
-        await ref.read(codeGitProvider(widget.info.id).notifier).discard();
-      }
-    } on Object catch (e) {
-      if (mounted) showAdaptiveToast(context, "Couldn't delete the session: $e");
-      return;
-    }
-    if (selected && mounted) context.go(Routes.code);
+    if (await deleteSession(context, ref, widget.info) && selected && mounted) context.go(Routes.code);
   }
 
   static String _age(DateTime t) {

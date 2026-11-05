@@ -10,7 +10,7 @@ import '../../../../core/ui/adaptive.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../domain/delivered_files.dart';
 import '../../domain/transcript.dart';
-import '../../panes/panes_providers.dart';
+import '../console/console_state.dart';
 
 /// The files the agent presented with `present_files`: one row each, to open,
 /// show in the file manager, or look at in the Changes pane.
@@ -46,7 +46,7 @@ class FilesCard extends ConsumerWidget {
               path: resolveDelivered(workingDir, f.path),
               onChanges: sessionId == null
                   ? null
-                  : () => ref.read(codePaneProvider(sessionId!).notifier).show(CodePane.diff),
+                  : () => ref.read(consolePanelProvider(sessionId!).notifier).show(ConsoleView.diff),
             ),
         ],
       ),

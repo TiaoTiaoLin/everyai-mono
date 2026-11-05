@@ -9,17 +9,16 @@ import '../../code_providers.dart' show isDemoPath;
 import '../../domain/code_session.dart';
 import '../../panes/panes_providers.dart';
 import '../../panes/pty.dart';
-import 'diff_pane.dart';
-import 'tasks_pane.dart';
+import '../console/console_layout.dart';
+import '../console/console_state.dart';
 import 'preview_pane.dart';
 import 'processes_pane.dart';
 import 'terminal_pane.dart';
 
-/// The panes [session] can show: Changes in a git repository; Terminal,
-/// Processes and Preview for a real folder on a desktop.
+/// The panes [session] can show: Terminal, Processes and Preview for a real
+/// folder on a desktop. The Diff and the old Tasks pane live in the console's
+/// right panel now (`ui/console/`); these three move to its bottom drawer next.
 List<CodePane> panesFor(CodeSessionInfo session) => [
-  if (session.diffTarget != null) CodePane.diff,
-  if (!isDemoPath(session.workingDir) && !session.isSubagent) CodePane.tasks,
   if (Host.isDesktop && shellSupported && !isDemoPath(session.workingDir)) ...[
     CodePane.terminal,
     CodePane.processes,
@@ -27,7 +26,8 @@ List<CodePane> panesFor(CodeSessionInfo session) => [
   ],
 ];
 
-/// The open pane beside the session (over it when narrow), with tabs.
+/// The session's body: the console's right panel ([ConsoleLayout]) around
+/// the open pane beside the session (over it when narrow), with tabs.
 class SessionPanes extends ConsumerStatefulWidget {
   const SessionPanes({super.key, required this.session, required this.child});
 
@@ -43,7 +43,12 @@ class _SessionPanesState extends ConsumerState<SessionPanes> {
   final _built = <CodePane>{};
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) =>
+        ConsoleLayout(session: widget.session, tier: ConsoleTier.forWidth(box.maxWidth), child: _panes(context)),
+  );
+
+  Widget _panes(BuildContext context) {
     final open = ref.watch(codePaneProvider(widget.session.id)).open;
     final panes = panesFor(widget.session);
     if (open == null || !panes.contains(open)) return widget.child;
@@ -83,10 +88,8 @@ class _SessionPanesState extends ConsumerState<SessionPanes> {
   }
 
   Widget _body(CodePane p, {required bool active}) {
-    final close = ref.read(codePaneProvider(widget.session.id).notifier).close;
     return switch (p) {
-      CodePane.diff => DiffPane(session: widget.session, onClose: close),
-      CodePane.tasks => TasksPane(session: widget.session),
+      CodePane.diff || CodePane.tasks => const SizedBox.shrink(),
       CodePane.terminal => TerminalPane(session: widget.session),
       // Polls only while showing.
       CodePane.processes => active ? ProcessesPane(session: widget.session) : const SizedBox.shrink(),

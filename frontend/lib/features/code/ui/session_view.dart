@@ -34,7 +34,8 @@ import 'code_composer.dart';
 import 'code_slash_host.dart';
 import 'transcript/files_card.dart';
 import 'code_top_bar.dart';
-import '../panes/panes_providers.dart';
+import 'console/console_header.dart';
+import 'console/console_state.dart';
 import 'panes/session_panes.dart';
 import 'transcript/approval_card.dart';
 import 'transcript/aside_card.dart';
@@ -141,14 +142,14 @@ class CodeSessionScreen extends ConsumerWidget {
     // None when it runs in one of its own modes: the harness's name for it says how it holds.
     final fidelity = driver == null || state.inNativeMode ? null : fidelityNote(driver, state.mode);
 
-    // The header drops chips by the width it really has (the sidebar and the
-    // panes take some), so the title keeps room and nothing jumps into an
-    // overflow menu.
+    // The console fits the width it really has (the sidebar takes some): the
+    // panel beside the transcript, then over it, then the view icons in ⋯.
     return LayoutBuilder(
       builder: (context, box) {
-        final tier = TopBarTier.forWidth(box.maxWidth);
+        final tier = ConsoleTier.forWidth(box.maxWidth);
         return AdaptivePage(
           title: info.title,
+          titleWidget: ConsoleTitle(info: info),
           onBack: info.parentId == null ? null : () => context.go(Routes.codeSession(info.parentId!)),
           backTooltip: 'Back to the parent session',
           header: fidelity == null
@@ -165,15 +166,8 @@ class CodeSessionScreen extends ConsumerWidget {
                   ),
                 ),
           actions: [
-            CodeTopBar(sessionId: sessionId),
-            if (info.diffTarget != null && tier != TopBarTier.narrow) _ChangesButton(sessionId: sessionId),
-            if (panesFor(info).contains(CodePane.terminal))
-              AdaptiveIconButton(
-                icon: EveryIcon.openPanel,
-                tooltip: 'Terminal, processes and preview',
-                onPressed: ref.read(codePaneProvider(sessionId).notifier).toggleLast,
-              ),
-            StatusPill(status: state.status, dense: tier == TopBarTier.narrow, minWidth: 92),
+            ConsoleActions(info: info, tier: tier),
+            StatusPill(status: state.status, dense: tier != ConsoleTier.wide, minWidth: 92),
             AdaptiveIconButton(
               icon: EveryIcon.newChat,
               tooltip: 'New session',
@@ -187,8 +181,8 @@ class CodeSessionScreen extends ConsumerWidget {
                 Expanded(
                   child: TranscriptScope(
                     root: info.workingDir,
-                    openDiff: panesFor(info).contains(CodePane.diff)
-                        ? ref.read(codePaneProvider(sessionId).notifier).showFile
+                    openDiff: info.diffTarget != null
+                        ? ref.read(consolePanelProvider(sessionId).notifier).showDiff
                         : null,
                     child: TranscriptList(
                       onRewind: (turn) => _rewind(context, ref, turn),
@@ -451,53 +445,6 @@ class CodeSessionScreen extends ConsumerWidget {
     if (!ok) return;
     final outcome = await ref.read(codeSessionProvider(sessionId).notifier).rewind(turn);
     if (context.mounted) showAdaptiveToast(context, outcome.label);
-  }
-}
-
-/// "3 files +40 −2": opens the Diff pane.
-class _ChangesButton extends ConsumerWidget {
-  const _ChangesButton({required this.sessionId});
-  final String sessionId;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = EveryTheme.of(context);
-    final git = ref.watch(codeGitProvider(sessionId)).value;
-    final open = ref.watch(codePaneProvider(sessionId).select((p) => p.open == CodePane.diff));
-    final files = git?.files.length ?? 0;
-    return GestureDetector(
-      onTap: () => ref.read(codePaneProvider(sessionId).notifier).toggle(CodePane.diff),
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 4),
-          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-          decoration: BoxDecoration(
-            color: open ? theme.accent.withValues(alpha: 0.14) : null,
-            border: Border.all(color: open ? theme.accent : theme.border),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text.rich(
-            TextSpan(
-              children: [
-                TextSpan(text: files == 0 ? 'No changes' : '$files file${files == 1 ? '' : 's'} '),
-                if (files > 0) ...[
-                  TextSpan(
-                    text: '+${git!.added} ',
-                    style: TextStyle(color: theme.success),
-                  ),
-                  TextSpan(
-                    text: '−${git.removed}',
-                    style: TextStyle(color: theme.danger),
-                  ),
-                ],
-              ],
-            ),
-            style: theme.type.callout.medium.tint(theme.text),
-          ),
-        ),
-      ),
-    );
   }
 }
 

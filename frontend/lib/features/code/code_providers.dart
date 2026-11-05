@@ -1317,6 +1317,7 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
+      ref.read(preferencesProvider)['$codeLayoutPrefix$g'] = null;
     }
     state = [
       for (final s in state)
@@ -4832,6 +4833,9 @@ bool editsFiles(String toolName) =>
 /// Prefs key prefix of what outside drivers reported per session (see [CodeUsage]).
 const codeUsageReportsPrefix = 'code.usage_reports.';
 
+/// Preferences key prefix of each session's console layout (the right panel's view and width), by session id.
+const codeLayoutPrefix = 'code.layout.';
+
 /// Tokens and spend of a Code session, from the backend's ledger (the gateway
 /// attributes every model call to the session). Demo sessions have none.
 final codeUsageProvider = AsyncNotifierProvider.family<CodeUsage, UsageTotals, String>(CodeUsage.new);
@@ -5080,6 +5084,23 @@ final nativeCommandsProvider = StreamProvider.autoDispose.family<List<NativeComm
   ref.watch(codeSessionProvider(sessionId).select((s) => s.connected));
   final live = ref.read(_liveProvider)[sessionId];
   return live is HasNativeCommands ? (live as HasNativeCommands).commands : Stream.value(null);
+});
+
+/// What Session info can itemise of [sessionId]'s context, as it was sent: the EveryAI harness's own prompt parts and
+/// tools ([HasContextParts]); for an outside lead only what EveryAI added (the briefing and the host's MCP tools),
+/// since the harness's own prompt is its business. Empty before the session connects.
+final codeContextPartsProvider = Provider.autoDispose.family<List<ContextPart>, String>((ref, sessionId) {
+  final info = ref.watch(codeSessionsProvider.select((all) => all.where((s) => s.id == sessionId).firstOrNull));
+  ref.watch(codeSessionProvider(sessionId).select((s) => (s.connected, s.transcript.running)));
+  if (info == null) return const [];
+  final live = ref.read(_liveProvider)[sessionId];
+  if (live is HasContextParts) return (live as HasContextParts).contextParts;
+  if (!isOutsideLead(info.harness, info.workingDir)) return const [];
+  return [
+    if (ref.read(_briefingTextsProvider)[sessionId] case final text? when text.isNotEmpty)
+      ContextPart(ContextKind.briefing, text),
+    for (final t in hostToolSpecs) ContextPart(ContextKind.mcpTools, jsonEncode(t), name: 'everyai'),
+  ];
 });
 
 /// The composer's `/` menu for [sessionId]: an outside lead's own commands

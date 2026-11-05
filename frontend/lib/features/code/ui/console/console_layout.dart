@@ -1,0 +1,125 @@
+import 'package:flutter/widgets.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../../core/theme/every_theme.dart';
+import '../../../../core/ui/adaptive.dart';
+import '../../../../core/ui/every_icons.dart';
+import '../../../artifacts/ui/panel_split.dart';
+import '../../domain/code_session.dart';
+import '../panes/diff_pane.dart';
+import 'console_state.dart';
+import 'running_work.dart';
+import 'session_info_view.dart';
+
+/// The session screen's body with its right panel: beside [child] when [tier] is wide (a divider resizes it), over
+/// it on the right otherwise, with the rest of the transcript dimmed (a tap there closes it).
+class ConsoleLayout extends ConsumerWidget {
+  const ConsoleLayout({super.key, required this.session, required this.tier, required this.child});
+
+  final CodeSessionInfo session;
+  final ConsoleTier tier;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final id = session.id;
+    final open = ref.watch(consolePanelProvider(id).select((p) => p.open));
+    if (!open) return child;
+    final width = ref.watch(consolePanelProvider(id).select((p) => p.width));
+    final notifier = ref.read(consolePanelProvider(id).notifier);
+    final panel = ConsolePanelView(session: session);
+    return LayoutBuilder(
+      builder: (context, box) {
+        if (tier == ConsoleTier.wide) {
+          return PanelSplit(
+            key: const ValueKey('console.split'),
+            maxWidth: box.maxWidth,
+            width: width,
+            onWidth: notifier.setWidth,
+            panel: panel,
+            child: child,
+          );
+        }
+        final theme = EveryTheme.of(context);
+        return Stack(
+          key: const ValueKey('console.overlay'),
+          children: [
+            child,
+            Positioned.fill(
+              child: GestureDetector(
+                key: const ValueKey('console.scrim'),
+                behavior: HitTestBehavior.opaque,
+                onTap: notifier.close,
+                child: ColoredBox(color: theme.text.withValues(alpha: 0.06)),
+              ),
+            ),
+            Positioned(
+              top: 0,
+              bottom: 0,
+              right: 0,
+              width: PanelSplit.widthFor(width, box.maxWidth).clamp(0, box.maxWidth - 40).toDouble(),
+              child: panel,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// The panel itself: a child session's chat when one is open, else the chosen view.
+class ConsolePanelView extends ConsumerWidget {
+  const ConsolePanelView({super.key, required this.session});
+
+  final CodeSessionInfo session;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = EveryTheme.of(context);
+    final state = ref.watch(consolePanelProvider(session.id));
+    final notifier = ref.read(consolePanelProvider(session.id).notifier);
+    // A view this session has no content for (a Diff outside git) shows Session info.
+    final view = switch (state.view) {
+      ConsoleView.diff when session.diffTarget == null => ConsoleView.info,
+      final v => v ?? ConsoleView.info,
+    };
+    final Widget body;
+    if (state.child case final child?) {
+      body = ChildChatView(key: ValueKey('console.child.$child'), parentId: session.id, childId: child);
+    } else if (view == ConsoleView.diff) {
+      // The Diff draws its own header, with Close.
+      return DiffPane(session: session, onClose: notifier.close);
+    } else {
+      body = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 6, 2),
+            child: Row(
+              children: [
+                Expanded(child: Text(view.label, style: theme.type.headline.tint(theme.text))),
+                AdaptiveIconButton(icon: EveryIcon.close, tooltip: 'Close', size: 16, onPressed: notifier.close),
+              ],
+            ),
+          ),
+          Expanded(
+            child: switch (view) {
+              // Files is the next view to land; until then a stored choice of it shows this.
+              ConsoleView.files => Center(
+                child: Text('Files is coming soon.', style: theme.type.callout.tint(theme.textMuted)),
+              ),
+              _ => SessionInfoView(session: session),
+            },
+          ),
+        ],
+      );
+    }
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: theme.surface,
+        border: Border(left: BorderSide(color: theme.border)),
+      ),
+      child: body,
+    );
+  }
+}

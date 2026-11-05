@@ -208,6 +208,22 @@ Future<String> remoteUrl(SessionWorktree w) async {
   return res.exitCode == 0 ? '${res.stdout}'.trim() : '';
 }
 
+Future<OpenPr?> prFor(SessionWorktree w) async {
+  try {
+    final res = await Process.run('gh', [
+      'pr',
+      'view',
+      w.branch,
+      '--json',
+      'number,url,state',
+    ], workingDirectory: w.path);
+    // Non-zero: no pull request for the branch, no remote, or gh isn't signed in.
+    return res.exitCode == 0 ? parsePrView('${res.stdout}') : null;
+  } on ProcessException {
+    return null;
+  }
+}
+
 Future<bool> ghReady(String dir) async {
   try {
     final res = await Process.run('gh', ['auth', 'status'], workingDirectory: dir);
