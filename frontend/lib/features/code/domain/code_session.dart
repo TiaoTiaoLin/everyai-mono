@@ -194,6 +194,9 @@ final class CodeSessionInfo {
 
   bool get isSubagent => parentId != null;
 
+  /// An agent a workflow started (its call id is `wf-<run>-<key>`).
+  bool get isWorkflowAgent => parentId != null && parentCallId.startsWith('wf-');
+
   /// The id its model calls are billed under (`X-EveryAI-Session`), and
   /// the tag its processes carry: its own, or its parent's for a subagent.
   String get billingTag => ownTag ? id : parentId ?? id;

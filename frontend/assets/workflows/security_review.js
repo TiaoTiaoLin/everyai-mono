@@ -48,6 +48,7 @@ const FINDING = {
     summary: { type: 'string' },
     exploit: { type: 'string', description: 'the concrete steps an attacker takes, and what they get' },
     fix: { type: 'string' },
+    lenses: { type: 'array', items: { type: 'string' }, description: 'the lenses that reported it, as given' },
   },
   required: ['severity', 'file', 'category', 'summary', 'exploit', 'fix'],
 }
@@ -114,7 +115,10 @@ the attacker is, what they send, and what they get. An empty list is a valid ans
   { label: `lens:${l.key}`, phase: 'Lenses', schema: FINDINGS_SCHEMA, readOnly: true })))
 
 // By lens index before dropping the failed lenses, so each finding keeps its own lens.
-const all = lensed.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
+const raw = lensed.flatMap((r, i) => (r ? r.findings.map((f) => ({ ...f, lens: LENSES[i].key })) : []))
+// The same problem seen by several lenses becomes one candidate that names them all.
+const all = mergeFindings(raw)
+if (all.length < raw.length) log(`merged ${raw.length - all.length} duplicate findings across lenses`)
 log(`${all.length} candidate findings from ${lensed.filter(Boolean).length} of ${LENSES.length} lenses`)
 if (!all.length) return { findings: [], dropped: [], threat_model: model, lenses: lensed.map((r) => !!r) }
 
@@ -127,7 +131,7 @@ ${quote(JSON.stringify(all, null, 1))}
 
 For each one, read the code and decide whether the exploit works as described. Keep it only when it does; drop it
 with a reason when the input can't reach that code, another check already stops it, or it needs an attacker who
-already has more access than they gain. Merge duplicates into one finding. Order the kept ones by severity.`,
+already has more access than they gain. Merge duplicates into one finding and keep its `lenses`. Order the kept ones by severity.`,
   { label: 'verify', phase: 'Verify', schema: VERIFIED_SCHEMA, readOnly: true })
   .catch((e) => { log(`verify failed: ${e.message}`); return null })
 

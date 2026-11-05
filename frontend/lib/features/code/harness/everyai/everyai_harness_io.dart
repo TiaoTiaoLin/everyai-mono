@@ -19,6 +19,7 @@ import '../../domain/subagents.dart' show forkingTaskSpec, subagentRules, taskTo
 import '../../settings/agent_prompt.dart' show forHeldClientTools;
 import '../events.dart';
 import '../harness.dart';
+import '../../drivers/briefing/briefing_types.dart' show everyaiServerName;
 import '../../drivers/usage_limit.dart';
 import 'browser_io.dart';
 import 'llm.dart';
@@ -37,7 +38,7 @@ import 'tools_io.dart';
 /// permissions and approvals are shared), but the loop, the tools and the
 /// history are ours: questions block inside the call, tool results can be cut
 /// to size, and a session can be forked from another's history.
-final class EveryAIHarness implements Harness, ForksSessions {
+final class EveryAIHarness implements Harness, ForksSessions, AttachesBriefed {
   EveryAIHarness({required this.dataDir, required this.gatewayKey, this.client});
 
   /// App Support; sessions are kept under `everyai-sessions/<id>/`.
@@ -85,6 +86,25 @@ final class EveryAIHarness implements Harness, ForksSessions {
     }
     final session = await EveryAISession._load(conversationId, dir, await gatewayKey(), client);
     _sessions[conversationId] = session;
+    return session;
+  }
+
+  /// [attach] for a workflow agent reopened with a fresh host ([briefing]):
+  /// the old token died with the app. One still open keeps the host it has;
+  /// the user's MCP servers come from its saved spec, not [mcpConfig].
+  @override
+  Future<HarnessSession> attachBriefed(
+    String conversationId,
+    DriverBriefing briefing, {
+    Map<String, Object?> mcpConfig = const {},
+  }) async {
+    final open = _sessions[conversationId];
+    final session = (await attach(conversationId)) as EveryAISession;
+    if (open == null) {
+      session
+        .._spec = session._withSpec(briefing: briefing)
+        .._hosted = true;
+    }
     return session;
   }
 
@@ -145,10 +165,25 @@ final class EveryAISession
   McpTools _mcp = McpTools.empty;
   Future<void>? _mcpReady;
 
+  /// A briefed session (a workflow agent) also reaches the app's host as the
+  /// `everyai` server, its tools named `everyai__<tool>` like an outside
+  /// agent's (the token stays in memory: [_specToJson] leaves it out).
   Future<void> _ensureMcp() => _mcpReady ??= () async {
-    final config = _spec.mcpConfig;
-    if (config.isEmpty || !(_spec.tools?.contains('mcp') ?? true)) return;
-    _mcp = await McpTools.start(config, reserved: {...actionKinds.keys, ...clientTools});
+    final host = _spec.briefing;
+    final config = {
+      if (_spec.tools?.contains('mcp') ?? true) ..._spec.mcpConfig,
+      if (host != null)
+        everyaiServerName: {
+          'url': host.mcpUrl,
+          'headers': {'Authorization': 'Bearer ${host.mcpToken}'},
+        },
+    };
+    if (config.isEmpty) return;
+    _mcp = await McpTools.start(
+      config,
+      reserved: {...actionKinds.keys, ...clientTools},
+      prefixed: {if (host != null) everyaiServerName},
+    );
   }();
   late ToolRunner _tools;
 
@@ -412,6 +447,7 @@ final class EveryAISession
     final spec = _specFromJson(specJson, key);
     final s = EveryAISession._(id, spec, dir, client);
     if (ModelFamily.values.asNameMap()[specJson['family']] case final f?) s.family = f;
+    s._hosted = specJson['host'] == true;
     final forkTools = File('${dir.path}/fork_tools.json');
     if (forkTools.existsSync()) {
       s._forkTools = (jsonDecode(forkTools.readAsStringSync()) as List<Object?>).cast<Map<String, Object?>>();
@@ -441,7 +477,12 @@ final class EveryAISession
   }
 
   void _writeSpec() =>
-      File('${_dir.path}/spec.json').writeAsStringSync(jsonEncode({..._specToJson(_spec), 'family': family.name}));
+      File('${_dir.path}/spec.json')
+          .writeAsStringSync(jsonEncode({..._specToJson(_spec), 'family': family.name, if (_hosted) 'host': true}));
+
+  /// Whether the session started with a host (a workflow agent): saved, unlike
+  /// the token, so it keeps its tools' shape when reopened without one.
+  late bool _hosted = _spec.briefing != null;
 
   /// The model family the session was started for: its tools and rules
   /// (fixed for the session, so the cached prefix holds after a model switch).
@@ -560,7 +601,8 @@ final class EveryAISession
       [
         ...builtInToolSpecs(only: _spec.tools, applyPatch: family == ModelFamily.gpt),
         if (_scripting) runScriptSpec,
-        memoryToolSpec,
+        // A workflow agent reads the memory in its prompt; the lead decides what is kept.
+        if (!_hosted) memoryToolSpec,
         ..._mcp.specs,
         if (_spec.bugCheck)
           {
@@ -795,6 +837,7 @@ final class EveryAISession
     int? maxInputTokens,
     bool? vision,
     ScriptCaps? script,
+    DriverBriefing? briefing,
   }) {
     final s = _spec;
     return SessionSpec(
@@ -819,6 +862,7 @@ final class EveryAISession
       bugCheck: s.bugCheck,
       script: script ?? s.script,
       reviewModel: s.reviewModel,
+      briefing: briefing ?? s.briefing,
     );
   }
 
@@ -1368,6 +1412,13 @@ final class EveryAISession
     if (call.name == bugCheckTool) return _bugCheck(call.args!, cancel);
     if (call.name == ToolNames.runScript) return _runScript(call.args!, cancel);
     if (call.name == ToolNames.memory) {
+      // A workflow agent reads the memory in its prompt; the lead decides what is kept.
+      if (_hosted) {
+        return const ToolOutput(
+          'Error: this session has no memory tool of its own; the project memory is already in your instructions.',
+          isError: true,
+        );
+      }
       if (_spec.researchSites != null) {
         return const ToolOutput(
           'Error: research jobs keep notes under their scratch folder, not in the project memory.',

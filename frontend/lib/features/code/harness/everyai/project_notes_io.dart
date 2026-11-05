@@ -46,13 +46,11 @@ String savePlan(String root, String markdown, {DateTime? now}) {
   return file.path;
 }
 
-/// The newest saved plan, or null.
-File? latestPlan(String root) {
+/// Whether `.everyai/plans/` holds a saved plan.
+bool _hasPlans(String root) {
   final dir = Directory(plansDir(root));
-  if (!dir.existsSync() || notesLinkProblem(root, dir.path) != null) return null;
-  final plans = dir.listSync(followLinks: false).whereType<File>().where((f) => f.path.endsWith('.md')).toList()
-    ..sort((a, b) => b.lastModifiedSync().compareTo(a.lastModifiedSync()));
-  return plans.firstOrNull;
+  if (!dir.existsSync() || notesLinkProblem(root, dir.path) != null) return false;
+  return dir.listSync(followLinks: false).any((f) => f is File && f.path.endsWith('.md'));
 }
 
 /// Whether git tracks [path] in [root]'s repository: a memory file that came
@@ -67,7 +65,9 @@ Future<bool> _tracked(String root, String path) async {
 }
 
 /// The block a new session's system prompt gets: the project memory (when
-/// the user's own) and where the latest approved plan is. Empty when neither.
+/// the user's own) and, when there are saved plans, where they are. Names
+/// no plan: they are earlier work, and the newest isn't this task's plan.
+/// Empty when neither.
 Future<String> projectNotesBlock(String root) async {
   final parts = <String>[];
   final memory = File(memoryPath(root));
@@ -85,11 +85,10 @@ Future<String> projectNotesBlock(String root) async {
       }
     }
   }
-  if (latestPlan(root) case final plan?) {
-    final title = RegExp(r'^#+\s*(.+)$', multiLine: true).firstMatch(plan.readAsStringSync())?.group(1)?.trim() ?? '';
+  if (_hasPlans(root)) {
     parts.add(
-      'Latest approved plan: ${plan.path}${title.isEmpty ? '' : ' ("$title")'}. Read it when the task continues '
-      'that work.',
+      "Earlier sessions' approved plans are in .everyai/plans/. They are past work, not this task's plan: read one "
+      'only when the user names it or asks to pick that work up.',
     );
   }
   if (parts.isEmpty) return '';

@@ -8,17 +8,21 @@ void main() {
   setUp(() => tmp = Directory.systemTemp.createTempSync('notes'));
   tearDown(() => tmp.deleteSync(recursive: true));
 
-  test('an approved plan is saved under .everyai/plans by date and heading; the newest is latest', () async {
+  test('an approved plan is saved under .everyai/plans by date and heading; the notes name no plan', () async {
+    // No plans yet: the block has no plans line.
+    expect(await projectNotesBlock(tmp.path), isNot(contains('.everyai/plans/')));
     final first = savePlan(tmp.path, '# Add dark mode!\n- toggle', now: DateTime(2026, 10, 31));
     expect(first, endsWith('/.everyai/plans/2026-10-31-add-dark-mode.md'));
     // The same plan again keeps the file; a different one with the same title gets a number.
     expect(savePlan(tmp.path, '# Add dark mode!\n- toggle', now: DateTime(2026, 10, 31)), first);
     final second = savePlan(tmp.path, '# Add dark mode!\n- toggle and tests', now: DateTime(2026, 10, 31));
     expect(second, endsWith('-add-dark-mode-2.md'));
-    File(second).setLastModifiedSync(DateTime.now().add(const Duration(minutes: 1)));
-    expect(latestPlan(tmp.path)!.path, second);
+    // Saved plans are earlier work: the block says where they are, never which one to read.
     final block = await projectNotesBlock(tmp.path);
-    expect(block, contains('Latest approved plan: $second ("Add dark mode!")'));
+    expect(block, contains("Earlier sessions' approved plans are in .everyai/plans/."));
+    expect(block, contains('only when the user names it'));
+    expect(block, isNot(contains('add-dark-mode')));
+    expect(block, isNot(contains('Add dark mode!')));
   });
 
   test('the memory tool adds, replaces and removes lines within its limit', () async {

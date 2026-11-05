@@ -18,7 +18,7 @@ final class _NoHost implements HostServer {
   const _NoHost();
 
   @override
-  Future<HostToken> mint(String sessionId, HostTools tools) =>
+  Future<HostToken> mint(String sessionId, HostTools tools, {Set<String>? only}) =>
       throw UnsupportedError('EveryAI can host tools on desktop only.');
 
   @override
