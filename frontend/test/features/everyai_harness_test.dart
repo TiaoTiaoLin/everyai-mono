@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/domain/mcp_tool_check.dart' show mcpToolDigest;
 import 'package:every_ai/features/code/domain/subagents.dart' show forkAnswerReason, taskTool;
 import 'package:every_ai/features/code/harness/events.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
@@ -782,6 +783,118 @@ for line in sys.stdin:
     final last = second.last! as Map;
     expect(jsonEncode(last['content']), contains('data:image/png;base64,'));
     await session.close();
+  });
+
+  group('MCP tools are vetted', () {
+    final lookup = {
+      'name': 'lookup',
+      'description': 'Looks a word up',
+      'inputSchema': {
+        'type': 'object',
+        'properties': {
+          'word': {'type': 'string'},
+        },
+      },
+    };
+    final define = {...lookup, 'name': 'define', 'description': 'Defines a word'};
+    late File server;
+    setUp(() {
+      server = File('$work/dict_mcp.py')
+        ..writeAsStringSync('''
+import json, sys
+TOOLS = json.loads(${jsonEncode(jsonEncode([lookup, define]))})
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m: continue
+    meth = m["method"]
+    if meth == "initialize": r = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}
+    elif meth == "tools/list": r = {"tools": TOOLS}
+    elif meth == "tools/call": r = {"content": [{"type": "text", "text": "meaning of " + m["params"]["arguments"].get("word", "")}]}
+    else: r = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+''');
+    });
+    Map<String, Object?> dict({Map<String, String>? pinned}) => {
+      'dict': {
+        'command': 'python3',
+        'args': [server.path],
+        'pinned': ?pinned,
+      },
+    };
+    List<Object?> toolNames(Map<String, Object?> request) => [
+      for (final t in request['tools']! as List<Object?>) ((t! as Map)['function']! as Map)['name'],
+    ];
+
+    test('a changed tool is left out, the prompt says so, and results come back wrapped', () async {
+      gateway
+        ..reply(
+          calls: [
+            ('lookup', {'word': 'cat'}),
+          ],
+        )
+        ..reply(text: 'Done.');
+      final session = await harness.start(
+        SessionSpec(
+          workingDir: work,
+          model: 'anthropic/claude-sonnet-5.5',
+          mode: AgentMode.fullAuto,
+          llmBaseUrl: gateway.baseUrl,
+          llmApiKey: 'sk-test',
+          sessionTag: 'tag-1',
+          initialMessage: 'what is a cat',
+          mcpConfig: dict(pinned: {'lookup': mcpToolDigest(lookup), 'define': 'an older digest'}),
+        ),
+      );
+      final events = await drive(session);
+      final first = gateway.requests.first;
+      expect(toolNames(first), contains('lookup'));
+      expect(toolNames(first), isNot(contains('define')));
+      final system = ((first['messages']! as List<Object?>).first! as Map)['content'] as String;
+      expect(system, contains('These MCP tools were left out because they changed or look unsafe'));
+      expect(system, contains('dict/define'));
+      expect(
+        events.whereType<ToolResult>().single.text,
+        contains('<untrusted-content source="mcp:dict/lookup">\nmeaning of cat\n</untrusted-content>'),
+      );
+      final report = await (session as ReportsMcpTools).mcpReport;
+      expect([for (final p in report['dict']!.pending) p.name], ['define']);
+      expect(report['dict']!.pin, isEmpty);
+      await session.close();
+    });
+
+    test('a reopened session connects to the servers as they are now, not as saved', () async {
+      gateway.reply(text: 'Hi.');
+      final session = await harness.start(
+        SessionSpec(
+          workingDir: work,
+          model: 'anthropic/claude-sonnet-5.5',
+          mode: AgentMode.fullAuto,
+          llmBaseUrl: gateway.baseUrl,
+          llmApiKey: 'sk-test',
+          sessionTag: 'tag-1',
+          initialMessage: 'hello',
+          mcpConfig: dict(),
+        ),
+      );
+      await drive(session);
+      // First use: both tools are clean, so both are pinned.
+      final report = await (session as ReportsMcpTools).mcpReport;
+      expect(report['dict']!.pin.keys, unorderedEquals(['lookup', 'define']));
+      expect(toolNames(gateway.requests.last), containsAll(['lookup', 'define']));
+      await session.close();
+
+      // The user turned the server off since.
+      gateway.reply(text: 'Bye.');
+      final fresh = EveryAIHarness(dataDir: () async => '${tmp.path}/data', gatewayKey: () async => 'sk-test');
+      final reopened = await fresh.attachWithMcp(session.id, const {});
+      final said = reopened.events.firstWhere((e) => e is ChatMessage && !e.fromUser && e.text == 'Bye.');
+      await reopened.send('again');
+      await said.timeout(const Duration(seconds: 20));
+      expect(toolNames(gateway.requests.last), isNot(contains('lookup')));
+      final saved = File('${tmp.path}/data/everyai-sessions/${session.id}/spec.json').readAsStringSync();
+      expect(saved, isNot(contains('dict_mcp.py')));
+      await reopened.close();
+    });
   });
 
   test("a briefed session reaches the app's host as everyai__ tools, in place of its own memory", () async {

@@ -2,7 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import 'mcp_tool_check.dart';
 import 'permissions.dart' show dangerReason, floorReason;
+
+export 'mcp_tool_check.dart' show McpToolReview, McpToolsReport;
 
 /// How the harness reaches an MCP server.
 enum McpTransport {
@@ -45,6 +48,8 @@ final class McpServer {
     this.approved,
     this.description = '',
     this.preset,
+    this.pinned,
+    this.pending = const [],
   });
 
   /// The key in `mcp_config`; letters, digits, `_` and `-`.
@@ -63,6 +68,16 @@ final class McpServer {
 
   /// The [McpPreset.id] this entry came from.
   final String? preset;
+
+  /// The tools sessions may show the model: the server's own tool name to
+  /// its `mcpToolDigest`. Null until a session first connected (then the
+  /// clean tools are pinned). Kept when the entry is edited, so a new
+  /// version of the server shows up as changes instead of being trusted.
+  final Map<String, String>? pinned;
+
+  /// Tools left out of sessions until the user allows them in Settings:
+  /// changed since they were pinned, new, or flagged by `scanMcpTool`.
+  final List<McpToolReview> pending;
 
   static final namePattern = RegExp(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$');
 
@@ -110,12 +125,14 @@ final class McpServer {
           if (args.isNotEmpty) 'args': args,
           if (env.isNotEmpty) 'env': env,
           if (description.isNotEmpty) 'description': description,
+          'pinned': ?pinned,
         }
       : {
           'url': url.trim(),
           'transport': transport.name,
           if (headers.isNotEmpty) 'headers': headers,
           if (description.isNotEmpty) 'description': description,
+          'pinned': ?pinned,
         };
 
   McpServer copyWith({
@@ -129,6 +146,8 @@ final class McpServer {
     bool? enabled,
     String? Function()? approved,
     String? description,
+    Map<String, String>? Function()? pinned,
+    List<McpToolReview>? pending,
   }) => McpServer(
     name: name ?? this.name,
     transport: transport ?? this.transport,
@@ -141,10 +160,16 @@ final class McpServer {
     approved: approved == null ? this.approved : approved(),
     description: description ?? this.description,
     preset: preset,
+    pinned: pinned == null ? this.pinned : pinned(),
+    pending: pending ?? this.pending,
   );
 
   /// This entry approved as it stands.
   McpServer approve() => copyWith(approved: () => consentKey);
+
+  /// This entry with every [pending] tool allowed as it was seen.
+  McpServer allowPending() =>
+      copyWith(pinned: () => {...?pinned, for (final p in pending) p.name: p.digest}, pending: const []);
 
   static Map<String, String> _strings(Object? v) => {
     if (v is Map<String, Object?>)
@@ -157,6 +182,8 @@ final class McpServer {
     final name = json['name'];
     if (name is! String || name.isEmpty) return null;
     final args = json['args'];
+    final pinned = json['pinned'];
+    final pending = json['pending'];
     return McpServer(
       name: name,
       transport: McpTransport.parse(json['transport']),
@@ -173,6 +200,11 @@ final class McpServer {
       approved: json['approved'] as String?,
       description: json['description'] as String? ?? '',
       preset: json['preset'] as String?,
+      pinned: pinned is Map<String, Object?> ? _strings(pinned) : null,
+      pending: [
+        if (pending is List<Object?>)
+          for (final p in pending) ?McpToolReview.fromJson(p),
+      ],
     );
   }
 
@@ -188,6 +220,8 @@ final class McpServer {
     'approved': ?approved,
     if (description.isNotEmpty) 'description': description,
     'preset': ?preset,
+    'pinned': ?pinned,
+    if (pending.isNotEmpty) 'pending': [for (final p in pending) p.toJson()],
   };
 }
 
@@ -219,9 +253,30 @@ final class StoredMcpServers {
   /// The `mcp_config` for a session in [projectId]: active servers only,
   /// sorted by name so the agent's tool list stays the same between sessions
   /// (and the model's prompt cache holds). The map is flat, `{name: server}`.
-  Map<String, Object?> mcpConfigFor(String? projectId) {
-    final active = serversFor(projectId).where((s) => s.active).toList()..sort((a, b) => a.name.compareTo(b.name));
+  ///
+  /// For an [outside] agent (ACP, which connects to whole servers itself and
+  /// can't be given some of a server's tools), a server with tools waiting
+  /// for the user's review is left out entirely.
+  Map<String, Object?> mcpConfigFor(String? projectId, {bool outside = false}) {
+    final active = serversFor(projectId).where((s) => s.active && !(outside && s.pending.isNotEmpty)).toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
     return {for (final s in active) s.name: s.toAgentConfig()};
+  }
+
+  /// [reports] from a session in [projectId] recorded: each server's new
+  /// pins added, its pending list replaced (so every session reporting the
+  /// same thing changes nothing). The entry is the one the session used: the
+  /// project's, else the global one.
+  StoredMcpServers withReports(String? projectId, Map<String, McpToolsReport> reports) {
+    var next = this;
+    for (final MapEntry(key: name, value: r) in reports.entries) {
+      final scope = projectId != null && (projects[projectId]?.any((s) => s.name == name) ?? false) ? projectId : null;
+      next = next.withList(scope, [
+        for (final s in next.listFor(scope))
+          s.name == name ? s.copyWith(pinned: () => {...?s.pinned, ...r.pin}, pending: r.pending) : s,
+      ]);
+    }
+    return next;
   }
 
   StoredMcpServers withList(String? projectId, List<McpServer> list) => projectId == null
@@ -633,7 +688,31 @@ String mcpConsentMessage(McpServer s, {required String scope, List<McpFlag>? fla
   b
     ..writeln()
     ..write(
-      'Its tools ask before each use in Ask, Auto-edit and Plan modes, unless you allow them; Full auto runs them.',
+      'Its tools ask before each use in Ask, Auto-edit and Plan modes, unless you allow them; Full auto runs them. '
+      'The tools it offers at its first session are kept as they are; a tool that changes later, or looks like it '
+      'carries hidden instructions, is left out until you review it here.',
     );
   return b.toString();
+}
+
+/// What the "Review tools" dialog says about [s]'s [McpServer.pending]
+/// tools: a [message], and a [detail] with each tool's name, why it was left
+/// out and what it tells the agent (shown in full).
+({String message, String detail}) mcpToolsReviewMessage(McpServer s) {
+  final b = StringBuffer();
+  for (final t in s.pending) {
+    if (b.isNotEmpty) b.writeln();
+    b.writeln('${t.name} (${t.isNew ? 'new' : 'changed'})');
+    for (final r in t.reasons) {
+      b.writeln('• $r');
+    }
+    b.writeln(t.description.isEmpty ? '(no description)' : t.description);
+  }
+  return (
+    message:
+        'Code sessions leave these tools of ${s.name} out until you allow them. Read what each one tells the agent '
+        "and allow them only if you trust the server: a tool's description can carry instructions you don't see in "
+        'the chat.',
+    detail: b.toString().trimRight(),
+  );
 }

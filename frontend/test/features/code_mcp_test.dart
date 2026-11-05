@@ -4,6 +4,7 @@ import 'package:every_ai/core/platform/platform_kind.dart';
 import 'package:every_ai/core/preferences.dart';
 import 'package:every_ai/core/theme/every_theme.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
+import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show acpMcpServers;
 import 'package:every_ai/features/code/domain/mcp_servers.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/harness/events.dart';
@@ -273,6 +274,131 @@ void main() {
       ctl.setEnabled('chart', false);
       expect(c.read(codeMcpServersProvider).mcpConfigFor(null), isEmpty);
     });
+
+    const remote = McpServer(name: 'dict', transport: McpTransport.http, url: 'https://dict.example/mcp');
+    const review = McpToolReview(
+      name: 'define',
+      digest: 'd2',
+      description: 'Defines a word.',
+      reasons: [McpToolReview.changedReason],
+    );
+
+    test('tool reports pin on first use and replace what waits for review; Allow pins it', () {
+      final prefs = Preferences.inMemory();
+      final c = ProviderContainer(overrides: [preferencesProvider.overrideWithValue(prefs)]);
+      addTearDown(c.dispose);
+      final ctl = c.read(codeMcpServersProvider.notifier);
+      ctl.put(remote);
+      McpServer dict() => c.read(codeMcpServersProvider).global.single;
+      expect(dict().pinned, isNull);
+      ctl.recordTools({
+        'dict': const McpToolsReport(
+          pin: {'lookup': 'd1'},
+          pending: [McpToolReview(name: 'evil', digest: 'e1', isNew: true)],
+        ),
+      });
+      expect(dict().pinned, {'lookup': 'd1'});
+      expect([for (final p in dict().pending) p.name], ['evil']);
+      // A second report replaces the list rather than adding to it; unknown servers are ignored.
+      ctl.recordTools({
+        'dict': const McpToolsReport(pending: [review]),
+        'gone': const McpToolsReport(pin: {'x': 'y'}),
+      });
+      expect(dict().pinned, {'lookup': 'd1'});
+      expect([for (final p in dict().pending) p.name], ['define']);
+      final reloaded = StoredMcpServers.fromJson(jsonDecode(prefs[CodeMcpServers.key]!));
+      expect(reloaded.toJson(), c.read(codeMcpServersProvider).toJson());
+      expect(reloaded.global.single.pending.single.reasons, [McpToolReview.changedReason]);
+      // Editing the entry keeps what was pinned.
+      expect(dict().copyWith(url: 'https://dict.example/v2').pinned, {'lookup': 'd1'});
+
+      ctl.allowTools('dict');
+      expect(dict().pinned, {'lookup': 'd1', 'define': 'd2'});
+      expect(dict().pending, isEmpty);
+    });
+
+    test("a project session's report goes to the project's own entry", () {
+      final c = ProviderContainer(overrides: [preferencesProvider.overrideWithValue(Preferences.inMemory())]);
+      addTearDown(c.dispose);
+      final ctl = c.read(codeMcpServersProvider.notifier);
+      ctl.put(remote);
+      ctl.put(remote, projectId: 'p1');
+      ctl.put(remote.copyWith(name: 'other'));
+      ctl.recordTools({
+        'dict': const McpToolsReport(pin: {'a': '1'}),
+        'other': const McpToolsReport(pin: {'b': '2'}),
+      }, projectId: 'p1');
+      final stored = c.read(codeMcpServersProvider);
+      expect(stored.projects['p1']!.single.pinned, {'a': '1'});
+      expect(stored.global.firstWhere((s) => s.name == 'dict').pinned, isNull);
+      expect(stored.global.firstWhere((s) => s.name == 'other').pinned, {'b': '2'});
+    });
+
+    test('sessions get the pins; outside agents lose servers with tools to review', () {
+      final stored = StoredMcpServers(
+        global: [
+          remote.copyWith(pinned: () => {'lookup': 'd1'}),
+          remote.copyWith(name: 'held', pinned: () => const {}, pending: const [review]),
+        ],
+      );
+      final config = stored.mcpConfigFor(null);
+      expect(config.keys, ['dict', 'held']);
+      expect((config['dict']! as Map)['pinned'], {'lookup': 'd1'});
+      expect(stored.mcpConfigFor(null, outside: true).keys, ['dict']);
+      // ACP agents get the server, never the pins.
+      expect(jsonEncode(acpMcpServers(config, http: true)), isNot(contains('pinned')));
+    });
+
+    test('the review message names each tool, why, and what it says', () {
+      final s = remote.copyWith(
+        pending: const [
+          review,
+          McpToolReview(
+            name: 'evil',
+            digest: 'e',
+            isNew: true,
+            reasons: ['Has hidden characters (zero-width characters).'],
+          ),
+        ],
+      );
+      final m = mcpToolsReviewMessage(s);
+      expect(m.message, contains('dict'));
+      expect(m.detail, contains('define (changed)\n• Changed since you allowed it.\nDefines a word.'));
+      expect(m.detail, contains('evil (new)\n• Has hidden characters (zero-width characters).\n(no description)'));
+      expect(s.pending.last.flagged, isTrue);
+      expect(s.pending.first.flagged, isFalse);
+    });
+  });
+
+  testWidgets('a server with tools to review says so', (tester) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final prefs = Preferences.inMemory();
+    prefs[CodeMcpServers.key] = jsonEncode(
+      const StoredMcpServers(
+        global: [
+          McpServer(
+            name: 'dict',
+            transport: McpTransport.http,
+            url: 'https://dict.example/mcp',
+            pending: [McpToolReview(name: 'define', digest: 'd')],
+          ),
+        ],
+      ).toJson(),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [preferencesProvider.overrideWithValue(prefs)],
+        child: m.MaterialApp(
+          home: EveryThemeScope(
+            theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
+            child: m.Material(child: McpSettingsBody()),
+          ),
+        ),
+      ),
+    );
+    expect(find.text('1 tool changed or needs a look: review'), findsOneWidget);
   });
 
   testWidgets('adding a local preset asks for consent with the whole command', (tester) async {

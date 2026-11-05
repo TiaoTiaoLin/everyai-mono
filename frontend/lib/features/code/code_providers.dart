@@ -749,10 +749,12 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     // AGENTS.md and friends from the project folder up to the repository root.
     final context = !local ? const <ContextFile>[] : await _startContext(workingDir, projectDir);
     // MCP servers come from the app's list (global plus this project's), never from repository files. An
-    // outside agent gets them too, except one named like the app's own host.
+    // outside agent gets them too, except one named like the app's own host, and except servers with tools
+    // waiting for review: only the EveryAI harness can leave out single tools. Only ACP agents take this
+    // list; Claude Code, Codex and OpenCode serve load their own MCP config, whose tools EveryAI never sees.
     final mcpConfig = noLocalFolder(projectDir)
         ? const <String, Object?>{}
-        : {...ref.read(codeMcpServersProvider).mcpConfigFor(projectId)};
+        : {...ref.read(codeMcpServersProvider).mcpConfigFor(projectId, outside: outside)};
     if (outside) mcpConfig.remove(everyaiServerName);
     // Skills likewise: the app's enabled ones, and project skills only once trusted.
     // The Max skill too in a main session: the Max note asks the lead to load it.
@@ -1030,16 +1032,19 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
   Future<HarnessSession> attachSession(CodeSessionInfo info, {bool keepCurrent = false}) async {
     final harness = await harnessFor(ref, info.workingDir, harness: info.harness);
     final project = ref.read(codeProjectsProvider).where((p) => p.id == info.projectId).firstOrNull;
-    // The user's approved MCP servers, as at start (specFor): the app's list for the project found by
-    // its folder, never repository files.
+    // The user's approved MCP servers, as at start (specFor) but as they are now: the app's list for the
+    // project found by its folder, never repository files.
     final mcp = <String, Object?>{
       if (!noLocalFolder(project?.path ?? info.workingDir))
-        ...ref.read(codeMcpServersProvider).mcpConfigFor(project?.id),
+        ...ref
+            .read(codeMcpServersProvider)
+            .mcpConfigFor(project?.id, outside: isOutsideLead(info.harness, info.workingDir)),
     }..remove(everyaiServerName);
     if (info.isWorkflowAgent) return _attachWorkflowAgent(info, harness, project?.path ?? info.workingDir, mcp);
     if (harness is! HarnessDriver || info.parentId != null || !isOutsideLead(info.harness, info.workingDir)) {
-      // A child session has no briefing, but an ACP agent still gets the user's servers back.
-      if (harness is AcpDriver && info.parentId != null) return harness.attachWithMcp(info.conversationId, mcp);
+      // No briefing (an EveryAI session, or a child), but the user's servers as they are now: one turned off
+      // since stays off, tools allowed in Settings since are offered.
+      if (harness is AttachesWithMcp) return (harness as AttachesWithMcp).attachWithMcp(info.conversationId, mcp);
       return harness.attach(info.conversationId);
     }
     if (consentProblem(harness.info, ref.read(codeSettingsProvider).ownClis) case final why?) throw HarnessError(why);
@@ -2153,6 +2158,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       _attachedFresh = live[sessionId] == null;
       final session = _session = live[sessionId] ?? await ref.read(codeSessionsProvider.notifier).attachSession(info);
       live[sessionId] = session;
+      // What vetting found about the session's MCP tools goes to Settings (pins, tools to review). A Future,
+      // not an event: a replayed history can't store a stale report again.
+      if (session case final ReportsMcpTools s) {
+        final store = ref.read(codeMcpServersProvider.notifier);
+        unawaited(s.mcpReport.then((r) => store.recordTools(r, projectId: info.projectId)));
+      }
       // After attaching: a reopen briefs the agent then, and that is the text to show.
       _showBriefing();
       _applySkillsOff();

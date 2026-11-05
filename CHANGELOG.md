@@ -13,6 +13,12 @@ EveryAI is in alpha. Signed releases start at `0.1.0-alpha.1`; the earlier unsig
   tools for this session" covers the whole kind; the floor and risky actions still ask. Allow rules match a chain
   when every part is allowed. Rules changed in Settings apply to the running session at once, including a card
   already waiting.
+- **MCP tools are checked before the agent sees them:** the EveryAI harness keeps each server's tools as they were at
+  its first session. A tool that changes later, or whose description or parameters carry hidden characters,
+  instructions to keep things from you, reach for secrets or talk about other tools, is left out until you review it
+  in Settings → MCP servers ("Review tools…"). On the first session after this update, flagged tools of servers you
+  already use are left out once. What MCP tools return is marked as outside data. Claude Code, Codex and OpenCode
+  load their own MCP servers, which EveryAI doesn't see; ACP agents don't get a server with tools waiting for review.
 
 ## 0.1.0-alpha.2 (2026-11-05): updates in the app, and the prober fixes
 
