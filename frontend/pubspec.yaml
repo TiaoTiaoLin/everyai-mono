@@ -130,8 +130,9 @@ msix_config:
   publisher: CN=AD3B1E5B-D432-4FA0-84BD-EB258B046DF7
   msix_version: 0.1.0.0
   logo_path: windows/runner/resources/store_logo.png
-  # runFullTrust: the Code workspace runs CLIs, a ConPTY terminal and the bundled Deno.
-  capabilities: internetClient, internetClientServer, privateNetworkClientServer, runFullTrust
+  # runFullTrust (the Code workspace runs CLIs, a ConPTY terminal and Deno) is always added by the msix package as a
+  # restricted capability; listing it here puts it in the wrong namespace and MakeAppx rejects the manifest.
+  capabilities: internetClient, internetClientServer, privateNetworkClientServer
   languages: en-us
   store: true
   install_certificate: false
