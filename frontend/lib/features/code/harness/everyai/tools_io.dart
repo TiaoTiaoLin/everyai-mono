@@ -1224,6 +1224,10 @@ final class ToolRunner {
     final pattern = args['pattern'] as String? ?? '';
     final where = resolvePath(root, args['path'] as String? ?? '');
     final mode = args['output_mode'] as String? ?? 'files_with_matches';
+    // Secret files never show up in grep (a `.env` glob included): their lines would reach the model unscrubbed.
+    if (secretPath(where)) {
+      return ToolOutput('Error: ${_relative(where)} looks like a secret; grep skips secret files.', isError: true);
+    }
     final env = (await ShellEnv.load()).env;
     final ProcessResult res;
     if (await _hasRg()) {
@@ -1235,6 +1239,7 @@ final class ToolRunner {
           '--max-columns=400',
           if (args['case_insensitive'] == true) '-i',
           if (args['glob'] case final String g when g.isNotEmpty) ...['--glob', g],
+          for (final g in secretGlobs) ...['--glob', '!$g'],
           ...switch (mode) {
             'content' => ['-n', if (args['context'] case final num c) '-C${c.toInt()}'],
             'count' => ['--count'],
@@ -1256,6 +1261,7 @@ final class ToolRunner {
           if (args['glob'] case final String g when g.isNotEmpty) '--include=$g',
           '--exclude-dir=.git',
           '--exclude-dir=node_modules',
+          for (final g in secretGlobs) ...['--exclude=$g', '--exclude-dir=$g'],
           ...switch (mode) {
             'content' => ['-n'],
             'count' => ['-c'],

@@ -41,6 +41,29 @@ bool hostAllowed(String host, List<String> allow) {
   return false;
 }
 
+/// The names [secretPath] matches, as globs on a file or folder name, for
+/// tools that search many files at once (grep): they skip these, since a
+/// match would print the secret's lines. Negative globs only: a positive one
+/// would let nothing else through.
+const secretGlobs = [
+  '.env*',
+  '*.pem',
+  '*.key',
+  '*.p12',
+  '*.pfx',
+  'id_rsa',
+  'id_ed25519',
+  '.netrc',
+  '.npmrc',
+  '.pypirc',
+  '.git-credentials',
+  '.ssh',
+  '.aws',
+  '.gnupg',
+  '.docker',
+  '.kube',
+];
+
 /// Paths a research job may not read: secrets and credentials.
 bool secretPath(String path) {
   final p = path.replaceAll('\\', '/');
