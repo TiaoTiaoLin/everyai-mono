@@ -40,13 +40,17 @@ final class CommandNotifier implements SystemNotifier {
           'display notification ${q(body)} with title ${q('EveryAI')} subtitle ${q(title)}',
         ]);
       } else if (Platform.isLinux) {
-        await Process.run('notify-send', ['--app-name=EveryAI', title, body]);
+        // Notification servers may read the body (not the title) as markup: quoted page text must not become a link.
+        await Process.run('notify-send', ['--app-name=EveryAI', title, notifyPlain(body)]);
       }
     } on Object {
       // No notification service; the status dot still shows it.
     }
   }
 }
+
+/// [s] with the characters notification markup reads escaped, so it shows as written.
+String notifyPlain(String s) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
 final systemNotifierProvider = Provider<SystemNotifier>((ref) => const CommandNotifier());
 

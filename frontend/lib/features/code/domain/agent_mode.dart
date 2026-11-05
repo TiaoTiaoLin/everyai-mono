@@ -310,6 +310,9 @@ const securityShownResult = 'Shown to the user. Carry on with the task without t
 const securityStopResult =
     'Shown to the user. The run is stopped until the user replies: end your turn now and wait for them.';
 
+/// The result of the other calls a `security_alert` with `stop_run` refused.
+const securityStopNotRun = 'Not run: the run stopped on a security alert. Wait for the user.';
+
 /// [securityAlertTool]'s spec: the same for the EveryAI harness (a client
 /// tool the app answers at once, in every mode) and outside agents (a host
 /// MCP tool). See `securityRules` for when the model calls it.

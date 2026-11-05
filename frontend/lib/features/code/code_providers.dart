@@ -1409,7 +1409,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
       throw const HarnessError("this harness can't reach EveryAI's tools");
     }
     final forward = _forwardTo(id, projectDir, ready, workflows: false);
-    final token = await ref.read(hostServerProvider).mint(id, forward, only: only);
+    // Its security_alert is the client tool; the host's copy would list the same tool twice.
+    final token = await ref.read(hostServerProvider).mint(id, forward, only: {...only}..remove(securityAlertTool));
     ref.read(_hostTokensProvider)[id] = token.token;
     return DriverBriefing(mcpUrl: '${token.url}', mcpToken: token.token, host: forward);
   }
@@ -1891,6 +1892,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   final _childSubs = <String, ProviderSubscription<CodeSessionState>>{};
   final _spawning = <String>{};
 
+  /// The `run_subagent` calls whose subagent is starting now.
+  @visibleForTesting
+  Set<String> get startingSubagents => Set.unmodifiable(_spawning);
+
   /// Calls stopped while their subagent was still starting.
   final _abandoned = <String>{};
 
@@ -1949,6 +1954,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         );
         notifySecurityAlert(ref, alert, _title);
         if (!alert.stopRun) return (text: securityShownResult, isError: false);
+        _securityHold = true;
         unawaited(_session?.interrupt());
         return (text: securityStopResult, isError: false);
       case 'memory':
@@ -2181,8 +2187,11 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       Timer(liveAfter, () {
         _live = true;
         if (!_historyIn.isCompleted) _historyIn.complete();
+        if (!ref.mounted) return;
+        // Stopped on a security alert before a restart: it still waits for the user.
+        _securityHold = state.transcript.securityStop != null && !state.transcript.running;
         // Calls still waiting after the history replayed (an app restart).
-        if (ref.mounted) _syncSubagents();
+        _syncSubagents();
       });
       state = state.copyWith(connected: true);
       await _loadSettingsRules(info);
@@ -2473,7 +2482,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Sends the next queued message once nothing runs or waits (and no lead switch is under way).
   void _sendQueued() {
     final t = state.transcript;
-    if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
+    if (_securityHold || _switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) {
+      return;
+    }
     // A workflow's result first: the app made it, so Stop and the user's queue don't touch it.
     if (_workflowResults.isNotEmpty && _session != null) {
       final r = _workflowResults.removeAt(0);
@@ -2653,10 +2664,28 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     final key = waiting.map((c) => c.id).join(',');
     if (key == _answered) return true;
     _answered = key;
+    _securityHold = true;
     _markDecided(waiting.map((c) => c.id), accept: false);
-    unawaited(_session?.respond(accept: false, reason: securityStopResult));
+    final session = _session;
+    if (session is PerCallApprovals) {
+      // The alerts say they were shown; the other calls that they were not run. Then deny all, so the harness parks.
+      final shown = [for (final a in alerts) a.call.id];
+      unawaited(
+        session!
+            .respond(accept: false, reason: securityStopResult, callIds: shown)
+            .then((_) => session.respond(accept: false, reason: securityStopNotRun)),
+      );
+    } else {
+      unawaited(session?.respond(accept: false, reason: securityStopResult));
+    }
     return true;
   }
+
+  /// Set while the run is stopped on a security alert: until the user writes
+  /// (or runs a command), nothing the app makes on its own (subagent and fork
+  /// reports, workflow results, queued messages) goes to the agent and no
+  /// subagent starts, so the agent can't carry on without the user.
+  bool _securityHold = false;
 
   /// Whether the session takes one answer per pending call.
   bool get perCall => _session is PerCallApprovals;
@@ -2981,6 +3010,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   @override
   Future<bool> send(String text, {List<Attachment> files = const []}) async {
     if (!_withinBudget()) return false;
+    _securityHold = false;
     final out = await _outgoing(text, files);
     if (out == null) return false;
     return _sendOut(out);
@@ -3009,6 +3039,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (session is! HasNativeCommands) return 'This agent has no / commands of its own.';
     if (_busy || _switching) return 'The agent is working. Run the command when it stops.';
     if (!_withinBudget()) return null;
+    _securityHold = false;
     _touchHost();
     await _checkpoint();
     try {
@@ -3077,6 +3108,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// Interrupts the agent and sends [text] right away.
   Future<void> steer(String text, {List<Attachment> files = const []}) async {
     if (!_withinBudget()) return;
+    _securityHold = false;
     final out = await _outgoing(text, files);
     final session = _session;
     if (out == null || session == null) return;
@@ -4152,6 +4184,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
         _watch(callId, childId);
       }
     }
+    // A stop alert refused the calls (this snapshot may still list them): nothing starts.
+    if (_securityHold) return;
     final t = state.transcript;
     for (final item in t.openSubagents) {
       final id = item.step.call.id;
@@ -4868,7 +4902,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   // ------------------------------------------------ Max forks over the host
 
   /// Background fork reports and questions for an outside lead that was busy
-  /// (an ACP prompt sent mid-turn can fail), sent together once it is idle.
+  /// (an ACP prompt sent mid-turn can fail), or for any lead stopped on a
+  /// security alert, sent together once it is idle (and the user replied).
   final _forkNotices = <({String kind, String id, String text})>[];
 
   /// Whether the session is led by an outside harness now.
@@ -4879,9 +4914,10 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// Sends [text] (a background fork's report or question) to this agent: at
   /// once on the EveryAI harness, which takes it into its next step; an
-  /// outside lead gets it when its turn ends.
+  /// outside lead gets it when its turn ends. While the run is stopped on a
+  /// security alert it waits for the user's reply on either.
   void _notifyLead(String text, {String kind = 'fork-report', String id = 'fork'}) {
-    if (!_onOutsideLead) {
+    if (!_onOutsideLead && !_securityHold) {
       unawaited(_session?.send(text).catchError((Object _) {}));
       return;
     }
@@ -4909,7 +4945,12 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   void _sendForkNotices() {
     final t = state.transcript;
     final session = _session;
-    if (_forkNotices.isEmpty || session == null || t.running || t.pending.isNotEmpty || state.queued.isNotEmpty) {
+    if (_forkNotices.isEmpty ||
+        session == null ||
+        _securityHold ||
+        t.running ||
+        t.pending.isNotEmpty ||
+        state.queued.isNotEmpty) {
       return;
     }
     // Wrapped now, for the lead that gets them.
@@ -5178,7 +5219,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// has one: as the held calls' result, else as one message when it's idle.
   void _deliver() {
     final session = _session;
-    if (_reports.isEmpty || _delivering || session == null) return;
+    if (_reports.isEmpty || _delivering || session == null || _securityHold) return;
     final t = state.transcript;
     final open = [for (final s in t.openSubagents) s.step.call.id];
     // Calls closed some other way (a reply in chat) no longer want a report.

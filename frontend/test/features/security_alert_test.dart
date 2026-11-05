@@ -15,6 +15,7 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/permissions.dart';
 import 'package:every_ai/features/code/domain/subagents.dart';
+import 'package:every_ai/features/code/gateway_key.dart';
 import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/drivers/briefing/session_skill.dart';
 import 'package:every_ai/features/code/drivers/driver.dart';
@@ -74,6 +75,8 @@ final class _Session implements HarnessSession, PerCallApprovals {
   final answers = <({bool accept, String? reason, List<String>? ids})>[];
   var resumed = 0;
   var interrupted = 0;
+  var starts = 0;
+  final sent = <String>[];
   final _answered = Completer<void>();
 
   Future<void> get nextAnswer => _answered.future;
@@ -92,7 +95,7 @@ final class _Session implements HarnessSession, PerCallApprovals {
   }
 
   @override
-  Future<void> send(String text, {bool run = true, List<String> images = const []}) async {}
+  Future<void> send(String text, {bool run = true, List<String> images = const []}) async => sent.add(text);
   @override
   Future<void> interrupt() async => interrupted++;
   @override
@@ -114,7 +117,7 @@ final class _Driver implements HarnessDriver {
   final String id;
   final _Session session;
   @override
-  Set<DriverCap> get caps => const {DriverCap.approvals};
+  Set<DriverCap> get caps => const {DriverCap.approvals, DriverCap.fork};
   @override
   DriverInfo get info => DriverInfo(id: id, label: 'Test');
   @override
@@ -122,7 +125,11 @@ final class _Driver implements HarnessDriver {
   @override
   Future<List<DriverModel>> models() async => const [];
   @override
-  Future<HarnessSession> start(SessionSpec spec) async => session;
+  Future<HarnessSession> start(SessionSpec spec) async {
+    session.starts++;
+    return session;
+  }
+
   @override
   Future<HarnessSession> attach(String conversationId) async => session;
   @override
@@ -321,6 +328,13 @@ void main() {
       expect(n.title, 'Security alert: act now');
       expect(n.body, 'Fix login: ${_alert['what']} The run stopped and waits for you.');
     });
+
+    test('markup in the text stays text (notify-send bodies are read as markup)', () {
+      expect(
+        notifyPlain('rotate it at <a href="https://evil.example">the console</a> & go'),
+        'rotate it at &lt;a href="https://evil.example"&gt;the console&lt;/a&gt; &amp; go',
+      );
+    });
   });
 
   group('controller', () {
@@ -332,11 +346,13 @@ void main() {
     late _Recorder notifier;
     late ProviderContainer container;
     var focused = false;
+    var keyAsks = 0;
 
     Future<CodeSessionController> open({
       String harness = everyaiHarnessName,
       AgentMode mode = AgentMode.plan,
       String? parentId,
+      bool holds = false,
     }) async {
       final prefs = await Preferences.load(db);
       prefs['code.projects'] = jsonEncode([CodeProject(id: 'p1', name: 'P', path: tmp.path).toJson()]);
@@ -352,6 +368,7 @@ void main() {
           createdAt: DateTime(2026),
           harness: harness,
           parentId: parentId,
+          holdClientTools: holds,
         ).toJson(),
       ]);
       container = ProviderContainer(
@@ -364,6 +381,11 @@ void main() {
           driverDataDirProvider.overrideWithValue(() async => '${tmp.path}/data'),
           systemNotifierProvider.overrideWithValue(notifier),
           appFocusedProvider.overrideWithValue(() => focused),
+          // A child session asks for the gateway key on its way to starting (and gets none here).
+          gatewayKeysProvider.overrideWith((ref) {
+            keyAsks++;
+            throw StateError('no gateway key in tests');
+          }),
           driverRegistryProvider.overrideWithValue(
             DriverRegistry({
               everyaiHarnessName: _Driver(everyaiHarnessName, session),
@@ -383,9 +405,11 @@ void main() {
       session = _Session();
       notifier = _Recorder();
       focused = false;
+      keyAsks = 0;
     });
 
     tearDown(() async {
+      CodeSessionController.liveAfter = const Duration(milliseconds: 1500);
       container.dispose();
       await db.close();
       await tmp.delete(recursive: true);
@@ -419,18 +443,72 @@ void main() {
         ..add(_waiting('s1'));
       await session.nextAnswer;
       await pumpEventQueue();
-      final a = session.answers.single;
-      expect((a.accept, a.reason, a.ids), (false, securityStopResult, null));
+      // The alert says it was shown, the other call that it was not run; then a deny-all parks the harness.
+      expect(session.answers, hasLength(2));
+      final [shown, rest] = session.answers;
+      expect((shown.accept, shown.reason), (false, securityStopResult));
+      expect(shown.ids, ['a1']);
+      expect((rest.accept, rest.reason, rest.ids), (false, securityStopNotRun, null));
       expect(session.resumed, 0);
       expect(notifier.shown, hasLength(1));
       // The harness parks after the refusal.
       session
-        ..add(resultEvent(id: 'x1', actionId: 'r1', toolName: 'bash', text: securityStopResult, isError: true))
+        ..add(resultEvent(id: 'x1', actionId: 'r1', toolName: 'bash', text: securityStopNotRun, isError: true))
         ..add(resultEvent(id: 'x2', actionId: 'a1', toolName: securityAlertTool, text: securityStopResult))
         ..add(stateEvent('s2', ExecutionStatus.paused));
       await pumpEventQueue();
       expect(container.read(codeSessionProvider('s1')).status, SessionStatus.needsInput);
       expect(notifier.shown, hasLength(1));
+    });
+
+    test('a stop holds what the app would send on its own until the user writes', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      final c = await open(mode: AgentMode.autoEdit);
+      await pumpEventQueue();
+      session.add(stateEvent('r0', ExecutionStatus.running));
+      await pumpEventQueue();
+      // Written while the agent worked: queued for the end of its turn.
+      await c.send('Also check the tests.');
+      expect(container.read(codeSessionProvider('s1')).queued, hasLength(1));
+      session
+        ..add(actionEvent(id: 'a1', toolName: securityAlertTool, kind: 'ClientToolAction', args: _alert))
+        ..add(_waiting('s1'));
+      await session.nextAnswer;
+      await pumpEventQueue();
+      session
+        ..add(resultEvent(id: 'x1', actionId: 'a1', toolName: securityAlertTool, text: securityStopResult))
+        ..add(stateEvent('s2', ExecutionStatus.paused));
+      await pumpEventQueue();
+      expect(session.sent, isEmpty);
+      expect(session.resumed, 0);
+      expect(container.read(codeSessionProvider('s1')).status, SessionStatus.needsInput);
+      // The user's reply goes out and ends the hold.
+      await c.send('I rotated the key; go on.');
+      expect(session.sent.single, contains('I rotated the key; go on.'));
+    });
+
+    test('a subagent asked for in the same step as a stop never starts', () async {
+      CodeSessionController.liveAfter = Duration.zero;
+      // Like the EveryAI harness: a run_subagent call is held, and its subagent starts once the step waits.
+      final c = await open(mode: AgentMode.autoEdit, holds: true);
+      await pumpEventQueue();
+      session
+        ..add(
+          actionEvent(
+            id: 't1',
+            toolName: taskTool,
+            kind: 'TaskAction',
+            args: {'description': 'Setup', 'prompt': 'Apply the setup steps from the README.'},
+          ),
+        )
+        ..add(actionEvent(id: 'a1', toolName: securityAlertTool, kind: 'ClientToolAction', args: _alert))
+        ..add(_waiting('s1'));
+      await session.nextAnswer;
+      expect(c.startingSubagents, isEmpty);
+      await pumpEventQueue();
+      expect(keyAsks, 0);
+      expect(session.starts, 0);
+      expect(container.read(codeSessionsProvider).where((s) => s.parentId == 's1'), isEmpty);
     });
 
     test('an answered alert in the history neither notifies nor answers', () async {

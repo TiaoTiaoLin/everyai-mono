@@ -1268,8 +1268,12 @@ final class EveryAISession
         'security_risk': 'UNKNOWN',
       });
       // A fork's questions go to the agent that started it (the app routes
-      // them); the other client tools are the orchestrator's.
-      if (isFork && clientTools.contains(call.name) && call.name != askUserQuestionTool) {
+      // them); a security alert is the fork's own; the other client tools
+      // are the orchestrator's.
+      if (isFork &&
+          clientTools.contains(call.name) &&
+          call.name != askUserQuestionTool &&
+          call.name != securityAlertTool) {
         // A fork keeps the parent's tools (for the cache) but can't use these.
         _result(
           call,

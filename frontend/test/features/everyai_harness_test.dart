@@ -401,6 +401,26 @@ void main() {
     expect(jsonEncode(gateway.requests.last['tools']), jsonEncode(gateway.requests.first['tools']));
   });
 
+  test('a fork\'s security alert reaches the app like any session\'s', () async {
+    gateway.reply(text: 'Parent done.');
+    final parent = await harness.start(spec('hi'));
+    await drive(parent);
+    gateway
+      ..reply(
+        calls: [
+          (securityAlertTool, {'severity': 'warning', 'what': 'x', 'action_taken': 'y', 'stop_run': false}),
+        ],
+      )
+      ..reply(text: 'Report.');
+    final child = await harness.fork(parent.id, spec('do a thing'));
+    // It waits for the app's answer (which notifies), instead of the fork refusal.
+    final events = await drive(child);
+    expect(events.whereType<ActionCall>().single.toolName, securityAlertTool);
+    final result = events.whereType<ToolResult>().single;
+    expect(result.outcome, isNot(ToolOutcome.error));
+    expect(result.text, isNot(contains('a fork cannot use')));
+  });
+
   test('past the threshold the history is compacted in place and the run carries on', () async {
     gateway
       ..reply(
