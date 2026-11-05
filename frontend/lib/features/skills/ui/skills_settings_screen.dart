@@ -34,9 +34,7 @@ class SkillsSettingsBody extends ConsumerWidget {
           children: [
             AdaptiveSectionHeader(title),
             if (items.isEmpty && empty != null)
-              AdaptiveListTile(
-                title: Text(empty, style: TextStyle(color: theme.textMuted)),
-              ),
+              AdaptiveListTile(title: Text(empty, style: theme.type.body.tint(theme.textMuted))),
             for (final s in items)
               _SkillTile(
                 skill: s,
@@ -75,7 +73,7 @@ class SkillsSettingsBody extends ConsumerWidget {
           ),
         ),
         if (skills case AsyncError(:final error))
-          Text("Couldn't read the skills folders: $error", style: TextStyle(color: theme.danger)),
+          Text("Couldn't read the skills folders: $error", style: theme.type.body.tint(theme.danger)),
         section('EveryAI library', [
           ...all.where((s) => s.source == SkillSource.library),
         ], empty: 'Nothing imported yet'),

@@ -25,7 +25,7 @@ class RasterImageView extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final b = bytes;
-    if (b == null) return Text('[Image unavailable]', style: TextStyle(color: theme.textMuted));
+    if (b == null) return Text('[Image unavailable]', style: theme.type.body.tint(theme.textMuted));
     return MouseRegion(
       cursor: SystemMouseCursors.zoomIn,
       child: GestureDetector(

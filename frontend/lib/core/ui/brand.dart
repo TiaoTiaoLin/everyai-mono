@@ -1,6 +1,9 @@
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
+
+import 'layout.dart';
+
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../theme/every_theme.dart';
@@ -234,29 +237,27 @@ class BrandEmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     final light = !theme.isDark && kind != 'empty-chats';
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SvgPicture.asset('assets/brand/empty/$kind${light ? '-light' : ''}.svg', width: 72, height: 72),
-            const SizedBox(height: 16),
-            Text(title, textAlign: TextAlign.center, style: theme.type.headline.tint(theme.text)),
-            if (message != null) ...[
-              const SizedBox(height: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 360),
-                child: Text(
-                  message!,
-                  textAlign: TextAlign.center,
-                  style: theme.type.body.copyWith(color: theme.textMuted, height: 1.4),
-                ),
+    // Centered when it fits, scrolling on a short window, plain inside a list.
+    return CenteredScroll(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SvgPicture.asset('assets/brand/empty/$kind${light ? '-light' : ''}.svg', width: 72, height: 72),
+          const SizedBox(height: 16),
+          Text(title, textAlign: TextAlign.center, style: theme.type.headline.tint(theme.text)),
+          if (message != null) ...[
+            const SizedBox(height: 6),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 360),
+              child: Text(
+                message!,
+                textAlign: TextAlign.center,
+                style: theme.type.body.copyWith(color: theme.textMuted, height: 1.4),
               ),
-            ],
-            if (action != null) ...[const SizedBox(height: 16), action!],
+            ),
           ],
-        ),
+          if (action != null) ...[const SizedBox(height: 16), action!],
+        ],
       ),
     );
   }

@@ -62,9 +62,7 @@ class _AgentsSettingsBodyState extends ConsumerState<AgentsSettingsBody> {
       children: [
         AdaptiveSectionHeader(title),
         if (items.isEmpty && empty != null)
-          AdaptiveListTile(
-            title: Text(empty, style: TextStyle(color: theme.textMuted)),
-          ),
+          AdaptiveListTile(title: Text(empty, style: theme.type.body.tint(theme.textMuted))),
         for (final a in items)
           _AgentTile(
             agent: a,
@@ -113,7 +111,7 @@ class _AgentsSettingsBodyState extends ConsumerState<AgentsSettingsBody> {
           ),
         ),
         if (library case AsyncError(:final error))
-          Text("Couldn't read the agent folders: $error", style: TextStyle(color: theme.danger)),
+          Text("Couldn't read the agent folders: $error", style: theme.type.body.tint(theme.danger)),
         section('Built-in', [...all.where((a) => a.source == AgentSource.builtin)]),
         section(
           'Global',

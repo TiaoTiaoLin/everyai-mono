@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
+import '../../../../core/ui/layout.dart';
 import '../../../../core/ui/every_icons.dart';
 import '../../../chat/ui/chat_markdown.dart';
 import '../../domain/transcript.dart';
@@ -176,14 +177,12 @@ class _PlanCardState extends State<PlanCard> {
               ),
               const SizedBox(height: 8),
             ],
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    widget.switchesToAutoEdit ? 'Start building switches to Auto-edit.' : '',
-                    style: theme.type.caption.tint(theme.textMuted),
-                  ),
-                ),
+            WrapRow(
+              lead: Text(
+                widget.switchesToAutoEdit ? 'Start building switches to Auto-edit.' : '',
+                style: theme.type.caption.tint(theme.textMuted),
+              ),
+              actions: [
                 if (_revising)
                   AdaptiveButton(label: 'Send changes', emphasis: ButtonEmphasis.secondary, onPressed: _revise)
                 else
@@ -192,7 +191,6 @@ class _PlanCardState extends State<PlanCard> {
                     emphasis: ButtonEmphasis.secondary,
                     onPressed: () => setState(() => _revising = true),
                   ),
-                const SizedBox(width: 8),
                 AdaptiveButton(label: 'Start building', onPressed: _approve),
               ],
             ),

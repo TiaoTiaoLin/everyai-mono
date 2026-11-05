@@ -35,7 +35,7 @@ class _ChartViewState extends State<ChartView> {
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
-    if (spec.isEmpty) return Text('No data to chart.', style: TextStyle(color: theme.textMuted));
+    if (spec.isEmpty) return Text('No data to chart.', style: theme.type.body.tint(theme.textMuted));
     final label = theme.type.footnote.tint(theme.textMuted);
     final legend = spec.isRound
         ? [for (final (i, s) in spec.slices.indexed) (s.label, s.other ? Color(chartOtherColor) : ChartView.colorOf(i))]

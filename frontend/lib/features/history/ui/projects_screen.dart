@@ -39,7 +39,7 @@ class ProjectsScreen extends ConsumerWidget {
                         title: Text(p.name),
                         subtitle: Text(
                           '${p.path}\n${_count(sessions.where((s) => s.projectId == p.id).length)}',
-                          style: TextStyle(color: theme.textMuted),
+                          style: theme.type.body.tint(theme.textMuted),
                         ),
                         onTap: () => context.go(Routes.code),
                       ),

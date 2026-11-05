@@ -7,6 +7,7 @@ import '../../../core/platform/platform_kind.dart';
 import '../../../core/providers.dart';
 import '../../../core/theme/every_theme.dart';
 import '../../../core/ui/adaptive.dart';
+import '../../../core/ui/layout.dart';
 import '../../../core/ui/every_icons.dart';
 import '../../../core/ui/segmented.dart';
 import '../../agents/ui/agents_settings_screen.dart';
@@ -208,14 +209,12 @@ class ModelsSection extends ConsumerWidget {
     return ListView(
       padding: _listPadding,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                'The models in your pickers. Add more from the shop.',
-                style: theme.type.callout.tint(theme.textMuted),
-              ),
-            ),
+        WrapRow(
+          lead: Text(
+            'The models in your pickers. Add more from the shop.',
+            style: theme.type.callout.tint(theme.textMuted),
+          ),
+          actions: [
             AdaptiveButton(
               key: const ValueKey('settings.models.shop'),
               label: 'Open model shop',
@@ -242,9 +241,7 @@ class ModelsSection extends ConsumerWidget {
             ),
           ),
         if (library.isEmpty)
-          AdaptiveListTile(
-            title: Text('No models yet', style: TextStyle(color: theme.textMuted)),
-          ),
+          AdaptiveListTile(title: Text('No models yet', style: theme.type.body.tint(theme.textMuted))),
       ],
     );
   }
@@ -266,7 +263,7 @@ class DeveloperSection extends ConsumerWidget {
             title: const Text('Nothing to set here'),
             subtitle: Text(
               'Developer switches show in development builds (DEV_SKIP_AUTH).',
-              style: TextStyle(color: theme.textMuted),
+              style: theme.type.body.tint(theme.textMuted),
             ),
           )
         else
@@ -282,7 +279,7 @@ class DeveloperSection extends ConsumerWidget {
                   ? settingsPicker(value.claude.label, [
                       for (final u in ClaudeUpstream.values) (u.label, u),
                     ], ref.read(devUpstreamProvider.notifier).set)
-                  : Text(value.claude.label, style: TextStyle(color: theme.textMuted)),
+                  : Text(value.claude.label, style: theme.type.body.tint(theme.textMuted)),
             ),
             AsyncError() => const AdaptiveListTile(
               title: Text('Claude models bill to'),

@@ -194,9 +194,7 @@ class _HostSectionState extends ConsumerState<_HostSection> {
               child: Center(child: AdaptiveProgress()),
             )
           else if (_devices!.isEmpty)
-            AdaptiveListTile(
-              title: Text('No devices yet', style: TextStyle(color: theme.textMuted)),
-            )
+            AdaptiveListTile(title: Text('No devices yet', style: theme.type.body.tint(theme.textMuted)))
           else
             for (final d in _devices!)
               AdaptiveListTile(
@@ -445,7 +443,7 @@ class _PairedHostsSectionState extends ConsumerState<_PairedHostsSection> {
           AdaptiveListTile(
             title: Text(
               Host.isDesktop ? 'None. Pair to use another computer\'s Code sessions.' : 'None yet',
-              style: TextStyle(color: theme.textMuted),
+              style: theme.type.body.tint(theme.textMuted),
             ),
           ),
         for (final h in hosts) _PairedHostTile(host: h, onUnpair: () => _unpair(h)),

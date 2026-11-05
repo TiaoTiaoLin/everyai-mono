@@ -280,9 +280,7 @@ class _StackedBars extends StatelessWidget {
     if (series.keys.isEmpty) {
       return SizedBox(
         height: 120,
-        child: Center(
-          child: Text('No usage in this range yet.', style: TextStyle(color: theme.textMuted)),
-        ),
+        child: Center(child: Text('No usage in this range yet.', style: theme.type.body.tint(theme.textMuted))),
       );
     }
     final axis = theme.type.footnote.tint(theme.textMuted);

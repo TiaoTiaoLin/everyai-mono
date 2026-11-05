@@ -46,9 +46,7 @@ class CustomCommandsBody extends ConsumerWidget {
       children: [
         AdaptiveSectionHeader(title),
         if (items.isEmpty)
-          AdaptiveListTile(
-            title: Text('No commands yet', style: TextStyle(color: theme.textMuted)),
-          ),
+          AdaptiveListTile(title: Text('No commands yet', style: theme.type.body.tint(theme.textMuted))),
         for (final c in items)
           AdaptiveListTile(
             title: Text('/${c.name}${c.args == null ? '' : ' ${c.args}'}'),
