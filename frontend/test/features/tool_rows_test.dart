@@ -158,6 +158,136 @@ void main() {
     });
   });
 
+  group('turn work box', () {
+    final c1 = done(call('1', 'TerminalAction', {'command': 'ls'}));
+    final c2 = done(call('2', 'TerminalAction', {'command': 'pwd'}));
+    final running = ToolStep(call('5', 'TerminalAction', {'command': 'dart test'}));
+    final ask = QuestionItem(call('q', 'MCPToolAction', {}, tool: 'ask_user_question'), const []);
+
+    test('a finished turn folds its work and lifts the closing reply out', () {
+      final out = groupTurnWork([
+        const UserTurn('u', 'go'),
+        const AgentText('a1', 'Looking around'),
+        StepItem(c1),
+        StepItem(c2),
+        const AgentText('a2', 'All done'),
+      ], active: false);
+      expect(out[0], isA<UserTurn>());
+      final work = out[1] as TurnWork;
+      expect(work.live, isFalse);
+      expect(work.items.map((i) => i.key), ['a1', '1', '2']);
+      expect(turnWorkSummary(work), 'Worked · 2 steps');
+      expect((out[2] as AgentText).text, 'All done');
+    });
+
+    test('a running turn keeps everything in one live box, key stable as it grows', () {
+      final first = groupTurnWork([const UserTurn('u', 'go'), StepItem(c1)], active: true);
+      final later = groupTurnWork([
+        const UserTurn('u', 'go'),
+        StepItem(c1),
+        const AgentText('a', 'now this'),
+        StepItem(c2),
+      ], active: true);
+      expect((later[1] as TurnWork).live, isTrue);
+      expect((later[1] as TurnWork).items, hasLength(3));
+      expect((later[1] as TurnWork).key, (first[1] as TurnWork).key);
+    });
+
+    test('cards, refused steps and turns without steps stay outside', () {
+      final refused = done(call('6', 'TerminalAction', {'command': 'rm -rf x'}), outcome: ToolOutcome.rejected);
+      final out = groupTurnWork([
+        const UserTurn('u', 'go'),
+        StepItem(c1),
+        ask,
+        StepItem(refused),
+        const UserTurn('u2', 'hi'),
+        const AgentText('a', 'hello'),
+      ], active: false);
+      expect(out.map((o) => o.runtimeType), [UserTurn, TurnWork, QuestionItem, StepItem, UserTurn, AgentText]);
+    });
+
+    test('a running command stays in the live box, so earlier work does not fold mid-turn', () {
+      final out = groupTurnWork([const UserTurn('u', 'go'), StepItem(c1), StepItem(running)], active: true);
+      expect(out.map((o) => o.runtimeType), [UserTurn, TurnWork]);
+      final work = out[1] as TurnWork;
+      expect(work.live, isTrue);
+      expect(work.items.map((i) => i.key), ['1', '5']);
+    });
+
+    test('the closing reply stays out when the turn ends on a notice or delivered files', () {
+      final files = FilesDelivered(
+        call('f', 'ClientToolAction', {
+          'files': ['a.md'],
+        }, tool: 'present_files'),
+      );
+      final out = groupTurnWork([
+        const UserTurn('u', 'go'),
+        StepItem(c1),
+        const AgentText('a', 'Here is the report'),
+        files,
+        const NoticeItem('n', 'Done'),
+      ], active: false);
+      expect(out.map((o) => o.runtimeType), [UserTurn, TurnWork, AgentText, FilesDelivered, NoticeItem]);
+      expect((out[1] as TurnWork).items.map((i) => i.key), ['1']);
+    });
+
+    test('the text that introduces a question card stays next to it', () {
+      final out = groupTurnWork([
+        const UserTurn('u', 'go'),
+        StepItem(c1),
+        const AgentText('a', 'Two things to settle first:'),
+        ask,
+      ], active: false);
+      expect(out.map((o) => o.runtimeType), [UserTurn, TurnWork, AgentText, QuestionItem]);
+    });
+
+    test('an earlier turn lifts its own closing reply, not narration before its last step', () {
+      final out = groupTurnWork([
+        const UserTurn('u', 'go'),
+        const AgentText('a1', 'Checking'),
+        StepItem(c1),
+        const AgentText('a2', 'Answer one'),
+        const UserTurn('u2', 'again'),
+        StepItem(c2),
+      ], active: true);
+      expect(out.map((o) => o.runtimeType), [UserTurn, TurnWork, AgentText, UserTurn, TurnWork]);
+      expect((out[2] as AgentText).key, 'a2');
+      expect((out[4] as TurnWork).live, isTrue);
+    });
+
+    testWidgets('a box with a command that never finished says stopped, not done', (tester) async {
+      await tester.pumpWidget(
+        host(TurnWorkView(work: TurnWork([StepItem(c1), StepItem(running)], live: false), children: const [])),
+      );
+      expect(find.text('stopped'), findsOneWidget);
+    });
+
+    testWidgets('folded when done, opens on tap, and remembers the choice', (tester) async {
+      final work = TurnWork([StepItem(c1)], live: false);
+      final shown = ValueNotifier(true);
+      await tester.pumpWidget(
+        host(
+          ValueListenableBuilder<bool>(
+            valueListenable: shown,
+            builder: (_, on, _) =>
+                on ? TurnWorkView(work: work, children: const [Text('inner row')]) : const SizedBox(),
+          ),
+        ),
+      );
+      expect(find.text('Worked · 1 step'), findsOneWidget);
+      expect(find.text('inner row'), findsNothing);
+      await tester.tap(find.text('Worked · 1 step'));
+      await tester.pump();
+      expect(find.text('inner row'), findsOneWidget);
+      // Scrolled away and back: a fresh state reads the choice from the page.
+      shown.value = false;
+      await tester.pump();
+      shown.value = true;
+      await tester.pump();
+      expect(find.text('inner row'), findsOneWidget);
+    });
+  });
+
   group('chat tool steps', () {
     test('labels follow the tool and its progress', () {
       expect(toolStepLabel('web_fetch', ToolRunStatus.running), 'Reading');

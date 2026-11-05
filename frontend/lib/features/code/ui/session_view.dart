@@ -546,14 +546,16 @@ class TranscriptList extends StatelessWidget {
           ),
           onRetry: onRetry,
         ),
-      for (final entry in groupSteps(t.items).reversed)
-        if (entry is StepRun)
-          StepRunView(key: ValueKey(entry.key), run: entry)
+      for (final entry in groupTurnWork(t.items, active: t.running || t.pending.isNotEmpty).reversed)
+        if (entry is TurnWork)
+          TurnWorkView(
+            key: ValueKey(entry.key),
+            work: entry,
+            children: [for (final inner in groupSteps(entry.items)) _entryView(inner)],
+          )
         // The task list shows above the composer while the agent works, not in the transcript too.
         else if (entry is! PlanItem)
-          // Every row is keyed: unkeyed rows handed their expanded state to
-          // whichever row of the same type slid into their index.
-          KeyedSubtree(key: ValueKey((entry as TranscriptItem).key), child: _itemView(entry)),
+          _entryView(entry),
     ];
     return AdaptiveSelectionArea(
       child: ListView.builder(
@@ -577,6 +579,16 @@ class TranscriptList extends StatelessWidget {
       ),
     );
   }
+
+  /// A row of the list or of a work box; every one is keyed (unkeyed rows
+  /// handed their expanded state to whichever row of the same type slid into
+  /// their index).
+  Widget _entryView(Object entry) => switch (entry) {
+    StepRun() => StepRunView(key: ValueKey(entry.key), run: entry),
+    PlanItem() => const SizedBox.shrink(),
+    final TranscriptItem item => KeyedSubtree(key: ValueKey(item.key), child: _itemView(item)),
+    _ => const SizedBox.shrink(),
+  };
 
   Widget _itemView(TranscriptItem item) => switch (item) {
     UserTurn(:final text, :final mode, :final lead, :final workflow) => Padding(

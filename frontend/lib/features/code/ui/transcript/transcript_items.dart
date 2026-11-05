@@ -902,9 +902,16 @@ class _Disclosure extends StatefulWidget {
     this.busyMark = MarkActivity.tool,
     this.mark = false,
     this.initiallyOpen = false,
+    this.open,
+    this.onToggle,
   });
 
   final String title;
+
+  /// Controlled mode: the caller owns the open state ([open]) and hears taps
+  /// through [onToggle]. Without them the disclosure keeps its own.
+  final bool? open;
+  final ValueChanged<bool>? onToggle;
 
   /// A colored title, shown instead of [title] (which stays for semantics).
   final InlineSpan? titleSpan;
@@ -932,6 +939,8 @@ class _DisclosureState extends State<_Disclosure> {
   late bool _open = widget.initiallyOpen;
   bool _hover = false;
 
+  bool get _isOpen => widget.open ?? _open;
+
   @override
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
@@ -944,10 +953,16 @@ class _DisclosureState extends State<_Disclosure> {
           onExit: (_) => setState(() => _hover = false),
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _open = !_open),
+            onTap: () {
+              if (widget.onToggle != null) {
+                widget.onToggle!(!_isOpen);
+              } else {
+                setState(() => _open = !_open);
+              }
+            },
             child: Semantics(
               button: true,
-              expanded: _open,
+              expanded: _isOpen,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
                 decoration: BoxDecoration(
@@ -987,7 +1002,7 @@ class _DisclosureState extends State<_Disclosure> {
                           ),
                           const SizedBox(width: 4),
                           AnimatedRotation(
-                            turns: _open ? 0.25 : 0,
+                            turns: _isOpen ? 0.25 : 0,
                             duration: const Duration(milliseconds: 120),
                             child: AdaptiveIcon(EveryIcon.chevronRight, size: 11, color: theme.textMuted),
                           ),
@@ -1001,7 +1016,7 @@ class _DisclosureState extends State<_Disclosure> {
             ),
           ),
         ),
-        if (!_open && widget.preview != null)
+        if (!_isOpen && widget.preview != null)
           Padding(
             padding: EdgeInsets.fromLTRB(widget.icon == null ? 6 : 27, 0, 6, 3),
             child: Text.rich(
@@ -1011,7 +1026,7 @@ class _DisclosureState extends State<_Disclosure> {
               style: _monoSmall.copyWith(color: theme.textMuted),
             ),
           ),
-        if (_open) Padding(padding: const EdgeInsets.fromLTRB(6, 4, 0, 4), child: widget.child),
+        if (_isOpen) Padding(padding: const EdgeInsets.fromLTRB(6, 4, 0, 4), child: widget.child),
       ],
     );
   }
@@ -1099,6 +1114,155 @@ class StepRunView extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [for (final s in run.steps) StepView(step: s)],
       ),
+    );
+  }
+}
+
+/// One turn's work (thoughts, narration, commands, edits) folded into a box.
+/// Open while the agent is on it, folded once it has handed back.
+final class TurnWork {
+  TurnWork(this.items, {required this.live});
+  final List<TranscriptItem> items;
+
+  /// The agent is still on this one (the newest box of a running turn).
+  final bool live;
+
+  String get key => 'work:${items.first.key}';
+
+  Iterable<ToolStep> get steps sync* {
+    for (final item in items) {
+      if (item is StepItem) yield item.step;
+      if (item is ExploreGroup) yield* item.steps;
+    }
+  }
+}
+
+/// Wraps each turn's work in a [TurnWork]. Anything the user needs to see
+/// stays outside, in order: cards, notices, delivered files, subagents and
+/// refused steps. Text kept outside too: a finished turn's closing reply (its
+/// last words after its last step, even when a notice or delivered files
+/// follow them) and the words that introduce a question or plan card. The
+/// newest stretch of a running turn ([active]) is one live box, running
+/// commands included, so earlier work doesn't fold and unfold as each command
+/// starts and ends. A stretch with no steps in it stays as it is.
+List<Object> groupTurnWork(List<TranscriptItem> items, {required bool active}) {
+  bool isWork(TranscriptItem i) => i is StepItem || i is ExploreGroup;
+
+  // The texts that stay outside a box.
+  final lifted = <String>{};
+  var turnStart = 0;
+  void closeTurn(int end, {required bool live}) {
+    if (live) return;
+    for (var i = end - 1; i >= turnStart; i--) {
+      final item = items[i];
+      if (isWork(item)) return;
+      if (item is AgentText && item.text.trim().isNotEmpty) {
+        lifted.add(item.key);
+        return;
+      }
+    }
+  }
+
+  for (var i = 0; i < items.length; i++) {
+    final item = items[i];
+    if (item is UserTurn) {
+      closeTurn(i, live: false);
+      turnStart = i + 1;
+    }
+    if ((item is QuestionItem || item is PlanProposal) && i > 0) {
+      final before = items[i - 1];
+      if (before is AgentText && before.text.trim().isNotEmpty) lifted.add(before.key);
+    }
+  }
+  closeTurn(items.length, live: active);
+
+  final out = <Object>[];
+  var buffer = <TranscriptItem>[];
+  void flush({bool live = false}) {
+    if (buffer.any(isWork)) {
+      out.add(TurnWork(buffer, live: live));
+    } else {
+      out.addAll(buffer);
+    }
+    buffer = [];
+  }
+
+  for (final item in items) {
+    final pinned =
+        lifted.contains(item.key) ||
+        switch (item) {
+          UserTurn() ||
+          QuestionItem() ||
+          PlanProposal() ||
+          PlanItem() ||
+          NoticeItem() ||
+          FilesDelivered() ||
+          SubagentItem() => true,
+          StepItem(:final step) => step.rejected,
+          _ => false,
+        };
+    if (pinned) {
+      flush();
+      out.add(item);
+    } else {
+      buffer.add(item);
+    }
+  }
+  flush(live: active);
+  return out;
+}
+
+String turnWorkSummary(TurnWork w) {
+  final n = w.steps.length;
+  return '${w.live ? 'Working' : 'Worked'} · $n ${n == 1 ? 'step' : 'steps'}';
+}
+
+class TurnWorkView extends StatefulWidget {
+  const TurnWorkView({super.key, required this.work, required this.children});
+  final TurnWork work;
+  final List<Widget> children;
+
+  @override
+  State<TurnWorkView> createState() => _TurnWorkViewState();
+}
+
+class _TurnWorkViewState extends State<TurnWorkView> {
+  /// The reader's choice, kept in the page's storage so it outlives the row
+  /// being scrolled off and rebuilt.
+  bool? _manual;
+
+  @override
+  void initState() {
+    super.initState();
+    _manual = PageStorage.maybeOf(context)?.readState(context, identifier: widget.work.key) as bool?;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = EveryTheme.of(context);
+    final work = widget.work;
+    final failed = work.steps.where((s) => s.failed).length;
+    // A command cut off by Stop or an error never got its result: no tick for that.
+    final unfinished = !work.live && work.steps.any((s) => !s.done);
+    final last = work.steps.isEmpty ? null : work.steps.last;
+    return _Disclosure(
+      icon: EveryIcon.code,
+      busy: work.live,
+      title: turnWorkSummary(work),
+      open: _manual ?? work.live,
+      onToggle: (v) {
+        setState(() => _manual = v);
+        PageStorage.maybeOf(context)?.writeState(context, v, identifier: work.key);
+      },
+      preview: work.live && last != null ? stepTitleSpan(context, last.call, _mono) : null,
+      trailing: failed > 0
+          ? Text('$failed failed', style: theme.type.caption.tint(theme.danger))
+          : work.live
+          ? null
+          : unfinished
+          ? Text('stopped', style: theme.type.caption.tint(theme.textMuted))
+          : AdaptiveIcon(EveryIcon.check, size: 13, color: theme.success),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: widget.children),
     );
   }
 }
