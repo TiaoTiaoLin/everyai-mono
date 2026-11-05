@@ -7,7 +7,7 @@ EveryAI is in alpha. Signed releases start at `0.1.0-alpha.1`; the earlier unsig
 
 - **macOS:** a Developer ID signed, notarized and stapled DMG on
   [GitHub Releases](https://github.com/xuckless/everyai-mono/releases), also through Homebrew
-  (`brew install --cask xuckless/tap/everyai`).
+  (`brew trust xuckless/tap && brew install --cask xuckless/tap/everyai`).
 - **Windows:** the [Microsoft Store](https://apps.microsoft.com/detail/9PHCKCV3J9S9) (the Store signs the MSIX), or
   `winget install --source msstore 9PHCKCV3J9S9`.
 - **Linux:** an AppImage and a .deb with GPG signatures and `SHA256SUMS` on GitHub Releases

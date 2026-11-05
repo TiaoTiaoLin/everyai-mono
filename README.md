@@ -89,7 +89,7 @@ flowchart LR
 
 | | Install | |
 |---|---|---|
-| **macOS** | [Download the DMG](https://github.com/xuckless/everyai-mono/releases/latest) or `brew install --cask xuckless/tap/everyai` | signed and notarized |
+| **macOS** | [Download the DMG](https://github.com/xuckless/everyai-mono/releases/latest) or `brew trust xuckless/tap && brew install --cask xuckless/tap/everyai` | signed and notarized |
 | **Windows** | [Microsoft Store](https://apps.microsoft.com/detail/9PHCKCV3J9S9) or `winget install --source msstore 9PHCKCV3J9S9` | signed by the Store |
 | **Linux** | [AppImage or .deb](https://github.com/xuckless/everyai-mono/releases/latest) | GPG-signed ([key](packaging/linux/everyai-release-key.asc)) |
 
