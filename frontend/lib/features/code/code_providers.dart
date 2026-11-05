@@ -3351,6 +3351,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     _freshLead = true;
     state = state.copyWith(transcript: _builder.snapshot, waited: '', handoffProblem: '', clearChanging: true);
     if (ref.exists(codeUsageProvider(sessionId))) ref.read(codeUsageProvider(sessionId).notifier).leadChanged();
+    // The old lead's plan limits (and a banner closed for them) end with it.
+    ref.read(codePlanLimitsProvider(sessionId).notifier).clear();
+    ref.read(preferencesProvider)['$codeLimitBannerPrefix$sessionId'] = null;
     await _openContext(next);
     if (!ref.mounted) {
       ready.complete();

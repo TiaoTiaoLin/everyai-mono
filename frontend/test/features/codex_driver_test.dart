@@ -658,6 +658,8 @@ void main() {
       ExecutionStatus.finished,
     ]);
     expect(channel.sent.toString(), isNot(contains('acceptForSession')));
+    // Two rate-limit updates with the same numbers: one PlanLimits.
+    expect(events.whereType<PlanLimits>(), hasLength(1));
     await s.close();
   });
 

@@ -110,6 +110,11 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
   /// The rate-limit snapshots by `limitId`, and the one updated last.
   final _rateLimits = <String, Map<String, Object?>>{};
   String? _lastLimit;
+
+  /// What the last [PlanLimits] sent said (resets to the minute): Codex
+  /// repeats the same numbers after every token update, and only a change is
+  /// worth an event.
+  String? _limitsSaid;
   CodexTokens? _total;
   var _status = ExecutionStatus.idle;
   var _closing = false;
@@ -651,7 +656,17 @@ final class CodexSession implements HarnessSession, PerCallApprovals, SteersRuns
               if (e.value != null) e.key: e.value,
           };
           _lastLimit = id;
-          if (codexPlanLimits(_rateLimits, id: _newId()) case final limits?) _emit(limits);
+          if (codexPlanLimits(_rateLimits, id: _newId()) case final limits?) {
+            final said = [
+              limits.warning,
+              for (final w in limits.windows)
+                '${w.name} ${w.used} ${w.minutes} ${w.resetsAt == null ? '' : w.resetsAt!.millisecondsSinceEpoch ~/ 60000}',
+            ].join('|');
+            if (said != _limitsSaid) {
+              _limitsSaid = said;
+              _emit(limits);
+            }
+          }
         }
       case 'error':
         // Retries (willRetry: true, "Reconnecting... n/5") aren't shown.

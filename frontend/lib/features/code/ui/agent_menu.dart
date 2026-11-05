@@ -24,6 +24,22 @@ import '../settings/code_settings.dart' show budgetPresets;
 import '../workflows/workflow_library.dart';
 import '../workflows/workflow_picker.dart';
 
+/// The Model page's groups with [model] picked, built once for every part
+/// of the menu (the composer shows several, rebuilt as the session streams).
+final _menuGroupsProvider = Provider.autoDispose.family<List<(ModelProvider, List<AgentMenuModel>)>, String>((
+  ref,
+  model,
+) {
+  final specs = ref.watch(modelCatalogProvider);
+  final library = ref.watch(libraryProvider).value ?? const <ModelSpec>[];
+  return libraryMenuGroups(
+    library,
+    ref.watch(agentCatalogProvider),
+    current: model,
+    nameOf: (id) => specs[ModelId(id)]?.name,
+  );
+});
+
 /// A harness that can lead a session, as the menu lists it: why it can't
 /// now ([blocked], null when it can) and its version.
 typedef LeadOption = ({DriverInfo info, String? blocked, String detail});
@@ -119,10 +135,8 @@ class AgentMenu extends ConsumerWidget {
 
   /// What the menu shows, worked out once for the trigger and its panel.
   _Resolved _resolve(WidgetRef ref) {
-    final catalog = ref.watch(agentCatalogProvider);
     final specs = ref.watch(modelCatalogProvider);
-    final library = ref.watch(libraryProvider).value ?? const <ModelSpec>[];
-    final groups = libraryMenuGroups(library, catalog, current: model, nameOf: (id) => specs[ModelId(id)]?.name);
+    final groups = ref.watch(_menuGroupsProvider(model));
     final current = [for (final (_, ms) in groups) ...ms].where((m) => m.model == model).firstOrNull;
     final registry = ref.watch(driverRegistryProvider);
     final lead = registry.resolve(harness)?.info ?? DriverInfo(id: harness, label: harness);

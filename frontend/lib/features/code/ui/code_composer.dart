@@ -423,6 +423,7 @@ class _Strip extends ConsumerWidget {
       projectId,
     ).length;
     final mcp = ref.watch(codeMcpServersProvider).serversFor(projectId).where((s) => s.active).length;
+    // MCP opens on this project's list; the Skills page lists every scope at once.
     void open(SettingsSection section) => showSettings(context, section: section, args: {'project': ?projectId});
     _QuietPart tab(String label, bool enabled) => _QuietPart(label: label, enabled: enabled, tab: true);
     return Padding(

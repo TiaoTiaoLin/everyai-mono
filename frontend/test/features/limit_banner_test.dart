@@ -45,7 +45,7 @@ void main() {
     test('a quarter used a tenth into the window is on pace to run out early', () {
       final b = limitBannerOf(plan: _plan(0.26), now: _now)!;
       expect(b.text, startsWith('On pace to hit your limit early · 26% used · resets '));
-      expect(b.key, 'plan:five_hour:${_now.add(const Duration(minutes: 270)).millisecondsSinceEpoch ~/ 1000}');
+      expect(b.key, 'plan:five_hour:near@${_now.add(const Duration(minutes: 270)).millisecondsSinceEpoch ~/ 1000}');
       expect(b.danger, isFalse);
     });
 
@@ -71,12 +71,40 @@ void main() {
       expect(limitBannerOf(plan: plan, now: _now)!.key, startsWith('plan:b:'));
     });
 
+    test('a used-up window says the limit is reached, not that it is on pace', () {
+      final b = limitBannerOf(plan: _plan(1), now: _now)!;
+      expect(b.text, startsWith('Limit reached · resets '));
+      expect((b.danger, b.key.startsWith('plan:five_hour:full@')), (true, true));
+    });
+
+    test('a window that has reset says nothing, warning or not; the cap still shows', () {
+      // Replayed on reopen a day later: reset 10 minutes ago.
+      expect(limitBannerOf(plan: _plan(0.8, left: -10, warning: true), now: _now), isNull);
+      expect(limitBannerOf(plan: _plan(1, left: -10), now: _now), isNull);
+      expect(
+        limitBannerOf(plan: _plan(1, left: -10), chargedMicros: 4500000, budgetUsd: 5, now: _now)!.key,
+        'budget:80:5.0',
+      );
+    });
+
+    test('a closed banner covers the same window reported a second apart, not the next step or window', () {
+      const key = 'plan:codex/primary:near@1796376588';
+      expect(limitBannerClosed(key, 'plan:codex/primary:near@1796376587'), isTrue);
+      expect(limitBannerClosed(key, 'plan:codex/primary:full@1796376588'), isFalse);
+      expect(limitBannerClosed(key, 'plan:codex/primary:near@1796394588'), isFalse);
+      expect(limitBannerClosed('budget:80:5.0', 'budget:80:5.0'), isTrue);
+      expect(limitBannerClosed('budget:80:5.0', 'budget:80:25.0'), isFalse);
+      expect(limitBannerClosed(null, key), isFalse);
+    });
+
     test('the session cap from 80%, danger once reached; a plan banner comes first', () {
       final near = limitBannerOf(chargedMicros: 4250000, budgetUsd: 5, now: _now)!;
-      expect((near.key, near.danger), ('budget:80', false));
+      expect((near.key, near.danger), ('budget:80:5.0', false));
       expect(near.text, contains('85% of your'));
       final reached = limitBannerOf(chargedMicros: 5000000, budgetUsd: 5, now: _now)!;
-      expect((reached.key, reached.danger), ('budget:100', true));
+      expect((reached.key, reached.danger), ('budget:100:5.0', true));
+      // Another cap is another banner.
+      expect(limitBannerOf(chargedMicros: 20000000, budgetUsd: 25, now: _now)!.key, 'budget:80:25.0');
       expect(limitBannerOf(chargedMicros: 3000000, budgetUsd: 5, now: _now), isNull);
       expect(
         limitBannerOf(plan: _plan(0.26), chargedMicros: 5000000, budgetUsd: 5, now: _now)!.key,
@@ -121,7 +149,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('limit-banner.dismiss')));
       await tester.pump();
       expect(find.byKey(const ValueKey('limit-banner')), findsNothing);
-      expect(prefs['${codeLimitBannerPrefix}s1'], startsWith('plan:five_hour:'));
+      expect(prefs['${codeLimitBannerPrefix}s1'], startsWith('plan:five_hour:near@'));
 
       // Still closed when built again, and for a later report of the same window.
       await pump(tester);
@@ -129,8 +157,20 @@ void main() {
       await tester.pump();
       expect(find.byKey(const ValueKey('limit-banner')), findsNothing);
 
+      // The same window and step, now with the harness warning too, stays closed.
+      c.read(codePlanLimitsProvider('s1').notifier).set(_plan(0.3, left: 270, warning: true));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('limit-banner')), findsNothing);
+
+      // Reaching the limit shows it again.
+      c.read(codePlanLimitsProvider('s1').notifier).set(_plan(1));
+      await tester.pump();
+      expect(find.textContaining('Limit reached'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('limit-banner.dismiss')));
+      await tester.pump();
+
       // A new window (another reset) shows it again.
-      c.read(codePlanLimitsProvider('s1').notifier).set(_plan(0.3, left: 260));
+      c.read(codePlanLimitsProvider('s1').notifier).set(_plan(0.3, left: 290));
       await tester.pump();
       expect(find.byKey(const ValueKey('limit-banner')), findsOneWidget);
     });

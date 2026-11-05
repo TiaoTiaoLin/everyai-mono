@@ -15,42 +15,71 @@ import '../settings/code_settings.dart' show budgetFill;
 import 'transcript/lead_offer_card.dart' show resetText;
 
 /// What the limit banner says: [key] names the step it is at, so a banner
-/// the user closed comes back for a new window or the next step.
+/// the user closed comes back for a new window or the next step (see
+/// [limitBannerClosed]).
 typedef LimitBannerInfo = ({String key, String text, bool danger});
 
 /// The banner above the composer, or null for none. A plan limit the
-/// harness reported ([plan], its fullest window) comes first: "On pace to
-/// hit your limit early" when at least a quarter is used and more than the
-/// share of the window gone by (known only when the harness gives the
-/// window's length and reset), otherwise "Close to your limit" when the
-/// harness warns. Then the session's spending cap ([budgetUsd]), from 80%
-/// as the usage meter turns amber. Only reported numbers are shown.
+/// harness reported ([plan], its fullest window that hasn't reset yet)
+/// comes first: "Limit reached" once it is all used; "On pace to hit your
+/// limit early" when at least a quarter is used and more than the share of
+/// the window gone by (known only when the harness gives the window's
+/// length and reset); otherwise "Close to your limit" when the harness
+/// warns. Then the session's spending cap ([budgetUsd]), from 80% as the
+/// usage meter turns amber. Only reported numbers that still hold are shown.
 LimitBannerInfo? limitBannerOf({PlanLimits? plan, int chargedMicros = 0, double? budgetUsd, required DateTime now}) {
-  final windows = [...?plan?.windows]..sort((a, b) => b.used.compareTo(a.used));
+  // A window whose reset has passed says nothing about now (a report replayed on reopen, or none since).
+  final windows = [
+    for (final w in plan?.windows ?? const <PlanWindow>[])
+      if (w.resetsAt == null || w.resetsAt!.isAfter(now)) w,
+  ]..sort((a, b) => b.used.compareTo(a.used));
   if (windows.firstOrNull case final w?) {
     final at = w.resetsAt;
     final minutes = w.minutes;
     final elapsed = at == null || minutes == null || minutes <= 0
         ? null
         : (1 - at.difference(now).inSeconds / (minutes * 60)).clamp(0.0, 1.0);
-    final headline = elapsed != null && w.used >= 0.25 && w.used > elapsed
+    final full = w.used >= 1;
+    final headline = full
+        ? 'Limit reached'
+        : elapsed != null && w.used >= 0.25 && w.used > elapsed
         ? 'On pace to hit your limit early'
         : plan!.warning
         ? 'Close to your limit'
         : null;
     if (headline != null) {
       return (
-        key: 'plan:${w.name}:${at == null ? '' : at.millisecondsSinceEpoch ~/ 1000}',
-        text: [headline, '${(w.used * 100).round()}% used', if (at != null) 'resets ${resetText(at, now)}'].join(' · '),
-        danger: w.used >= 1,
+        key: 'plan:${w.name}:${full ? 'full' : 'near'}${at == null ? '' : '@${at.millisecondsSinceEpoch ~/ 1000}'}',
+        text: [
+          headline,
+          if (!full) '${(w.used * 100).round()}% used',
+          if (at != null) 'resets ${resetText(at, now)}',
+        ].join(' · '),
+        danger: full,
       );
     }
   }
   final fill = budgetFill(chargedMicros, budgetUsd);
   if (fill == null || fill < 0.8) return null;
   final cap = formatMicros((budgetUsd! * 1e6).round());
-  if (fill >= 1) return (key: 'budget:100', text: 'Session cap reached · $cap', danger: true);
-  return (key: 'budget:80', text: '${(fill * 100).floor()}% of your $cap session cap used', danger: false);
+  // The cap is in the key: a banner closed under one cap comes back near a new one.
+  if (fill >= 1) return (key: 'budget:100:$budgetUsd', text: 'Session cap reached · $cap', danger: true);
+  return (key: 'budget:80:$budgetUsd', text: '${(fill * 100).floor()}% of your $cap session cap used', danger: false);
+}
+
+/// Whether [stored], the key of the banner the user closed, still covers
+/// [key]: the same step of the same window. Harnesses report a window's reset
+/// a second or so apart between updates (Codex works it out from the time
+/// left), so resets up to 10 minutes apart are the same window.
+bool limitBannerClosed(String? stored, String key) {
+  if (stored == null) return false;
+  if (stored == key) return true;
+  final a = stored.split('@');
+  final b = key.split('@');
+  if (a.length != 2 || b.length != 2 || a.first != b.first) return false;
+  final x = int.tryParse(a.last);
+  final y = int.tryParse(b.last);
+  return x != null && y != null && (x - y).abs() <= 600;
 }
 
 /// [limitBannerOf] for session [sessionId], above its composer; the × hides
@@ -81,7 +110,7 @@ class _LimitBannerState extends ConsumerState<LimitBanner> {
       now: widget.now(),
     );
     final prefs = ref.read(preferencesProvider);
-    if (info == null || prefs[_key] == info.key) return const SizedBox.shrink();
+    if (info == null || limitBannerClosed(prefs[_key], info.key)) return const SizedBox.shrink();
     final theme = EveryTheme.of(context);
     final color = info.danger ? theme.danger : theme.warning;
     return Padding(
