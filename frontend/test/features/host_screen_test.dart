@@ -132,5 +132,13 @@ void main() {
         'cd app && flutter run -d macos',
       ]);
     });
+
+    test('a subfolder name is quoted as one word, never run', () {
+      expect(detect({'My App/Cargo.toml': ''}, dirs: ['My App']), ["cd 'My App' && cargo run"]);
+      expect(detect({r'web$(open -a Calculator)/go.mod': ''}, dirs: [r'web$(open -a Calculator)']), [
+        r"cd 'web$(open -a Calculator)' && go run .",
+      ]);
+      expect(detect({"it's/go.mod": ''}, dirs: ["it's"]), [r"cd 'it'\''s' && go run ."]);
+    });
   });
 }

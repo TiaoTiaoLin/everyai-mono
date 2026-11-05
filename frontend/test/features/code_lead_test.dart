@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' show max;
 
 import 'package:drift/native.dart';
 import 'package:every_ai/core/db/app_database.dart';
@@ -13,6 +14,7 @@ import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/domain/git_commands.dart' show plainPrBody;
 import 'package:every_ai/features/code/domain/goal.dart' show GoalStatus;
+import 'package:every_ai/features/code/domain/local_ports.dart' show ListeningPort;
 import 'package:every_ai/features/code/domain/no_spend.dart';
 import 'package:every_ai/features/code/domain/permissions.dart' show DenialKind, denialMessage;
 import 'package:every_ai/features/code/domain/questions.dart';
@@ -812,6 +814,47 @@ void main() {
       expect(stateOf(info.id).transcript.openQuestion, isNull);
     });
 
+    test('browser calls made together run one at a time, on one browser', () async {
+      final info = await start();
+      await open(info.id);
+      final first = hostCall(info.id, browserTool, const {'action': 'open'});
+      final second = hostCall(info.id, browserTool, const {'action': 'screenshot'});
+      await pumpEventQueue();
+      expect(screen.browsers, hasLength(1));
+      final b = screen.browsers.single;
+      expect(b.gates, hasLength(1));
+      b.gates.single.complete();
+      expect((await first.result).text, 'did open');
+      await pumpEventQueue();
+      expect(b.gates, hasLength(2));
+      b.gates.last.complete();
+      expect((await second.result).text, 'did screenshot');
+      expect(b.mostAtOnce, 1);
+    });
+
+    test('removing a session ends its app and browser', () async {
+      final info = await start();
+      final c = await open(info.id);
+      final browse = hostCall(info.id, browserTool, const {'action': 'open'});
+      await pumpEventQueue();
+      screen.browsers.single.gates.single.complete();
+      await browse.result;
+      screen.onSpawn = (p) => p.say('  Local:   http://localhost:3000/');
+      File('${project.path}/pubspec.yaml').writeAsStringSync('name: counter\n');
+      final run = hostCall(info.id, appRunTool, const {});
+      await pumpEventQueue();
+      await c.answer(stateOf(info.id).transcript.openQuestion!, const [
+        QuestionAnswer(selected: {0}),
+      ]);
+      await run.result;
+      expect(c.appRunPid, 1000);
+      await container.read(codeSessionsProvider.notifier).remove(info.id);
+      await pumpEventQueue();
+      expect(screen.processes.single.closed, isTrue);
+      expect(screen.browsers.single.closed, isTrue);
+      expect(c.appRunPid, isNull);
+    });
+
     test('off macOS a screenshot is not supported yet', () async {
       final info = await start();
       await open(info.id);
@@ -947,6 +990,87 @@ void main() {
         expect(screen.processes.last.closed, isTrue);
       });
 
+      test('Stop while the app starts ends it once it has started', () async {
+        final info = await start();
+        final c = await open(info.id);
+        screen.spawnGate = Completer();
+        final call = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        await screen.spawning.future;
+        await c.stop();
+        screen.spawnGate!.complete();
+        final r = await call.result;
+        expect(r.isError, isTrue);
+        expect(r.text, contains('was stopped'));
+        expect(screen.processes.single.closed, isTrue);
+        expect(c.appRunPid, isNull);
+      });
+
+      test('two calls at once start one copy', () async {
+        final info = await start();
+        final c = await open(info.id);
+        screen.onSpawn = (p) => p.say('  Local:   http://localhost:3000/');
+        final first = hostCall(info.id, appRunTool, const {});
+        final second = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        expect((await first.result).isError, isFalse);
+        expect((await second.result).text, contains('http://localhost:3000/'));
+        expect(screen.spawned, hasLength(1));
+        expect(stateOf(info.id).transcript.openQuestion, isNull);
+      });
+
+      test('a run card nobody answers is given up', () async {
+        screen.cardLimit = Duration.zero;
+        final info = await start();
+        await open(info.id);
+        final r = await hostCall(info.id, appRunTool, const {}).result;
+        expect(r, (text: "Error: the user didn't confirm a run command, so the app wasn't started.", isError: true));
+        expect(stateOf(info.id).transcript.openQuestion, isNull);
+        expect(screen.spawned, isEmpty);
+      });
+
+      test("an older copy of the app built in the folder isn't the new one's window", () async {
+        final info = await start();
+        final c = await open(info.id);
+        const old = (id: 5, pid: 50, owner: 'counter', title: 'old', width: 800, height: 600);
+        screen
+          ..windows = [old]
+          ..executables[50] = '${info.workingDir}/build/counter.app/Contents/MacOS/counter'
+          ..executables[60] = '${info.workingDir}/build/counter.app/Contents/MacOS/counter';
+        // The new build opens with `open`: not in the tree, but new and run from the folder.
+        screen.onSpawn = (_) =>
+            screen.windows = [old, (id: 6, pid: 60, owner: 'counter', title: 'new', width: 800, height: 600)];
+        final call = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        final r = await call.result;
+        expect(r.text, contains('window_id 6'));
+        expect(r.text, isNot(contains('window_id 5')));
+      });
+
+      test('off macOS it stops waiting for a window and says why', () async {
+        screen.os = 'linux';
+        final info = await start();
+        final c = await open(info.id);
+        final call = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        final r = await call.result;
+        expect(r.isError, isFalse);
+        expect(r.text, contains("can't see app windows on Linux yet"));
+        expect(screen.spawned.single.command, 'flutter run -d linux');
+      });
+
+      test('a server that prints no URL is found by its port', () async {
+        File('${project.path}/pubspec.yaml').deleteSync();
+        File('${project.path}/go.mod').writeAsStringSync('module x\n');
+        final info = await start();
+        final c = await open(info.id);
+        screen.ports = [const ListeningPort(pid: 1000, port: 8080)];
+        final call = hostCall(info.id, appRunTool, const {});
+        await confirm(c, pick: 0);
+        final r = await call.result;
+        expect(r.text, contains('It listens on http://localhost:8080'));
+      });
+
       test("Windows isn't supported yet", () async {
         final info = await start();
         await open(info.id);
@@ -995,10 +1119,18 @@ final class _FakeScreen {
   final processes = <_FakeProcess>[];
   void Function(_FakeProcess p)? onSpawn;
 
+  /// Holds each spawn until completed, when set; [spawning] completes when one waits there.
+  Completer<void>? spawnGate;
+  final spawning = Completer<void>();
+  final executables = <int, String>{};
+  var ports = <ListeningPort>[];
+  var cardLimit = const Duration(seconds: 300);
+  final browsers = <_FakeBrowser>[];
+
   late final access = ScreenAccess(
     os: os,
     listWindows: () async => windows,
-    executableOf: (pid) async => '/Applications/App.app/Contents/MacOS/App',
+    executableOf: (pid) async => executables[pid] ?? '/Applications/App.app/Contents/MacOS/App',
     capture: (w, root, others) async {
       captured.add(w.id);
       return (
@@ -1011,14 +1143,45 @@ final class _FakeScreen {
     processTree: (pid) async => {pid},
     spawn: ({required command, required cwd, required sessionTag, required logPath}) async {
       spawned.add((command: command, cwd: cwd, tag: sessionTag));
+      if (!spawning.isCompleted) spawning.complete();
+      await spawnGate?.future;
       final p = _FakeProcess(1000 + processes.length);
       processes.add(p);
       onSpawn?.call(p);
       return p;
     },
-    browser: (_) => throw UnimplementedError(),
+    browser: (_) {
+      final b = _FakeBrowser();
+      browsers.add(b);
+      return b;
+    },
+    listening: (pids) async => [
+      for (final p in ports)
+        if (pids.contains(p.pid)) p,
+    ],
     poll: () async {},
+    cardLimit: cardLimit,
   );
+}
+
+/// A browser whose calls wait until the test lets them finish.
+final class _FakeBrowser implements ScreenBrowser {
+  final gates = <Completer<void>>[];
+  var running = 0, mostAtOnce = 0;
+  var closed = false;
+
+  @override
+  Future<ScreenResult> run(Map<String, Object?> args, String root) async {
+    mostAtOnce = max(mostAtOnce, ++running);
+    final gate = Completer<void>();
+    gates.add(gate);
+    await gate.future;
+    running--;
+    return (text: 'did ${args['action']}', isError: false, images: const <HostImage>[]);
+  }
+
+  @override
+  Future<void> close() async => closed = true;
 }
 
 final class _FakeProcess implements DriverProcess {

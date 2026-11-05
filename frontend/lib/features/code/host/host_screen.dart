@@ -5,6 +5,7 @@ import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../domain/local_ports.dart' show ListeningPort;
 import '../drivers/driver_process.dart' show DriverProcess;
 import '../harness/everyai/screen_windows.dart';
 import 'host.dart';
@@ -81,7 +82,7 @@ List<String> detectRunCommands({
   for (final dir in dirs) {
     String at(String f) => dir.isEmpty ? f : '$dir/$f';
     void add(String command) {
-      final c = dir.isEmpty ? command : 'cd $dir && $command';
+      final c = dir.isEmpty ? command : 'cd ${_shellWord(dir)} && $command';
       if (!out.contains(c)) out.add(c);
     }
 
@@ -116,6 +117,11 @@ List<String> detectRunCommands({
   return out;
 }
 
+/// [word] as one shell word: as it is when plain, else single-quoted (a
+/// folder name is the repo's, so `$(…)` in it must stay text).
+String _shellWord(String word) =>
+    RegExp(r'^[A-Za-z0-9._/+-]+$').hasMatch(word) ? word : "'${word.replaceAll("'", r"'\''")}'";
+
 Object? _json(String text) {
   try {
     return jsonDecode(text);
@@ -148,7 +154,9 @@ final class ScreenAccess {
     required this.processTree,
     required this.spawn,
     required this.browser,
+    this.listening = _noPorts,
     this.poll = _aSecond,
+    this.cardLimit = const Duration(seconds: 300),
   });
 
   /// `Platform.operatingSystem`: macos, linux, windows ('' on the web).
@@ -182,11 +190,18 @@ final class ScreenAccess {
   /// A headless browser keeping its profile in [profileDir].
   final ScreenBrowser Function(String profileDir) browser;
 
+  /// The TCP ports [pids] listen on.
+  final Future<List<ListeningPort>> Function(Set<int> pids) listening;
+
   /// Waits between two looks for app_run's window.
   final Future<void> Function() poll;
+
+  /// How long app_run's card waits for an answer (the held tools' limit).
+  final Duration cardLimit;
 }
 
 Future<void> _aSecond() => Future<void>.delayed(const Duration(seconds: 1));
+Future<List<ListeningPort>> _noPorts(Set<int> _) async => const [];
 
 final screenAccessProvider = Provider<ScreenAccess>((ref) => impl.screenAccess());
 

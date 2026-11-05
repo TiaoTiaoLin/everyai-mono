@@ -54,7 +54,8 @@ final List<Map<String, Object?>> hostToolSpecs = List.unmodifiable([
   reportIssueSpec,
   {
     ..._mcpTool(builtInToolSpecs(only: [browserTool]).single),
-    'annotations': {'readOnlyHint': true, 'destructiveHint': false},
+    // Not read-only: clicks and typing change the page, and calls share one page, so a client runs them in turn.
+    'annotations': {'readOnlyHint': false, 'destructiveHint': false},
   },
   screenshotSpec,
   appRunSpec,

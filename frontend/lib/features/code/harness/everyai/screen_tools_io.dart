@@ -2,6 +2,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'browser_io.dart';
 import 'tools_io.dart' show ToolOutput, imageDataUrl;
@@ -82,7 +83,7 @@ Future<ToolOutput> runBrowser(
     final dir = Directory('$root/.everyai/scratch/screenshots')..createSync(recursive: true);
     final path = '${dir.path}/browser-${DateTime.now().millisecondsSinceEpoch}.png';
     File(path).writeAsBytesSync(png);
-    final url = imageDataUrl(png, 'png');
+    final url = await _pngDataUrl(png);
     if (!vision || url == null) {
       return ToolOutput('$text\nSaved the screenshot to $path (this model can\'t view images).');
     }
@@ -102,9 +103,13 @@ Future<ToolOutput> captureFor(ScreenWindow w, {required String root, required bo
   if (await captureWindow(w.id, path) case final problem?) return ToolOutput('Error: $problem', isError: true);
   final label = windowLabel(w);
   final more = others > 0 ? ' $others other window(s) of this session\'s apps; pick with app.' : '';
-  final url = imageDataUrl(File(path).readAsBytesSync(), 'png');
+  final url = await _pngDataUrl(File(path).readAsBytesSync());
   if (!vision || url == null) {
     return ToolOutput('Saved a screenshot of $label to $path (this model can\'t view images).$more');
   }
   return ToolOutput('Screenshot of $label: $path.$more', images: [(label: path, dataUrl: url)]);
 }
+
+/// [imageDataUrl] for a PNG, off the calling isolate: shrinking a Retina
+/// window's picture takes long enough to freeze the app's UI.
+Future<String?> _pngDataUrl(List<int> png) => Isolate.run(() => imageDataUrl(png, 'png'));

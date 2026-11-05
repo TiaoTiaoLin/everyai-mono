@@ -1345,6 +1345,8 @@ final class CodeSessions extends Notifier<List<CodeSessionInfo>> {
     ];
     for (final g in gone) {
       unawaited(ref.read(_liveProvider).remove(g)?.close());
+      // Its app (app_run) and headless browser end with it; the controller itself lives on unused.
+      if (ref.exists(codeSessionProvider(g))) unawaited(ref.read(codeSessionProvider(g).notifier)._closeScreen());
       ref.read(preferencesProvider)['$codeUsageReportsPrefix$g'] = null;
       ref.read(preferencesProvider)['$codeLayoutPrefix$g'] = null;
       ref.read(preferencesProvider)['$codeLimitBannerPrefix$g'] = null;

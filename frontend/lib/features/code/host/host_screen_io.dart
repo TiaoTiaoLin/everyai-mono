@@ -8,6 +8,7 @@ import '../harness/everyai/screen_tools_io.dart';
 import '../harness/everyai/tools_io.dart' show ToolOutput;
 import '../harness/everyai/window_capture_io.dart' as capture;
 import '../harness/session_processes.dart';
+import '../panes/processes.dart' show listeningPorts;
 import 'host_screen.dart';
 
 ScreenAccess screenAccess() => ScreenAccess(
@@ -32,13 +33,17 @@ ScreenAccess screenAccess() => ScreenAccess(
     logPath: logPath,
   ),
   browser: (profileDir) => _Browser(HeadlessBrowser(profileDir: profileDir)),
+  listening: listeningPorts,
 );
 
 ScreenResult _result(ToolOutput o) =>
     (text: o.text, isError: o.isError, images: [for (final i in o.images) ?hostImageOf(i.dataUrl)]);
 
+/// Closed with the session, or when the app quits.
 final class _Browser implements ScreenBrowser {
-  _Browser(this._b);
+  _Browser(this._b) {
+    trackDriverClose(close);
+  }
   final HeadlessBrowser _b;
 
   @override
@@ -46,7 +51,10 @@ final class _Browser implements ScreenBrowser {
       _result(await runBrowser(_b, args, root: root, vision: true, fit: (text, _) => _cut(text)));
 
   @override
-  Future<void> close() => _b.close();
+  Future<void> close() {
+    untrackDriverClose(close);
+    return _b.close();
+  }
 }
 
 /// An eval result as long as a host result should be.

@@ -8,13 +8,17 @@ const _runCommandsKey = 'code.run_commands';
 /// How many times app_run looks for the app's window or URL, a second apart.
 const _appRunLooks = 120;
 
+/// After this many looks app_run also takes a listening port for an answer,
+/// and off macOS (no windows to see) it stops waiting.
+const _appRunQuiet = 10;
+
 /// The lines of the app's output app_run keeps, and shows.
 const _appRunKeep = 200;
 const _appRunShow = 40;
 
 /// The app app_run started for a session, and the end of its output.
 final class _AppRun {
-  _AppRun(this.command, this.process) {
+  _AppRun(this.command, this.process, this.before) {
     _sub = process.lines.listen((line) {
       tail.add(line);
       if (tail.length > _appRunKeep) tail.removeAt(0);
@@ -24,6 +28,9 @@ final class _AppRun {
 
   final String command;
   final DriverProcess process;
+
+  /// The windows on screen before it started: none of them is its.
+  final Set<int> before;
   final tail = <String>[];
   int? exit;
   late final StreamSubscription<String> _sub;
@@ -61,7 +68,23 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
   final _screenGrants = <({int id, int pid})>{};
 
   ScreenBrowser? _screenBrowser;
+
+  /// The last browser call: calls run one after another, as they share one page.
+  Future<void> _browserTurn = Future.value();
   _AppRun? _appRun;
+
+  /// app_run's start under way (its card, then the spawn), which a call made
+  /// meanwhile waits on instead of starting a second copy.
+  Future<({_AppRun? run, String? problem})>? _appStarting;
+
+  /// Goes up when the browser and app close: work begun before ends there.
+  var _screenGen = 0;
+
+  /// The app app_run started and is still running, for the Processes pane.
+  int? get appRunPid {
+    final run = _appRun;
+    return run != null && run.exit == null ? run.process.pid : null;
+  }
 
   Future<HostResult> _screenCall(HostCall call, CodeSessionInfo info) async {
     final a = ref.read(screenAccessProvider);
@@ -74,8 +97,13 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
 
   /// Shows a card with [questions] for host call [call]; its answers, or
   /// null when it was given up.
-  Future<List<QuestionAnswer>?> _askLocally(HostCall call, String id, List<Question> questions) {
+  /// A card unanswered after [limit] is given up too.
+  Future<List<QuestionAnswer>?> _askLocally(HostCall call, String id, List<Question> questions, {Duration? limit}) {
     final done = _localAsks[id] = Completer();
+    if (limit != null) {
+      final timer = Timer(limit, () => _settleLocalAsk(id, null));
+      unawaited(done.future.whenComplete(timer.cancel));
+    }
     _builder.addLocalQuestion(
       ActionCall(id: id, raw: const {}, toolName: askUserQuestionTool, toolCallId: id, action: const {}),
       questions,
@@ -103,6 +131,7 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
 
   /// Ends the session's browser and app (Stop, the session closing).
   Future<void> _closeScreen() async {
+    _screenGen++;
     _refuseLocalAsks();
     final browser = _screenBrowser, run = _appRun;
     _screenBrowser = null;
@@ -186,10 +215,17 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
 
   Future<HostResult> _browse(HostCall call, CodeSessionInfo info, ScreenAccess a) async {
     if (a.os.isEmpty) return (text: 'Error: the browser works on desktop only.', isError: true);
-    final b = _screenBrowser ??= a.browser(
-      '${await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId)}/browser',
-    );
-    return _withImages(call, await b.run(call.args, info.workingDir));
+    final gen = _screenGen;
+    final dir = await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId);
+    final Future<HostResult> turn = _browserTurn.then((_) async {
+      if (gen != _screenGen || !ref.mounted) {
+        return (text: 'Error: the session was stopped, and its browser with it.', isError: true);
+      }
+      final b = _screenBrowser ??= a.browser('$dir/browser');
+      return _withImages(call, await b.run(call.args, info.workingDir));
+    });
+    _browserTurn = turn.then((_) {}, onError: (Object _) {});
+    return turn;
   }
 
   /// The project folder [info] belongs to (where its run command is kept),
@@ -231,57 +267,109 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
     }
     final reused = run != null;
     if (run == null) {
-      final picked = await _runCommandFor(call, info, a);
-      if (picked.problem case final problem?) return (text: problem, isError: true);
-      final command = picked.command!;
-      if (hostRunDenial(policy: policy, mode: state.mode, tool: appRunTool, command: command) case final why?) {
-        return (text: '$why\n(command: $command)', isError: true);
-      }
-      final dir = await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId);
-      try {
-        run = _appRun = _AppRun(
-          command,
-          await a.spawn(command: command, cwd: info.workingDir, sessionTag: info.id, logPath: '$dir/app-run.log'),
-        );
-      } on Object catch (e) {
-        return (text: "Error: couldn't start `$command`: $e", isError: true);
-      }
+      final starting = _appStarting ??= _startApp(call, info, a);
+      final started = await starting;
+      if (identical(_appStarting, starting)) _appStarting = null;
+      if (started.problem case final problem?) return (text: problem, isError: true);
+      run = started.run!;
     }
     final head = reused
         ? 'The app is already running (`${run.command}`, pid ${run.process.pid}); pass restart: true to start it again.'
         : 'Started `${run.command}` (pid ${run.process.pid}).';
     String output() => run!.tail.isEmpty ? '' : '\nOutput so far:\n${run.shown}';
+    final mac = a.os == 'macos';
+    // A Flutter app's own ports are its debugger's; its window is what counts.
+    final ports = !run.command.contains('flutter run');
+    final root = info.workingDir;
+    final exe = <int, String>{};
     for (var look = 0; look < _appRunLooks && !gone; look++) {
       if (run.exit case final code?) {
         if (identical(_appRun, run)) _appRun = null;
         return (text: 'Error: `${run.command}` exited with code $code.${output()}', isError: true);
       }
-      final all = await a.listWindows();
       final tree = await a.processTree(run.process.pid);
-      final owner = await sessionOwner(all, pids: tree, root: info.workingDir, executableOf: a.executableOf);
-      final windows = [
-        for (final w in all)
-          if (w.width >= 40 && w.height >= 40 && owner(w)) w,
-      ];
-      if (windows.isNotEmpty) {
-        return (
-          text:
-              '$head Windows:\n${[for (final w in windows) '- window_id ${w.id}: ${windowLabel(w)}'].join('\n')}\n'
-              'Look at one with screenshot {window_id}.${output()}',
-          isError: false,
-        );
+      if (mac) {
+        // Its windows: its process tree's, or new ones of an app built in the folder (opened with `open`).
+        final windows = <ScreenWindow>[];
+        for (final w in await a.listWindows()) {
+          if (w.width < 40 || w.height < 40) continue;
+          if (tree.contains(w.pid) ||
+              (!run.before.contains(w.id) && (exe[w.pid] ??= await a.executableOf(w.pid)).startsWith('$root/'))) {
+            windows.add(w);
+          }
+        }
+        if (windows.isNotEmpty) {
+          return (
+            text:
+                '$head Windows:\n${[for (final w in windows) '- window_id ${w.id}: ${windowLabel(w)}'].join('\n')}\n'
+                'Look at one with screenshot {window_id}.${output()}',
+            isError: false,
+          );
+        }
       }
       if (run.urls case [..., final url]) {
         return (text: '$head It serves $url: open it with browser.${output()}', isError: false);
+      }
+      if (look >= _appRunQuiet) {
+        final listening = ports
+            ? {
+                for (final p in await a.listening(tree))
+                  if (p.local) p.port,
+              }
+            : const <int>{};
+        if (listening.isNotEmpty) {
+          final at = [for (final p in listening) 'http://localhost:$p'].join(', ');
+          return (
+            text: '$head It listens on $at: if one is a web page, open it with browser.${output()}',
+            isError: false,
+          );
+        }
+        if (!mac) {
+          return (
+            text:
+                "$head It is running, but app_run can't see app windows on ${_osName(a.os)} yet (nor take screenshots "
+                'there), and it printed no local URL. Read its output to tell how it is doing.${output()}',
+            isError: false,
+          );
+        }
       }
       await a.poll();
     }
     return (
       text:
-          '$head It is still starting: no window or local URL yet. Call app_run again (it won\'t start a second '
-          'copy).${output()}',
+          '$head No window, local URL or listening port after 2 minutes. If it is still building, call app_run again '
+          '(it won\'t start a second copy). A program with no window or web page (a command-line tool, a server on '
+          'another protocol) can\'t be shown: read its output instead.${output()}',
       isError: false,
     );
+  }
+
+  /// Starts app_run's app: the command (asked for when it isn't trusted
+  /// yet), checked, then spawned, unless Stop came meanwhile.
+  Future<({_AppRun? run, String? problem})> _startApp(HostCall call, CodeSessionInfo info, ScreenAccess a) async {
+    const stopped = 'Error: the session was stopped, so the app wasn\'t started.';
+    final gen = _screenGen;
+    final picked = await _runCommandFor(call, info, a);
+    if (picked.problem case final problem?) return (run: null, problem: problem);
+    if (gen != _screenGen || !ref.mounted) return (run: null, problem: stopped);
+    final command = picked.command!;
+    if (hostRunDenial(policy: policy, mode: state.mode, tool: appRunTool, command: command) case final why?) {
+      return (run: null, problem: '$why\n(command: $command)');
+    }
+    final dir = await ref.read(codeSessionsProvider.notifier)._driverDir(sessionId);
+    final before = a.os == 'macos' ? {for (final w in await a.listWindows()) w.id} : const <int>{};
+    if (gen != _screenGen || !ref.mounted) return (run: null, problem: stopped);
+    final DriverProcess process;
+    try {
+      process = await a.spawn(command: command, cwd: info.workingDir, sessionTag: info.id, logPath: '$dir/app-run.log');
+    } on Object catch (e) {
+      return (run: null, problem: "Error: couldn't start `$command`: $e");
+    }
+    if (gen != _screenGen || !ref.mounted) {
+      await process.close();
+      return (run: null, problem: stopped);
+    }
+    return (run: _appRun = _AppRun(command, process, before), problem: null);
   }
 
   /// The command app_run starts: the one the user confirmed for this
@@ -329,7 +417,7 @@ mixin _SessionScreen on Notifier<CodeSessionState> {
     }
     final dontRun = options.length;
     options.add(const QuestionOption("Don't run it", 'The agent is told no.'));
-    final answers = await _askLocally(call, 'run-${call.id}', [
+    final answers = await _askLocally(call, 'run-${call.id}', limit: a.cardLimit, [
       Question(
         header: 'Run the app',
         question:
