@@ -2,6 +2,7 @@
 
 import 'dart:io';
 
+import '../../../core/security/untrusted.dart';
 import '../harness/everyai/project_notes_io.dart';
 import 'host.dart' show HostResult;
 
@@ -33,7 +34,7 @@ HostResult hostSavedPlans(String root, Map<String, Object?> args) {
   final file = File('${dir.path}/$name');
   if (notesLinkProblem(root, file.path) case final why?) return (text: 'Error: $why', isError: true);
   if (!file.existsSync()) return (text: 'Error: there is no saved plan called $name.', isError: true);
-  return (text: file.readAsStringSync(), isError: false);
+  return (text: untrusted(file.readAsStringSync(), source: '.everyai/plans/$name'), isError: false);
 }
 
 /// The plan's first heading after a colon, or nothing.

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/preferences.dart';
+import '../../core/security/untrusted.dart';
 import '../../core/providers.dart';
 import '../chat/data/chat_repository.dart';
 import '../skills/skills_providers.dart';
@@ -48,9 +49,10 @@ final class MemoryController extends Notifier<Memory> {
   }
 
   /// Settings → Memory: replaces a note's entries as the user edited them.
+  /// Never refused (the user's own words); hidden characters are dropped.
   void setEntries(MemoryTarget target, List<String> entries) => _save(
     state.withEntries(target, [
-      for (final e in entries.map(normalizeEntry))
+      for (final e in entries.map((e) => normalizeEntry(stripHidden(e))))
         if (e.isNotEmpty) e,
     ]),
   );
@@ -214,12 +216,13 @@ final class LocalChatTools {
             final text = await recall.readText(id.trim());
             return text == null
                 ? (text: 'Error: no chat has chat_id "$id". Use a chat_id from search results.', isError: true)
-                : (text: text, isError: false);
+                : (text: untrusted(text, source: 'chat:${id.trim()}'), isError: false);
           }
           final query = (args['query'] as String? ?? '').trim();
           if (query.isEmpty) return (text: 'Error: give a query or a chat_id.', isError: true);
           final limit = args['limit'] is num ? (args['limit'] as num).toInt() : 8;
-          return (text: await recall.searchText(query, excludeChat: chatId, limit: limit), isError: false);
+          final found = await recall.searchText(query, excludeChat: chatId, limit: limit);
+          return (text: untrusted(found, source: 'chat search'), isError: false);
       }
     } on Object catch (e) {
       return (text: 'Error: $name failed on the device ($e).', isError: true);

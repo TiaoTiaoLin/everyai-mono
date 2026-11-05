@@ -211,13 +211,27 @@ String renderTail(CompactionPlan plan, {CompactionBudget budget = const Compacti
         .join('\n\n');
 
 /// The conversation so far as text for a side call (`/btw`): tool output cut
-/// short, and only the newest [maxChars] characters when it runs long.
-String renderSessionRecord(List<HarnessEvent> events, {int maxChars = 60000}) {
-  final text = [
+/// short, and only the newest [maxChars] characters when it runs long (whole
+/// steps go first, so a [wrapResult] block is never cut in two).
+/// [wrapResult], when given, frames each tool result's text (a handoff marks
+/// results as untrusted data; the user's and agent's messages stay plain).
+String renderSessionRecord(
+  List<HarnessEvent> events, {
+  int maxChars = 60000,
+  String Function(String toolName, String text)? wrapResult,
+}) {
+  final parts = [
     for (final e in events)
-      if (countsForModel(e)) _render(e, outputCap: 800, argsCap: 600),
-  ].where((p) => p.isNotEmpty).join('\n\n');
+      if (countsForModel(e)) _render(e, outputCap: 800, argsCap: 600, wrapResult: wrapResult),
+  ].where((p) => p.isNotEmpty).toList();
+  final text = parts.join('\n\n');
   if (text.length <= maxChars) return text;
+  var size = 0, from = parts.length;
+  while (from > 0 && size + parts[from - 1].length + 2 <= maxChars) {
+    size += parts[from - 1].length + 2;
+    from--;
+  }
+  if (from < parts.length) return '[earlier steps omitted]\n\n${parts.sublist(from).join('\n\n')}';
   final cut = text.indexOf('\n\n', text.length - maxChars);
   return '[earlier steps omitted]\n\n${text.substring(cut < 0 ? text.length - maxChars : cut + 2)}';
 }
@@ -230,7 +244,12 @@ String renderSessionRecord(List<HarnessEvent> events, {int maxChars = 60000}) {
 String renderStep(HarnessEvent e, {int outputCap = 800, int argsCap = 600}) =>
     _render(e, outputCap: outputCap, argsCap: argsCap);
 
-String _render(HarnessEvent e, {required int outputCap, required int argsCap}) => switch (e) {
+String _render(
+  HarnessEvent e, {
+  required int outputCap,
+  required int argsCap,
+  String Function(String toolName, String text)? wrapResult,
+}) => switch (e) {
   ChatMessage(fromUser: true, :final text) => '[user]\n${_userText(text).trim()}',
   ChatMessage(:final text, :final reasoning) =>
     text.trim().isEmpty
@@ -239,10 +258,13 @@ String _render(HarnessEvent e, {required int outputCap, required int argsCap}) =
   ActionCall() => _renderCall(e, argsCap),
   ToolResult(:final toolName, :final outcome) =>
     '[result of $toolName${outcome == ToolOutcome.ok ? '' : ' (${outcome.name})'}]\n'
-        '${outputCap == 0 ? clearedOutput : _cap(_resultText(e), outputCap)}',
+        '${outputCap == 0 ? clearedOutput : _wrapped(toolName, _cap(_resultText(e), outputCap), wrapResult)}',
   ConversationFailure(:final message) => '[error]\n$message',
   _ => '',
 };
+
+String _wrapped(String tool, String text, String Function(String, String)? wrap) =>
+    wrap == null ? text : wrap(tool, text);
 
 /// Fields OpenHands adds to typed actions that say nothing new about the step
 /// (client tools such as `present_plan` keep their own `summary`).

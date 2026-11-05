@@ -2,6 +2,7 @@
 
 import 'package:flutter/foundation.dart';
 
+import '../../../core/security/untrusted.dart';
 import '../harness/events.dart';
 import '../settings/agent_settings.dart' show AgentType;
 import 'agent_mode.dart';
@@ -63,6 +64,7 @@ const subagentRules = '''
 You are a subagent. Another agent handed you one task, and your final message is the report it gets back. Nobody
 reads along while you work and you cannot ask the user anything; you also cannot start subagents of your own.
 ask_user_question and present_plan do not exist in this conversation, whatever the rules above say about them.
+security_alert does: use it as the Security rules above say; it reaches the user even though nobody reads along.
 - Do the task you were given and nothing else, within the limits it sets (only investigate, or change files).
 - Work on your own until the task is done or you are blocked. Then end with one final message that gives exactly
   what the task asked for: findings with file paths and line numbers, what you changed and how you checked it, or
@@ -302,8 +304,14 @@ final _block = RegExp(r'<subagent_report id="([^"]*)" status="([^"]*)">\n([\s\S]
 String _blocks(Map<String, SubagentReport> reports) => [
   for (final e in reports.entries)
     '$_open${e.key}" status="${e.value.status.wire}">\n'
-        '${_cut(e.value.text).replaceAll('</subagent_report>', '</subagent-report>')}\n</subagent_report>',
+        '${e.value.text.replaceAll('</subagent_report>', '</subagent-report>')}\n</subagent_report>',
 ].join('\n\n');
+
+/// [report] as its parent reads it: the fork's own words (which can relay whatever it read) cut short and marked as
+/// data from `fork:<childId>`. Called where a fork's report comes in, before the app adds its own notes (merge,
+/// fallback) beside it, so those stay ours and a fork can't forge them.
+SubagentReport forkReport(String childId, SubagentReport report) =>
+    SubagentReport(report.status, untrusted(_cut(report.text), source: 'fork:$childId'));
 
 String _cut(String s) =>
     s.length <= _maxReport ? s : '${s.substring(0, _maxReport)}\n[… report cut at $_maxReport characters]';
@@ -327,7 +335,9 @@ String subagentReason(Map<String, SubagentReport> reports) =>
 /// empty when it has none.
 Map<String, SubagentReport> parseSubagentReports(String text) {
   if (!text.contains(_open)) return const {};
-  return {for (final m in _block.allMatches(text)) m[1]!: SubagentReport(SubagentStatus.parse(m[2]!), m[3]!)};
+  return {
+    for (final m in _block.allMatches(text)) m[1]!: SubagentReport(SubagentStatus.parse(m[2]!), unwrapUntrusted(m[3]!)),
+  };
 }
 
 /// What a background subagent's call returns straight away.
@@ -386,7 +396,8 @@ const sharedFolderNote =
 /// A background subagent's report, sent to its parent when it ends.
 String taskNotification(String childId, String title, SubagentReport report) =>
     '<task-notification>\n<task-id>$childId</task-id>\n<description>$title</description>\n'
-    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(report.text)}\n</result>\n</task-notification>';
+    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(report.text)}\n</result>\n'
+    '</task-notification>';
 
 final _notification = RegExp(
   r'^<task-notification>\n<task-id>([^<]*)</task-id>\n<description>([^<]*)</description>\n<status>([^<]*)</status>\n'
@@ -397,7 +408,7 @@ final _notification = RegExp(
 ({String childId, String title, SubagentStatus status, String result})? parseTaskNotification(String text) {
   final m = _notification.firstMatch(unwrapNotice(text.trim()));
   if (m == null) return null;
-  return (childId: m[1]!, title: m[2]!, status: SubagentStatus.parse(m[3]!), result: m[4]!);
+  return (childId: m[1]!, title: m[2]!, status: SubagentStatus.parse(m[3]!), result: unwrapUntrusted(m[4]!));
 }
 
 // ------------------------------------------------------------ orchestrating
@@ -461,7 +472,9 @@ String forkQuestionsText(List<({String question, List<String> options, bool mult
 ].join('\n');
 
 String _forkQuestionBlock(String childId, String title, String questions) =>
-    '<fork-question fork_id="$childId" task="${title.replaceAll('"', "'")}">\n$questions\n</fork-question>\n'
+    '<fork-question fork_id="$childId" task="${title.replaceAll('"', "'")}">\n'
+    '${untrusted(questions, source: 'fork:$childId').replaceAll('</fork-question', '<_fork-question')}\n'
+    '</fork-question>\n'
     'Answer it with answer_fork (fork_id "$childId"). If the user should decide, ask them with ask_user_question '
     'first and pass their answer on. Don\'t do the fork\'s work yourself meanwhile; its report arrives as a '
     '<task-notification>.';

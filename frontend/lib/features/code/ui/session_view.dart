@@ -38,6 +38,7 @@ import 'code_composer.dart';
 import 'limit_banner.dart';
 import 'code_slash_host.dart';
 import 'transcript/files_card.dart';
+import 'transcript/security_alert_card.dart';
 import 'code_top_bar.dart';
 import 'console/console_header.dart';
 import 'console/console_state.dart';
@@ -698,6 +699,7 @@ class TranscriptList extends StatelessWidget {
       onRevise: onRevisePlan,
     ),
     FilesDelivered() => FilesCard(item: item, workingDir: workingDir, sessionId: sessionId),
+    SecurityAlert() => SecurityAlertCard(item: item),
     NoticeItem(:final handedOffFrom) => NoticeView(
       item: item,
       onChange: handedOffFrom.isEmpty || onChangeHandoff == null ? null : () => onChangeHandoff!(handedOffFrom),

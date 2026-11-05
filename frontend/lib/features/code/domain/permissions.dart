@@ -132,6 +132,10 @@ final class PermissionPolicy {
   /// what the rest of the policy says about a floor hit (see floor_advice.dart).
   Decision decide(ActionCall call, AgentMode mode, {bool floor = true}) {
     if (isClientTool(call)) return const Decision(Verdict.allow, DecisionSource.clientTool);
+    // The app's own security alert only shows a card: no rule (an `Mcp(everyai*)` deny included) holds it back.
+    if (hostTools && hostToolOf(call) == securityAlertTool) {
+      return const Decision(Verdict.allow, DecisionSource.clientTool);
+    }
     // Bypass: the user turned every EveryAI check off (floor, rules, risk) for this session.
     if (mode == AgentMode.bypass) return const Decision(Verdict.allow, DecisionSource.mode);
     final command = _command(call);

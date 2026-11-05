@@ -1199,6 +1199,7 @@ List<Object> groupTurnWork(List<TranscriptItem> items, {required bool active}) {
           PlanItem() ||
           NoticeItem() ||
           FilesDelivered() ||
+          SecurityAlert() ||
           SubagentItem() => true,
           StepItem(:final step) => step.rejected,
           _ => false,

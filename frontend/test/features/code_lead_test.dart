@@ -594,7 +594,10 @@ void main() {
     await Directory('${project.path}/.everyai/plans').create(recursive: true);
     File('${project.path}/.everyai/plans/2026-11-04-dark.md').writeAsStringSync('# Dark\n\nSteps');
     expect((await hostCall(info.id, savedPlansTool, const {}).result).text, '- 2026-11-04-dark.md: Dark');
-    expect((await hostCall(info.id, savedPlansTool, {'name': '2026-11-04-dark.md'}).result).text, '# Dark\n\nSteps');
+    expect(
+      (await hostCall(info.id, savedPlansTool, {'name': '2026-11-04-dark.md'}).result).text,
+      '<untrusted-content source=".everyai/plans/2026-11-04-dark.md">\n# Dark\n\nSteps\n</untrusted-content>',
+    );
     expect((await hostCall(info.id, savedPlansTool, {'name': '../memory.md'}).result).isError, isTrue);
     final bug = await hostCall(info.id, 'bug_check', const {}).result;
     expect(bug.isError, isTrue);

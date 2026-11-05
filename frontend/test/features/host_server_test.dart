@@ -150,6 +150,7 @@ void main() {
       [
         'ask_user_question',
         'present_plan',
+        'security_alert',
         'memory',
         'saved_plans',
         'fork',
@@ -183,7 +184,10 @@ void main() {
       'headers': {'Authorization': 'Bearer ${w.token}'},
     });
     addTearDown(c.close);
-    expect([for (final t in c.tools) t['name']], ['bug_check', 'check', 'diff_stats', 'report_issue']);
+    expect(
+      [for (final t in c.tools) t['name']],
+      ['security_alert', 'bug_check', 'check', 'diff_stats', 'report_issue'],
+    );
     for (final name in ['fork', 'run_workflow', 'ask_user_question', 'present_plan', 'memory']) {
       final r = await post(rpc('tools/call', {'name': name, 'arguments': <String, Object?>{}}), token: w.token);
       expect(errorCode(r), -32602, reason: name);

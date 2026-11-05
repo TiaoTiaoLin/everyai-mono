@@ -1129,7 +1129,9 @@ void main() {
         unawaited(bridge.agent('Fix', <String, Object?>{}).catchError((Object _) => null));
         final info = await child();
         expect(info.harness, 'everyai');
-        expect(host.only[info.id], workflowHostTools);
+        // Its security_alert is the client tool; the host doesn't list it a second time.
+        expect(host.only[info.id], {...workflowHostTools}..remove(securityAlertTool));
+        expect(drivers['everyai']!.specs.last.clientTools, [securityAlertSpec]);
         final briefing = drivers['everyai']!.specs.last.briefing!;
         expect(briefing.mcpToken, host.live[info.id]!.single);
         expect(briefing.sessionSkill, isNull);
