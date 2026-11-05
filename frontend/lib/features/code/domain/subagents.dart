@@ -2,6 +2,7 @@
 
 import 'package:flutter/foundation.dart';
 
+import '../../../core/security/untrusted.dart';
 import '../harness/events.dart';
 import '../settings/agent_settings.dart' show AgentType;
 import 'agent_mode.dart';
@@ -303,8 +304,13 @@ final _block = RegExp(r'<subagent_report id="([^"]*)" status="([^"]*)">\n([\s\S]
 String _blocks(Map<String, SubagentReport> reports) => [
   for (final e in reports.entries)
     '$_open${e.key}" status="${e.value.status.wire}">\n'
-        '${_cut(e.value.text).replaceAll('</subagent_report>', '</subagent-report>')}\n</subagent_report>',
+        '${_reportText(e.key, e.value).replaceAll('</subagent_report>', '</subagent-report>')}\n</subagent_report>',
 ].join('\n\n');
+
+/// A report's text as the parent reads it: the fork's own words (which can relay whatever it read) marked as data
+/// from `fork:<id>`; our own "started in the background" text stays plain.
+String _reportText(String id, SubagentReport r) =>
+    r.status == SubagentStatus.background ? r.text : untrusted(_cut(r.text), source: 'fork:$id');
 
 String _cut(String s) =>
     s.length <= _maxReport ? s : '${s.substring(0, _maxReport)}\n[… report cut at $_maxReport characters]';
@@ -328,7 +334,9 @@ String subagentReason(Map<String, SubagentReport> reports) =>
 /// empty when it has none.
 Map<String, SubagentReport> parseSubagentReports(String text) {
   if (!text.contains(_open)) return const {};
-  return {for (final m in _block.allMatches(text)) m[1]!: SubagentReport(SubagentStatus.parse(m[2]!), m[3]!)};
+  return {
+    for (final m in _block.allMatches(text)) m[1]!: SubagentReport(SubagentStatus.parse(m[2]!), unwrapUntrusted(m[3]!)),
+  };
 }
 
 /// What a background subagent's call returns straight away.
@@ -387,7 +395,8 @@ const sharedFolderNote =
 /// A background subagent's report, sent to its parent when it ends.
 String taskNotification(String childId, String title, SubagentReport report) =>
     '<task-notification>\n<task-id>$childId</task-id>\n<description>$title</description>\n'
-    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(report.text)}\n</result>\n</task-notification>';
+    '<status>${report.status.wire}</status>\n<result>\n${defuseNoticeTags(_reportText(childId, report))}\n</result>\n'
+    '</task-notification>';
 
 final _notification = RegExp(
   r'^<task-notification>\n<task-id>([^<]*)</task-id>\n<description>([^<]*)</description>\n<status>([^<]*)</status>\n'
@@ -398,7 +407,7 @@ final _notification = RegExp(
 ({String childId, String title, SubagentStatus status, String result})? parseTaskNotification(String text) {
   final m = _notification.firstMatch(unwrapNotice(text.trim()));
   if (m == null) return null;
-  return (childId: m[1]!, title: m[2]!, status: SubagentStatus.parse(m[3]!), result: m[4]!);
+  return (childId: m[1]!, title: m[2]!, status: SubagentStatus.parse(m[3]!), result: unwrapUntrusted(m[4]!));
 }
 
 // ------------------------------------------------------------ orchestrating

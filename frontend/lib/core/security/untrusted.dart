@@ -11,7 +11,8 @@ library;
 /// A kind of character that renders as nothing (or reorders text) and can
 /// hide instructions from the person reading.
 enum HiddenKind {
-  /// Zero-width spaces, joiners and the word joiner (U+200B–U+200D, U+2060, U+FEFF inside text).
+  /// Zero-width spaces, joiners, the word joiner and invisible math operators (U+200B–U+200D, U+2060–U+2064,
+  /// U+FEFF inside text).
   zeroWidth('zero-width characters'),
 
   /// Bidirectional controls that reorder what is shown (U+202A–U+202E, U+2066–U+2069, U+200E/F, U+061C).
@@ -28,7 +29,7 @@ enum HiddenKind {
 }
 
 HiddenKind? _kindOf(int r) {
-  if (r == 0x200B || r == 0x200C || r == 0x200D || r == 0x2060 || r == 0xFEFF) return HiddenKind.zeroWidth;
+  if ((r >= 0x200B && r <= 0x200D) || (r >= 0x2060 && r <= 0x2064) || r == 0xFEFF) return HiddenKind.zeroWidth;
   if ((r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069) || r == 0x200E || r == 0x200F || r == 0x061C) {
     return HiddenKind.bidi;
   }
@@ -77,6 +78,56 @@ String untrusted(String text, {required String source, String? nonce}) {
   if (hidden.isNotEmpty) attrs.write(' removed="${hidden.map((k) => k.label).join(', ')}"');
   return '<untrusted-content $attrs>\n$clean\n</untrusted-content>';
 }
+
+/// The text inside one [untrusted] block, or [text] unchanged when it isn't one (for parsers that read back what
+/// we sent, such as the transcript's report cards).
+String unwrapUntrusted(String text) {
+  final m = RegExp(r'^\s*<untrusted-content\b[^>]*>\n?([\s\S]*?)\n?</untrusted-content>\s*$').firstMatch(text);
+  return m == null ? text : m.group(1)!;
+}
+
+/// Why [text] reads like instructions smuggled to a model, or null. A cheap
+/// heuristic for stores that carry text into later sessions (memory, notes):
+/// overriding the rules, a new role or system prompt, forged tags, hiding
+/// something from the user, or sending secrets or the conversation somewhere.
+/// Notes addressed to "the agent" are fine; the wrapper is the real backstop.
+String? smugglingProblem(String text) {
+  final t = stripHidden(text).replaceAll(RegExp(r'\s+'), ' ');
+  for (final (pattern, why) in _smuggling) {
+    if (pattern.hasMatch(t)) return 'it reads like instructions to a model ($why)';
+  }
+  return null;
+}
+
+RegExp _ci(String p) => RegExp(p, caseSensitive: false);
+
+final _smuggling = [
+  (
+    _ci(
+      r'\b(ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+|your\s+)?(previous\s+|prior\s+|above\s+|'
+      r'earlier\s+|system\s+|safety\s+)?(instructions|rules|guidelines|prompts?)\b',
+    ),
+    'asks to ignore the rules',
+  ),
+  (_ci(r'\byou\s+are\s+now\b|\bnew\s+system\s+prompt\b'), 'gives the model a new role'),
+  (_ci(r'</?\s*(system|instructions?|memory|untrusted-content|everyai-[\w-]+)\b'), 'holds a forged tag'),
+  (
+    _ci(
+      r"\b(do\s+not|don'?t|never)\s+(tell|show|mention|reveal|inform)\b[^.\n]{0,40}\buser\b|"
+      r'\bwithout\s+(telling|informing)\s+the\s+user\b|\bwithout\s+the\s+user\s+(knowing|noticing)\b|'
+      r'\bhide\s+\w+\s+from\s+the\s+user\b',
+    ),
+    'asks to hide something from the user',
+  ),
+  (
+    _ci(
+      r'\b(send|post|upload|forward|leak|exfiltrate|transmit)\b[^\n]{0,80}(\.env\b|\b(secrets?|api[ _-]?keys?|'
+      r'(api|access|auth|secret)\s+tokens?|passwords?|credentials|conversation|chat\s+history|'
+      r'environment\s+variables)\b)',
+    ),
+    'asks to send secrets or the conversation somewhere',
+  ),
+];
 
 String _attr(String s) => s.replaceAll('"', "'").replaceAll(RegExp(r'[\r\n]+'), ' ');
 
