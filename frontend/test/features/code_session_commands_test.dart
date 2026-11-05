@@ -235,8 +235,8 @@ void main() {
     test('/cost adds one usage card', () async {
       final id = await startDemo();
       final controller = container.read(codeSessionProvider(id).notifier);
-      controller.showCost();
-      controller.showCost();
+      await controller.showCost();
+      await controller.showCost();
       final asides = container.read(codeSessionProvider(id)).asides;
       expect(asides.single.kind, AsideKind.cost);
     });

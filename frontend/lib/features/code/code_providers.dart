@@ -3657,13 +3657,25 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     }
   }
 
-  /// Shows the session's tokens and spend as an aside card (`/cost`).
-  void showCost() {
+  /// Shows the session's tokens and spend as an aside card (`/usage`). A lead that reports the plan's usage itself
+  /// ([ReportsPlanUsage], Claude Code's own `/usage`) adds its report to the card (the answer; an error when it can't).
+  Future<void> showCost() async {
     if (state.asides.any((a) => a.kind == AsideKind.cost)) return;
     if (ref.exists(codeUsageProvider(sessionId))) {
       ref.read(codeUsageProvider(sessionId).notifier).refreshSoon(delay: Duration.zero, force: true);
     }
-    _putAside(Aside(id: ++_asideIds, kind: AsideKind.cost));
+    final session = _session;
+    final reports = session is ReportsPlanUsage;
+    final aside = Aside(id: ++_asideIds, kind: AsideKind.cost, busy: reports);
+    _putAside(aside);
+    if (!reports) return;
+    try {
+      final text = await (session as ReportsPlanUsage).planUsage();
+      if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.done(text));
+    } on Object catch (e) {
+      final why = e is HarnessError ? e.message : '$e';
+      if (ref.mounted && state.asides.any((a) => a.id == aside.id)) _putAside(aside.failed(why));
+    }
   }
 
   /// Moves the session to [model] and/or [effort] ('' is the model's default)

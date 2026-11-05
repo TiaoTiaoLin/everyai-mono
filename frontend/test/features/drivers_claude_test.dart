@@ -907,6 +907,36 @@ void main() {
       },
     );
 
+    test("/usage: Claude Code's own report from a headless run that calls no model", () async {
+      const report = 'Current week (all models): 35% used · resets Nov 10 at 7:59pm';
+      final usage = ReplayChannel(
+        jsonEncode({
+          'dir': 'in',
+          'msg': {'type': 'result', 'subtype': 'success', 'is_error': false, 'result': '$report\n'},
+        }),
+      );
+      final s = _Spawner([usage]);
+      final session = await driver(s).start(_spec());
+      expect(await (session as ReportsPlanUsage).planUsage(), report);
+      final args = s.calls.single.args;
+      expect(args, containsAllInOrder(['-p', '/usage']));
+      expect(args, containsAll(['--no-session-persistence', '--strict-mcp-config']));
+      expect(args, isNot(contains('--resume')));
+      await session.close();
+    });
+
+    test('/usage that errors says so', () async {
+      final usage = ReplayChannel(
+        jsonEncode({
+          'dir': 'in',
+          'msg': {'type': 'result', 'subtype': 'success', 'is_error': true, 'result': 'Not signed in'},
+        }),
+      );
+      final session = await driver(_Spawner([usage])).start(_spec());
+      await expectLater((session as ReportsPlanUsage).planUsage(), throwsA(isA<HarnessError>()));
+      await session.close();
+    });
+
     test('/btw before the first message ran asks a fresh, unsaved process', () async {
       final aside = ReplayChannel(
         [

@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/widgets.dart';
 
 import '../../../../core/theme/every_theme.dart';
@@ -89,6 +90,29 @@ class AsideCard extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(line, style: theme.type.callout.tint(theme.textMuted)),
+            ),
+          // The lead's own report of the plan (Claude Code's /usage): waiting, its text, or why there is none.
+          if (aside.busy)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(
+                children: [
+                  const EveryMarkActivity(activity: MarkActivity.thinking, size: 14),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('Getting your plan usage…', style: theme.type.callout.tint(theme.textMuted))),
+                ],
+              ),
+            )
+          else if (aside.error case final error?)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(error, style: theme.type.callout.tint(theme.textMuted)),
+            )
+          else if (aside.answer.isNotEmpty)
+            Padding(
+              key: const ValueKey('usage.plan-report'),
+              padding: const EdgeInsets.only(top: 10),
+              child: SelectableText(aside.answer, style: theme.type.callout.mono),
             ),
         ],
       ),

@@ -27,6 +27,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:every_ai/features/code/harness/events.dart' show PlanLimits, PlanWindow;
 import 'package:go_router/go_router.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
@@ -245,6 +246,21 @@ void main() {
       expect(find.text('≈500'), findsOneWidget);
       expect(find.textContaining('Harness (not itemised)'), findsOneWidget);
       expect(find.textContaining('estimated from length'), findsOneWidget);
+    });
+
+    test('usage lines: each plan window the lead reported, with its reset', () {
+      final now = DateTime(2026, 11, 5, 12);
+      final plan = PlanLimits.of(
+        id: 'x',
+        windows: [
+          PlanWindow(name: 'seven_day', used: 0.35, resetsAt: DateTime(2026, 11, 5, 19, 59).toUtc(), minutes: 10080),
+          const PlanWindow(name: 'five_hour', used: 0.1, minutes: 300),
+        ],
+      );
+      final lines = usageLines(totals: UsageTotals.zero, plan: plan, outsideLabel: 'Claude Code', now: now);
+      expect(lines, containsAllInOrder(['This week: 35% used · resets 19:59', '5-hour window: 10% used']));
+      expect(lines.any((l) => l.contains('not reported')), isFalse);
+      expect(planWindowName(const PlanWindow(name: 'seven_day_opus', used: 0, minutes: 10080)), 'This week (Opus)');
     });
 
     test('Usage shows a reached limit with its reset time, and says when a harness reports none', () {

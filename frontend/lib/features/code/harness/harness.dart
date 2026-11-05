@@ -381,6 +381,11 @@ abstract interface class HasContextParts {
 /// in a throwaway fork of its conversation: the session itself is neither
 /// interrupted nor told, and the fork isn't kept. It runs on the user's own
 /// account for that CLI (EveryAI spends nothing).
+/// A session whose harness reports the user's plan usage and limits itself (Claude Code's `/usage`), as text to show.
+abstract interface class ReportsPlanUsage {
+  Future<String> planUsage();
+}
+
 abstract interface class AnswersSideQuestion {
   /// The answer to [question], or a [HarnessError] saying why there is none.
   Future<String> sideAnswer(String question);

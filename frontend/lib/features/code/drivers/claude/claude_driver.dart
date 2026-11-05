@@ -449,7 +449,7 @@ typedef _Held = ({String requestId, bool hook, String name, Map<String, Object?>
 /// One Claude Code conversation. Refusing a call doesn't stop the run (the
 /// model is told and carries on); [resume] runs a stopped or failed turn on.
 final class ClaudeSession
-    implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes, AnswersSideQuestion {
+    implements HarnessSession, PerCallApprovals, HasNativeCommands, NativeModes, AnswersSideQuestion, ReportsPlanUsage {
   ClaudeSession._(this._driver, this.id, this._dir, this._meta, this._briefing, this._journal)
     : _commands = NativeCommandList(_meta.commands),
       _modes = NativeModeFeed((modes: claudeModes(autoMode: _meta.autoMode), current: _meta.permissionMode));
@@ -707,6 +707,30 @@ final class ClaudeSession
     _respawn = false;
     await _sub?.cancel();
     await c?.close();
+  }
+
+  /// `/usage`: Claude Code's own report of the plan's windows, from a short
+  /// headless process that calls no model ([claudeUsageArgs]).
+  @override
+  Future<String> planUsage() async {
+    final c = await _driver._spawn(
+      claudeUsageArgs,
+      cwd: _meta.cwd,
+      env: const {},
+      sessionTag: _meta.sessionTag,
+      logPath: '$_dir/$id-usage.log',
+    );
+    try {
+      final reply = await c.lines
+          .map(_json)
+          .firstWhere((j) => j?['type'] == 'result', orElse: () => null)
+          .timeout(const Duration(seconds: 45));
+      return claudeUsageText(reply) ?? (throw const HarnessError("Claude Code didn't report your plan usage."));
+    } on TimeoutException {
+      throw const HarnessError('Claude Code took too long to report your plan usage.');
+    } finally {
+      await c.close();
+    }
   }
 
   /// `/btw`: a second CLI process on a fork of this conversation that isn't

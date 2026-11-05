@@ -17,6 +17,7 @@ import '../../models/models_providers.dart';
 import '../../questions/ui/question_card.dart';
 import '../../usage/usage_totals.dart';
 import '../code_providers.dart';
+import '../limit_providers.dart' show codePlanLimitsProvider;
 import '../morning_providers.dart';
 import '../domain/agent_mode.dart';
 import '../domain/code_session.dart';
@@ -316,7 +317,12 @@ class CodeSessionScreen extends ConsumerWidget {
                                                     ref.watch(codeUsageProvider(sessionId)).value ?? UsageTotals.zero,
                                                 budget: ref.watch(codeSettingsProvider).budgets[sessionId],
                                                 limit: controller.limitPick?.limit,
-                                                outsideLabel: isOutsideLead(info.harness, info.workingDir)
+                                                plan: ref.watch(codePlanLimitsProvider(sessionId)),
+                                                // The lead's own report (below) says what it knows of the plan.
+                                                outsideLabel:
+                                                    isOutsideLead(info.harness, info.workingDir) &&
+                                                        !aside.busy &&
+                                                        aside.answer.isEmpty
                                                     ? (driver?.info.label ?? info.harness)
                                                     : null,
                                               ).skip(1).toList(),

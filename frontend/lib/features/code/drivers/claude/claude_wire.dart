@@ -208,6 +208,28 @@ List<String> claudeAsideArgs({required String sessionId, required bool resume, S
   ];
 }
 
+/// Claude Code's own `/usage`, run headless: a local command (no model call, nothing spent) that answers with the
+/// plan's windows ("Current week (all models): 35% used · resets …") and what used them. Nothing is saved.
+const claudeUsageArgs = [
+  '-p',
+  '/usage',
+  '--output-format',
+  'json',
+  '--no-session-persistence',
+  '--strict-mcp-config',
+  ..._userSettingsOnly,
+];
+
+/// The text of `/usage`'s reply ([claudeUsageArgs]), or null when it gave none or an error.
+String? claudeUsageText(Object? reply) {
+  if (reply is! Map<String, Object?> || reply['is_error'] == true) return null;
+  final text = switch (reply['result']) {
+    final String t => t.trim(),
+    _ => '',
+  };
+  return text.isEmpty ? null : text;
+}
+
 /// The `/btw` message the side process gets.
 /// Prompt reason: the fork must answer, not carry on with the session's task.
 String asideMessage(String question) =>
