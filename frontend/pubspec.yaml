@@ -1,7 +1,7 @@
 name: every_ai
 description: "EveryAI: every AI model in one app."
 publish_to: 'none'
-version: 0.1.0-dev-nonsigned+1
+version: 0.1.0-alpha.1+2
 
 environment:
   sdk: ^3.13.0

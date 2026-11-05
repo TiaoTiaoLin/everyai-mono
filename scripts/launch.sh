@@ -106,7 +106,7 @@ if [[ "$MODE" == build ]]; then
     apk | android) flutter build apk --release "${ARGS[@]}" "${EXTRA[@]+"${EXTRA[@]}"}"; OUT="build/app/outputs/flutter-apk/app-release.apk" ;;
     *) die "Can't build '$TARGET' here: use macos, linux, windows, web or apk." ;;
   esac
-  say "Built (unsigned, 0.1.0-dev-nonsigned): frontend/$OUT"
+  say "Built (unsigned local build): frontend/$OUT"
   [[ "$TARGET" == macos ]] && say "Open it: open \"frontend/$OUT\""
   exit 0
 fi

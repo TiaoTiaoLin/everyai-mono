@@ -1,6 +1,6 @@
-# EveryAI Dev Build Terms (0.1.0-dev-nonsigned, pre-alpha)
+# EveryAI Dev Build Terms (0.1.0-alpha.1, alpha)
 
-You accept these when you enter the app. They cover pre-alpha developer builds only.
+You accept these when you enter the app. They cover alpha and developer builds only.
 
 - EveryAI is provided as-is, with no warranty, for testing only.
 - You are responsible for your API keys and what they cost. EveryAI never stores your keys on its server.

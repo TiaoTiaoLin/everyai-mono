@@ -1,7 +1,18 @@
 # Changelog
 
-EveryAI is a pre-alpha dev build. Versions start at `0.1.0-dev-nonsigned`; until signed releases begin, changes are
-listed by date and pull request.
+EveryAI is in alpha. Signed releases start at `0.1.0-alpha.1`; the earlier unsigned dev build was
+`0.1.0-dev-nonsigned`. Earlier changes are listed by date and pull request.
+
+## 0.1.0-alpha.1 (2026-11-05): the first signed release
+
+- **macOS:** a Developer ID signed, notarized and stapled DMG on
+  [GitHub Releases](https://github.com/xuckless/everyai-mono/releases), also through Homebrew
+  (`brew install --cask xuckless/tap/everyai`).
+- **Windows:** the [Microsoft Store](https://apps.microsoft.com/detail/9PHCKCV3J9S9) (the Store signs the MSIX), or
+  `winget install --source msstore 9PHCKCV3J9S9`.
+- **Linux:** an AppImage and a .deb with GPG signatures and `SHA256SUMS` on GitHub Releases
+  (key: `packaging/linux/everyai-release-key.asc`).
+- A [privacy policy](PRIVACY.md) for the store listings. The first-launch tour shows again for the new version.
 
 ## 2026-11-05: the console layout (PR #8)
 

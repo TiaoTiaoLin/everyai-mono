@@ -682,6 +682,10 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
   Linux: `packaging/linux/package.sh` → AppImage + .deb (Deno next to the binary), SHA256SUMS, GPG `.asc` signatures
   (key `packaging/linux/everyai-release-key.asc`); release job on Ubuntu 22.04. Checked in an Ubuntu 22.04 container:
   the .deb installs, desktop file valid, signatures verify. Flathub is off the table (no AI-written manifests/PRs).
+- **0.1.0-alpha.1, the first signed release (2026-11-05).** `-dev-nonsigned` dropped: pubspec `0.1.0-alpha.1+2`,
+  `appVersion`, the terms, README (downloads → latest GitHub Release, the Microsoft Store listing 9PHCKCV3J9S9, the
+  Homebrew tap `xuckless/homebrew-tap`), CHANGELOG. Tag `v0.1.0-alpha.1` runs `release.yml`. Dev builds stay unsigned
+  (`0.1.0-alpha.1-unsigned`). Next versions: bump pubspec + `appVersion` together, tag `v<version>`.
 
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).

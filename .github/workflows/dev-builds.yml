@@ -18,7 +18,7 @@ permissions:
 
 env:
   FLUTTER_VERSION: 3.47.9
-  VERSION: 0.1.0-dev-nonsigned
+  VERSION: 0.1.0-alpha.1-unsigned
   API_BASE_URL: ${{ inputs.api || 'https://everyai.136-108-68-64.sslip.io:8443' }}
 
 jobs:

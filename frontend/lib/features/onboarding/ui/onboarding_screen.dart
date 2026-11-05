@@ -33,7 +33,7 @@ const devBuildTerms = [
   'The software is licensed under FSL-1.1-ALv2 (see LICENSE).',
 ];
 
-/// The pre-alpha entry screen: a short guided tour that ends with the user
+/// The alpha entry screen: a short guided tour that ends with the user
 /// accepting the dev-build terms. Shown once per [appVersion].
 class OnboardingScreen extends ConsumerStatefulWidget {
   const OnboardingScreen({super.key, this.desktop});
@@ -80,7 +80,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
                   const SizedBox(width: 10),
                   Text('EveryAI', style: theme.type.headline.semibold.tint(theme.text)),
                   const Spacer(),
-                  Text('$appVersion · pre-alpha', style: theme.type.caption.mono.tint(theme.textMuted)),
+                  Text('$appVersion · alpha', style: theme.type.caption.mono.tint(theme.textMuted)),
                 ],
               ),
             ),
@@ -337,7 +337,7 @@ class _Welcome extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = EveryTheme.of(context);
     return Text(
-      'This is a pre-alpha developer build of EveryAI: one workspace for chatting with any model and coding with '
+      'This is an alpha build of EveryAI: one workspace for chatting with any model and coding with '
       "any agent. It isn't finished, it isn't signed, and it changes every day. Here's what you need to know "
       'before you start.',
       style: theme.type.body.tint(theme.textMuted),
@@ -723,7 +723,7 @@ class _AgreeState extends State<_Agree> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    "I understand this is an experimental pre-alpha build that may have bugs and lose data. I'll "
+                    "I understand this is an experimental alpha build that may have bugs and lose data. I'll "
                     'use it for testing until it is stable, and I accept the Dev Build Terms.',
                     style: theme.type.body.tint(theme.text),
                   ),
