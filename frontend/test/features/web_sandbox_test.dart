@@ -67,6 +67,23 @@ void main() {
       final head = page.substring(0, page.indexOf('<iframe'));
       expect(head, contains('http-equiv="Content-Security-Policy"'));
       expect(head, contains('default-src'));
+      // So the frame can't navigate itself to a remote page (Android doesn't ask the app for subframes).
+      expect(head, contains("frame-src 'none'"));
+    });
+
+    test('pages that run script lose DNS prefetching and WebRTC before the content', () {
+      const html = '<p>content</p>';
+      final doc = sandboxedDocument(html, surface: WebSurface.page, interactive: true);
+      final at = doc.indexOf(html);
+      expect(
+        doc.indexOf('x-dns-prefetch-control'),
+        allOf(greaterThan(doc.indexOf('Content-Security-Policy')), lessThan(at)),
+      );
+      expect(doc.indexOf('RTCPeerConnection'), allOf(greaterThan(0), lessThan(at)));
+      expect(doc, contains('RTCDataChannel'));
+      final static = sandboxedDocument(html, surface: WebSurface.page, interactive: false);
+      expect(static, isNot(contains('RTCPeerConnection')));
+      expect(static, isNot(contains('x-dns-prefetch-control')));
     });
   });
 
@@ -232,7 +249,7 @@ void main() {
       '<svg viewBox="0 0 10 10"><defs><linearGradient id="g"/></defs>'
       '<style>@import url(https://evil.example/a.css); .a{fill:url(#g)} .b{background:url("https://evil.example/t")}</style>'
       '<use href="#shape"/><use xlink:href="data:image/svg+xml;base64,AAA"/>'
-      '<image href="data:image/png;base64,AAAA"/><a href="javascript:x()"><rect onmouseover=x() width="1"/></a>'
+      '<image href="data:image/png;base64,AAAA"/><a href="javascript:x()"><rect onmouseover="x()" width="1"/></a>'
       '<script src="https://evil.example/s.js"/></svg>',
     );
     expect(clean, contains('href="#shape"'));
@@ -243,5 +260,64 @@ void main() {
     expect(clean, isNot(contains('svg+xml')));
     expect(clean, isNot(contains('onmouseover')));
     expect(clean, isNot(contains('<script')));
+  });
+
+  group('sanitizeSvg on a parsed tree', () {
+    const svgOpen =
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:x="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">';
+
+    test('drops prefixed scripts, prefixed outside hrefs and animation', () {
+      final clean = sanitizeSvg(
+        '$svgOpen<svg:script xmlns:svg="http://www.w3.org/2000/svg">steal()</svg:script>'
+        '<image x:href="https://evil.example/p.png"/>'
+        '<a href="#a"><set attributeName="href" to="javascript:steal()"/>'
+        '<animate attributeName="href" values="javascript:steal()"/><text>t</text></a>'
+        '<foreignObject><div>x</div></foreignObject></svg>',
+      );
+      expect(clean, isNot(contains('script')));
+      expect(clean, isNot(contains('evil.example')));
+      expect(clean, isNot(contains('<set')));
+      expect(clean, isNot(contains('<animate')));
+      expect(clean, isNot(contains('foreignObject')));
+      expect(clean, contains('<text>t</text>'));
+    });
+
+    test('drops a doctype whose entity would expand to markup', () {
+      final clean = sanitizeSvg(
+        '<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY e "&#60;script&#62;steal()&#60;/script&#62;">]>'
+        '$svgOpen<text>&e;</text></svg>',
+      );
+      expect(clean, isNot(contains('DOCTYPE')));
+      expect(clean, isNot(contains('ENTITY')));
+      expect(clean, isNot(contains('<script')));
+    });
+
+    test('refuses CSS that hides a fetch', () {
+      final clean = sanitizeSvg(
+        '$svgOpen<rect style="background:u\\72l(https://evil.example/a)" width="1"/>'
+        '<rect style="fill:image-set(\'https://evil.example/b\' 1x)" width="2"/>'
+        '<style>.c{background:image-set("https://evil.example/c" 1x)}</style></svg>',
+      );
+      expect(clean, isNot(contains('evil.example')));
+      expect(clean, contains('width="1"'));
+      expect(clean, contains('width="2"'));
+    });
+
+    test('keeps fragment uses, gradients and inline PNGs', () {
+      final clean = sanitizeSvg(
+        '$svgOpen<defs><linearGradient id="g"><stop offset="0"/></linearGradient></defs>'
+        '<rect fill="url(#g)" width="5" height="5"/><use x:href="#g"/>'
+        '<image href="data:image/png;base64,AAAA"/></svg>',
+      );
+      expect(clean, contains('url(#g)'));
+      expect(clean, contains('x:href="#g"'));
+      expect(clean, contains('<stop'));
+      expect(clean, contains('data:image/png;base64,AAAA'));
+    });
+
+    test('invalid XML and non-SVG documents give nothing', () {
+      expect(sanitizeSvg('<svg><rect></svg>'), '');
+      expect(sanitizeSvg('<html><script>x()</script></html>'), '');
+    });
   });
 }
