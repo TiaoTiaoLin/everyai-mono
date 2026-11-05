@@ -57,6 +57,18 @@ jobs:
             "$API_BASE_URL" > "$RUNNER_TEMP/defines.json"
       - run: flutter pub get
       - run: flutter build ${{ matrix.platform }} --release --dart-define-from-file="$RUNNER_TEMP/defines.json"
+      - name: Store MSIX (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          V="$(grep -m1 '^version:' pubspec.yaml | sed 's/version: *//; s/[-+].*//')"
+          dart run msix:create --store --build-windows false --version "$V.0" \
+            --output-path build/msix --output-name "EveryAI-$V"
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'windows'
+        with:
+          name: everyai-${{ env.VERSION }}-windows-store-msix
+          path: frontend/build/msix/*.msix
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: everyai-${{ env.VERSION }}-${{ matrix.platform }}-x64
