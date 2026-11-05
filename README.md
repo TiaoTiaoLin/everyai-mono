@@ -13,7 +13,7 @@
 <a href="https://apps.microsoft.com/detail/9PHCKCV3J9S9"><img alt="Windows" src="https://img.shields.io/badge/Microsoft%20Store-get%20it-0078D4?style=for-the-badge&logo=windows11&logoColor=white"/></a>
 <a href="https://github.com/xuckless/everyai-mono/releases/latest"><img alt="Linux" src="https://img.shields.io/badge/Linux-download-FCC624?style=for-the-badge&logo=linux&logoColor=black"/></a>
 <br/>
-<a href="https://github.com/xuckless/everyai-mono/releases"><img alt="alpha 0.1.0-alpha.1, signed" src="https://img.shields.io/badge/alpha-0.1.0--alpha.1%20·%20signed-FF6B9A?style=flat-square"/></a>
+<a href="https://github.com/xuckless/everyai-mono/releases"><img alt="alpha 0.1.0-alpha.2, signed" src="https://img.shields.io/badge/alpha-0.1.0--alpha.2%20·%20signed-FF6B9A?style=flat-square"/></a>
 <br/><br/>
 
 <img src="docs/readme/console.webp" alt="A Code session: each turn's work folded into a box, a subagent, and Session info in the right panel" width="92%"/>

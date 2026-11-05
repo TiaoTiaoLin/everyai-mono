@@ -1,4 +1,4 @@
-# EveryAI Dev Build Terms (0.1.0-alpha.1, alpha)
+# EveryAI Dev Build Terms (0.1.0-alpha.2, alpha)
 
 You accept these when you enter the app. They cover alpha and developer builds only.
 

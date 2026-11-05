@@ -3,12 +3,29 @@
 EveryAI is in alpha. Signed releases start at `0.1.0-alpha.1`; the earlier unsigned dev build was
 `0.1.0-dev-nonsigned`. Earlier changes are listed by date and pull request.
 
-## Unreleased
+## 0.1.0-alpha.2 (2026-11-05): updates in the app, and the prober fixes
 
 - **Updates without reinstalling.** Each launch checks GitHub Releases (Settings → About: Check now, and "Get
   pre-releases"). The macOS release downloads the update quietly through Sparkle and shows "Restart to update" in the
   sidebar. A Linux AppImage downloads the new AppImage, checks it against the signed `SHA256SUMS` and replaces itself.
-  The .deb offers the download. Microsoft Store installs keep updating through the Store.
+  The .deb offers the download. Microsoft Store installs keep updating through the Store. This release is the first
+  that can update itself; from 0.1.0-alpha.1, install it once by hand.
+- **Workflows:** workflow agents get proof tools (`bug_check`, `check`, `diff_stats`, `report_issue`). Bug fix
+  reproduces and verifies through `bug_check` and asks for the bug, steps and expected result when the report is
+  thin. Ultra runs research → implement → review → refix for each item and loads only the plan it wrote or the one
+  you picked. Results read verdict first (status, cost, agents, time) with the raw JSON folded under Details. The same
+  finding from several review lenses is merged. Finished work asks: Commit here, New branch or Leave uncommitted.
+  Finished runs can be dismissed.
+- **Outside leads (Claude Code and others):** `screenshot`, `browser` and `app_run` through EveryAI's MCP tools. The
+  session's own apps are free; other windows ask once. Fork reports and workflow results arrive as signed
+  `<everyai-notice>` blocks, never as plain user messages. Claude Code skills can be turned off per project.
+- **Approvals:** every card and refusal says why it asked (the rule, the mode or the safety floor). Writes to the
+  project's scratch folder and the temp folder don't ask (except in Plan). "Allow for all forks" covers sibling forks.
+  Forks, subagents and workflow agents start in the parent's mode, Full auto and Claude Code's native auto included.
+- **Sessions:** `/usage` shows plan windows and Claude Code's own report; Running work groups fold; subagent chats
+  say plainly they aren't the main chat; the right panel sits beside the transcript whenever both fit.
+- **Layout:** every screen starts below the top bar; rows of text and buttons wrap instead of overflowing; short
+  windows scroll instead of cutting off. New layout tests cover every screen and card in all four design languages.
 
 ## 0.1.0-alpha.1 (2026-11-05): the first signed release
 
