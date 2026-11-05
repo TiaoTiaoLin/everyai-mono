@@ -354,6 +354,53 @@ void main() {
       expect(events.map(usageLimitOf).nonNulls, isEmpty);
     });
 
+    test('rate_limit_event: how much of each window is used, before the limit (recorded + hand-written)', () {
+      final d = ClaudeDecoder();
+      // Recorded (run2 c1-traffic): allowed, one seven-day window.
+      final recorded =
+          d.decode({
+                'type': 'rate_limit_event',
+                'uuid': 'rl-1',
+                'rate_limit_info': {
+                  'status': 'allowed',
+                  'resetsAt': 1800000000,
+                  'rateLimitType': 'seven_day',
+                  'unifiedWindows': {
+                    'seven_day': {'utilization': 0.1, 'resetsAt': 1800000000, 'status': 'allowed'},
+                  },
+                },
+              }).single
+              as PlanLimits;
+      final w = recorded.windows.single;
+      expect((w.name, w.used, w.minutes, recorded.warning), ('seven_day', 0.1, 10080, false));
+      expect(w.resetsAt, DateTime.fromMillisecondsSinceEpoch(1800000000 * 1000, isUtc: true));
+      // Round-trips through raw, as the mirror and the journal carry it.
+      final again = HarnessEvent.decode(recorded.raw) as PlanLimits;
+      expect((again.windows.single.used, again.windows.single.resetsAt, again.warning), (0.1, w.resetsAt, false));
+
+      // Hand-written, not recorded: a warning on the five-hour window, a percent.
+      final warned =
+          d.decode({
+                'type': 'rate_limit_event',
+                'rate_limit_info': {
+                  'status': 'allowed_warning',
+                  'unifiedWindows': {
+                    'five_hour': {'utilization': 82, 'status': 'allowed_warning'},
+                  },
+                },
+              }).single
+              as PlanLimits;
+      expect((warned.windows.single.used, warned.windows.single.minutes, warned.warning), (0.82, 300, true));
+      // No number at all: nothing to show.
+      expect(
+        d.decode({
+          'type': 'rate_limit_event',
+          'rate_limit_info': {'status': 'allowed'},
+        }),
+        isEmpty,
+      );
+    });
+
     test('the limit is cleared by the turn it ended', () {
       final d = ClaudeDecoder();
       d.decode(apiError('limit', api: 'model_requires_usage_credits'));

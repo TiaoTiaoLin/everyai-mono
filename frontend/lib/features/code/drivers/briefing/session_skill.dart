@@ -1,3 +1,4 @@
+import '../../../../core/config/version.dart';
 import '../../domain/agent_mode.dart';
 import 'briefing_types.dart';
 import 'skill_render.dart';
@@ -105,6 +106,36 @@ String sessionBriefing(SessionSkillInput input) {
     ..writeln('- Ask the user when a decision is theirs (scope, design, trade-offs) and the code cannot answer it.')
     ..writeln('  Otherwise decide and go on.')
     ..writeln('- Say what you changed and what you did not check when you finish.')
+    ..writeln()
+    ..writeln('## Prefer EveryAI\'s tools')
+    ..writeln()
+    ..writeln(
+      'Where one of the EveryAI tools, skills or workflows in this briefing fits, use it before a method of your own (for example',
+    )
+    ..writeln('`check` rather than guessing which tests to run). The user\'s own instructions always come first.')
+    ..writeln()
+    ..writeln('## Reporting EveryAI problems')
+    ..writeln()
+    ..writeln(
+      'If an EveryAI tool misbehaves, gives a confusing result, or you have a review of one, you may report it,',
+    )
+    ..writeln(
+      'but only after the user says yes. Ask once per problem, and never again after a no. Draft the issue (the',
+    )
+    ..writeln(
+      'tool, what you expected, what happened, then a last line `Harness: <you> · Model: <your model> · App: $appVersion`) and show it. Leave out code, file',
+    )
+    ..writeln(
+      'paths, secrets and anything from the user\'s project or prompts. Search open issues first (`gh issue list',
+    )
+    ..writeln('-R xuckless/everyai-mono --search "..."`) and comment on a match instead of opening a new one. After a')
+    ..writeln(
+      'yes: with `gh` signed in, `gh issue create -R xuckless/everyai-mono --label feedback`; otherwise call `report_issue` (if',
+    )
+    ..writeln(
+      'listed above) and give the user the link it returns. Sub-agents and forks do not report; they put the problem in',
+    )
+    ..writeln('their report to the lead.')
     ..writeln()
     ..writeln('## This session')
     ..writeln()

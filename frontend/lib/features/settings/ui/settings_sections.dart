@@ -48,7 +48,7 @@ Widget settingsSectionBody(SettingsSection section, Map<String, String> args) =>
     scope: args['scope'] == null ? null : SettingsScope.parse(args['scope']),
   ),
   SettingsSection.permissions => const PermissionsSection(),
-  SettingsSection.mcp => const McpSettingsBody(),
+  SettingsSection.mcp => McpSettingsBody(projectId: args['project']),
   SettingsSection.skills => const SkillsSettingsBody(),
   SettingsSection.agents => const AgentsSettingsBody(),
   SettingsSection.commands => const CustomCommandsBody(),

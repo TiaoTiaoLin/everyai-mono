@@ -7,6 +7,7 @@ Future<String> dataDir() async => '';
 Future<String?> repoRoot(String dir) async => null;
 Future<bool> hasCommits(String repoRoot) async => false;
 Future<List<String>> worktrees(String dir) async => const [];
+Future<Set<String>> ignoredAmong(String dir, List<String> paths) async => const {};
 Future<GitBaseline?> baseline(String dir) async => null;
 Future<SessionWorktree> createWorktree({
   required String repoRoot,
@@ -20,6 +21,9 @@ Future<List<FileDiff>> uncommittedDiff(SessionWorktree w) async => const [];
 Future<List<String>> commitSubjects(SessionWorktree w) async => const [];
 Future<String> remoteUrl(SessionWorktree w) async => '';
 Future<bool> ghReady(String dir) async => false;
+Future<bool> isDirty(SessionWorktree w) async => false;
+Future<String> headCommit(SessionWorktree w) async => '';
+Future<BranchPr?> prFor(SessionWorktree w) async => null;
 Future<void> revertHunk(SessionWorktree w, FileDiff file, int hunk) async => _unsupported();
 Future<bool> commitAll(SessionWorktree w, String message) async => _unsupported();
 Future<String> checkpoint(SessionWorktree w, int turn) async => _unsupported();

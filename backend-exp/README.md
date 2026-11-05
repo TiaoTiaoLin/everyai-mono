@@ -1,20 +1,21 @@
 # backend-exp
 
-The experimental EveryAI backend, written in Zig 0.17 on
-[Anole](https://github.com/xuckless/anole). It replaces `backend/` (FastAPI)
-with a `/v1` API: auth, an SSE chat gateway with a server-side tool loop, an
-OpenAI-compatible LLM gateway for coding agents (OpenHands), the model shop,
-image generation, and usage billing (plans + prepaid wallet, upstream cost × 1.15).
-All model traffic goes through OpenRouter.
+The optional EveryAI backend, written in Zig 0.17 on [Anole](https://github.com/xuckless/anole) 0.5.1. EveryAI's
+product is the app (the harness and orchestrator); outside coding agents don't need this server at all. It provides:
+
+- the **chat tool loop** (`/v1/chat/stream`, SSE) and an **OpenAI-compatible gateway** the EveryAI harness uses,
+  both running on the key the user adds in the app (BYOK: `X-Provider-Key-OpenRouter|Anthropic`);
+- the **model catalog**, images, and small side jobs (titles, follow-ups, `decide`);
+- the **remote-control relay** that pairs phones, tablets and browsers with a desktop (end-to-end encrypted).
+
+The dev build runs with no provider keys of its own. Accounts and billing exist in the code but are parked.
 
 ```
-cp .env.example .env    # then set OPENROUTER_API_KEY here or in the repo-root .env
-zig build run           # http://localhost:8080, API docs at /docs
+zig build run           # http://localhost:8080, API docs at /docs (no .env needed; add a key in the app)
 zig build test          # unit tests + routes in memory against a fake OpenRouter
 ```
 
-Anole is a path dependency (`../../../PersonalProjects/anole` in
-`build.zig.zon`) while both are developed together.
+Anole comes from its release tag (url + hash in `build.zig.zon`).
 
 | Area | Endpoints | Source |
 | --- | --- | --- |
@@ -90,7 +91,10 @@ cached_tokens, cache_write_tokens, charged_micros}` (one per upstream call),
 
 Cached and cache-write tokens are recorded per call in `usage_events`.
 
-## Billing
+## Billing (parked)
+
+Not used by the dev build (BYOK only); kept for later.
+
 
 - Amounts are integer micro-dollars; the charge is `ceil(cost × MARKUP)`.
 - A charge is debited from the plan's monthly included usage first, then from the wallet.

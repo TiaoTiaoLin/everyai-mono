@@ -4,6 +4,13 @@ Context for the next agent. Keep it current: update the **Progress log** and
 **Next steps** whenever you finish a step. Plans under `~/.claude/plans/` and the TODO*.md files are the
 owner's local notes (gitignored); the task board is the GitHub Project.
 
+## What EveryAI is (owner, 2026-11-04)
+A coding **harness and orchestrator for every coding agent**: Claude Code, Codex, OpenCode, ACP agents and our own
+EveryAI harness in one native workspace, with our workflows, checks, rewind and tools on top. **BYOK** (users' own keys
+and subscriptions; EveryAI spends nothing on sessions it doesn't lead), **local AI** next, and outside agents keep
+their **native feel**. OpenRouter is plumbing, not the product; billing is parked. Public docs: `README.md`,
+`docs/ROADMAP.md`, `docs/CODE_ROADMAP.md`, `docs/ARCHITECTURE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`.
+
 ## Rules (from the user — do not break)
 - **Commits:** author as your own git identity (the owner's agents commit as
   `xuckless` with the GitHub noreply address). **No Claude/AI identifiers**
@@ -56,7 +63,6 @@ owner's local notes (gitignored); the task board is the GitHub Project.
     the rail is 92px on macOS so the traffic lights fit inside it.
   - Tests: `flutter test` (app) and `packages/*` tests. Screenshots go through
     the seeded demo DB under the macOS container.
-- `backend/`: the legacy FastAPI app (uv). **Frozen**; being replaced by backend-exp.
 - `backend-exp/`: the new backend in **Zig 0.17.0 on Anole** (the `xuckless/anole`
   tag pinned in `build.zig.zon`). See `backend-exp/README.md`.
   - `zig build run` serves `:8080` with docs at `/docs`.
@@ -709,4 +715,4 @@ owner's local notes (gitignored); the task board is the GitHub Project.
 - OpenRouter: with native web search, citations are nondeterministic; `exa`
   always cites (~$0.007/search). The usage chunk comes last, before
   `[DONE]`; `: OPENROUTER PROCESSING` comments occur.
-- The old FastAPI backend on :8000 is no longer needed; backend-exp runs on :8080.
+- The old FastAPI backend (`backend/`) was removed on 2026-11-05; backend-exp is the only server.

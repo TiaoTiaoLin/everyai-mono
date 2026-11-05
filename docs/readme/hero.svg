@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-label="EveryAI: every AI model, one app">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 420" width="1280" height="420" role="img" aria-label="EveryAI: every coding agent, one workspace">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#14082D"/>
@@ -78,17 +78,17 @@
 
     <!-- Title -->
     <text x="380" y="190" font-size="92" font-weight="800" letter-spacing="-2" fill="url(#title)">EveryAI</text>
-    <text x="384" y="238" font-size="27" font-weight="500" fill="#ECE5FE" fill-opacity="0.9">Every AI model. One native app. A coding agent built in.</text>
-    <text x="384" y="276" font-size="17" fill="#BCADFF" fill-opacity="0.85" font-family="SFMono-Regular, Menlo, Consolas, monospace">$ everyai --chat --code --artifacts --6-platforms<tspan class="caret" fill="#2CCCEB">▍</tspan></text>
+    <text x="384" y="238" font-size="27" font-weight="500" fill="#ECE5FE" fill-opacity="0.9">Every coding agent. One workspace.</text>
+    <text x="384" y="276" font-size="17" fill="#BCADFF" fill-opacity="0.85" font-family="SFMono-Regular, Menlo, Consolas, monospace">$ everyai --your-agents --your-keys --local-soon<tspan class="caret" fill="#2CCCEB">▍</tspan></text>
 
     <!-- Pills -->
     <g font-size="15" font-weight="600">
-      <g class="pill p1"><rect x="384" y="314" width="96" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="432" y="335" text-anchor="middle" fill="#ECE5FE">Claude</text></g>
-      <g class="pill p2"><rect x="492" y="314" width="84" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="534" y="335" text-anchor="middle" fill="#ECE5FE">GPT</text></g>
-      <g class="pill p3"><rect x="588" y="314" width="100" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="638" y="335" text-anchor="middle" fill="#ECE5FE">Gemini</text></g>
-      <g class="pill p4"><rect x="700" y="314" width="112" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="756" y="335" text-anchor="middle" fill="#ECE5FE">DeepSeek</text></g>
-      <g class="pill p5"><rect x="824" y="314" width="96" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="872" y="335" text-anchor="middle" fill="#ECE5FE">Qwen</text></g>
-      <g class="pill p6"><rect x="932" y="314" width="170" height="32" rx="16" fill="#2CCCEB" fill-opacity="0.16" stroke="#2CCCEB" stroke-opacity="0.7"/><text x="1017" y="335" text-anchor="middle" fill="#CAF4FE">+ 380 more models</text></g>
+      <g class="pill p1"><rect x="384" y="314" width="130" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="449" y="335" text-anchor="middle" fill="#ECE5FE">Claude Code</text></g>
+      <g class="pill p2"><rect x="526" y="314" width="90" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="571" y="335" text-anchor="middle" fill="#ECE5FE">Codex</text></g>
+      <g class="pill p3"><rect x="628" y="314" width="116" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="686" y="335" text-anchor="middle" fill="#ECE5FE">OpenCode</text></g>
+      <g class="pill p4"><rect x="756" y="314" width="126" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="819" y="335" text-anchor="middle" fill="#ECE5FE">Antigravity</text></g>
+      <g class="pill p5"><rect x="894" y="314" width="92" height="32" rx="16" fill="#FFFFFF" fill-opacity="0.08" stroke="#9C85FC" stroke-opacity="0.55"/><text x="940" y="335" text-anchor="middle" fill="#ECE5FE">Cursor</text></g>
+      <g class="pill p6"><rect x="998" y="314" width="160" height="32" rx="16" fill="#2CCCEB" fill-opacity="0.16" stroke="#2CCCEB" stroke-opacity="0.7"/><text x="1078" y="335" text-anchor="middle" fill="#CAF4FE">+ any ACP agent</text></g>
     </g>
     <rect x="0.5" y="0.5" width="1279" height="419" rx="27.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
   </g>

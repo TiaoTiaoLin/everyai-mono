@@ -212,8 +212,17 @@ void main() {
       ),
     );
     expect(HarnessTier.offered, [HarnessTier.efficient, HarnessTier.thorough]);
+    // On the Effort page, which the root row names it on.
+    expect(find.text('Effort level'), findsNothing);
+    expect(find.text('Medium · Efficient'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('agent-menu.effort')));
+    await tester.pump();
     expect(find.text('Effort level'), findsOneWidget);
-    expect(find.text('Max'), findsNothing);
+    // Max is an effort row there, never a level.
+    expect(
+      find.descendant(of: find.byKey(const ValueKey('agent-menu.level')), matching: find.text('Max')),
+      findsNothing,
+    );
     await tester.tap(find.text('Thorough'));
     await tester.pump();
     expect(picks, [HarnessTier.thorough]);
@@ -261,7 +270,11 @@ void main() {
           ),
         ),
       );
+      await tester.tap(find.byKey(const ValueKey('agent-menu.effort')));
+      await tester.pump();
       expect(find.text('Effort level'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.back')));
+      await tester.pump();
       await tester.tap(find.byKey(const ValueKey('agent-menu.harness')));
       await tester.pump();
       expect(find.text('Turn on in Settings'), findsOneWidget);
@@ -285,8 +298,9 @@ void main() {
       expect(picked, ['deep@']);
       await tester.tap(find.byKey(const ValueKey('agent-menu.effort')));
       await tester.pump();
-      // Deep takes no effort; only the default is listed.
+      // Deep takes no effort; only the default is listed, and no EveryAI level.
       expect(find.byKey(const ValueKey('agent-menu.effort.low')), findsNothing);
+      expect(find.text('Effort level'), findsNothing);
     });
 
     testWidgets('an outside lead without a model list runs its default', (tester) async {
@@ -423,6 +437,73 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('agent-menu.harness')));
       await tester.pump();
       expect(find.byKey(const ValueKey('agent-menu.harness.everyai')), findsNothing);
+    });
+  });
+
+  group('opened at one page (a composer part)', () {
+    Future<({List<String> picks, List<String> closes})> show(
+      WidgetTester tester,
+      AgentMenuPage page, {
+      List<DriverModel>? driverModels,
+    }) async {
+      final picks = <String>[];
+      final closes = <String>[];
+      await tester.pumpWidget(
+        _host(
+          SizedBox(
+            width: 320,
+            height: 700,
+            child: AgentMenuPanel(
+              key: ValueKey('$page${driverModels != null}'),
+              initialPage: page,
+              groups: agentMenuGroups(_catalog),
+              model: driverModels == null ? 'anthropic/claude-opus-5.5' : 'fast',
+              effort: 'medium',
+              onChanged: (m, e) => picks.add('$m@$e'),
+              close: () => closes.add('closed'),
+              onLevel: (t) => picks.add(t.name),
+              driverModels: driverModels,
+            ),
+          ),
+        ),
+      );
+      return (picks: picks, closes: closes);
+    }
+
+    testWidgets('the Model page has no back row, and a pick closes it', (tester) async {
+      final r = await show(tester, AgentMenuPage.model);
+      expect(find.byKey(const ValueKey('agent-menu.back')), findsNothing);
+      expect(find.byKey(const ValueKey('agent-menu.model')), findsNothing);
+      expect(find.text('Anthropic'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.model.openai/gpt-6.1-sol')));
+      await tester.pump();
+      expect(r.picks, ['openai/gpt-6.1-sol@high']);
+      expect(r.closes, ['closed']);
+    });
+
+    testWidgets('the Effort page carries the EveryAI level, not for an outside lead', (tester) async {
+      final r = await show(tester, AgentMenuPage.effort);
+      expect(find.byKey(const ValueKey('agent-menu.back')), findsNothing);
+      expect(find.text('Effort level'), findsOneWidget);
+      await tester.tap(find.text('Thorough'));
+      await tester.pump();
+      expect(r.picks, ['thorough']);
+      // The level stays open for another pick; an effort closes the panel.
+      expect(r.closes, isEmpty);
+      await tester.tap(find.byKey(const ValueKey('agent-menu.effort.high')));
+      await tester.pump();
+      expect(r.picks.last, 'anthropic/claude-opus-5.5@high');
+      expect(r.closes, ['closed']);
+
+      await show(
+        tester,
+        AgentMenuPage.effort,
+        driverModels: const [
+          DriverModel(id: 'fast', label: 'Fast', efforts: ['low', 'high']),
+        ],
+      );
+      expect(find.text('Effort level'), findsNothing);
+      expect(find.byKey(const ValueKey('agent-menu.effort.low')), findsOneWidget);
     });
   });
 }

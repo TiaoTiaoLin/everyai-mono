@@ -248,6 +248,22 @@ void main() {
     expect(replay.whereType<ChatMessage>().first.text, 'make hello.py');
   });
 
+  test('the context parts are the system message as sent, then one schema per tool sent', () async {
+    gateway.reply(text: 'Done.');
+    final session = await harness.start(spec('look around'));
+    await drive(session);
+    final sent = gateway.requests.first;
+    final system = (sent['messages']! as List<Object?>).first! as Map<String, Object?>;
+    final parts = (session as HasContextParts).contextParts;
+    // Byte for byte: the parts don't change the cached prefix.
+    expect(parts.where((p) => p.kind.inPrompt).map((p) => p.text).join('\n\n'), system['content']);
+    final tools = parts.where((p) => !p.kind.inPrompt).toList();
+    expect(tools.map((p) => p.name), [
+      for (final t in (sent['tools']! as List<Object?>).cast<Map<String, Object?>>()) (t['function']! as Map)['name'],
+    ]);
+    expect(tools.every((p) => p.kind == ContextKind.tools), isTrue);
+  });
+
   group('usage limits', () {
     tearDown(() => EveryAISession.testRetryPolicy = null);
 
