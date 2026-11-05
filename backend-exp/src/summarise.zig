@@ -63,6 +63,7 @@ pub fn run(app: *App, req: *anole.Request, who: auth.Identity, session: ?[]const
     const url = std.mem.trim(u8, openrouter.jsonString(args, "url") orelse "", " \t\r\n");
     const question = std.mem.trim(u8, openrouter.jsonString(args, "question") orelse "", " \t\r\n");
     if (question.len == 0) return "Error: question is empty.";
+    if (try chat.leakRefusal(arena, url, true, sink)) |refusal| return refusal;
     var diag: safe_fetch.Diagnostics = .{};
     const page = fetcher.get(req.io, arena, url, "text/html,text/plain,application/xhtml+xml,*/*;q=0.5", &diag) catch |err|
         return std.fmt.allocPrint(arena, "Error: {s}.", .{try safe_fetch.reason(arena, err, diag)});

@@ -6,7 +6,8 @@ import '../style.dart';
 /// model output can carry injected text, and an image URL with data in its
 /// query would send that data out the moment it renders. They show the alt
 /// text and host, and load only when the user taps. `data:` images render at
-/// once; anything else shows the alt text.
+/// once; anything else shows the alt text. A [RemoteImageGate] above may ask
+/// once more before a tapped image loads.
 class MarkdownImage extends StatefulWidget {
   const MarkdownImage({super.key, required this.src, required this.alt, required this.style});
 
@@ -44,6 +45,13 @@ class _MarkdownImageState extends State<MarkdownImage> {
   void didUpdateWidget(MarkdownImage old) {
     super.didUpdateWidget(old);
     if (old.src != widget.src) _load = false;
+  }
+
+  Future<void> _tapped() async {
+    final src = widget.src;
+    final confirm = context.getInheritedWidgetOfExactType<RemoteImageGate>()?.confirm;
+    if (confirm != null && !await confirm(src)) return;
+    if (mounted && widget.src == src) setState(() => _load = true);
   }
 
   Widget _box(String text, {String? detail}) {
@@ -105,7 +113,7 @@ class _MarkdownImageState extends State<MarkdownImage> {
         label: 'Load image from $host',
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: () => setState(() => _load = true),
+          onTap: _tapped,
           child: MouseRegion(
             cursor: SystemMouseCursors.click,
             child: _box(widget.alt.isEmpty ? 'Image' : widget.alt, detail: 'Load from $host'),
@@ -122,4 +130,15 @@ class _MarkdownImageState extends State<MarkdownImage> {
       ),
     );
   }
+}
+
+/// Asks before a tapped remote image loads (see [MarkdownView.confirmRemoteImage]).
+/// Read at tap time only, so it never rebuilds the blocks below.
+class RemoteImageGate extends InheritedWidget {
+  const RemoteImageGate({super.key, required this.confirm, required super.child});
+
+  final Future<bool> Function(String src) confirm;
+
+  @override
+  bool updateShouldNotify(RemoteImageGate oldWidget) => false;
 }

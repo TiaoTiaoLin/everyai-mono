@@ -4,10 +4,13 @@ import 'package:archive/archive.dart';
 import 'package:flutter/services.dart';
 
 import '../checks/math_raster.dart';
+import '../checks/web_scripts.dart';
 import '../checks/webview_diagram_renderer.dart';
 import '../domain/artifact.dart';
 import '../domain/chart_spec.dart';
+import '../ui/renderers/sandbox.dart';
 import '../ui/renderers/slides_view.dart';
+import '../ui/renderers/svg_view.dart';
 import 'chart_svg.dart';
 import 'diagram_raster.dart';
 import 'doc_model.dart';
@@ -53,9 +56,19 @@ List<DownloadOption> downloadsOf(Visual v) {
           return bytes;
         }),
       ];
+    case VisualKind.html || VisualKind.widget:
+      // Saved inside the same sandbox and policy as on screen: opened from
+      // disk, raw model markup would run with no limits. Copy keeps the source.
+      final surface = v.kind == VisualKind.widget ? WebSurface.widget : WebSurface.page;
+      return [
+        DownloadOption('Web page', 'html', () async {
+          final page = await withBundledScripts(export.text);
+          return utf8Of(sandboxedHostPage(page, surface: surface, interactive: true));
+        }),
+      ];
     case VisualKind.svg:
       return [
-        DownloadOption('SVG', 'svg', () => utf8Of(export.text)),
+        DownloadOption('SVG', 'svg', () => utf8Of(sanitizeSvg(export.text))),
         DownloadOption('PNG', 'png', () async {
           final f = await rasterizeSvg(export.text, maxWidth: 1600, scale: 2);
           if (f == null) throw StateError('This illustration could not be drawn.');
@@ -94,8 +107,11 @@ List<DownloadOption> downloadsOf(Visual v) {
 
 /// [markdown] with each ```svg block written as inline `<svg>` HTML, which
 /// VS Code, Obsidian, Typora and most Markdown editors draw in place.
-String markdownWithInlineSvg(String markdown) =>
-    _replaceSvgFences(markdown, (svg, _) => '\n${svg.split('\n').where((l) => l.trim().isNotEmpty).join('\n')}\n');
+/// Figures are sanitized as on screen, since those editors run their script.
+String markdownWithInlineSvg(String markdown) => _replaceSvgFences(
+  markdown,
+  (svg, _) => '\n${sanitizeSvg(svg).split('\n').where((l) => l.trim().isNotEmpty).join('\n')}\n',
+);
 
 /// A zip of the Markdown with figures as `figures/figure-N.svg` files linked
 /// as images, the form GitHub and every viewer render.
@@ -107,7 +123,7 @@ Uint8List markdownZip(String markdown, String name) {
   }
 
   final text = _replaceSvgFences(markdown, (svg, n) {
-    add('$name/figures/figure-$n.svg', svg);
+    add('$name/figures/figure-$n.svg', sanitizeSvg(svg));
     return '![Figure $n](figures/figure-$n.svg)';
   });
   add('$name/$name.md', text);

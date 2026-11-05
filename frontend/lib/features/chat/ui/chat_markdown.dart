@@ -1,6 +1,5 @@
 import 'package:everyai_markdown/everyai_markdown.dart';
 import 'package:flutter/widgets.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/platform/platform_kind.dart';
 import '../../../core/theme/every_theme.dart';
@@ -9,6 +8,7 @@ import '../../artifacts/ui/renderers/chart_view.dart';
 import '../../artifacts/ui/renderers/svg_view.dart';
 import '../../artifacts/ui/renderers/web_view.dart';
 import '../domain/message.dart';
+import 'link_gate.dart';
 
 /// Markdown for chat content, styled from the app tokens so it matches every
 /// design language. The only place the app touches the renderer package.
@@ -36,15 +36,17 @@ class ChatMarkdown extends StatelessWidget {
           ? null
           : (index) {
               if (index >= 1 && index <= sources.length) {
-                launchUrl(sources[index - 1].url, mode: LaunchMode.externalApplication);
+                openOutside(context, sources[index - 1].url);
               }
             },
       onTapLink: (href) {
         final uri = Uri.tryParse(href);
         if (uri != null && (uri.scheme == 'https' || uri.scheme == 'http' || uri.scheme == 'mailto')) {
-          launchUrl(uri, mode: LaunchMode.externalApplication);
+          openOutside(context, uri);
         }
       },
+      // Remote images already wait for a tap; one whose address carries data asks first.
+      confirmRemoteImage: (src) => confirmRemote(context, Uri.parse(src)),
     );
   }
 

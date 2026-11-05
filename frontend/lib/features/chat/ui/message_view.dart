@@ -3,7 +3,6 @@ import '../../../core/ui/brand.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/platform/platform_kind.dart';
 import '../../../core/theme/every_theme.dart';
@@ -23,9 +22,12 @@ import '../../models/ui/model_avatar.dart';
 import '../chat_providers.dart';
 import '../domain/ask_user.dart';
 import '../domain/message.dart';
+import '../domain/security_alert.dart';
 import '../domain/suggest_mode.dart';
 import 'ask_user_card.dart';
 import 'chat_markdown.dart';
+import 'link_gate.dart';
+import 'security_alert_card.dart';
 import 'tool_steps.dart';
 
 /// One message. User turns are right-aligned bubbles with edit and copy on
@@ -490,7 +492,7 @@ class _SourceCardState extends State<_SourceCard> {
         onEnter: (_) => setState(() => _hover = true),
         onExit: (_) => setState(() => _hover = false),
         child: GestureDetector(
-          onTap: () => launchUrl(s.url, mode: LaunchMode.externalApplication),
+          onTap: () => openOutside(context, s.url),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 120),
             width: 184,
@@ -738,6 +740,7 @@ class _PartView extends StatelessWidget {
         conversationId: conversationId,
         isLatest: isLatest,
       ),
+      final ToolCallPart call when call.toolName == securityAlertTool => SecurityAlertCard(part: call),
       final ToolCallPart call when allLocalChatTools.contains(call.toolName) => LocalToolChip(part: call),
       final ToolCallPart call => InlineVisual(part: call, conversationId: conversationId),
       ArtifactPart(:final title) => Text(title, style: theme.type.body.tint(theme.accent)),
