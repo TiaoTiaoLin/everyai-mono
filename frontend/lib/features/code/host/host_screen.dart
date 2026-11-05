@@ -31,7 +31,8 @@ const screenshotSpec = <String, Object?>{
   'description':
       'Take a screenshot of a desktop app\'s window and look at it. Windows of apps this session started (run from '
       'your shell or by app_run, or built in this folder) are captured at once. To see another app\'s window, name '
-      'it with app or window_id: the user is asked once per window and may say no. The picture comes with the '
+      'it with app or window_id: the user is asked once per window and may say no. Password managers and banking '
+      'or payment pages are never captured. The picture comes with the '
       'result and its file path is in the text. macOS only for now; for web pages use browser.',
   'inputSchema': {
     'type': 'object',

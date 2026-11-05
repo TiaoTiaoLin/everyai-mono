@@ -313,7 +313,9 @@ final _specs = [
     'resize {width, height} · close.\n'
     '- Every action reports what the page logged since the last one (console errors, uncaught exceptions, '
     'failed requests); console reads it alone. screenshot returns the picture: look at it before saying a UI works.\n'
-    '- Add screenshot: true to any action to see the page right after it.',
+    '- Add screenshot: true to any action to see the page right after it.\n'
+    '- It never types into password, one-time code or payment fields nor submits their forms, and eval must not '
+    'either: the user does that. Downloads land in .everyai/scratch/downloads.',
     {
       'action': {
         'type': 'string',
@@ -353,7 +355,8 @@ final _specs = [
     ToolNames.screenshot,
     'Take a screenshot of a desktop app\'s window that this session started (a native, Flutter or Electron app you '
     'run here, or one built in this folder) and look at it. Other apps\' windows are the user\'s and are never '
-    'captured. macOS only for now; for web pages use browser instead.',
+    'captured, and password managers and banking or payment pages never are. macOS only for now; for web pages use '
+    'browser instead.',
     {
       'app': {'type': 'string', 'description': 'App or window name to pick, when the session runs several'},
     },
@@ -777,11 +780,19 @@ final class ToolRunner {
       app: app,
     );
     // Another app's window is the user's: never captured here.
-    if (pick case OwnWindow(:final window, :final others)) {
-      return captureFor(window, root: root, vision: vision, others: others);
+    if (pick case OwnWindow(:final window, :final others, :final skipped)) {
+      final shot = await captureFor(window, root: root, vision: vision, others: others);
+      return skipped.isEmpty || shot.isError
+          ? shot
+          : ToolOutput('${shot.text}\n${skippedText(skipped)}', images: shot.images);
     }
+    final skipped = switch (pick) {
+      NoWindow(:final skipped) => '${skippedText(skipped)} ',
+      _ => '',
+    };
     return ToolOutput(
-      'Error: no window of an app this session started${app == null || app.isEmpty ? '' : ' matching "$app"'}. Start '
+      'Error: ${skipped.trimLeft()}no window of an app this session started'
+      '${app == null || app.isEmpty ? '' : ' matching "$app"'}. Start '
       'the app from this session (bash with run_in_background) or open one built in this folder, wait for its '
       'window, then try again. Other apps\' windows are the user\'s and are not captured. For web pages use browser.',
       isError: true,

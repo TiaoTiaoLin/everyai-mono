@@ -772,6 +772,25 @@ void main() {
       expect(screen.captured, [8, 8]);
     });
 
+    test('a password manager or a banking page is never captured, not even in Bypass', () async {
+      final info = await start(mode: AgentMode.bypass);
+      await open(info.id);
+      screen.windows = [
+        mail,
+        (id: 9, pid: 90, owner: 'Bitwarden', title: 'My vault', width: 900, height: 700),
+        (id: 10, pid: 91, owner: 'Safari', title: 'Online Banking', width: 900, height: 700),
+      ];
+      final vault = await hostCall(info.id, screenshotTool, const {'app': 'Bitwarden'}).result;
+      expect(vault.isError, isTrue);
+      expect(vault.text, startsWith('Error: Skipped Bitwarden (a password manager): EveryAI never captures'));
+      final bank = await hostCall(info.id, screenshotTool, const {'window_id': 10}).result;
+      expect(bank.text, contains('Safari (looks like a banking or payment page)'));
+      // Bypass still captures an ordinary window of another app without asking.
+      expect((await hostCall(info.id, screenshotTool, const {'app': 'mail'}).result).isError, isFalse);
+      expect(screen.captured, [8]);
+      expect(stateOf(info.id).transcript.openQuestion, isNull);
+    });
+
     test("a refused window isn't captured", () async {
       final info = await start();
       final c = await open(info.id);

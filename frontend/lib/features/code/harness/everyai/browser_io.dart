@@ -11,7 +11,9 @@ import 'shell_io.dart' show killTree;
 /// browser or cookies), started on first use and stopped with the session.
 /// The agent opens pages (`http://localhost…`, `file://…`), clicks and types
 /// like a user (real mouse and key events), takes screenshots, runs scripts
-/// and reads what the page logged.
+/// and reads what the page logged. It never types into password or payment
+/// fields nor submits their forms ([_guardJs]), and its downloads land in
+/// [downloadDir].
 final class HeadlessBrowser {
   HeadlessBrowser({required this.profileDir, this.executable});
 
@@ -21,10 +23,22 @@ final class HeadlessBrowser {
   /// The browser to run; null finds Chrome, Chromium, Edge or Brave.
   final String? executable;
 
+  /// Where downloads go, set before the browser starts (the session's scratch
+  /// folder); null refuses downloads.
+  String? downloadDir;
+
   Process? _process;
   // Closed in close().
   // ignore: close_sinks
   WebSocket? _socket;
+  // The browser-level connection: the download folder holds while it is open.
+  // Closed in close().
+  // ignore: close_sinks
+  WebSocket? _browserSocket;
+
+  /// Downloads started and not yet finished, by guid, with their file names.
+  final _downloads = <String, String>{};
+  Completer<void>? _downloadsDone;
   var _nextId = 0;
   final _calls = <int, Completer<Map<String, Object?>>>{};
   // Lives as long as this object: the browser may start again after close.
@@ -94,6 +108,9 @@ final class HeadlessBrowser {
       '--no-default-browser-check',
       '--disable-extensions',
       '--disable-background-networking',
+      // Never the user's Keychain or keyring.
+      '--use-mock-keychain',
+      '--password-store=basic',
       '--hide-scrollbars',
       '--mute-audio',
       '--window-size=$width,$height',
@@ -133,7 +150,21 @@ final class HeadlessBrowser {
       client.close(force: true);
     }
     _socket!.listen(_onFrame, onDone: _closed, onError: (Object _) => _closed());
-    await Future.wait([_send('Page.enable'), _send('Runtime.enable'), _send('Log.enable'), _send('Network.enable')]);
+    _browserSocket = await WebSocket.connect(browserWs.toString());
+    _browserSocket!.listen(_onFrame, onError: (Object _) {});
+    final dir = downloadDir;
+    if (dir != null) Directory(dir).createSync(recursive: true);
+    await Future.wait([
+      _send('Page.enable'),
+      _send('Runtime.enable'),
+      _send('Log.enable'),
+      _send('Network.enable'),
+      _sendOn(_browserSocket, 'Browser.setDownloadBehavior', {
+        'behavior': dir == null ? 'deny' : 'allow',
+        'downloadPath': ?dir,
+        'eventsEnabled': true,
+      }),
+    ]);
     await _viewport();
   }
 
@@ -186,6 +217,20 @@ final class HeadlessBrowser {
         final r = p['response'] as Map<String, Object?>? ?? const {};
         final status = (r['status'] as num?)?.toInt() ?? 0;
         if (status >= 400) line = 'HTTP $status: ${r['url']}';
+      case 'Browser.downloadWillBegin':
+        _downloads['${p['guid']}'] = '${p['suggestedFilename'] ?? 'download'}';
+        _downloadsDone ??= Completer<void>();
+      case 'Browser.downloadProgress':
+        final state = p['state'];
+        if (state != 'completed' && state != 'canceled') break;
+        final name = _downloads.remove('${p['guid']}') ?? 'download';
+        line = state == 'completed'
+            ? 'Downloaded ${p['filePath'] ?? '$downloadDir/$name'}'
+            : 'Download canceled: $name${downloadDir == null ? ' (this browser takes no downloads)' : ''}';
+        if (_downloads.isEmpty) {
+          _downloadsDone?.complete();
+          _downloadsDone = null;
+        }
     }
     if (line == null) return;
     _log.add(line.length > 600 ? '${line.substring(0, 600)}…' : line);
@@ -194,14 +239,22 @@ final class HeadlessBrowser {
 
   void _closed() {
     _socket = null;
+    unawaited(_browserSocket?.close());
+    _browserSocket = null;
+    _downloads.clear();
+    _downloadsDone?.complete();
+    _downloadsDone = null;
     for (final c in _calls.values) {
       if (!c.isCompleted) c.completeError(const BrowserError('The browser closed.'));
     }
     _calls.clear();
   }
 
-  Future<Map<String, Object?>> _send(String method, [Map<String, Object?> params = const {}]) {
-    final socket = _socket;
+  Future<Map<String, Object?>> _send(String method, [Map<String, Object?> params = const {}]) =>
+      _sendOn(_socket, method, params);
+
+  /// Sends [method] on [socket]: the page's, or the browser's own.
+  Future<Map<String, Object?>> _sendOn(WebSocket? socket, String method, Map<String, Object?> params) {
     if (socket == null) return Future.error(const BrowserError('The browser is not running.'));
     final id = ++_nextId;
     final c = Completer<Map<String, Object?>>();
@@ -304,6 +357,11 @@ final class HeadlessBrowser {
   Future<String> click({String? selector, double? x, double? y, int count = 1}) async {
     await _start();
     final at = selector != null ? await _centre(selector) : (x: x ?? 0, y: y ?? 0);
+    await _refuse('''
+const el = deep(${at.x}, ${at.y});
+const c = el && el.closest && el.closest('button, input[type=submit i], input[type=image i]');
+const f = c && c.type !== 'button' && c.type !== 'reset' ? c.form : null;
+return f && sensitiveForm(f) ? 'that button submits a form with ' + sensitiveForm(f) : null;''');
     await _send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': at.x, 'y': at.y});
     for (var n = 1; n <= count; n++) {
       for (final type in ['mousePressed', 'mouseReleased']) {
@@ -317,6 +375,7 @@ final class HeadlessBrowser {
       }
     }
     await Future<void>.delayed(const Duration(milliseconds: 250));
+    await _settleDownloads();
     final hit = await evaluate(
       '(() => { const e = document.elementFromPoint(${at.x}, ${at.y}); '
       'return e ? e.tagName.toLowerCase() + (e.id ? "#" + e.id : "") + '
@@ -329,6 +388,12 @@ final class HeadlessBrowser {
   Future<String> type(String text, {String? selector, bool submit = false}) async {
     await _start();
     if (selector != null) await click(selector: selector);
+    await _refuse(
+      '''
+const el = focused();
+const f = $submit && el && (el.form || (el.closest && el.closest('form')));
+return sensitive(el) ? 'the field is ' + sensitive(el) : f && sensitiveForm(f) ? 'its form has ' + sensitiveForm(f) : null;''',
+    );
     await _send('Input.insertText', {'text': text});
     if (submit) await press('Enter');
     return 'Typed ${text.length} characters${submit ? ' and pressed Enter' : ''}.';
@@ -366,6 +431,14 @@ final class HeadlessBrowser {
       'windowsVirtualKeyCode': named?.$2 ?? upper.codeUnitAt(0),
     };
     final text = named?.$3 ?? key;
+    if (key == 'Enter') {
+      await _refuse('''
+const el = focused();
+const f = el && (el.form || (el.closest && el.closest('form')));
+return f && sensitiveForm(f) ? 'Enter would submit a form with ' + sensitiveForm(f) : null;''');
+    } else if (text.isNotEmpty) {
+      await _refuse('const el = focused(); return sensitive(el) ? "the field is " + sensitive(el) : null;');
+    }
     await _send('Input.dispatchKeyEvent', {
       ...base,
       'type': text.isEmpty ? 'rawKeyDown' : 'keyDown',
@@ -373,6 +446,7 @@ final class HeadlessBrowser {
     });
     await _send('Input.dispatchKeyEvent', {...base, 'type': 'keyUp'});
     await Future<void>.delayed(const Duration(milliseconds: 150));
+    await _settleDownloads();
     return 'Pressed $key.';
   }
 
@@ -413,15 +487,89 @@ final class HeadlessBrowser {
     return 'The viewport is ${width}x$height.';
   }
 
+  /// Waits (up to 20 s) for the downloads an action started, so its log says
+  /// where they landed.
+  Future<void> _settleDownloads() async {
+    final done = _downloadsDone;
+    if (done != null) await done.future.timeout(const Duration(seconds: 20), onTimeout: () {});
+  }
+
+  /// Throws a refusal when [check] (a function body over [_guardJs]'s
+  /// helpers, returning why or null) finds a password or payment field.
+  Future<void> _refuse(String check) async {
+    final why = await evaluate('(() => { $_guardJs\n$check })()');
+    if (why is! String) return;
+    throw BrowserError(
+      'Refused: $why. The browser tool never types passwords, one-time codes or payment details and never submits '
+      'their forms: the user does that. To test a sign-in or checkout of the app you build, check it another way '
+      '(a test, or its API) or ask the user.',
+    );
+  }
+
   Future<void> close() async {
     final socket = _socket;
     _socket = null;
     await socket?.close();
+    final browserSocket = _browserSocket;
+    _browserSocket = null;
+    await browserSocket?.close();
     final p = _process;
     _process = null;
     if (p != null) await killTree(p.pid);
   }
 }
+
+/// Page helpers for the guards: `sensitive(el)` says what a password, one-time
+/// code or payment field is ("a password field") or null; `sensitiveForm(f)`
+/// the same for a form holding one; `focused()` is the focused element,
+/// through shadow roots and same-origin frames; `deep(x, y)` is the element
+/// at a point, through shadow roots. A frame we can't look into counts by its name (Stripe
+/// and the like put card fields in their own frame). Names in other languages,
+/// canvas fields and div "buttons" are missed: a tripwire, not a sandbox.
+const _guardJs = r'''
+const cardName = /card.?(number|num)|cardno|card.?no(?![a-z])|ccnum|security.?code|sort.?code|routing.?number|account.?number|(?<![a-z])(cvv|cvc|csc|iban)(?![a-z])/i;
+const payFrame = /stripe|braintree|adyen|paypal|checkout|card|payment/i;
+const sensitive = (el) => {
+  if (!el || !el.tagName) return null;
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'iframe') {
+    return payFrame.test([el.src, el.name, el.title].join(' ')) ? 'in a payment frame' : null;
+  }
+  if (tag === 'input' && (el.type || '').toLowerCase() === 'password') return 'a password field';
+  const ac = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+  if (ac.includes('current-password') || ac.includes('new-password')) return 'a password field';
+  if (ac.includes('one-time-code')) return 'a one-time code field';
+  if (ac.some((t) => t.startsWith('cc-'))) return 'a payment card field';
+  const names = [el.getAttribute('name'), el.id, el.getAttribute('aria-label')].filter(Boolean).join(' ');
+  return cardName.test(names) ? 'a payment field' : null;
+};
+const sensitiveForm = (f) => {
+  for (const el of [...(f.elements || []), ...f.querySelectorAll('iframe')]) {
+    const why = sensitive(el);
+    if (why) return why === 'in a payment frame' ? 'a payment frame' : why;
+  }
+  return null;
+};
+const inside = (el) => {
+  try { return el.contentDocument && el.contentDocument.activeElement; } catch (e) { return null; }
+};
+const focused = () => {
+  let el = document.activeElement;
+  for (;;) {
+    const next = (el && el.shadowRoot && el.shadowRoot.activeElement) || (el && el.tagName === 'IFRAME' && inside(el));
+    if (!next || next === el || next.tagName === 'BODY') return el;
+    el = next;
+  }
+};
+const deep = (x, y) => {
+  let el = document.elementFromPoint(x, y);
+  while (el && el.shadowRoot) {
+    const under = el.shadowRoot.elementFromPoint(x, y);
+    if (!under || under === el) break;
+    el = under;
+  }
+  return el;
+};''';
 
 final class BrowserError implements Exception {
   const BrowserError(this.message);

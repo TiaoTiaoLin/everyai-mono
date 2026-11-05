@@ -15,7 +15,8 @@ import 'window_capture_io.dart';
 // own tools and the app's MCP host (outside agents).
 
 /// Runs one browser tool call ([args] as the `browser` spec has them) on [b].
-/// Screenshots go under [root]'s `.everyai/scratch/screenshots/`; [fit] cuts
+/// Screenshots go under [root]'s `.everyai/scratch/screenshots/`, downloads
+/// under its `.everyai/scratch/downloads/`; [fit] cuts
 /// a long eval result (text, a name for its spill file).
 Future<ToolOutput> runBrowser(
   HeadlessBrowser b,
@@ -28,6 +29,8 @@ Future<ToolOutput> runBrowser(
   String? str(String k) => (args[k] as String?)?.trim().isEmpty ?? true ? null : (args[k] as String).trim();
   double? at(String k) => (args[k] as num?)?.toDouble();
   var shot = args['screenshot'] == true;
+  // Before the browser starts: the folder its downloads go to.
+  b.downloadDir = '$root/.everyai/scratch/downloads';
   // Our own line about the site (a bare IP, a shortener, ...), kept outside the page's untrusted block.
   String? note;
   try {
