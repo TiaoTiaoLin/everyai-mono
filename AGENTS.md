@@ -702,6 +702,16 @@ their **native feel**. OpenRouter is plumbing, not the product; billing is parke
   `auto_updates true`. Linux repos next: own signed apt/dnf repos on GitHub Pages, maybe COPR (the owner allows an
   `Assisted-by:` line there as a one-time exception), AUR pushed by the owner.
 
+- **Prober fixes + 0.1.0-alpha.2 (2026-11-05; merge 2fe40cb, release 2713b25, PR #12).** Lane batch (6 items, notes
+  `docs/research/batches/harness/prober-fixes/`): workflow agents get `workflowHostTools` (bug_check, check,
+  diff_stats, memory read-only, report_issue) through a filtered host token; Bug fix proves with bug_check and asks for
+  a thin bug (`workflows/bug_report.dart`); Ultra runs phases per item, `plan_ref` only from saved_plans; verdict-first
+  results, merged lens findings, landing choice (commit here / new branch / leave); host `screenshot`, `browser`,
+  `app_run` for outside leads (own apps free, others ask once); `<everyai-notice nonce>` wrapping; Claude Code skills
+  off per project (`--settings skillOverrides`); approvals say why, scratch/temp writes free, sibling forks, mode
+  inheritance. The bundled workflow tests need Deno (`frontend/.deno`); worktrees without it skip them (a parse error
+  in security_review.js slipped through that way). Release: tag `v0.1.0-alpha.2` on main after the merge.
+
 ## Next steps
 0. **User testing of the 2026-10-30 build pass** (live and click-through), then re-enable the eval gate. Open/skipped items are in TODO.md (backend MCP client, OAuth, connectors, resvg, skill review, App Store variant, Win/Linux).
 0. **Every harness in one workspace** (`TODO-multi-harness.md`, plan `~/.claude/plans/multi-harness.md`): Stages 1–2
