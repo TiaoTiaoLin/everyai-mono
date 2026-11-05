@@ -851,6 +851,60 @@ void main() {
     expect(d('beta').specs.single.bugCheck, isFalse);
   });
 
+  test('a background agent in the same folder keeps Files from saving while the lead is idle', () async {
+    CodeSessionController.liveAfter = Duration.zero;
+    final everyai = d(everyaiHarnessName);
+    // The lead left a fork working in the background; its turn has ended.
+    everyai.conversations['e1'] = FakeLeadSession(
+      id: 'e1',
+      replays: true,
+      history: [
+        userMessageEvent('u1', 'Add dark mode'),
+        const ActionCall(id: 't1', raw: {}, toolName: taskTool, toolCallId: 'tc1', action: {'run_in_background': true}),
+        ToolResult(
+          id: 't1-r',
+          raw: const {},
+          actionId: 't1',
+          toolName: taskTool,
+          outcome: ToolOutcome.ok,
+          observation: {
+            'content': [
+              {'type': 'text', 'text': backgroundStarted('k1').text},
+            ],
+          },
+        ),
+        agentMessageEvent('a1', 'A fork is on it.'),
+        stateEvent('s1-idle', ExecutionStatus.idle),
+      ],
+    );
+    everyai.conversations['e2'] = FakeLeadSession(id: 'e2', replays: true);
+    CodeSessionInfo info(String id, String conversation, {String? parent}) => CodeSessionInfo(
+      id: id,
+      projectId: 'p1',
+      title: id == 's1' ? 'Dark mode' : 'Fork',
+      conversationId: conversation,
+      model: 'anthropic/claude-sonnet-5.5',
+      mode: AgentMode.ask,
+      workingDir: project.path,
+      createdAt: DateTime(2026),
+      harness: everyaiHarnessName,
+      parentId: parent,
+      parentCallId: parent == null ? '' : 't1',
+    );
+    prefs['code.sessions'] = jsonEncode([info('s1', 'e1').toJson(), info('k1', 'e2', parent: 's1').toJson()]);
+    container.dispose();
+    container = make();
+    final c = await open('s1');
+    await whenValue(container, codeSessionProvider('k1').select((s) => s.connected), (bool on) => on);
+    final state = container.read(codeSessionProvider('s1'));
+    // The lead's turn is over, but the fork still edits this folder.
+    expect((state.transcript.running, state.sideWork, state.filesLocked), (false, true, true));
+    final f = File('${project.path}/notes.txt')..writeAsStringSync('one\n');
+    final out = await c.saveFile(f.path, 'two\n', expected: 'one\n');
+    expect((out.kind, out.reason), (SaveKind.refused, CodeSessionController.agentWorking));
+    expect(f.readAsStringSync(), 'one\n');
+  });
+
   test('leaving the EveryAI harness stops its background forks, once the user agrees', () async {
     CodeSessionController.liveAfter = Duration.zero;
     final everyai = d(everyaiHarnessName);

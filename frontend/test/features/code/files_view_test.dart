@@ -12,7 +12,7 @@ import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
 import 'package:every_ai/features/code/git/git_service.dart';
-import 'package:every_ai/features/code/panes/file_tree.dart' show folderCap;
+import 'package:every_ai/features/code/panes/file_tree.dart' show folderCap, textOpenCommand;
 import 'package:every_ai/features/code/panes/panes_providers.dart';
 import 'package:every_ai/features/code/ui/code_composer.dart';
 import 'package:every_ai/features/code/ui/console/bottom_drawer.dart';
@@ -28,7 +28,7 @@ import 'package:every_ai/features/usage/usage_totals.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_riverpod/misc.dart' show ProviderListenable;
+import 'package:flutter_riverpod/misc.dart' show Override, ProviderListenable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart' as m;
 
@@ -49,6 +49,14 @@ Future<T> _when<T>(ProviderContainer c, ProviderListenable<T> p, bool Function(T
     if (cond(v) && !done.isCompleted) done.complete(v);
   }, fireImmediately: true);
   return done.future.whenComplete(sub.close);
+}
+
+/// Opens files without the disk, so a test can open one from a tap under the fake clock.
+final class _NoDiskEditor extends FilesEditor {
+  _NoDiskEditor(super.sessionId);
+
+  @override
+  Future<void> open(String path) async => state = FilesBuffer(path: path, text: 'x', opened: 'x');
 }
 
 Widget _app(Widget child) => m.MaterialApp(
@@ -75,7 +83,7 @@ void main() {
 
   /// A worktree session over a repository with a changed and an added file under lib/, ignored files and folders,
   /// and a folder over the listing cap.
-  Future<void> setUpRepo(WidgetTester tester) async {
+  Future<void> setUpRepo(WidgetTester tester, {List<Override> overrides = const []}) async {
     db = AppDatabase(NativeDatabase.memory());
     addTearDown(db.close);
     await tester.runAsync(() async {
@@ -130,6 +138,7 @@ void main() {
         codeUsageProvider.overrideWithBuild((ref, n) async => UsageTotals.zero),
         gitButtonProvider.overrideWith((ref, id) async => null),
         sessionRemoteLineProvider.overrideWithValue('Off'),
+        ...overrides,
       ],
     );
     addTearDown(container.dispose);
@@ -303,6 +312,129 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
+  test('Open in text editor never hands a file to the system to run', () {
+    List<String>? cmd(String path, String os, {bool executable = false}) =>
+        switch (textOpenCommand(path, os: os, executable: executable)) {
+          final c? => [c.exe, ...c.args],
+          null => null,
+        };
+    for (final f in ['setup.command', 'build.bat', 'tool.js', 'x.vbs', 'setup.exe', 'a.ps1', 'run.sh', 'README.md']) {
+      expect(cmd('/r/$f', 'macos', executable: true), ['open', '-t', '/r/$f']);
+      expect(cmd('C:\\r\\$f', 'windows'), ['notepad.exe', 'C:\\r\\$f']);
+    }
+    expect(cmd('/r/run.sh', 'linux', executable: true), isNull);
+    expect(cmd('/r/app.desktop', 'linux'), isNull);
+    expect(cmd('/r/README.md', 'linux'), ['xdg-open', '/r/README.md']);
+    expect(cmd('/r/README.md', 'android'), isNull);
+  });
+
+  testWidgets("a file the view can't show has no Open in text editor", (tester) async {
+    await setUpRepo(tester);
+    await tester.runAsync(() => File(path('logo.bin')).writeAsBytes([0x89, 0, 1, 2]));
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _app(FilesView(session: info)),
+      ),
+    );
+    await tester.runAsync(() => container.read(filesEditorProvider('s1').notifier).open(path('logo.bin')));
+    await tester.pump();
+    expect(find.text('Not a text file.'), findsOneWidget);
+    expect(find.byKey(const ValueKey('files.external')), findsNothing);
+    await tester.runAsync(() => container.read(filesEditorProvider('s1').notifier).open(path('README.md')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('files.external')), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('a file changed while the view was away shows the disk; an edited one is marked as a conflict', (
+    tester,
+  ) async {
+    await setUpRepo(tester);
+    final editor = container.read(filesEditorProvider('s1').notifier);
+    await tester.runAsync(() => editor.open(path('README.md')));
+    // The agent rewrote it with no Files view on screen; the diff refreshed.
+    await tester.runAsync(() async {
+      File(path('README.md')).writeAsStringSync('# By the agent\n');
+      await container.read(codeGitProvider('s1').notifier).refresh();
+      await _when(container, filesEditorProvider('s1'), (FilesBuffer b) => b.opened == '# By the agent\n');
+    });
+    expect((editor.state.text, editor.state.dirty, editor.state.conflict), ('# By the agent\n', false, false));
+
+    editor.edit('# Mine\n');
+    await tester.runAsync(() async {
+      File(path('README.md')).writeAsStringSync('# Agent again\n');
+      await container.read(codeGitProvider('s1').notifier).refresh();
+      await _when(container, filesEditorProvider('s1'), (FilesBuffer b) => b.conflict);
+    });
+    expect((editor.state.text, editor.state.opened), ('# Mine\n', '# By the agent\n'));
+  });
+
+  testWidgets("a save that returns after the file was closed doesn't touch what is open now", (tester) async {
+    await setUpRepo(tester);
+    final editor = container.read(filesEditorProvider('s1').notifier);
+    await tester.runAsync(() async {
+      await editor.open(path('README.md'));
+      editor.edit('# Saved\n');
+      final saving = editor.save();
+      editor.close();
+      await saving;
+    });
+    expect(File(path('README.md')).readAsStringSync(), '# Saved\n');
+    expect((editor.state.path, editor.state.opened, editor.state.dirty), (null, null, false));
+  });
+
+  testWidgets('a minified one-line file opens as plain text', (tester) async {
+    await tester.pumpWidget(_app(const SizedBox(key: ValueKey('host'))));
+    final context = tester.element(find.byKey(const ValueKey('host')));
+    int spans(String text) {
+      var n = 0;
+      void count(InlineSpan s) {
+        n++;
+        if (s is TextSpan) s.children?.forEach(count);
+      }
+
+      count(FilesCodeController(text: text, language: 'json').buildTextSpan(context: context, withComposing: false));
+      return n;
+    }
+
+    final row = '{"k": 1, "v": [true, null, "x"]}';
+    expect(spans(row), greaterThan(1));
+    expect(spans('[${List.filled(3000, row).join(',')}]'), 1);
+    expect(spans(List.filled(FilesCodeController.maxChars ~/ row.length + 1, row).join('\n')), 1);
+  });
+
+  testWidgets('discarding after the view went away still opens the file', (tester) async {
+    await setUpRepo(tester, overrides: [filesEditorProvider.overrideWith2(_NoDiskEditor.new)]);
+    final showing = ValueNotifier(true);
+    addTearDown(showing.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: _app(
+          ValueListenableBuilder(
+            valueListenable: showing,
+            builder: (context, on, _) => on ? FilesView(session: info) : const SizedBox(),
+          ),
+        ),
+      ),
+    );
+    await container.read(filesEditorProvider('s1').notifier).open(path('README.md'));
+    container.read(filesEditorProvider('s1').notifier).edit('# Draft\n');
+    await tester.pump();
+    await tester.tap(row('.gitignore'));
+    await tester.pumpAndSettle();
+    expect(find.text('Discard changes to README.md?'), findsOneWidget);
+    // An approval closed the narrow panel meanwhile.
+    showing.value = false;
+    await tester.pump();
+    await tester.tap(find.text('Discard'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(container.read(filesEditorProvider('s1')).path, path('.gitignore'));
+    await tester.pumpWidget(const SizedBox());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
   group('bottom drawer', () {
     testWidgets('⌃` toggles it with the composer focused; a drag sets its height, remembered per session', (
       tester,
@@ -371,6 +503,52 @@ void main() {
       again.read(codePaneProvider('d1').notifier).toggleDrawer();
       expect(again.read(codePaneProvider('d1')).open, CodePane.preview);
       expect(again.read(codePaneProvider('d1')).height, closeTo(800 * 0.7, 0.5));
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets('closing from a focused terminal keeps ⌃` working to open it again', (tester) async {
+      final session = CodeSessionInfo(
+        id: 'd2',
+        projectId: 'p1',
+        title: 'Drawer',
+        conversationId: 'c',
+        model: 'm',
+        mode: AgentMode.ask,
+        workingDir: '/tmp/drawer',
+        createdAt: DateTime(2026),
+      );
+      final c = ProviderContainer(overrides: [preferencesProvider.overrideWithValue(Preferences.inMemory())]);
+      addTearDown(c.dispose);
+      c.read(codePaneProvider('d2').notifier).toggleDrawer();
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: c,
+          child: _app(
+            BottomDrawer(
+              session: session,
+              // Like the terminal: it takes the keyboard and handles ⌃` itself.
+              paneBuilder: (p) => Focus(
+                autofocus: true,
+                onKeyEvent: (_, event) => terminalKeys(event, c.read(codePaneProvider('d2').notifier).toggleDrawer),
+                child: Text('pane ${p.name}'),
+              ),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.text('pane terminal'), findsOneWidget);
+      Future<void> toggle() async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.backquote);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+      }
+
+      await toggle();
+      expect(c.read(codePaneProvider('d2')).open, isNull);
+      await toggle();
+      expect(c.read(codePaneProvider('d2')).open, CodePane.terminal);
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
     testWidgets('a focused terminal hands ⌃` to the drawer instead of the shell', (tester) async {

@@ -60,3 +60,16 @@ Future<bool> insideRoot(String root, String path) async {
     return false;
   }
 }
+
+Future<String?> openAsText(String path) async {
+  try {
+    final stat = await File(path).stat();
+    // Any execute bit.
+    final cmd = textOpenCommand(path, os: Platform.operatingSystem, executable: stat.mode & 0x49 != 0);
+    if (cmd == null) return "This file can't be opened as text here.";
+    await Process.start(cmd.exe, cmd.args, mode: ProcessStartMode.detached);
+    return null;
+  } on Object catch (e) {
+    return "Couldn't open it: $e";
+  }
+}

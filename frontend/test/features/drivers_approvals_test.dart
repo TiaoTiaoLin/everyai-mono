@@ -551,6 +551,20 @@ void main() {
       expect(File('${w.path}/new.txt').existsSync(), isFalse);
     });
 
+    test('a save while the files go back is refused, and Files is read-only until they are', () async {
+      final controller = await open(AgentMode.fullAuto, worktree: w);
+      await turn(controller, 'm1', 'Add a file');
+      await turn(controller, 'm2', 'Add a decrement method');
+      final readme = '${w.path}/README.md';
+      final rewinding = controller.rewind(2);
+      expect(container.read(codeSessionProvider('s1')).filesLocked, isTrue);
+      final out = await controller.saveFile(readme, '# Edited\n', expected: '# App\n');
+      expect((out.kind, out.reason), (SaveKind.refused, CodeSessionController.agentWorking));
+      await rewinding;
+      expect(container.read(codeSessionProvider('s1')).filesLocked, isFalse);
+      expect(File(readme).readAsStringSync(), '# App\n');
+    });
+
     test("a save from Files lands in the next turn's checkpoint: rewinding to that turn keeps it", () async {
       final controller = await open(AgentMode.fullAuto, worktree: w);
       await turn(controller, 'm1', 'Add a file');

@@ -26,7 +26,8 @@ final class FolderListing {
   final int more;
 }
 
-/// The most children one folder shows, so a huge folder (node_modules) stays cheap.
+/// The most children one folder shows, so a huge folder (node_modules) stays cheap to draw. The folder is still
+/// listed and sorted whole; it is listed again only when it is opened or a file in the diff is added or removed.
 const folderCap = 500;
 
 /// The largest file the editor opens.
@@ -55,3 +56,17 @@ Future<void> writeText(String path, String text) => impl.writeText(path, text);
 
 /// Whether [path], symlinks resolved, is inside [root] (or would be, for a new file).
 Future<bool> insideRoot(String root, String path) => impl.insideRoot(root, path);
+
+/// Opens [path] in the system's text editor, never as a program; returns why it didn't, or null.
+Future<String?> openAsText(String path) => impl.openAsText(path);
+
+/// The command that shows [path] as text on [os] (`Platform.operatingSystem`), or null when there is no safe one:
+/// macOS `open -t` (the default text editor), Notepad on Windows (the shell's default handler runs scripts and
+/// programs), and `xdg-open` on Linux except for [executable] files and `.desktop` launchers, which it would run.
+({String exe, List<String> args})? textOpenCommand(String path, {required String os, required bool executable}) =>
+    switch (os) {
+      'macos' => (exe: 'open', args: ['-t', path]),
+      'windows' => (exe: 'notepad.exe', args: [path]),
+      'linux' when !executable && !path.toLowerCase().endsWith('.desktop') => (exe: 'xdg-open', args: [path]),
+      _ => null,
+    };

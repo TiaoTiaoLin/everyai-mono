@@ -5,7 +5,7 @@ import 'package:everyai_markdown/everyai_markdown.dart' show CodeHighlighter, la
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:path/path.dart' as p;
 
 import '../../../../core/theme/every_theme.dart';
 import '../../../../core/ui/adaptive.dart';
@@ -53,12 +53,20 @@ final class FilesBuffer {
 
 final filesEditorProvider = NotifierProvider.family<FilesEditor, FilesBuffer, String>(FilesEditor.new);
 
-final class FilesEditor extends Notifier<FilesBuffer> {
+base class FilesEditor extends Notifier<FilesBuffer> {
   FilesEditor(this.sessionId);
   final String sessionId;
 
   @override
-  FilesBuffer build() => const FilesBuffer();
+  FilesBuffer build() {
+    // Files changed under the editor (the agent, a rewind, a reverted hunk): an untouched file shows them.
+    ref.listen(codeGitProvider(sessionId), (_, _) => unawaited(sync()));
+    // A deleted session keeps no buffer.
+    ref.listen(codeSessionsProvider, (_, _) {
+      if (ref.read(codeSessionsProvider.notifier).byId(sessionId) == null) state = const FilesBuffer();
+    });
+    return const FilesBuffer();
+  }
 
   String? get _root => ref.read(codeSessionsProvider.notifier).byId(sessionId)?.workingDir;
 
@@ -86,6 +94,23 @@ final class FilesEditor extends Notifier<FilesBuffer> {
     if (state.path case final path?) await open(path);
   }
 
+  /// Compares the open file with the disk: an untouched one shows what is there now, an edited one is marked as a
+  /// conflict (saving asks first).
+  Future<void> sync() async {
+    final b = state;
+    final path = b.path;
+    if (path == null || b.opened == null) return;
+    final disk = await fs.readText(path);
+    if (!ref.mounted || state.path != path || state.opened != b.opened || disk == b.opened) return;
+    if (state.dirty) {
+      state = state.copyWith(conflict: true);
+    } else if (disk == null) {
+      await open(path);
+    } else {
+      state = FilesBuffer(path: path, text: disk, opened: disk, expanded: state.expanded);
+    }
+  }
+
   void toggleFolder(String dir) => state = state.copyWith(
     expanded: state.expanded.contains(dir) ? ({...state.expanded}..remove(dir)) : {...state.expanded, dir},
   );
@@ -98,6 +123,8 @@ final class FilesEditor extends Notifier<FilesBuffer> {
         .read(codeSessionProvider(sessionId).notifier)
         .saveFile(b.path!, b.text, expected: b.opened, overwrite: overwrite);
     if (!ref.mounted) return null;
+    // Another file was opened meanwhile: the outcome isn't its.
+    if (state.path != b.path) return out.reason;
     switch (out.kind) {
       case SaveKind.saved:
         // Typed on during the save: those edits stay unsaved.
@@ -136,9 +163,11 @@ class FilesView extends ConsumerWidget {
 
   String get _root => session.workingDir;
 
-  String _rel(String path) => path.startsWith('$_root/') ? path.substring(_root.length + 1) : path;
+  String _rel(String path) => p.isWithin(_root, path) ? p.relative(path, from: _root) : path;
 
   Future<void> _open(BuildContext context, WidgetRef ref, String path) async {
+    // Read before the dialog: the view may be gone when it closes (the narrow panel closes on an approval).
+    final editor = ref.read(filesEditorProvider(session.id).notifier);
     final b = ref.read(filesEditorProvider(session.id));
     if (b.path == path) return;
     if (b.dirty && b.path != null) {
@@ -151,7 +180,7 @@ class FilesView extends ConsumerWidget {
       );
       if (!ok) return;
     }
-    await ref.read(filesEditorProvider(session.id).notifier).open(path);
+    await editor.open(path);
   }
 
   /// Changed files by absolute path; diff paths are relative to the repository's top, which is the session folder
@@ -159,8 +188,14 @@ class FilesView extends ConsumerWidget {
   Map<String, ChangeKind> _changes(GitSnapshot? git) {
     final top = session.worktree?.path ?? session.baseline?.repoRoot;
     if (git == null || top == null) return const {};
-    return {for (final f in git.files) '$top/${f.path}': f.kind};
+    return {for (final f in git.files) p.normalize(p.join(top, f.path)): f.kind};
   }
+
+  /// What the tree's listings depend on in the diff: the files added, removed or renamed (not those only edited).
+  static String _shape(GitSnapshot? git) => [
+    for (final f in git?.files ?? const <FileDiff>[])
+      if (f.kind != ChangeKind.modified) '${f.kind.letter} ${f.path}',
+  ].join('\n');
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -169,12 +204,16 @@ class FilesView extends ConsumerWidget {
     final editor = ref.read(filesEditorProvider(id).notifier);
     final expanded = ref.watch(filesEditorProvider(id).select((b) => b.expanded));
     final open = ref.watch(filesEditorProvider(id).select((b) => b.path));
-    // The agent (or the user) changed files: list the open folders again.
-    ref.listen(codeGitProvider(id), (_, _) => ref.invalidate(filesFolderProvider));
+    // Files were added or removed: list this session's open folders again.
+    ref.listen(codeGitProvider(id).select((s) => _shape(s.value)), (_, _) {
+      for (final dir in {_root, ...expanded}) {
+        ref.invalidate(filesFolderProvider(dir));
+      }
+    });
     final changes = _changes(ref.watch(codeGitProvider(id)).value);
     final changedDirs = <String>{
       for (final path in changes.keys)
-        for (var i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) path.substring(0, i),
+        for (var d = p.dirname(path); d != p.dirname(d); d = p.dirname(d)) d,
     };
     final rows = <Widget>[];
     void walk(String dir, int depth, {required bool dimmed}) {
@@ -320,7 +359,7 @@ class _FileEditor extends ConsumerStatefulWidget {
 }
 
 class _FileEditorState extends ConsumerState<_FileEditor> {
-  late final _controller = _CodeController(
+  late final _controller = FilesCodeController(
     text: ref.read(filesEditorProvider(widget.session.id)).text,
     language: languageForPath(ref.read(filesEditorProvider(widget.session.id)).path ?? ''),
   );
@@ -330,6 +369,8 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
   @override
   void initState() {
     super.initState();
+    // What changed while the view wasn't showing.
+    unawaited(_editor.sync());
     _controller.addListener(() {
       if (_controller.text != ref.read(filesEditorProvider(widget.session.id)).text) _editor.edit(_controller.text);
     });
@@ -358,7 +399,7 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
         )) {
       return;
     }
-    _editor.close();
+    if (mounted) _editor.close();
   }
 
   @override
@@ -371,16 +412,14 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
     ref.listen(filesEditorProvider(id).select((b) => b.text), (_, text) {
       if (text != _controller.text) _controller.text = text;
     });
-    final busy = ref.watch(
-      codeSessionProvider(id)
-          .select((s) => s.transcript.running || s.transcript.pending.isNotEmpty || s.queued.isNotEmpty),
-    );
+    final busy = ref.watch(codeSessionProvider(id).select((s) => s.filesLocked));
     // A turn ended: an untouched file shows what the agent left.
     ref.listen(codeSessionProvider(id).select((s) => s.transcript.running), (was, now) {
-      if (was == true && !now && !ref.read(filesEditorProvider(id)).dirty) unawaited(_editor.reload());
+      if (was == true && !now) unawaited(_editor.sync());
     });
     final root = widget.session.workingDir;
-    final rel = path.startsWith('$root/') ? path.substring(root.length + 1) : path;
+    // With forward slashes on every platform, as the agent writes paths.
+    final rel = p.isWithin(root, path) ? p.split(p.relative(path, from: root)).join('/') : path;
     final style = theme.type.caption.mono.copyWith(color: theme.text, height: 1.45);
     _controller
       ..base = style
@@ -423,13 +462,18 @@ class _FileEditorState extends ConsumerState<_FileEditor> {
                 size: 15,
                 onPressed: () => ref.read(composerInsertProvider(id).notifier).insert('@$rel '),
               ),
-              AdaptiveIconButton(
-                key: const ValueKey('files.external'),
-                icon: EveryIcon.external,
-                tooltip: 'Open in editor',
-                size: 15,
-                onPressed: () => unawaited(launchUrl(Uri.file(path))),
-              ),
+              // As text in the system's editor, never run; not for a file this view couldn't show either.
+              if (b.opened != null)
+                AdaptiveIconButton(
+                  key: const ValueKey('files.external'),
+                  icon: EveryIcon.external,
+                  tooltip: 'Open in text editor',
+                  size: 15,
+                  onPressed: () async {
+                    final why = await fs.openAsText(path);
+                    if (why != null && context.mounted) showAdaptiveToast(context, why);
+                  },
+                ),
               AdaptiveIconButton(
                 key: const ValueKey('files.close'),
                 icon: EveryIcon.close,
@@ -500,26 +544,44 @@ class _Banner extends StatelessWidget {
 }
 
 /// Colours the text as it is typed: straight through the highlighter (not `codeSpan`'s cache, which would fill with
-/// every keystroke's text), remembering only the last result; plain above [_maxLines] lines.
-class _CodeController extends TextEditingController {
-  _CodeController({super.text, required this.language});
+/// every keystroke's text), remembering only the last result. Plain above [maxChars] characters or with a line over
+/// [maxLine] (minified code): the highlighter runs on the UI thread on every keystroke and slows down sharply on long
+/// lines.
+@visibleForTesting
+class FilesCodeController extends TextEditingController {
+  FilesCodeController({super.text, required this.language});
 
   final String? language;
   TextStyle base = const TextStyle();
   Brightness brightness = Brightness.light;
 
-  static const _maxLines = 3000;
+  static const maxChars = 40000;
+  static const maxLine = 2000;
+
+  static bool _tooBig(String text) {
+    if (text.length > maxChars) return true;
+    var start = 0;
+    while (start < text.length) {
+      final end = text.indexOf('\n', start);
+      if ((end < 0 ? text.length : end) - start > maxLine) return true;
+      if (end < 0) break;
+      start = end + 1;
+    }
+    return false;
+  }
+
   (String, TextStyle, Brightness, TextSpan)? _last;
 
   @override
   TextSpan buildTextSpan({required BuildContext context, TextStyle? style, required bool withComposing}) {
     final lang = language;
     final composing = withComposing && value.isComposingRangeValid;
-    if (lang == null || composing || '\n'.allMatches(text).length > _maxLines) {
-      return super.buildTextSpan(context: context, style: style, withComposing: withComposing);
-    }
-    if (_last case (final t, final b, final br, final span) when t == text && b == base && br == brightness) {
+    if (_last case (final t, final b, final br, final span)
+        when !composing && t == text && b == base && br == brightness) {
       return span;
+    }
+    if (lang == null || composing || _tooBig(text)) {
+      return super.buildTextSpan(context: context, style: style, withComposing: withComposing);
     }
     final span = CodeHighlighter.highlight(text, lang, base: base, theme: syntaxThemeFor(brightness));
     _last = (text, base, brightness, span);

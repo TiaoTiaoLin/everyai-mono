@@ -5,3 +5,4 @@ Future<OpenedFile> openForEdit(String path, String root) async => const OpenedFi
 Future<String?> readText(String path) async => null;
 Future<void> writeText(String path, String text) async => throw UnsupportedError('Files need the desktop app.');
 Future<bool> insideRoot(String root, String path) async => false;
+Future<String?> openAsText(String path) async => 'Files need the desktop app.';

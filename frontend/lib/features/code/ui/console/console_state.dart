@@ -76,8 +76,8 @@ final class ConsolePanel {
 final consolePanelProvider = NotifierProvider.family<ConsolePanels, ConsolePanel, String>(ConsolePanels.new);
 
 /// A session's right panel. Stored in Preferences `code.layout.<id>` as `{"panel": "info"|"diff"|"files"|null,
-/// "panel_width": 520}` next to the bottom drawer's keys ([readCodeLayout]); a session opened for the first time shows Session info, and one the user closed stays
-/// closed.
+/// "panel_width": 520}` next to the bottom drawer's keys ([readCodeLayout]); a session opened for the first time
+/// shows Session info, and one the user closed stays closed.
 final class ConsolePanels extends Notifier<ConsolePanel> {
   ConsolePanels(this.sessionId);
   final String sessionId;

@@ -74,6 +74,11 @@ class _BottomDrawerState extends ConsumerState<BottomDrawer> {
     final state = ref.watch(codePaneProvider(id));
     final notifier = ref.read(codePaneProvider(id).notifier);
     final open = state.open;
+    // Closing with the keyboard inside the drawer (a terminal): the keyboard stays on the screen, so ⌃` opens it
+    // again. Before the pane goes, or focus would fall out of reach of the shortcut.
+    ref.listen(codePaneProvider(id).select((s) => s.open), (was, now) {
+      if (was != null && now == null && _focus.hasFocus) _focus.requestFocus();
+    });
     return CallbackShortcuts(
       bindings: {drawerToggleKey: notifier.toggleDrawer},
       child: Focus(
