@@ -372,8 +372,11 @@ class _CodeSettingsSectionState extends ConsumerState<CodeSettingsSection> {
         control = AdaptiveButton(
           label: 'Open',
           emphasis: ButtonEmphasis.secondary,
-          onPressed: () =>
-              showSettings(context, section: d.key == 'mcp' ? SettingsSection.mcp : SettingsSection.skills),
+          onPressed: () => showSettings(
+            context,
+            section: d.key == 'mcp' ? SettingsSection.mcp : SettingsSection.skills,
+            args: {if (l.projectId != null) 'project': l.projectId!},
+          ),
         );
     }
 

@@ -84,4 +84,43 @@ void main() {
     expect(leadSkillsOff(prefs, 'p1', 'claude-code'), {'pdf', 'review'});
     expect(leadSkillsOff(prefs, 'p2', 'claude-code'), isEmpty);
   });
+
+  testWidgets('a skill that is off but missing from the CLI\'s list keeps its switch, in the chosen project', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final prefs = Preferences.inMemory({
+      'code.projects': jsonEncode([
+        {'id': 'p1', 'name': 'Alpha', 'path': '/a'},
+        {'id': 'p2', 'name': 'Beta', 'path': '/b'},
+      ]),
+      // The CLI left the skill out of its list because it started with it off.
+      leadSkillsSeenKey: jsonEncode({
+        'claude-code': ['review'],
+      }),
+      leadSkillsOffKey: jsonEncode({
+        'p2': {
+          'claude-code': ['pdf'],
+        },
+      }),
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [preferencesProvider.overrideWithValue(prefs)],
+        child: m.MaterialApp(
+          home: EveryThemeScope(
+            theme: EveryTheme.resolve(DesignLanguage.material, Brightness.light),
+            child: const m.Material(child: LeadSkillsSection(projectId: 'p2')),
+          ),
+        ),
+      ),
+    );
+    expect(find.text('Beta'), findsOneWidget);
+    expect(tester.widgetList<m.Switch>(find.byType(m.Switch)).map((s) => s.value), [false, true]);
+    await tester.tap(find.byType(m.Switch).first);
+    await tester.pumpAndSettle();
+    expect(leadSkillsOff(prefs, 'p2', 'claude-code'), isEmpty);
+  });
 }

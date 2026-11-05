@@ -451,6 +451,25 @@ final class TranscriptBuilder {
           if (said.isEmpty) return;
           text = said;
         }
+        // Notices to an outside lead: one row each, as if the body had come bare.
+        if (noticeBodies(text) case final bodies when bodies.isNotEmpty) {
+          for (final (i, body) in bodies.indexed) {
+            final id = bodies.length == 1 ? e.id : '${e.id}-$i';
+            if (parseTaskNotification(body) case final n?) {
+              _items.add(
+                NoticeItem(
+                  id,
+                  '${n.title} ${n.status == SubagentStatus.completed ? 'finished' : n.status.label.toLowerCase()} in the background',
+                  error: n.status == SubagentStatus.failed,
+                  detail: n.result,
+                ),
+              );
+            } else {
+              _items.add(UserTurn(id, body, mode: i == 0 && changed ? mode : null, lead: lead));
+            }
+          }
+          return;
+        }
         if (_answer(text) || _reported(text)) return;
         if (text.trimLeft().startsWith('<$researchWorkflowTag')) {
           final n = RegExp(r'reports="(\d+)"').firstMatch(text)?[1] ?? '';

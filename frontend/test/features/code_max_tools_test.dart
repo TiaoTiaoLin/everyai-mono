@@ -10,6 +10,8 @@ import 'package:every_ai/core/providers.dart';
 import 'package:every_ai/features/code/code_providers.dart';
 import 'package:every_ai/features/code/domain/agent_mode.dart';
 import 'package:every_ai/features/code/domain/code_session.dart';
+import 'package:every_ai/features/code/domain/notice.dart';
+import 'package:every_ai/features/code/domain/transcript.dart';
 import 'package:every_ai/features/code/domain/subagents.dart';
 import 'package:every_ai/features/code/drivers/acp/acp_mapping.dart' show agentMessageEvent;
 import 'package:every_ai/features/code/drivers/driver.dart';
@@ -291,6 +293,25 @@ void main() {
     l.session.add(stateEvent('r2', ExecutionStatus.finished));
     await pumpEventQueue();
     expect(notices(l.session), hasLength(1));
+  });
+
+  test('two reports held for a busy lead go as one message with a notice each, and read back as two rows', () async {
+    final l = await lead();
+    final f1 = await fork(l.info.id);
+    final f2 = await fork(l.info.id);
+    l.session.add(stateEvent('r1', ExecutionStatus.running));
+    await pumpEventQueue();
+    finish(f1.session, 'First done.');
+    finish(f2.session, 'Second done.');
+    await pumpEventQueue();
+    l.session.add(stateEvent('r2', ExecutionStatus.finished));
+    await pumpEventQueue();
+    final n = notices(l.session).single;
+    expect(RegExp('<everyai-notice ').allMatches(n), hasLength(2));
+    expect([for (final b in noticeBodies(n)) parseTaskNotification(b)!.childId], [f1.info.id, f2.info.id]);
+    // The echo of that message: one row per report.
+    final b = TranscriptBuilder()..add(ChatMessage(id: 'u1', raw: const {}, fromUser: true, text: n));
+    expect(b.snapshot.items.whereType<NoticeItem>().map((i) => i.detail), ['First done.', 'Second done.']);
   });
 
   test('check_forks mid-turn gives a busy lead the reports held for its turn end', () async {

@@ -2295,7 +2295,9 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_switching || _rewinding || t.running || t.pending.isNotEmpty || t.openSubagents.isNotEmpty) return;
     // A workflow's result first: the app made it, so Stop and the user's queue don't touch it.
     if (_workflowResults.isNotEmpty && _session != null) {
-      unawaited(_session!.send(_workflowResults.removeAt(0)).catchError((Object _) {}));
+      final r = _workflowResults.removeAt(0);
+      final text = _onOutsideLead ? _notice('workflow-result', r.id, r.text) : r.text;
+      unawaited(_session!.send(text).catchError((Object _) {}));
       return;
     }
     if (state.queued.isEmpty) return;
@@ -4088,7 +4090,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   final _activeRuns = <String>{};
 
   /// Ended runs' results the agent hasn't been sent yet (see [_toLead]).
-  final _workflowResults = <String>[];
+  final _workflowResults = <({String id, String text})>[];
 
   /// Runs the workflow [source] (a `.js` file's text, called [name]) with
   /// [args]: its agents are child sessions of this one, and what it returns
@@ -4192,7 +4194,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
   /// spent budget skips): the run's journal is retired by now, so this is
   /// the only copy.
   void _toLead(String text, {String? runId}) {
-    _workflowResults.add(_onOutsideLead ? _notice('workflow-result', runId ?? 'workflow', text) : text);
+    _workflowResults.add((id: runId ?? 'workflow', text: text));
     _sendQueued();
   }
 
@@ -4332,7 +4334,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
 
   /// Background fork reports and questions for an outside lead that was busy
   /// (an ACP prompt sent mid-turn can fail), sent together once it is idle.
-  final _forkNotices = <String>[];
+  final _forkNotices = <({String kind, String id, String text})>[];
 
   /// Whether the session is led by an outside harness now.
   bool get _onOutsideLead {
@@ -4348,7 +4350,7 @@ final class CodeSessionController extends Notifier<CodeSessionState>
       unawaited(_session?.send(text).catchError((Object _) {}));
       return;
     }
-    _forkNotices.add(_notice(kind, id, text));
+    _forkNotices.add((kind: kind, id: id, text: text));
     _sendForkNotices();
   }
 
@@ -4375,7 +4377,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     if (_forkNotices.isEmpty || session == null || t.running || t.pending.isNotEmpty || state.queued.isNotEmpty) {
       return;
     }
-    final text = _forkNotices.join('\n\n');
+    // Wrapped now, for the lead that gets them.
+    final text = [for (final n in _forkNotices) _notice(n.kind, n.id, n.text)].join('\n\n');
     _forkNotices.clear();
     unawaited(session.send(text).catchError((Object _) {}));
   }
@@ -4537,8 +4540,8 @@ final class CodeSessionController extends Notifier<CodeSessionState>
     switch (name) {
       case checkForksTool:
         // Reports and questions held for the end of an outside lead's turn come with the answer instead.
-        // A tool result, not a user message: no notice wrapper.
-        final held = [for (final n in _forkNotices) unwrapNotice(n)];
+        // A tool result, not a user message: no notice wrapper (the briefing names this result as EveryAI's own).
+        final held = [for (final n in _forkNotices) n.text];
         _forkNotices.clear();
         return [
           if (_activeForks.isEmpty)

@@ -491,7 +491,12 @@ final class ClaudeSession
   void setSkillsOff(Set<String> off) {
     if (off.length == _skillsOff.length && off.containsAll(_skillsOff)) return;
     _skillsOff = off;
-    if (_channel == null || _closed) return;
+    if (_closed) return;
+    // Still starting: it was launched with the old set.
+    if (_channel == null) {
+      if (_starting != null) _respawn = true;
+      return;
+    }
     if (!_running) {
       unawaited(_drop());
     } else {

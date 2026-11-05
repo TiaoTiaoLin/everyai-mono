@@ -18,7 +18,10 @@ import 'lead_skills_section.dart';
 /// EveryAI library and `~/.agents/skills` are on unless turned off; skills
 /// that came with a project stay off until the user reviews and trusts them.
 class SkillsSettingsBody extends ConsumerWidget {
-  const SkillsSettingsBody({super.key});
+  const SkillsSettingsBody({super.key, this.projectId});
+
+  /// The project whose Claude Code skills are listed first (from the Code settings link).
+  final String? projectId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -77,7 +80,7 @@ class SkillsSettingsBody extends ConsumerWidget {
         ),
         if (skills case AsyncError(:final error))
           Text("Couldn't read the skills folders: $error", style: TextStyle(color: theme.danger)),
-        const LeadSkillsSection(),
+        LeadSkillsSection(projectId: projectId),
         section('EveryAI library', [
           ...all.where((s) => s.source == SkillSource.library),
         ], empty: 'Nothing imported yet'),

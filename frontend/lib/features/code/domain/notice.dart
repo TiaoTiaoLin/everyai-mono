@@ -26,7 +26,11 @@ String wrapNotice({required String kind, required String id, required String non
     '${body.replaceAll(RegExp('</?$noticeTag', caseSensitive: false), '‹$noticeTag')}\n'
     '</$noticeTag>';
 
-final _wrapped = RegExp('^<$noticeTag [^>\\n]*>\\n([\\s\\S]*)\\n</$noticeTag>\$');
+final _wrapped = RegExp('<$noticeTag [^>\\n]*>\\n([\\s\\S]*?)\\n</$noticeTag>');
 
-/// The body of a wrapped notice, or [text] as it is.
-String unwrapNotice(String text) => _wrapped.firstMatch(text)?.group(1) ?? text;
+/// The bodies of the notices in [text], in order (several can share one message; a driver may put its own lines
+/// in front).
+List<String> noticeBodies(String text) => [for (final m in _wrapped.allMatches(text)) m[1]!];
+
+/// The body of the first wrapped notice, or [text] as it is.
+String unwrapNotice(String text) => noticeBodies(text).firstOrNull ?? text;

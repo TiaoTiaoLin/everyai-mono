@@ -558,6 +558,23 @@ void main() {
       await session.close();
     });
 
+    test('skills turned off while the process starts reach the next one', () async {
+      final one = ReplayChannel(_script([_init, _say('Hi.'), _done('r1')]));
+      final two = ReplayChannel(_script([_init, _say('Again.'), _done('r2')]));
+      final s = _Spawner([one, two]);
+      final session = await driver(s).start(_spec());
+      final first = session.send('Hi.');
+      // The process is being launched with the old set.
+      (session as TakesSkillOverrides).setSkillsOff({'pdf'});
+      await first;
+      await _played(one);
+      await session.send('Again.');
+      await _played(two);
+      expect(s.calls, hasLength(2));
+      expect(s.calls[1].args, contains(claudeSettingsJson(skillsOff: {'pdf'})));
+      await session.close();
+    });
+
     test('with an API key the turn is spending, not the plan', () async {
       final channel = ReplayChannel(
         _fixture('init_image_turn.jsonl').replaceAll('"apiKeySource":"none"', '"apiKeySource":"ANTHROPIC_API_KEY"'),

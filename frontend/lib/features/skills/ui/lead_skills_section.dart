@@ -10,8 +10,10 @@ import '../../code/drivers/lead_skills.dart';
 /// each for one project. A skill that is off is passed to the CLI for that project's sessions; nothing is written
 /// to `~/.claude`.
 class LeadSkillsSection extends ConsumerStatefulWidget {
-  const LeadSkillsSection({super.key, this.lead = 'claude-code', this.label = 'Claude Code'});
+  const LeadSkillsSection({super.key, this.projectId, this.lead = 'claude-code', this.label = 'Claude Code'});
 
+  /// The project shown first; the picker can change it.
+  final String? projectId;
   final String lead;
   final String label;
 
@@ -20,7 +22,7 @@ class LeadSkillsSection extends ConsumerStatefulWidget {
 }
 
 class _LeadSkillsSectionState extends ConsumerState<LeadSkillsSection> {
-  String? _projectId;
+  late String? _projectId = widget.projectId;
 
   @override
   Widget build(BuildContext context) {
@@ -29,8 +31,9 @@ class _LeadSkillsSectionState extends ConsumerState<LeadSkillsSection> {
     final skills = ref.read(leadSkillsProvider.notifier);
     final projects = ref.watch(codeProjectsProvider);
     final project = projects.where((p) => p.id == _projectId).firstOrNull ?? projects.firstOrNull;
-    final names = skills.seen(widget.lead);
     final off = project == null ? const <String>{} : skills.off(project.id, widget.lead);
+    // A skill that is off may be left out of the CLI's own list: keep its switch so it can be turned back on.
+    final names = {...skills.seen(widget.lead), ...off}.toList()..sort();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
